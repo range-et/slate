@@ -1,0 +1,16 @@
+:root {
+    --background: #121212;
+    --primary-text: #E0E0E0;
+    --secondary-text: #B0B0B0;
+    --information-1: #00BCD4; 
+    --information-2: #03A9F4;
+    --information-3: #8BC34A;
+    --warning: #FFC107;
+    --alert: #F44336;
+    --highlight: #FFEB3B;
+    --disabled: #757575;
+    --start: #4CAF50;
+    --finish: #9C27B0;
+    --foot: #FFEB3B;
+    --hand: #03A9F4;
+}
