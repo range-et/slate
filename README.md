@@ -1,54 +1,104 @@
-# React + TypeScript + Vite
+# Web-App Template
+A webapp template that I use for everything - a python/flask backend with a node based HTML/CSS/JS front end
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# General use instructions
 
-Currently, two official plugins are available:
+## Getting Started
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See deployment for notes on how to deploy the project on a live system.
 
-## Expanding the ESLint configuration
+### Prerequisites
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+What things you need to install the software and how to install them.
 
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+```bash
+npm
+Python 3
+docker
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### Installing
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+A step by step series of examples that tell you how to get a development environment running.
 
-export default tseslint.config({
-  plugins: {
-    // Add the react-x and react-dom plugins
-    'react-x': reactX,
-    'react-dom': reactDom,
-  },
-  rules: {
-    // other rules...
-    // Enable its recommended typescript rules
-    ...reactX.configs['recommended-typescript'].rules,
-    ...reactDom.configs.recommended.rules,
-  },
-})
+- Clone the repository
+
+```bash
+git clone https://yourrepositorylink.com
+cd your-project-name
 ```
+
+- Install JavaScript dependencies
+
+```bash
+npm install
+```
+
+- Install Python dependencies
+
+First, ensure you have a virtual environment created and activated:
+
+```bash
+pipenv shell
+```
+
+- Then install the dependencies:
+
+```bash
+pipenv install Flask
+```
+- Build the project
+
+Before serving the project with Flask, you need to build the static files with Parcel:
+
+```bash
+npm run build
+```
+- This command compiles your assets into the dist directory.
+Serving with Flask
+
+To serve your project using Flask, run:
+
+```bash
+python app.py
+```
+
+Your project should now be accessible at ```http://localhost:5000```
+
+### Development
+
+For development, you can use Parcel's development server for hot reloading of changes:
+
+```bash
+npm start
+```
+
+And in another terminal, run your Flask application for backend functionality:
+
+```bash
+python app.py
+```
+
+Clearing the dist directory before builds
+
+To ensure the dist directory is cleared before each build, the prebuild script in package.json is configured to run a clean operation:
+
+```bash
+"scripts": {
+  "clean": "rimraf ./dist/*",
+  "prebuild": "npm run clean",
+  ...
+}
+```
+
+### Contributing
+
+Please be nice and polite while submiting PRs - use github to submit the PRs and open issues as requiered.
+
+### License
+
+This project is licensed under the MIT License - see the LICENSE.md file for details
+
+### Acknowledgments
+
+This was mostly done for a huge number of students and personal projects that I make with the Node - Flask - Mongo (Or whatever DB of your choice) Python allows for some really funky ML pipelines that would be impossible in other environments. 

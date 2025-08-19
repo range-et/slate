@@ -1,44 +1,23 @@
 {
-  "name": "slate",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
+  "name": "webapptemplate",
+  "version": "1.0.0",
+  "description": "A webapp template that I use for everything - a python/flask backend with a node based HTML/CSS/JS front end",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "eslint .",
-    "preview": "vite preview"
+    "clean": "rimraf dist/",
+    "prebuild": "npm run clean",
+    "build": "vite build",
+    "start": "vite",
+    "dev": "vite --open"
+  },
+  "keywords": [],
+  "author": "Indrajeet Haldar",
+  "license": "MIT",
+  "devDependencies": {
+    "rimraf": "^5.0.5",
+    "vite": "^7.1.3"
   },
   "dependencies": {
-    "@tailwindcss/cli": "^4.1.7",
-    "@tailwindcss/vite": "^4.1.7",
-    "@tiptap/extension-color": "^2.12.0",
-    "@tiptap/pm": "^2.12.0",
-    "@tiptap/react": "^2.12.0",
-    "@tiptap/starter-kit": "^2.12.0",
-    "@types/d3": "^7.4.3",
     "d3": "^7.9.0",
-    "flexlayout-react": "^0.8.17",
-    "path": "^0.12.7",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "tailwindcss": "^4.1.7",
-    "tsconfig-paths": "^4.2.0"
-  },
-  "devDependencies": {
-    "@eslint/js": "^9.25.0",
-    "@types/node": "^22.15.19",
-    "@types/react": "^19.1.2",
-    "@types/react-dom": "^19.1.2",
-    "@vitejs/plugin-react": "^4.4.1",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9.25.0",
-    "eslint-plugin-react-hooks": "^5.2.0",
-    "eslint-plugin-react-refresh": "^0.4.19",
-    "globals": "^16.0.0",
-    "postcss": "^8.5.3",
-    "typescript": "~5.8.3",
-    "typescript-eslint": "^8.30.1",
-    "vite": "^6.3.5"
+    "uuid": "^11.1.0"
   }
 }
