@@ -1,14 +1,15 @@
 import * as d3 from "d3";
 
 export class NetworkViz {
-  constructor(container, data, width) {
+  constructor(container, data, width, height) {
     this.container = container;
     this.data = {
       nodes: [...(data.nodes || [])],
       links: [...(data.links || [])]
     };
     this.svg = null;
-    this.width = width || 960;
+    this.width = width;
+    this.height = height;
     this.radius = this.width / 2;
     this.innerRadius = this.radius - 120;
     
@@ -18,6 +19,11 @@ export class NetworkViz {
       .curve(d3.curveBundle.beta(0.85))
       .radius(d => d.y)
       .angle(d => d.x / 180 * Math.PI);
+    
+    // Zoom behavior setup
+    this.zoom = d3.zoom()
+      .scaleExtent([0.1, 5]) // Allow zooming from 10% to 500%
+      .on("zoom", (event) => this.handleZoom(event));
     
     // Add CSS styles for interactivity
     this.addStyles();
@@ -31,6 +37,12 @@ export class NetworkViz {
     const style = document.createElement('style');
     style.id = 'networkviz-styles';
     style.textContent = `
+      .networkviz-container {
+        cursor: grab;
+      }
+      .networkviz-container:active {
+        cursor: grabbing;
+      }
       .node--internal {
         font: 400 9px "Helvetica Neue", Helvetica, Arial, sans-serif;
         fill: #E0E0E0;
@@ -71,6 +83,61 @@ export class NetworkViz {
       }
     `;
     document.head.appendChild(style);
+  }
+
+  handleZoom(event) {
+    const { transform } = event;
+    this.zoomGroup.attr("transform", transform);
+  }
+
+  // Method to programmatically zoom to a specific scale and center
+  zoomTo(scale, x = 0, y = 0, duration = 750) {
+    this.svg.transition()
+      .duration(duration)
+      .call(
+        this.zoom.transform,
+        d3.zoomIdentity.translate(x, y).scale(scale)
+      );
+  }
+
+  // Method to reset zoom to fit the entire visualization
+  resetZoom(duration = 750) {
+    this.svg.transition()
+      .duration(duration)
+      .call(
+        this.zoom.transform,
+        d3.zoomIdentity
+      );
+  }
+
+  // Method to zoom to fit content with padding
+  zoomToFit(padding = 50, duration = 750) {
+    if (!this.zoomGroup) return;
+    
+    const bounds = this.zoomGroup.node().getBBox();
+    const width = bounds.width;
+    const height = bounds.height;
+    const midX = bounds.x + width / 2;
+    const midY = bounds.y + height / 2;
+    
+    if (width === 0 || height === 0) return;
+    
+    const scale = Math.min(
+      (this.width - padding) / width,
+      (this.width - padding) / height
+    );
+    
+    const translate = [
+      this.width / 2 - scale * midX,
+      this.width / 2 - scale * midY
+    ];
+    
+    this.svg.transition()
+      .duration(duration)
+      .call(
+        this.zoom.transform,
+        d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+      );
   }
 
   addNode(node) {
@@ -154,11 +221,16 @@ export class NetworkViz {
     // Clear previous content
     d3.select(this.container).selectAll("svg").remove();
     
-    // Create SVG
+    // Create SVG with zoom behavior
     this.svg = d3.select(this.container)
       .append("svg")
       .attr("width", this.width)
-      .attr("height", this.width)
+      .attr("height", this.height)
+      .attr("class", "networkviz-container")
+      .call(this.zoom);
+    
+    // Create zoom group that will contain all zoomable content
+    this.zoomGroup = this.svg
       .append("g")
       .attr("transform", `translate(${this.radius},${this.radius})`);
 
@@ -235,9 +307,9 @@ export class NetworkViz {
         .filter(d => d !== null);
     }
 
-    // Create link group
-    const linkGroup = this.svg.append("g").selectAll(".link");
-    const nodeGroup = this.svg.append("g").selectAll(".node");
+    // Create link group (inside zoom group)
+    const linkGroup = this.zoomGroup.append("g").selectAll(".link");
+    const nodeGroup = this.zoomGroup.append("g").selectAll(".node");
 
     // Draw links with bundled curves
     const links = linkGroup
@@ -290,8 +362,13 @@ export class NetworkViz {
       .on("mouseout", (event, d) => this.mouseouted(d));
 
     // Store references for interactivity
-    this.linkElements = this.svg.selectAll(".link");
+    this.linkElements = this.zoomGroup.selectAll(".link");
     this.nodeElements = nodes;
+
+    this.svg.call(
+      this.zoom.transform,
+      d3.zoomIdentity.translate(this.radius, this.radius)
+    );
   }
 
   // Method to update data and re-render
