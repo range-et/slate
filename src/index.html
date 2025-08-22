@@ -22,6 +22,14 @@
 </head>
 
 <body>
+    <div id="overlay">
+        <div id="modal">
+            <div id="modal-content"></div>
+            <div id="modal-actions"></div>
+        </div>
+    </div>
+
+
     <div id="container">
         <div id="topbar">
             <h3>SLATE</h3> 
@@ -35,6 +43,9 @@
             <button class="info_btn">
                 <span class="material-symbols-outlined">undo</span>
             </button>
+            <h4>| </h4>
+            <button class="finish_btn">EXPORT</button>
+            <button class="success_btn">IMPORT</button>
         </div>
         <div id="content">
             <div id="network">
@@ -45,10 +56,13 @@
                 
             </div>
             <div id="doc">
-                <h4>DOC</h4>
+                <div class="doc_heading">
+                    <h4>DOC</h4>
+                    <button class="info_btn">SUMMARY</button>
+                    <button class="alert_btn">REMOVE DOC</button>
+                </div>
+                
                 <div class="card_container" id="doc-content" style="flex: 1 1 0;">
-
-                    
 
                     <div class="card">
                         <div class="card_header">
@@ -71,6 +85,8 @@
 
             <div id="chat">
                 <h4>CHAT</h4>
+
+
                 <div class="card_container" id="chat-content">
 
                 </div>
@@ -84,6 +100,8 @@
                     </div>
                     
                 </div>
+
+                
             </div>
         </div>
     </div>  
