@@ -112,3 +112,6 @@ instance/
 *.gz
 .env
 .env.local
+
+
+src/config.js
