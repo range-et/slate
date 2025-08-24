@@ -11,8 +11,6 @@
         rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=undo" />
     
-    
-
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
@@ -34,18 +32,18 @@
         <div id="topbar">
             <h3>SLATE</h3> 
                 <h4>| ADD / REMOVE DOC</h4>
-            <button class="success_btn">+</button>
-            <button class="alert_btn">--</button>
+            <button class="success_btn" id="add_doc">+</button>
+            <button class="alert_btn" id="remove_doc">--</button>
             <h4>| SEARCH CARDS / DOCS </h4>
-            <input type="text" placeholder="Search...">
-            <button class="info_btn">SEARCH</button>
+            <input type="text" placeholder="Search..." id="search_input">
+            <button class="info_btn" id="search_btn">SEARCH</button>
             <h4>| </h4>
-            <button class="info_btn">
+            <button class="info_btn" id="undo_btn">
                 <span class="material-symbols-outlined">undo</span>
             </button>
             <h4>| </h4>
-            <button class="finish_btn">EXPORT</button>
-            <button class="success_btn">IMPORT</button>
+            <button class="finish_btn" id="export_btn">EXPORT</button>
+            <button class="success_btn" id="import_btn">IMPORT</button>
         </div>
         <div id="content">
             <div id="network">
@@ -58,8 +56,7 @@
             <div id="doc">
                 <div class="doc_heading">
                     <h4>DOC</h4>
-                    <button class="info_btn">SUMMARY</button>
-                    <button class="alert_btn">REMOVE DOC</button>
+                    <button class="info_btn" id="summary_btn">SUMMARY</button>
                 </div>
                 
                 <div class="card_container" id="doc-content" style="flex: 1 1 0;">
@@ -86,16 +83,14 @@
             <div id="chat">
                 <h4>CHAT</h4>
 
+                <div class="card_container" id="chat-content"></div>
 
-                <div class="card_container" id="chat-content">
-
-                </div>
                 <h4>PROMPT</h4>
                 <div class="response_container">
                     <div contenteditable="true" class="response" id="chat-prompt"></div>
                     <div class="response_control_panel">
-                        <button class="info_btn">SEND</button>
-                        <button class="info_btn">ADD TO DOC</button>
+                        <button class="info_btn" id="send_prompt">SEND</button>
+                        <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
                         <button class="info_btn">ATTACH FILES</button>
                     </div>
                     

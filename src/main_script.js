@@ -1,71 +1,87 @@
 import { NetworkViz } from "./network_viz.js";
+// dummy data
+import data from "./dummy_data.js";
 
 // Select all the dom elements
 const network = document.getElementById("network");
-const log = document.getElementById("log");
-const chat = document.getElementById("chat");
 const resetZoom = document.getElementById("resetZoom");
+// search stuff
+const search_input = document.getElementById("search_input");
+const search_btn = document.getElementById("search_btn");
+// docs stuff
+const doc_content = document.getElementById("doc-content");
+const summary_btn = document.getElementById("summary_btn");
+const add_doc = document.getElementById("add_doc");
+const remove_doc = document.getElementById("remove_doc");
+// editor actions
+const undo_btn = document.getElementById("undo_btn");
+const export_btn = document.getElementById("export_btn");
+const import_btn = document.getElementById("import_btn");
+// chat stuff
+const chat_content = document.getElementById("chat-content");
+const prompt = document.getElementById("chat-prompt");
+const send_prompt = document.getElementById("send_prompt");
+const add_to_doc = document.getElementById("add_to_doc");
+
+const buttons = {
+    resetZoom:resetZoom,
+    search_input:search_input,
+    search_btn:search_btn,
+    summary_btn:summary_btn,
+    add_doc:add_doc,
+    remove_doc:remove_doc,
+    undo_btn:undo_btn,
+    export_btn:export_btn,
+    import_btn:import_btn,
+    send_prompt:send_prompt,
+    add_to_doc:add_to_doc,
+    prompt:prompt
+};
 
 // main manager
 class MainManager {
-    constructor() {
+    constructor(network, log, chat, data, buttons) {
         this.network = network; // this is the network data structure
         this.log = log; // this is the log of events
         this.chat = chat; // this is the chat interface
+        this.viz = null; // this will hold the network visualization instance
+        this.buttons = buttons; // store button references
+        this.data = data; // store data
+    }
+
+    resetZoom() {
+        this.viz.resetZoom();
+        this.viz.zoomToFit();
+    }
+
+    summary_btn() {
+        alert("Show summary?");
+    }
+
+    add_to_doc() {
+        if (confirm("Add to document?")) {
+            // Logic to add to document
+        } else {
+            alert("Didnt add to document");
+        }
+    }
+
+    mapButtons() {
+        this.buttons.resetZoom.addEventListener("click", () => this.resetZoom());
+        this.buttons.summary_btn.addEventListener("click", () => this.summary_btn());
+        this.buttons.add_to_doc.addEventListener("click", () => this.add_to_doc());
+    }
+
+    async init() {
+        // Initialize the network visualization
+        this.viz = new NetworkViz("#network", data, this.network.clientWidth, this.network.clientHeight);
+        // map all the buttons
+        this.mapButtons();
     }
 }
 
-// Initial node and link data
-const data = {
-    nodes: [
-        { id: "root", parent: "" },
-        { id: "doc_1", parent: "root" },
-        { id: "doc_2", parent: "root" },
-        { id: "doc_3", parent: "root" },
-        { id: "doc_4", parent: "root" },
-        { id: "doc_5", parent: "root" },
-        { id: "doc_6", parent: "root" },
-        { id: "card_1", parent: "doc_1" },
-        { id: "card_2", parent: "doc_1" },
-        { id: "card_3", parent: "doc_2" },
-        { id: "card_4", parent: "doc_2" },
-        { id: "card_5", parent: "doc_3" },
-        { id: "card_6", parent: "doc_3" },
-        { id: "card_7", parent: "doc_4" },
-        { id: "card_8", parent: "doc_4" },
-        { id: "card_9", parent: "doc_5" },
-        { id: "card_10", parent: "doc_5" },
-        { id: "card_11", parent: "doc_6" },
-        { id: "card_12", parent: "doc_6" },
-        { id: "card_13", parent: "doc_6" }
-    ],
-    links: [
-        { source: "card_1", target: "card_4" },
-        { source: "card_2", target: "card_5" },
-        { source: "card_3", target: "card_6" },
-        { source: "card_4", target: "card_7" },
-        { source: "card_5", target: "card_8" },
-        { source: "card_6", target: "card_9" },
-        { source: "card_7", target: "card_10" },
-        { source: "card_8", target: "card_11" },
-        { source: "card_9", target: "card_12" },
-        { source: "card_10", target: "card_13" },
-        { source: "card_11", target: "card_1" },
-        { source: "card_12", target: "card_2" },
-        { source: "card_13", target: "card_3" }
-    ]
-};
-
-// Initialize the visualization
-const viz = new NetworkViz("#network", data, network.clientWidth, network.clientHeight);
-
-// Example usage
-viz.addLink({ source: "A1", target: "C" });
-viz.removeNode("B1");
-viz.removeLink("A2", "B1");
 
 
-resetZoom.onclick = () => {
-    viz.resetZoom();
-    viz.zoomToFit(); 
-};
+// Initialize the main manager
+const mainManager = new MainManager(network, doc_content, chat_content, data, buttons);
+await mainManager.init();

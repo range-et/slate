@@ -5,6 +5,8 @@ class Card {
         this.title = title;
         this.content = content;
         this.id = Card.generateId();
+        this.links = []; // array of linked card IDs
+        this.parent = null; // reference to the parent doc
     }
 
     static generateId() {
@@ -19,6 +21,15 @@ class Card {
       <p>${this.content}</p>
     `;
         return cardElement;
+    }
+
+    remove() {
+        // Remove the card from the DOM
+        if (window.confirm("Do you want to open in new tab?")) {
+            console.log("Removing card...");
+        } else {
+            console.log("Keeping card...");
+        }
     }
 }
 
