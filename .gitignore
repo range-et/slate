@@ -113,5 +113,5 @@ instance/
 .env
 .env.local
 
-
+scratch/*
 src/config.js

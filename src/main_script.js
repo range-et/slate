@@ -1,4 +1,5 @@
 import { NetworkViz } from "./network_viz.js";
+import OpenAIAgent from "./ai_utils.js";
 // dummy data
 import data from "./dummy_data.js";
 
@@ -24,18 +25,19 @@ const send_prompt = document.getElementById("send_prompt");
 const add_to_doc = document.getElementById("add_to_doc");
 
 const buttons = {
-    resetZoom:resetZoom,
-    search_input:search_input,
-    search_btn:search_btn,
-    summary_btn:summary_btn,
-    add_doc:add_doc,
-    remove_doc:remove_doc,
-    undo_btn:undo_btn,
-    export_btn:export_btn,
-    import_btn:import_btn,
-    send_prompt:send_prompt,
-    add_to_doc:add_to_doc,
-    prompt:prompt
+    resetZoom: resetZoom,
+    search_input: search_input,
+    search_btn: search_btn,
+    summary_btn: summary_btn,
+    add_doc: add_doc,
+    remove_doc: remove_doc,
+    undo_btn: undo_btn,
+    export_btn: export_btn,
+    import_btn: import_btn,
+    send_prompt: send_prompt,
+    add_to_doc: add_to_doc,
+    prompt: prompt,
+    chat_content: chat_content
 };
 
 // main manager
@@ -47,6 +49,7 @@ class MainManager {
         this.viz = null; // this will hold the network visualization instance
         this.buttons = buttons; // store button references
         this.data = data; // store data
+        this.ai_agent = null;
     }
 
     resetZoom() {
@@ -66,15 +69,28 @@ class MainManager {
         }
     }
 
+    async ask_ai() {
+        const userInput = this.buttons.prompt.innerText;
+        console.log("User input:", userInput);
+        this.ai_agent.generateResponse(userInput).then((res) => {
+            this.buttons.chat_content.innerHTML = res;
+        });
+        // update the chat content
+        this.buttons.chat_content.innerHTML = "Waiting for response...";
+    }
+
     mapButtons() {
         this.buttons.resetZoom.addEventListener("click", () => this.resetZoom());
         this.buttons.summary_btn.addEventListener("click", () => this.summary_btn());
         this.buttons.add_to_doc.addEventListener("click", () => this.add_to_doc());
+        this.buttons.send_prompt.addEventListener("click", () => this.ask_ai());
     }
 
     async init() {
         // Initialize the network visualization
         this.viz = new NetworkViz("#network", data, this.network.clientWidth, this.network.clientHeight);
+        // Initialize the AI agent
+        this.ai_agent = new OpenAIAgent();
         // map all the buttons
         this.mapButtons();
     }
