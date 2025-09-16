@@ -1,5 +1,6 @@
 import { NetworkViz } from "./network_viz.js";
 import OpenAIAgent from "./ai_utils.js";
+import Card from "./cards.js";
 // dummy data
 import data from "./dummy_data.js";
 
@@ -101,3 +102,10 @@ class MainManager {
 // Initialize the main manager
 const mainManager = new MainManager(network, doc_content, chat_content, data, buttons);
 await mainManager.init();
+
+
+// create a fake card and add to doc_content
+var card = new Card("Test Card", "This is a test card");
+card.init();
+console.log(card);
+doc_content.appendChild(card.innerHTML);
