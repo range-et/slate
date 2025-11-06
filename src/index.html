@@ -44,49 +44,40 @@
             <h4>| </h4>
             <button class="finish_btn" id="export_btn">EXPORT</button>
             <button class="success_btn" id="import_btn">IMPORT</button>
+            <div style="flex: 1;"></div>
+            <button class="info_btn" id="api_key_btn">API KEY</button>
         </div>
         <div id="content">
             <!-- NETWORK SECTION -->
             <div id="network">
                 <div class="network_heading">
-                    <h4>NETWORK VIZ</h4>
+                    <h4>PROJECT :</h4>
+                    <input type="text" id="project_title_input" placeholder="untitled project" maxlength="100">
                     <button class="info_btn" id="resetZoom">RESET ZOOM</button>
                 </div>
-                
             </div>
             <!-- DOC SECTION -->
             <div id="doc">
                 <div class="doc_heading">
-                    <h4>DOC</h4>
+                    <h4>DOC :</h4>
+                    <input type="text" id="doc_title_input" placeholder="untitled" maxlength="100">
                     <button class="info_btn" id="summary_btn">SUMMARY</button>
                 </div>
                 
                 <div class="card_container" id="doc-content" style="flex: 1 1 0;">
-
-                    <div class="card">
-                        <div class="card_header">
-                            <div class="card_actions" style="justify-content: space-between;">
-                                <input type="checkbox" id="card_selector" name="card_selector" value="false">
-                                <button class="alert_btn">x</button>
-                            </div>
-                            <br>
-                            <div class="card_details">
-                                <h4>Card Title</h4>
-                                <p class="">refUUID</p>
-                            </div>
-                            
-                        </div>
-                        <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Suspendisse sagittis id nisi eget accumsan. Nullam id viverra nisi, ut semper lectus. Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere cubilia curae; Vivamus quis metus eu massa facilisis sollicitudin sit amet vel felis. Quisque a blandit diam. Aliquam efficitur ante efficitur risus volutpat euismod. Curabitur dignissim ligula enim, et consectetur ligula accumsan sed. Aliquam pharetra at nibh at interdum. Maecenas commodo purus a ligula suscipit pharetra. </p>
-                    </div>
-
                     
                 </div>
             </div>
             <!-- CHAT SECTION -->
             <div id="chat">
+                <div class="chat_title_heading">
+                    <h4>CARD :</h4>
+                    <input type="text" id="card_title_input" placeholder="enter card title..." maxlength="100">
+                </div>
+                
                 <h4>CHAT</h4>
-
                 <div class="card_container" id="chat-content"></div>
+                
 
                 <h4>PROMPT</h4>
                 <div class="response_container">

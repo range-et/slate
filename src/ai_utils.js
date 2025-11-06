@@ -3,27 +3,51 @@ import { OPENAI_API_KEY } from "./config";
 
 class OpenAIAgent {
     constructor() {
+        // Try to load API key from localStorage first, then fall back to config
+        const apiKey = localStorage.getItem('openai_api_key') || OPENAI_API_KEY;
+        
         this.client = new OpenAI({
-            apiKey: OPENAI_API_KEY,
+            apiKey: apiKey,
             dangerouslyAllowBrowser: true
         });
     }
 
     async generateSummary(content) {
-        let concatenatedContent = content.join("\n");
-        const response = await this.client.responses.create({
-            model: "gpt-5",
-            input: "Generate a summary of the following content: " + concatenatedContent
+        const response = await this.client.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                {
+                    role: "system",
+                    content: "You are a helpful assistant that creates concise summaries of documents. Provide a clear, informative summary that captures the key points."
+                },
+                {
+                    role: "user",
+                    content: `Generate a summary of the following content:\n\n${content}`
+                }
+            ],
+            temperature: 0.7,
+            max_tokens: 500
         });
-        return response.output_text;
+        return response.choices[0].message.content;
     }
 
     async generateResponse(prompt) {
-        const response = await this.client.responses.create({
-            model: "gpt-5",
-            input: "Generate a informative response for the following prompt: " + prompt
+        const response = await this.client.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                {
+                    role: "system",
+                    content: "You are a helpful assistant that provides concise, informative responses. Keep your answers brief and to the point while maintaining clarity. Focus on the essential information and avoid unnecessary elaboration."
+                },
+                {
+                    role: "user",
+                    content: prompt
+                }
+            ],
+            temperature: 0.7,
+            max_tokens: 500
         });
-        return response.output_text;
+        return response.choices[0].message.content;
     }
 }
 

@@ -1,7 +1,7 @@
 import * as d3 from "d3";
 
 export class NetworkViz {
-  constructor(container, data, width, height) {
+  constructor(container, data, width, height, onNodeClick = null) {
     this.container = container;
     this.data = {
       nodes: [...(data.nodes || [])],
@@ -12,6 +12,7 @@ export class NetworkViz {
     this.height = height;
     this.radius = this.width / 2;
     this.innerRadius = this.radius - 120;
+    this.onNodeClick = onNodeClick; // callback for node clicks
     
     // Setup cluster layout and line generator
     this.cluster = d3.cluster().size([360, this.innerRadius]);
@@ -42,6 +43,10 @@ export class NetworkViz {
       }
       .networkviz-container:active {
         cursor: grabbing;
+      }
+      .node--root {
+        font: 700 14px "Helvetica Neue", Helvetica, Arial, sans-serif;
+        fill: #00BCD4;
       }
       .node--internal {
         font: 400 9px "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -271,6 +276,11 @@ export class NetworkViz {
     // Create node map for link generation
     const nodeById = new Map();
     root.descendants().forEach(d => {
+      // Map by ID (most important for our graph structure)
+      if (d.data.id) {
+        nodeById.set(d.data.id, d);
+      }
+      // Also map by name for fallback
       const key = d.data.name || d.data.id;
       if (key) {
         nodeById.set(key, d);
@@ -293,25 +303,34 @@ export class NetworkViz {
       // Use package imports method for hierarchical data
       linkData = this.packageImports(root.leaves());
     } else {
-      // Convert regular links to paths
+      // Convert regular links to paths, preserving type information
       linkData = this.data.links
         .map(l => {
           const source = nodeById.get(l.source);
           const target = nodeById.get(l.target);
           if (source && target) {
             const path = source.path(target);
-            return path && path.length >= 2 ? path : null;
+            if (path && path.length >= 2) {
+              // Attach link type to the path object
+              path.linkType = l.type || 'hierarchy';
+              return path;
+            }
+            return null;
+          } else {
+            console.warn("Could not find nodes for link:", l.source, "->", l.target);
+            return null;
           }
-          return null;
         })
         .filter(d => d !== null);
     }
+    
+    console.log("Generated", linkData.length, "links from", this.data.links.length, "link definitions");
 
     // Create link group (inside zoom group)
     const linkGroup = this.zoomGroup.append("g").selectAll(".link");
     const nodeGroup = this.zoomGroup.append("g").selectAll(".node");
 
-    // Draw links with bundled curves
+    // Draw links with bundled curves, styled by type
     const links = linkGroup
       .data(linkData)
       .enter().append("path")
@@ -319,47 +338,70 @@ export class NetworkViz {
         d.source = d[0];
         d.target = d[d.length - 1]; 
       })
-      .attr("class", "link")
+      .attr("class", d => `link link--${d.linkType || 'hierarchy'}`)
       .attr("d", d => {
         // Ensure we have a valid path array
         if (!Array.isArray(d) || d.length < 2) return null;
         return this.line(d);
       })
       .attr("fill", "none")
-      .attr("stroke", "steelblue")
-      .attr("stroke-opacity", 0.4)
-      .attr("stroke-width", 1)
+      .attr("stroke", d => {
+        // Different colors for different link types
+        return d.linkType === 'reference' ? "#FF6B6B" : "#00BCD4";
+      })
+      .attr("stroke-opacity", d => {
+        // Reference links slightly more transparent
+        return d.linkType === 'reference' ? 0.4 : 0.6;
+      })
+      .attr("stroke-width", d => {
+        // Hierarchy links thicker, reference links thinner
+        return d.linkType === 'reference' ? 1 : 2;
+      })
       .style("pointer-events", "none");
 
     // Draw nodes as text labels with interactivity
-    const allNodes = root.descendants().filter(d => d.depth > 0); // Exclude root
+    const allNodes = root.descendants(); // Include all nodes including root
     const nodes = nodeGroup
       .data(allNodes)
       .enter().append("text")
-      .attr("class", d => d.children ? "node node--internal" : "node node--leaf")
+      .attr("class", d => {
+        if (d.depth === 0) return "node node--root"; // Root node (project)
+        return d.children ? "node node--internal" : "node node--leaf";
+      })
       .attr("dy", "0.31em")
       .attr("transform", d => {
         const rotation = d.x - 90;
         const translation = d.y + 8;
-        const textRotation = d.x < 180 ? 0 : 180;
-        return `rotate(${rotation}) translate(${translation},0) rotate(${textRotation})`;
+        // Keep text horizontal by counter-rotating
+        return `rotate(${rotation}) translate(${translation},0) rotate(${-rotation})`;
       })
-      .attr("text-anchor", d => d.x < 180 ? "start" : "end")
+      .attr("text-anchor", "middle")
       .text(d => {
-        // For leaf nodes, show the key/name
-        if (!d.children) {
-          return d.data.key || d.data.name || d.data.id;
-        }
-        // For internal nodes, show the package name
+        // Show the node name based on available data
         return d.data.key || d.data.name || d.data.id;
       })
-      .attr("font-size", d => d.children ? "9px" : "10px")
+      .attr("font-size", d => {
+        if (d.depth === 0) return "14px"; // Root node (project)
+        return d.children ? "9px" : "10px"; // Internal nodes vs leaf nodes
+      })
       .attr("font-family", "Helvetica Neue, Helvetica, Arial, sans-serif")
-      .attr("font-weight", d => d.children ? "400" : "300")
-      .attr("fill", d => d.children ? "#666" : "#bbb")
+      .attr("font-weight", d => {
+        if (d.depth === 0) return "700"; // Root node (project)
+        return d.children ? "400" : "300"; // Internal nodes vs leaf nodes
+      })
+      .attr("fill", d => {
+        if (d.depth === 0) return "#00BCD4"; // Root node (project) - bright cyan
+        return d.children ? "#666" : "#bbb"; // Internal nodes vs leaf nodes
+      })
       .style("cursor", "pointer")
       .on("mouseover", (event, d) => this.mouseovered(d))
-      .on("mouseout", (event, d) => this.mouseouted(d));
+      .on("mouseout", (event, d) => this.mouseouted(d))
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        if (this.onNodeClick) {
+          this.onNodeClick(d.data);
+        }
+      });
 
     // Store references for interactivity
     this.linkElements = this.zoomGroup.selectAll(".link");

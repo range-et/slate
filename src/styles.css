@@ -35,6 +35,7 @@ h4 {
   margin-top: calc(var(--global_padding) / 6);
   margin-bottom: calc(var(--global_padding) / 3);
   font-style: italic;
+  flex-shrink: 0;
 }
 
 h3 {
@@ -75,6 +76,44 @@ button:hover {
 button:active{
   background-color: var(--primary-text);
   color: var(--background);
+}
+
+input[type="text"] {
+  width: 100%;
+  padding: 8px;
+  background: var(--background);
+  color: var(--primary-text);
+  border: 1px solid var(--information-2);
+  border-radius: 4px;
+  font-size: small;
+  font-family: "Open Sans", sans-serif;
+  margin-bottom: calc(var(--global_padding) / 3);
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--information-1);
+}
+
+input[type="text"]::placeholder {
+  color: var(--secondary-text);
+  opacity: 0.6;
+}
+
+#search_input {
+  width: 150px;
+  min-width: 300px;
+  padding: 4px 8px;
+  font-size: small;
+  margin: 0;
+  margin-bottom: 0;
+  border-width: 1px;
+  height: auto;
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
 }
 
 #container {
@@ -153,9 +192,27 @@ button:active{
 
 .doc_heading{
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
   flex-direction: row;
+  gap: 10px;
+}
+
+.doc_heading button {
+  margin-left: auto;
+}
+
+#doc_title_input {
+  width: 200px;
+  padding: 4px 8px;
+  font-size: small;
+  margin: 0;
+  margin-bottom: 0;
+  border-width: 1px;
+  height: auto;
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
 }
 
 /* CHAT PANEL */
@@ -166,6 +223,17 @@ button:active{
   height: 100%;
 }
 
+.chat_title_heading {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  gap: 10px;
+}
+
+.chat_title_heading input {
+  flex: 1;
+}
+
 #chat-content.card_container {
   flex: 1 1 0;
   min-height: 0;
@@ -174,13 +242,6 @@ button:active{
   flex-direction: column;
   gap: 10px;
   border: 1px solid var(--information-1);
-}
-
-/* Split chat-content and prompt area equally */
-#chat-content {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
   padding: var(--global_padding);
 }
 
@@ -198,7 +259,6 @@ button:active{
   overflow-y: auto;
   border: 1px solid var(--information-2);
   padding: calc(var(--global_padding)/2);
-  font-family: "Courier New", Courier, monospace;
   font-size: medium;
 }
 
@@ -248,7 +308,25 @@ button:active{
 
 .network_heading {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
+}
+
+.network_heading button {
+  margin-left: auto;
+}
+
+#project_title_input {
+  width: 200px;
+  padding: 4px 8px;
+  font-size: small;
+  margin: 0;
+  margin-bottom: 0;
+  border-width: 1px;
+  height: auto;
+  line-height: 1.4;
+  display: inline-flex;
   align-items: center;
 }
 
@@ -257,15 +335,13 @@ button:active{
   font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 16;
 }
 
-#overlay{
+#overlay {
   height: 100%;
   width: 100%;
   position: fixed;
   top: 0;
   left: 0;
   background: rgba(0, 0, 0, 0.9);
-  justify-content: center;
-  align-items: center;
   z-index: 1000;
   display: none;
   align-items: center;
@@ -277,20 +353,119 @@ button:active{
   border: 1px solid var(--information-2);
   padding: var(--global_padding);
   border-radius: 5px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-  min-width: 40%;
-  min-height: 40%;
-  max-width: 50%;
-  max-height: 60%;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  min-width: 300px;
+  max-width: 500px;
+  max-height: 80vh;
   overflow: auto;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  gap: var(--global_padding);
 }
 
-#modal-actions{
-  width: 100%;
+#modal-content {
+  flex: 1;
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
   padding: var(--global_padding);
+}
+
+#modal-content p {
+  font-size: medium;
+  color: var(--primary-text);
+  line-height: 1.5;
+}
+
+#modal-actions {
+  display: flex;
+  justify-content: center;
+  gap: calc(var(--global_padding) / 2);
+  padding-top: calc(var(--global_padding) / 2);
+  border-top: 1px solid var(--information-2);
+}
+
+/* Loading animation */
+.loading-text {
+  background: linear-gradient(
+    90deg,
+    var(--information-1) 0%,
+    var(--information-2) 25%,
+    var(--information-3) 50%,
+    var(--information-2) 75%,
+    var(--information-1) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradient-shift 2s ease-in-out infinite;
+  font-weight: 600;
+  font-style: italic;
+  text-align: center;
+  padding: var(--global_padding);
+}
+
+@keyframes gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* Alternative pulsing animation */
+.loading-pulse {
+  opacity: 0.6;
+  animation: pulse 1.5s ease-in-out infinite;
+  text-align: center;
+  font-style: italic;
+  color: var(--information-2);
+  padding: var(--global_padding);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Summary generation animation */
+.summary-generating {
+  background: linear-gradient(
+    -45deg,
+    var(--information-1),
+    var(--information-2),
+    var(--information-1),
+    var(--primary-text)
+  ) !important;
+  background-size: 400% 400% !important;
+  animation: gradient-shift 2s ease infinite !important;
+  color: var(--background) !important;
+  font-weight: 600 !important;
+}
+
+/* Summary success state */
+.summary-success {
+  background: var(--success) !important;
+  color: var(--background) !important;
+  font-weight: 600 !important;
+  transition: background 0.3s ease !important;
+}
+
+/* Summary error state */
+.summary-error {
+  background: var(--alert) !important;
+  color: var(--background) !important;
+  font-weight: 600 !important;
+  transition: background 0.3s ease !important;
 }
