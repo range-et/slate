@@ -47,16 +47,56 @@ const customTheme = EditorView.theme({
         borderRadius: "4px",
         boxShadow: "0 4px 8px rgba(0,0,0,0.3)",
         "& ul": {
-            fontFamily: "inherit"
+            fontFamily: "inherit",
+            maxHeight: "300px",
+            overflowY: "auto"
         },
         "& li": {
             color: "var(--primary-text)",
-            padding: "4px 8px"
+            padding: "6px 10px",
+            cursor: "pointer",
+            borderRadius: "2px"
         },
         "& li[aria-selected]": {
-            backgroundColor: "var(--information-1)",
-            color: "var(--background)"
+            backgroundColor: "#03A9F4",  // information-2 (light blue)
+            color: "#1A1A1A"  // Dark background for contrast
         }
+    },
+    // Info panel that shows additional details
+    ".cm-tooltip.cm-tooltip-autocomplete.cm-completionInfo": {
+        backgroundColor: "var(--background)",
+        border: "1px solid var(--information-2)",
+        color: "var(--primary-text)",
+        padding: "8px 12px",
+        boxShadow: "0 4px 8px rgba(0,0,0,0.3)"
+    },
+    ".cm-completionInfo": {
+        backgroundColor: "var(--background)",
+        color: "var(--primary-text)",
+        padding: "8px 12px"
+    },
+    // Completion item styling - matching network viz colors
+    ".cm-completionLabel": {
+        fontWeight: "500",
+        color: "var(--primary-text)"
+    },
+    ".cm-completionDetail": {
+        fontStyle: "normal",
+        fontSize: "0.85em",
+        marginLeft: "auto",
+        paddingLeft: "12px",
+        fontWeight: "600"
+    },
+    // Section headers in completion list
+    "ul[role=listbox] li[role=option][aria-disabled=true]": {
+        padding: "4px 10px 2px",
+        fontSize: "0.75em",
+        fontWeight: "700",
+        textTransform: "uppercase",
+        color: "var(--information-2)",
+        opacity: "0.8",
+        cursor: "default",
+        backgroundColor: "transparent !important"
     },
     ".cm-reference": {
         color: "#00BCD4",
@@ -125,8 +165,9 @@ function createReferenceCompletion(getCurrentDoc, getCurrentProject) {
                         label: "@" + card.title,
                         apply: "@" + card.title + " ",
                         type: "variable",
-                        detail: "card",
-                        info: `Card: ${card.title}`
+                        detail: "🟢 card",  // Green circle emoji to match card color
+                        info: `Card: ${card.title}`,
+                        section: "Cards"
                     });
                 });
             }
@@ -139,8 +180,9 @@ function createReferenceCompletion(getCurrentDoc, getCurrentProject) {
                         label: "@" + doc.title,
                         apply: "@" + doc.title + " ",
                         type: "class",
-                        detail: "doc",
-                        info: `Document: ${doc.title}`
+                        detail: "🔵 doc",  // Blue circle emoji to match doc color
+                        info: `Document: ${doc.title}`,
+                        section: "Documents"
                     });
                 });
             }
