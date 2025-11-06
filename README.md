@@ -7,12 +7,14 @@ A graph-based document editor with AI-powered card creation and intelligent refe
 ## Overview
 
 Slate is a hierarchical document management system that combines:
-- **AI-Assisted Writing**: Generate content using OpenAI's GPT-4o-mini model
-- **Graph Visualization**: See your knowledge as an interconnected network
+- **AI-Assisted Writing**: Generate content using OpenAI's GPT-4o-mini model with vision support
+- **Image Support**: Attach or paste images, analyzed by AI using vision capabilities
+- **Graph Visualization**: See your knowledge as an interconnected network with intelligent node spacing
 - **Smart References**: Link cards and documents using @mentions with autocomplete
 - **Document Summaries**: AI-generated summaries of document content
 - **Advanced Editor**: CodeMirror-powered prompt editor with syntax highlighting
 - **Cross-Document Context**: Reference cards across different documents
+- **Card Management**: Move cards between documents seamlessly
 
 ## Features
 
@@ -24,13 +26,24 @@ Slate is a hierarchical document management system that combines:
 
 ### 🤖 AI Integration
 - Generate content with OpenAI's GPT-4o-mini model
+- **Vision API Support**: Send images to AI for analysis and description
 - Include context by @referencing cards and documents
 - Automatic bibliography construction from references
 - AI-generated document summaries (automatically created when cards are added)
 - Reference document summaries instead of individual cards
 - **Markdown formatting**: All AI responses rendered with beautiful markdown
-- **Prompt preservation**: Original prompts saved with each card
+- **Prompt preservation**: Original prompts and images saved with each card
 - Seamless integration with your workflow
+
+### 🖼️ Image Support
+- **Attach Images**: Click "ATTACH IMAGE" button to select from file system
+- **Copy-Paste**: Just like ChatGPT - copy any image and paste directly into the app
+- **Multiple Images**: Add multiple images to a single prompt
+- **Preview & Remove**: See thumbnails before sending, remove unwanted images
+- **Base64 Storage**: Images encoded and stored in JSON (no external file dependencies)
+- **AI Vision**: Images sent to OpenAI's vision API for analysis
+- **Card Display**: Images preserved and displayed in saved cards
+- **Export/Import**: Images included in JSON exports for complete portability
 
 ### 🔗 Smart Linking & References
 - Use `@card_title` to reference any card in your project
@@ -55,12 +68,16 @@ Slate is a hierarchical document management system that combines:
 - Portable and shareable
 
 ### 🎨 Visual Network
-- Radial tree layout visualization
+- Force-directed graph layout with intelligent spacing
+- **Advanced Collision Detection**: Nodes never overlap, even with labels
+- **Dynamic Spacing**: Automatic node repulsion prevents clustering
 - Color-coded node types (project/doc/card)
 - Two edge types:
   - **Thick cyan edges**: Hierarchy (parent-child)
   - **Thin red edges**: References (card-to-card links)
 - Interactive zoom and pan
+- Smooth animations and transitions
+- Real-time updates when cards are moved between documents
 
 ### ✨ Enhanced Editor Experience
 - **CodeMirror 6 Integration**: Modern, powerful text editor
@@ -115,12 +132,34 @@ npm run dev
 2. **Add Documents**: Click the `+` button
 3. **Generate Cards**:
    - Enter a prompt in the CodeMirror editor area
+   - **Add Images** (optional):
+     - Click "ATTACH IMAGE" button to select files
+     - OR copy any image and paste it (Ctrl/Cmd+V)
+     - Preview thumbnails appear above the editor
+     - Click × on any thumbnail to remove it
    - Use `@` to reference other cards or documents (autocomplete shows ALL cards)
-   - Click **SEND** to generate markdown-formatted AI response
-   - Click **ADD TO DOC** to save as a card
+   - Click **SEND** to generate markdown-formatted AI response (with image analysis if images attached)
+   - Click **ADD TO DOC** to instantly save as a card (no confirmation needed)
    - Card titles auto-generate or can be customized
-   - **Card Structure**: Each card preserves both the prompt and response
+   - **Card Structure**: Each card preserves the prompt, images, and response
    - Document summaries are automatically generated in the background
+
+### Managing Cards
+
+1. **View Card Details**:
+   - Each card shows the original prompt (with clickable @references)
+   - Attached images displayed below the prompt
+   - AI response rendered with markdown formatting
+   
+2. **Move Cards Between Documents**:
+   - Click the **↗️** button on any card
+   - Select destination document from dropdown
+   - Card moves instantly with all content, images, and links preserved
+   - Network visualization updates automatically
+   
+3. **Remove Cards**:
+   - Click the **×** button on any card
+   - Confirmation required before deletion
 
 ### Using References with Autocomplete
 
@@ -152,12 +191,19 @@ Summarize the key points from @design_doc and compare with @api_spec
 
 ### Card Anatomy
 
-Each card has two sections:
-1. **Prompt Section** (blue-grey, italics):
+Each card has three sections:
+1. **Card Header**:
+   - Card title and unique ID
+   - **↗️ Move button**: Relocate card to another document
+   - **× Remove button**: Delete card (with confirmation)
+   
+2. **Prompt Section** (blue-grey, italics):
    - Shows the original prompt that created the card
    - @references are highlighted in green and clickable
    - Click any @reference to navigate to that card
-2. **Response Section** (markdown-rendered):
+   - **Attached images** displayed as thumbnails
+   
+3. **Response Section** (markdown-rendered):
    - AI-generated response with full markdown formatting
    - Headings, lists, code blocks, tables, etc.
    - Neutral grey color scheme for readability
@@ -176,6 +222,7 @@ Each card has two sections:
 - **Delete Doc**: `-` button (with confirmation)
 - **Rename**: Click doc title input, edit, blur to save
 - **Switch**: Click doc node in visualization
+- **Move Cards**: Use the ↗️ button on cards to move them between documents
 
 ## Architecture
 
@@ -234,30 +281,40 @@ slate/
 - Serializes to/from JSON with summary data
 
 #### `Card`
-- Stores title, content, **prompt**, and links
-- **Dual-section rendering**: Prompt (italics) + Response (markdown)
+- Stores title, content, **prompt**, **images**, and links
+- **Triple-section rendering**: Header + Prompt (with images) + Response (markdown)
 - Tracks @references to other cards
 - **Clickable @references**: Navigate by clicking links in prompt
+- **Move between documents**: Relocate cards with full data preservation
 - Handles DOM creation and removal
 - Parent document relationship tracking
+- Base64 image storage and rendering
 - Markdown rendering for all content
 
 #### `ChatManager`
 - Manages AI interactions
+- **Image handling**: Attach button, paste events, preview management
+- **Base64 encoding**: Converts images for storage and API transmission
 - Parses @references from prompts (cards and docs)
 - Builds bibliography with card content or doc summaries
 - **Markdown rendering**: Converts AI responses to formatted HTML
-- Handles card creation workflow with prompt preservation
+- Handles card creation workflow with prompt and image preservation
 - **Triggers automatic summary generation** when cards are added
 - CodeMirror editor integration
 
 #### `NetworkViz`
 - D3.js force-directed graph visualization
+- **Advanced collision detection**: Prevents node overlap with label padding
+- **Dynamic force simulation**: 
+  - Strong repulsion forces push nodes apart
+  - Collision iterations ensure perfect spacing
+  - Text label padding included in collision radius
 - **Centered layout**: Graph stays centered during interactions
 - Interactive node clicking for navigation
 - **Click card nodes**: Jump to card's document
 - Zoom and pan controls with smooth transitions
 - Styled edges by type (hierarchy vs reference)
+- Real-time updates when graph structure changes
 
 #### `CodeMirror Setup`
 - Custom theme matching app color scheme
@@ -287,6 +344,7 @@ All titles are automatically sanitized:
 |-----|--------|
 | `Enter` | Search (when in search box) |
 | `Enter` | Send prompt (when in prompt editor) |
+| `Ctrl/Cmd + V` | Paste image (when image is in clipboard) |
 | `@` | Trigger autocomplete (cards and docs) |
 | `Arrow Keys` | Navigate autocomplete suggestions |
 | `Enter` / `Click` | Select autocomplete suggestion |
@@ -311,11 +369,21 @@ All titles are automatically sanitized:
 ### AI Prompting Best Practices
 - **Use autocomplete**: Type `@` to see ALL cards from ALL documents
 - **Autocomplete shows context**: See which document each card belongs to
+- **Add images for visual context**: Copy-paste or attach images for AI to analyze
+- **Multiple images supported**: Add diagrams, screenshots, photos for comprehensive analysis
 - Reference multiple cards for rich context
 - **Reference documents** for broader context instead of individual cards
 - The AI sees the full content of referenced cards or document summaries
 - Use descriptive card titles for better reference matching
 - **AI formats in markdown**: Responses include headings, lists, code, tables
+
+### Working with Images
+- **Copy-Paste Workflow**: Copy image from anywhere → Paste in Slate → Preview → Send
+- **File Attachment**: Click "ATTACH IMAGE" → Select one or more files → Preview → Send
+- **Preview Management**: Review thumbnails before sending, remove unwanted images
+- **Storage**: All images stored as base64 in JSON (completely portable)
+- **AI Vision**: GPT-4o-mini analyzes image content and incorporates it into responses
+- **Card Preservation**: Images saved with cards and displayed in prompt section
 
 ### Navigation & Links
 - **Click @references in prompts**: Navigate to referenced cards instantly
@@ -343,6 +411,13 @@ All titles are automatically sanitized:
           "title": "card_title",
           "content": "<rendered markdown html>",
           "prompt": "Original prompt text with @references",
+          "images": [
+            {
+              "data": "data:image/png;base64,...",
+              "mimeType": "image/png",
+              "name": "screenshot.png"
+            }
+          ],
           "links": ["referenced_card_1", "referenced_card_2"]
         }
       ],
@@ -376,8 +451,10 @@ All titles are automatically sanitized:
 
 ### Performance
 - Efficient graph rendering with D3.js
-- Incremental updates (no full re-renders)
+- **Optimized force simulation**: 5 collision iterations for perfect node spacing
+- Incremental updates with full re-renders only when structure changes
 - Asynchronous summary generation (non-blocking)
+- Base64 image encoding (no external file I/O)
 - Local-first architecture
 - No database required
 - Client-side AI API calls
@@ -385,6 +462,13 @@ All titles are automatically sanitized:
 ## Roadmap
 
 ### Recently Completed ✅
+- [x] **Image Support** - attach, paste, preview, and send images to AI
+- [x] **OpenAI Vision API** - GPT-4o-mini analyzes images
+- [x] **Base64 Storage** - images encoded in JSON for portability
+- [x] **Move Cards Between Documents** - relocate cards with ↗️ button
+- [x] **No Confirmation Popups** - instant card addition
+- [x] **Advanced Collision Detection** - prevents node overlap in graph
+- [x] **Dynamic Force Simulation** - intelligent node spacing with label padding
 - [x] CodeMirror editor integration with syntax highlighting
 - [x] @reference autocomplete for cards and documents
 - [x] **Project-wide autocomplete** - see ALL cards from ALL documents
@@ -397,20 +481,22 @@ All titles are automatically sanitized:
 - [x] **Centered graph layout** - no jarring translations
 
 ### Potential Features
-- [ ] Undo/Redo functionality
 - [ ] Rich text editing (markdown support in cards)
 - [ ] Card templates
 - [ ] Tags and filtering
 - [ ] Full-text search (beyond titles)
+- [ ] Image zoom/lightbox in cards
+- [ ] Multiple image formats (GIF, WebP, etc.)
+- [ ] Drag-and-drop image upload
 - [ ] Collaborative editing
 - [ ] Cloud sync
-- [ ] PDF export
+- [ ] PDF export (including images)
 - [ ] Graph analytics (in/out degrees, centrality)
-- [ ] Custom graph layouts (force-directed, hierarchical)
+- [ ] Alternative graph layouts (hierarchical, circular)
 - [ ] Multiple AI model support (GPT-4, Claude, etc.)
 - [ ] Streaming responses
 - [ ] Card versioning/history
-- [ ] Custom color themes
+- [ ] Bulk card operations
 
 ## Contributing
 
