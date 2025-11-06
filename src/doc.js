@@ -152,6 +152,7 @@ class Doc {
                 id: card.id,
                 title: card.title,
                 content: card.content,
+                prompt: card.prompt || "",
                 links: card.links
             })),
             createdAt: this.createdAt,
@@ -175,7 +176,13 @@ class Doc {
         // Restore cards (Note: this creates new Card instances without DOM elements)
         if (jsonData.cards && Array.isArray(jsonData.cards)) {
             jsonData.cards.forEach(cardData => {
-                const card = new Card(cardData.title, cardData.content);
+                const card = new Card(
+                    cardData.title, 
+                    cardData.content, 
+                    null, 
+                    null, 
+                    cardData.prompt || ""
+                );
                 card.id = cardData.id;
                 card.links = cardData.links || [];
                 doc.cards.push(card);

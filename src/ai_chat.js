@@ -1,6 +1,7 @@
 import Card from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
 import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor } from "./codemirror_setup.js";
+import { marked } from 'marked';
 
 /**
  * Sanitize a title to follow naming conventions:
@@ -218,7 +219,9 @@ export class ChatManager {
         
         // Send the full prompt (with bibliography) to the AI
         this.aiAgent.generateResponse(fullPrompt).then((res) => {
-            this.chatContent.innerHTML = res;
+            // Render the response as markdown
+            const renderedResponse = marked.parse(res);
+            this.chatContent.innerHTML = `<div class="markdown-body">${renderedResponse}</div>`;
         }).catch((err) => {
             console.error("Error generating response:", err);
             this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response</p>';
@@ -311,12 +314,17 @@ export class ChatManager {
                 const referencedTitles = this.parseReferences(promptText);
                 console.log("Card will link to:", referencedTitles);
                 
-                // Create and add the card
+                // Get the rendered markdown content (extract from the markdown-body div if present)
+                const markdownBodyDiv = this.chatContent.querySelector('.markdown-body');
+                const cardContent = markdownBodyDiv ? markdownBodyDiv.innerHTML : this.chatContent.innerHTML;
+                
+                // Create and add the card with the prompt
                 const card = new Card(
                     cardTitle, 
-                    this.chatContent.innerHTML, 
+                    cardContent, 
                     this.modal, 
-                    this.updateNetworkCallback
+                    this.updateNetworkCallback,
+                    promptText  // Pass the original prompt
                 );
                 card.init();
                 

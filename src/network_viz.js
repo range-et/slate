@@ -119,11 +119,13 @@ export class NetworkViz {
   }
 
   resetZoom(duration = 750) {
+    // Reset to centered view (scale 1, centered at viewport center)
+    // Account for the zoomGroup being at (width/2, height/2)
     this.svg.transition()
       .duration(duration)
       .call(
         this.zoom.transform,
-        d3.zoomIdentity.translate(this.width / 2, this.height / 2)
+        d3.zoomIdentity.translate(this.width / 2, this.height / 2).scale(1)
       );
   }
 
@@ -199,10 +201,14 @@ export class NetworkViz {
       .attr("class", "networkviz-container")
       .call(this.zoom);
     
-    // Create zoom group
-    this.zoomGroup = this.svg
-      .append("g")
-      .attr("transform", `translate(${this.width / 2},${this.height / 2})`);
+    // Create zoom group - DON'T pre-translate, let zoom behavior handle it
+    this.zoomGroup = this.svg.append("g");
+    
+    // Set initial zoom transform to center the graph
+    this.svg.call(
+      this.zoom.transform,
+      d3.zoomIdentity.translate(this.width / 2, this.height / 2).scale(1)
+    );
 
     // If no nodes, return early
     if (this.data.nodes.length === 0) return;
@@ -398,8 +404,8 @@ export class NetworkViz {
         .attr("transform", d => `translate(${d.x},${d.y})`);
     });
 
-    // Initial zoom to fit
-    setTimeout(() => this.zoomToFit(), 1000);
+    // Don't auto-zoom to fit - keep graph centered as the simulation settles
+    // The force simulation with center(0,0) keeps everything naturally centered
   }
 
   // Drag handlers

@@ -7,6 +7,7 @@ import Modal from "./modal.js";
 import ChatManager, { sanitizeTitle } from "./ai_chat.js";
 import generateRandomName from "./random_name_generator.js";
 import { setupCodeMirrorEditor } from "./codemirror_setup.js";
+import { marked } from 'marked';
 // dummy data
 import data from "./dummy_data.js";
 
@@ -74,7 +75,7 @@ class MainManager {
 
     resetZoom() {
         this.viz.resetZoom();
-        this.viz.zoomToFit();
+        // Don't call zoomToFit - keeps graph naturally centered
     }
 
     async summary_btn() {
@@ -99,12 +100,13 @@ class MainManager {
             return;
         }
 
-        // Show the summary in a modal
+        // Show the summary in a modal with markdown rendering
         const summaryContainer = document.createElement('div');
+        const renderedSummary = marked.parse(this.currentDoc.summary);
         summaryContainer.innerHTML = `
             <h4 style="margin-bottom: 15px;">Summary of "${this.currentDoc.title}"</h4>
-            <div style="max-height: 400px; overflow-y: auto; padding: 10px; background: var(--background); border: 1px solid var(--information-2); border-radius: 4px; line-height: 1.6;">
-                ${this.currentDoc.summary}
+            <div class="markdown-body" style="max-height: 400px; overflow-y: auto; padding: 10px; background: var(--background); border: 1px solid var(--information-2); border-radius: 4px;">
+                ${renderedSummary}
             </div>
         `;
 
@@ -131,10 +133,13 @@ class MainManager {
             this.buttons.summary_btn.classList.remove('summary-generating');
             this.buttons.summary_btn.classList.add('summary-success');
             
-            // Remove success state after 3 seconds
+            // Remove success state after 3 seconds and restore original styling
             setTimeout(() => {
                 if (this.buttons.summary_btn) {
                     this.buttons.summary_btn.classList.remove('summary-success');
+                    // Force a style reset to ensure proper color restoration
+                    this.buttons.summary_btn.style.removeProperty('background');
+                    this.buttons.summary_btn.style.removeProperty('color');
                 }
             }, 3000);
         }

@@ -296,45 +296,52 @@ input[type="text"]::placeholder {
   margin: calc(var(--global_padding) / 3);
 }
 
-/* Card links section */
-.card-links-section {
-  background-color: rgba(139, 195, 74, 0.1);  /* Light green background */
-  border-left: 3px solid #8BC34A;  /* Green left border matching card nodes */
+/* Card prompt section - shows the original prompt that created the card */
+.card-prompt-section {
+  background-color: rgba(96, 125, 139, 0.1);  /* Light blue-grey background */
+  border-left: 3px solid #607D8B;  /* Blue-grey left border */
   padding: 8px 12px;
   margin-bottom: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
   border-radius: 2px;
 }
 
-.card-links-label {
-  font-size: small;
-  font-weight: 600;
-  color: #8BC34A;  /* Green to match card nodes */
-  margin-right: 4px;
+.card-prompt-label {
+  font-size: x-small;
+  font-weight: 700;
+  color: #78909C;  /* Blue-grey to distinguish from card nodes */
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: block;
+  margin-bottom: 6px;
 }
 
-.card-link {
-  display: inline-block;
-  background-color: rgba(139, 195, 74, 0.2);  /* Slightly more opaque green */
-  color: #9CCC65;  /* Light green text */
-  padding: 3px 8px;
-  border-radius: 12px;
+.card-prompt-text {
   font-size: small;
-  font-weight: 500;
+  line-height: 1.6;
+  color: var(--secondary-text);
+  font-style: italic;  /* Italics to distinguish from AI response */
+  word-wrap: break-word;
+  white-space: pre-wrap;  /* Preserve line breaks from prompt */
+}
+
+/* Inline clickable @references within the prompt */
+.card-link-inline {
+  display: inline;
+  background-color: rgba(139, 195, 74, 0.25);  /* Green highlight for @references */
+  color: #9CCC65;  /* Light green text */
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
-  border: 1px solid rgba(139, 195, 74, 0.3);
+  font-style: normal;  /* Override italic from parent */
+  text-decoration: none;
 }
 
-.card-link:hover {
-  background-color: rgba(139, 195, 74, 0.3);
+.card-link-inline:hover {
+  background-color: rgba(139, 195, 74, 0.4);
   color: #AED581;  /* Lighter green on hover */
-  border-color: #8BC34A;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 4px rgba(139, 195, 74, 0.2);
+  text-decoration: underline;
 }
 
 /* Scrollbar styles */

@@ -153,34 +153,34 @@ function createReferenceCompletion(getCurrentDoc, getCurrentProject) {
         // Don't show completions if there's no @ at the start
         if (word.from === word.to && !context.explicit) return null;
         
-        // Get all available references (cards and docs)
+        // Get all available references (cards and docs) - PROJECT-WIDE
         const options = [];
         
         try {
-            // Get current doc cards
-            const currentDoc = getCurrentDoc();
-            if (currentDoc) {
-                currentDoc.getAllCards().forEach(card => {
-                    options.push({
-                        label: "@" + card.title,
-                        apply: "@" + card.title + " ",
-                        type: "variable",
-                        detail: "🟢 card",  // Green circle emoji to match card color
-                        info: `Card: ${card.title}`,
-                        section: "Cards"
+            const currentProject = getCurrentProject();
+            
+            if (currentProject) {
+                // Get ALL cards from ALL documents in the project
+                currentProject.getAllDocs().forEach(doc => {
+                    doc.getAllCards().forEach(card => {
+                        options.push({
+                            label: "@" + card.title,
+                            apply: "@" + card.title + " ",
+                            type: "variable",
+                            detail: `🟢 card (${doc.title})`,  // Show which doc the card is from
+                            info: `Card: ${card.title} from document "${doc.title}"`,
+                            section: "Cards"
+                        });
                     });
                 });
-            }
-            
-            // Get all docs
-            const currentProject = getCurrentProject();
-            if (currentProject) {
+                
+                // Get all documents
                 currentProject.getAllDocs().forEach(doc => {
                     options.push({
                         label: "@" + doc.title,
                         apply: "@" + doc.title + " ",
                         type: "class",
-                        detail: "🔵 doc",  // Blue circle emoji to match doc color
+                        detail: "🔵 doc",
                         info: `Document: ${doc.title}`,
                         section: "Documents"
                     });

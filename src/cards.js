@@ -11,11 +11,12 @@ marked.setOptions({
 });
 
 class Card {
-    constructor(title, content, modal = null, updateNetworkCallback = null) {
+    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "") {
         this.title = title;
         this.content = content;
+        this.prompt = prompt; // the original prompt that created this card
         this.id = null; // unique identifier
-        this.links = []; // array of linked card titles
+        this.links = []; // array of linked card titles (extracted from prompt)
         this.parent = null; // reference to the parent doc
         this.innerHTML = null;
         this.modal = modal || new Modal(); // use provided modal or create new one
@@ -26,19 +27,24 @@ class Card {
         const cardElement = document.createElement("div");
         cardElement.classList.add("card");
         
-        // Render markdown content
+        // Render markdown content (AI response)
         const renderedContent = marked.parse(this.content);
         
-        // Build links section if there are any links
-        let linksHTML = '';
-        if (this.links && this.links.length > 0) {
-            const linkTags = this.links.map(link => 
-                `<span class="card-link" data-link="${link}">@${link}</span>`
-            ).join('');
-            linksHTML = `
-                <div class="card-links-section">
-                    <span class="card-links-label">References:</span>
-                    ${linkTags}
+        // Build prompt section with highlighted @references
+        let promptHTML = '';
+        if (this.prompt && this.prompt.trim() !== '') {
+            // Highlight @references in the prompt
+            let highlightedPrompt = this.prompt;
+            
+            // Find all @references and make them clickable spans
+            highlightedPrompt = highlightedPrompt.replace(/@([\w]+)/g, (match, cardTitle) => {
+                return `<span class="card-link-inline" data-link="${cardTitle}">@${cardTitle}</span>`;
+            });
+            
+            promptHTML = `
+                <div class="card-prompt-section">
+                    <span class="card-prompt-label">Prompt:</span>
+                    <div class="card-prompt-text">${highlightedPrompt}</div>
                 </div>
             `;
         }
@@ -54,7 +60,7 @@ class Card {
                     <p class="">${this.id}</p>
                 </div>
             </div>
-            ${linksHTML}
+            ${promptHTML}
             <div class="card-content markdown-body">${renderedContent}</div>`;
         return cardElement;
     }
@@ -99,8 +105,8 @@ class Card {
             });
         }
         
-        // Attach click handlers to all link tags
-        const linkElements = this.innerHTML.querySelectorAll('.card-link');
+        // Attach click handlers to all @reference links in the prompt
+        const linkElements = this.innerHTML.querySelectorAll('.card-link-inline');
         linkElements.forEach(linkEl => {
             linkEl.addEventListener('click', (e) => {
                 e.stopPropagation();
