@@ -31,7 +31,15 @@ class Doc {
      */
     addCard(card) {
         if (card instanceof Card) {
+            // Check if card already exists in this document (prevent duplicates)
+            const existingCard = this.cards.find(c => c.id === card.id);
+            if (existingCard) {
+                console.warn(`Card ${card.id} already exists in document ${this.title}, skipping add`);
+                return;
+            }
+            
             this.cards.push(card);
+            card.parent = this; // Set parent reference
             this.updatedAt = new Date().toISOString();
         } else {
             console.error("Can only add Card instances to a document");
@@ -153,6 +161,7 @@ class Doc {
                 title: card.title,
                 content: card.content,
                 prompt: card.prompt || "",
+                images: card.images || [],
                 links: card.links
             })),
             createdAt: this.createdAt,
@@ -181,7 +190,8 @@ class Doc {
                     cardData.content, 
                     null, 
                     null, 
-                    cardData.prompt || ""
+                    cardData.prompt || "",
+                    cardData.images || []
                 );
                 card.id = cardData.id;
                 card.links = cardData.links || [];

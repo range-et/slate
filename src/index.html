@@ -38,10 +38,6 @@
             <input type="text" placeholder="Search..." id="search_input">
             <button class="info_btn" id="search_btn">SEARCH</button>
             <h4>| </h4>
-            <button class="info_btn" id="undo_btn">
-                <span class="material-symbols-outlined">undo</span>
-            </button>
-            <h4>| </h4>
             <button class="finish_btn" id="export_btn">EXPORT</button>
             <button class="success_btn" id="import_btn">IMPORT</button>
             <div style="flex: 1;"></div>
@@ -81,11 +77,12 @@
 
                 <h4>PROMPT</h4>
                 <div class="response_container">
+                    <div id="image-preview-container"></div>
                     <div id="chat-prompt"></div>
                     <div class="response_control_panel">
                         <button class="info_btn" id="send_prompt">SEND</button>
                         <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
-                        <button class="info_btn">ATTACH FILES</button>
+                        <button class="info_btn" id="attach_image">ATTACH IMAGE</button>
                     </div>
                     
                 </div>

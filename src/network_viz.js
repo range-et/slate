@@ -263,20 +263,36 @@ export class NetworkViz {
     this.simulation = d3.forceSimulation(nodes)
       .force("link", d3.forceLink(hierarchyLinks)
         .id(d => d.id)
-        .distance(120)
-        .strength(0.8))
+        .distance(d => {
+          // Longer distances for parent-child connections
+          if (d.source.type === 'project') return 180;
+          if (d.source.type === 'doc') return 160;
+          return 140;
+        })
+        .strength(0.5))  // Weaker links allow more spacing
       .force("charge", d3.forceManyBody()
         .strength(d => {
-          // Stronger repulsion for bigger nodes
-          if (d.type === 'project') return -1000;
-          if (d.type === 'doc') return -400;
-          return -200;
+          // Very strong repulsion to push nodes apart
+          if (d.type === 'project') return -2500;
+          if (d.type === 'doc') return -1200;
+          return -800;
         }))
       .force("center", d3.forceCenter(0, 0))
       .force("collision", d3.forceCollide()
-        .radius(d => d.radius + 25))
-      .force("x", d3.forceX(0).strength(0.03))
-      .force("y", d3.forceY(0).strength(0.03));
+        .radius(d => {
+          // Much larger collision radius to absolutely prevent overlap
+          // Include space for labels
+          const textPadding = 60; // Account for text labels
+          if (d.type === 'project') return d.radius + textPadding + 20;
+          if (d.type === 'doc') return d.radius + textPadding + 15;
+          return d.radius + textPadding;
+        })
+        .strength(1.5)  // Extra strong collision force (>1.0 for aggressive prevention)
+        .iterations(5))  // Many more iterations for perfect collision detection
+      .force("x", d3.forceX(0).strength(0.01))
+      .force("y", d3.forceY(0).strength(0.01))
+      .alphaDecay(0.01)  // Slower cooldown = more time to settle
+      .velocityDecay(0.3);  // Lower velocity decay = smoother movement
 
     // Create link elements
     const linkGroup = this.zoomGroup.append("g")
@@ -513,10 +529,13 @@ export class NetworkViz {
 
   // Method to update data and re-render
   updateData(newData) {
+    // Create fresh copies of nodes and links to ensure D3 doesn't hold stale references
     this.data = {
-      nodes: [...(newData.nodes || [])],
-      links: [...(newData.links || [])]
+      nodes: (newData.nodes || []).map(node => ({ ...node })),
+      links: (newData.links || []).map(link => ({ ...link }))
     };
+    
+    // Force a complete re-render to ensure old nodes are removed
     this.render();
   }
 }

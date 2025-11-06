@@ -11,10 +11,11 @@ marked.setOptions({
 });
 
 class Card {
-    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "") {
+    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "", images = []) {
         this.title = title;
         this.content = content;
         this.prompt = prompt; // the original prompt that created this card
+        this.images = images; // array of image objects {data: base64, mimeType: string, name: string}
         this.id = null; // unique identifier
         this.links = []; // array of linked card titles (extracted from prompt)
         this.parent = null; // reference to the parent doc
@@ -30,7 +31,7 @@ class Card {
         // Render markdown content (AI response)
         const renderedContent = marked.parse(this.content);
         
-        // Build prompt section with highlighted @references
+        // Build prompt section with highlighted @references and images
         let promptHTML = '';
         if (this.prompt && this.prompt.trim() !== '') {
             // Highlight @references in the prompt
@@ -41,10 +42,23 @@ class Card {
                 return `<span class="card-link-inline" data-link="${cardTitle}">@${cardTitle}</span>`;
             });
             
+            // Build images HTML if images exist
+            let imagesHTML = '';
+            if (this.images && this.images.length > 0) {
+                imagesHTML = `
+                    <div class="card-prompt-images">
+                        ${this.images.map(img => `
+                            <img src="${img.data}" alt="${img.name}" class="card-prompt-image" />
+                        `).join('')}
+                    </div>
+                `;
+            }
+            
             promptHTML = `
                 <div class="card-prompt-section">
                     <span class="card-prompt-label">Prompt:</span>
                     <div class="card-prompt-text">${highlightedPrompt}</div>
+                    ${imagesHTML}
                 </div>
             `;
         }
@@ -52,6 +66,7 @@ class Card {
         cardElement.innerHTML = `
             <div class="card_header">
                 <div class="card_actions" style="justify-content: flex-end;">
+                    <button class="info_btn card-move-btn" title="Move to another document">↗</button>
                     <button class="alert_btn">x</button>
                 </div>
                 <br>
@@ -105,6 +120,15 @@ class Card {
             });
         }
         
+        // Attach event listener to the move button
+        const moveBtn = this.innerHTML.querySelector('.card-move-btn');
+        if (moveBtn) {
+            moveBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.moveToAnotherDoc();
+            });
+        }
+        
         // Attach click handlers to all @reference links in the prompt
         const linkElements = this.innerHTML.querySelectorAll('.card-link-inline');
         linkElements.forEach(linkEl => {
@@ -114,6 +138,86 @@ class Card {
                 this.navigateToCard(linkedCardTitle);
             });
         });
+    }
+    
+    async moveToAnotherDoc() {
+        // Move this card to a different document
+        if (!window.mainManager) {
+            console.error("MainManager not found");
+            return;
+        }
+        
+        const project = window.mainManager.currentProject;
+        if (!project) {
+            console.error("No current project");
+            return;
+        }
+        
+        const allDocs = project.getAllDocs();
+        
+        // Filter out the current document
+        const otherDocs = allDocs.filter(doc => doc !== this.parent);
+        
+        if (otherDocs.length === 0) {
+            if (this.modal) {
+                await this.modal.alert("No other documents available. Create a new document first.");
+            }
+            return;
+        }
+        
+        // Create a selection list for the user
+        const docTitles = otherDocs.map(doc => doc.title);
+        const selection = await this.modal.select("Move card to which document?", docTitles);
+        
+        if (selection === null) {
+            return; // User cancelled
+        }
+        
+        const targetDoc = otherDocs[selection];
+        const sourceDoc = this.parent; // Store reference before changing
+        const sourceDocTitle = sourceDoc ? sourceDoc.title : 'unknown';
+        const isTargetDocCurrentlyViewed = (targetDoc === window.mainManager.currentDoc);
+        
+        // Remove card from current document's data
+        if (sourceDoc) {
+            sourceDoc.removeCard(this.id);
+            console.log(`Removed card from ${sourceDoc.title}, now has ${sourceDoc.getCardCount()} cards`);
+        }
+        
+        // Remove from DOM
+        if (this.innerHTML && this.innerHTML.parentNode) {
+            this.innerHTML.remove();
+        }
+        
+        // Clear parent reference before adding to new doc
+        this.parent = null;
+        
+        // Add to target document's data (addCard will set parent)
+        targetDoc.addCard(this);
+        console.log(`Added card to ${targetDoc.title}, now has ${targetDoc.getCardCount()} cards`);
+        
+        // If the target document is currently being viewed, add the card to the DOM
+        if (isTargetDocCurrentlyViewed) {
+            // Re-initialize the card to create fresh DOM element
+            this.init();
+            // Add to the DOM
+            const docContent = document.getElementById('doc-content');
+            if (docContent) {
+                docContent.appendChild(this.innerHTML);
+            }
+        }
+        
+        // Force update the network visualization by regenerating from current project state
+        if (window.mainManager && window.mainManager.updateNetworkViz) {
+            window.mainManager.updateNetworkViz();
+        }
+        
+        console.log(`Card "${this.title}" moved from "${sourceDocTitle}" to "${targetDoc.title}"`);
+        
+        // Show success message
+        if (this.modal) {
+            await this.modal.alert(`Card moved to "${targetDoc.title}"`);
+        }
     }
     
     navigateToCard(cardTitle) {

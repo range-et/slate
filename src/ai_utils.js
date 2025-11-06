@@ -31,7 +31,33 @@ class OpenAIAgent {
         return response.choices[0].message.content;
     }
 
-    async generateResponse(prompt) {
+    async generateResponse(prompt, images = []) {
+        // Build the user message content
+        let userContent;
+        
+        if (images.length > 0) {
+            // Use vision API format with images
+            userContent = [
+                {
+                    type: "text",
+                    text: prompt
+                }
+            ];
+            
+            // Add each image to the content array
+            images.forEach(img => {
+                userContent.push({
+                    type: "image_url",
+                    image_url: {
+                        url: img.data  // base64 data URL
+                    }
+                });
+            });
+        } else {
+            // Text-only format
+            userContent = prompt;
+        }
+        
         const response = await this.client.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
@@ -41,7 +67,7 @@ class OpenAIAgent {
                 },
                 {
                     role: "user",
-                    content: prompt
+                    content: userContent
                 }
             ],
             temperature: 0.7,

@@ -89,6 +89,58 @@ class Modal {
     }
 
     /**
+     * Display a selection modal with a list of options
+     * @param {string} message - The message/prompt to display
+     * @param {Array<string>} options - Array of option strings
+     * @returns {Promise<number|null>} - Resolves to index of selected option, or null if cancelled
+     */
+    select(message, options) {
+        return new Promise((resolve) => {
+            // Create the select interface
+            const container = document.createElement("div");
+            container.innerHTML = `
+                <p style="margin-bottom: 12px;">${message}</p>
+                <select class="modal-select" style="width: 100%; padding: 8px; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); border-radius: 4px;">
+                    ${options.map((opt, index) => `<option value="${index}">${opt}</option>`).join('')}
+                </select>
+            `;
+            
+            this.modalContent.innerHTML = "";
+            this.modalContent.appendChild(container);
+            
+            const selectElement = container.querySelector('select');
+            
+            // Create Cancel button
+            const cancelButton = document.createElement("button");
+            cancelButton.textContent = "Cancel";
+            cancelButton.className = "alert_btn";
+            cancelButton.addEventListener("click", () => {
+                this.hide();
+                resolve(null);
+            });
+            
+            // Create OK button
+            const okButton = document.createElement("button");
+            okButton.textContent = "Move";
+            okButton.className = "success_btn";
+            okButton.addEventListener("click", () => {
+                const selectedIndex = parseInt(selectElement.value);
+                this.hide();
+                resolve(selectedIndex);
+            });
+            
+            this.modalActions.innerHTML = "";
+            this.modalActions.appendChild(cancelButton);
+            this.modalActions.appendChild(okButton);
+            
+            this.show();
+            
+            // Focus the select element
+            selectElement.focus();
+        });
+    }
+
+    /**
      * Display a custom modal with custom content and actions
      * @param {string|HTMLElement} content - The content to display
      * @param {Array<{text: string, className: string, callback: function}>} actions - Array of action button configs

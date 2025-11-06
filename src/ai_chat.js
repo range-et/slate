@@ -33,6 +33,10 @@ export class ChatManager {
         this.currentDoc = currentDoc; // reference to the current document
         this.updateNetworkCallback = updateNetworkCallback; // callback to update network viz
         
+        // Image support
+        this.attachedImages = []; // Array of {data: base64String, mimeType: string, name: string}
+        this.imagePreviewContainer = null; // Will be set by setupImageSupport
+        
         // Auto-sanitize title on blur (when user leaves the field) and ensure uniqueness
         this.cardTitleInput.addEventListener('blur', () => {
             if (this.cardTitleInput.value.trim() !== "") {
@@ -78,6 +82,7 @@ export class ChatManager {
         this.setDefaultMessage();
         this.cardTitleInput.value = "";
         clearEditor(this.promptEditor);
+        this.clearImages();
     }
 
     /**
@@ -182,6 +187,114 @@ export class ChatManager {
     }
 
     /**
+     * Setup image support (attach button and paste events)
+     * @param {HTMLElement} attachButton - The attach image button
+     * @param {HTMLElement} previewContainer - Container for image previews
+     */
+    setupImageSupport(attachButton, previewContainer) {
+        this.imagePreviewContainer = previewContainer;
+        
+        // Handle attach button click
+        attachButton.addEventListener('click', () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'image/*';
+            input.multiple = true;
+            input.onchange = (e) => {
+                const files = Array.from(e.target.files);
+                files.forEach(file => this.addImageFile(file));
+            };
+            input.click();
+        });
+        
+        // Handle paste events for copy-paste images
+        document.addEventListener('paste', (e) => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const file = items[i].getAsFile();
+                    if (file) {
+                        e.preventDefault();
+                        this.addImageFile(file);
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Convert an image file to base64
+     * @param {File} file - The image file
+     * @returns {Promise<{data: string, mimeType: string, name: string}>}
+     */
+    async addImageFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const base64 = e.target.result; // This includes the data:image/...;base64, prefix
+                const imageData = {
+                    data: base64,
+                    mimeType: file.type,
+                    name: file.name
+                };
+                this.attachedImages.push(imageData);
+                this.renderImagePreviews();
+                resolve(imageData);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+
+    /**
+     * Remove an image from the attached images array
+     * @param {number} index - Index of the image to remove
+     */
+    removeImage(index) {
+        this.attachedImages.splice(index, 1);
+        this.renderImagePreviews();
+    }
+
+    /**
+     * Render preview thumbnails for attached images
+     */
+    renderImagePreviews() {
+        if (!this.imagePreviewContainer) return;
+        
+        if (this.attachedImages.length === 0) {
+            this.imagePreviewContainer.innerHTML = '';
+            this.imagePreviewContainer.style.display = 'none';
+            return;
+        }
+        
+        this.imagePreviewContainer.style.display = 'flex';
+        this.imagePreviewContainer.innerHTML = this.attachedImages.map((img, index) => `
+            <div class="image-preview-item">
+                <img src="${img.data}" alt="${img.name}" />
+                <button class="image-remove-btn" data-index="${index}">×</button>
+            </div>
+        `).join('');
+        
+        // Attach remove button listeners
+        this.imagePreviewContainer.querySelectorAll('.image-remove-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const index = parseInt(btn.getAttribute('data-index'));
+                this.removeImage(index);
+            });
+        });
+    }
+
+    /**
+     * Clear attached images
+     */
+    clearImages() {
+        this.attachedImages = [];
+        this.renderImagePreviews();
+    }
+
+    /**
      * Generate AI response based on user input
      */
     async askAI() {
@@ -217,8 +330,8 @@ export class ChatManager {
         // Show loading animation
         this.chatContent.innerHTML = '<div class="loading-text">Waiting for response...</div>';
         
-        // Send the full prompt (with bibliography) to the AI
-        this.aiAgent.generateResponse(fullPrompt).then((res) => {
+        // Send the full prompt (with bibliography) and images to the AI
+        this.aiAgent.generateResponse(fullPrompt, this.attachedImages).then((res) => {
             // Render the response as markdown
             const renderedResponse = marked.parse(res);
             this.chatContent.innerHTML = `<div class="markdown-body">${renderedResponse}</div>`;
@@ -281,12 +394,10 @@ export class ChatManager {
      * Add the current chat content to the document as a card
      */
     async addToDoc() {
-        const confirmed = await this.modal.confirm("Add to document?");
-        if (confirmed) {
-            try {
-                // Get content and title
-                const contentText = this.chatContent.innerText.trim();
-                let cardTitle = this.cardTitleInput.value.trim();
+        try {
+            // Get content and title
+            const contentText = this.chatContent.innerText.trim();
+            let cardTitle = this.cardTitleInput.value.trim();
                 
                 // Validate content is not empty, loading, or the default welcome message
                 if (contentText === "" || 
@@ -318,13 +429,14 @@ export class ChatManager {
                 const markdownBodyDiv = this.chatContent.querySelector('.markdown-body');
                 const cardContent = markdownBodyDiv ? markdownBodyDiv.innerHTML : this.chatContent.innerHTML;
                 
-                // Create and add the card with the prompt
+                // Create and add the card with the prompt and images
                 const card = new Card(
                     cardTitle, 
                     cardContent, 
                     this.modal, 
                     this.updateNetworkCallback,
-                    promptText  // Pass the original prompt
+                    promptText,  // Pass the original prompt
+                    [...this.attachedImages]  // Pass a copy of attached images
                 );
                 card.init();
                 
@@ -351,12 +463,9 @@ export class ChatManager {
                 // Clear everything (including prompt) after adding card
                 this.clearAll();
             }
-            catch (err) {
-                console.error("Didn't add card to document:", err);
-                await this.modal.alert("Cannot add: " + err.message);
-            }
-        } else {
-            await this.modal.alert("Didn't add to document");
+        catch (err) {
+            console.error("Didn't add card to document:", err);
+            await this.modal.alert("Cannot add: " + err.message);
         }
     }
 }

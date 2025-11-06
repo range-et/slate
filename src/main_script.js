@@ -32,6 +32,8 @@ const prompt = document.getElementById("chat-prompt");
 const send_prompt = document.getElementById("send_prompt");
 const add_to_doc = document.getElementById("add_to_doc");
 const card_title_input = document.getElementById("card_title_input");
+const attach_image = document.getElementById("attach_image");
+const image_preview_container = document.getElementById("image-preview-container");
 
 const buttons = {
     resetZoom: resetZoom,
@@ -50,7 +52,9 @@ const buttons = {
     add_to_doc: add_to_doc,
     prompt: prompt,
     chat_content: chat_content,
-    card_title_input: card_title_input
+    card_title_input: card_title_input,
+    attach_image: attach_image,
+    image_preview_container: image_preview_container
 };
 
 // main manager
@@ -694,6 +698,12 @@ class MainManager {
             this.modal,
             this.currentDoc,
             () => this.updateNetworkViz() // callback to update network viz
+        );
+        
+        // Setup image support for the chat manager
+        this.chatManager.setupImageSupport(
+            this.buttons.attach_image,
+            this.buttons.image_preview_container
         );
         
         // map all the buttons
