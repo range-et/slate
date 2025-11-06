@@ -10,20 +10,14 @@ export class NetworkViz {
     this.svg = null;
     this.width = width;
     this.height = height;
-    this.radius = this.width / 2;
-    this.innerRadius = this.radius - 120;
-    this.onNodeClick = onNodeClick; // callback for node clicks
+    this.onNodeClick = onNodeClick;
     
-    // Setup cluster layout and line generator
-    this.cluster = d3.cluster().size([360, this.innerRadius]);
-    this.line = d3.radialLine()
-      .curve(d3.curveBundle.beta(0.85))
-      .radius(d => d.y)
-      .angle(d => d.x / 180 * Math.PI);
+    // Force simulation
+    this.simulation = null;
     
     // Zoom behavior setup
     this.zoom = d3.zoom()
-      .scaleExtent([0.1, 5]) // Allow zooming from 10% to 500%
+      .scaleExtent([0.1, 5])
       .on("zoom", (event) => this.handleZoom(event));
     
     // Add CSS styles for interactivity
@@ -32,7 +26,6 @@ export class NetworkViz {
   }
 
   addStyles() {
-    // Check if styles already exist
     if (document.getElementById('networkviz-styles')) return;
     
     const style = document.createElement('style');
@@ -44,47 +37,68 @@ export class NetworkViz {
       .networkviz-container:active {
         cursor: grabbing;
       }
-      .node--root {
-        font: 700 14px "Helvetica Neue", Helvetica, Arial, sans-serif;
-        fill: #00BCD4;
+      .node-circle {
+        stroke: #fff;
+        stroke-width: 2px;
+        cursor: pointer;
+        transition: opacity 0.3s ease, stroke-width 0.2s ease;
       }
-      .node--internal {
-        font: 400 9px "Helvetica Neue", Helvetica, Arial, sans-serif;
-        fill: #E0E0E0;
+      .node-circle:hover {
+        stroke-width: 3px;
       }
-      .node--leaf {
-        font: 300 10px "Helvetica Neue", Helvetica, Arial, sans-serif;
-        fill: #B0B0B0;
+      .node-circle.dimmed {
+        opacity: 0.15;
       }
-      .node:hover {
-        fill: #FFEB3B;
+      .node-circle.highlighted {
+        opacity: 1;
+        stroke-width: 3px;
+      }
+      .node-label {
+        pointer-events: none;
+        user-select: none;
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-anchor: middle;
+        dominant-baseline: middle;
+        transition: opacity 0.3s ease;
+      }
+      .node-label.dimmed {
+        opacity: 0.15;
+      }
+      .node-label.highlighted {
+        opacity: 1;
+      }
+      .node-label-bg {
+        fill: rgba(0, 0, 0, 0.75);
+        rx: 4px;
+        ry: 4px;
+        transition: opacity 0.3s ease;
+      }
+      .node-label-bg.dimmed {
+        opacity: 0.15;
+      }
+      .node-label-bg.highlighted {
+        opacity: 1;
       }
       .link {
-        stroke: #00BCD4;
-        fill: none;
-        pointer-events: none;
+        stroke-linecap: round;
+        transition: opacity 0.3s ease;
+        cursor: pointer;
       }
-      .node:hover,
-      .node--source,
-      .node--target {
-        font-weight: 700;
+      .link--hierarchy {
+        stroke: #03A9F4;  /* --information-2 */
+        stroke-opacity: 0.6;
       }
-      .node--source {
-        fill: #2ca02c;
+      .link--reference {
+        stroke: #F44336;  /* --alert (red for references) */
+        stroke-opacity: 0.4;
+        stroke-dasharray: 4 2;
       }
-      .node--target {
-        fill: #9C27B0;
+      .link.dimmed {
+        opacity: 0.1;
       }
-      .link--source,
-      .link--target {
-        stroke-opacity: 1;
-        stroke-width: 2px;
-      }
-      .link--source {
-        stroke: #2ca02c;
-      }
-      .link--target {
-        stroke: #9C27B0;
+      .link.highlighted {
+        opacity: 1;
+        stroke-width: 4px !important;
       }
     `;
     document.head.appendChild(style);
@@ -95,7 +109,6 @@ export class NetworkViz {
     this.zoomGroup.attr("transform", transform);
   }
 
-  // Method to programmatically zoom to a specific scale and center
   zoomTo(scale, x = 0, y = 0, duration = 750) {
     this.svg.transition()
       .duration(duration)
@@ -105,18 +118,16 @@ export class NetworkViz {
       );
   }
 
-  // Method to reset zoom to fit the entire visualization
   resetZoom(duration = 750) {
     this.svg.transition()
       .duration(duration)
       .call(
         this.zoom.transform,
-        d3.zoomIdentity
+        d3.zoomIdentity.translate(this.width / 2, this.height / 2)
       );
   }
 
-  // Method to zoom to fit content with padding
-  zoomToFit(padding = 50, duration = 750) {
+  zoomToFit(padding = 100, duration = 750) {
     if (!this.zoomGroup) return;
     
     const bounds = this.zoomGroup.node().getBBox();
@@ -129,12 +140,13 @@ export class NetworkViz {
     
     const scale = Math.min(
       (this.width - padding) / width,
-      (this.width - padding) / height
+      (this.height - padding) / height,
+      1.5 // Cap max zoom
     );
     
     const translate = [
       this.width / 2 - scale * midX,
-      this.width / 2 - scale * midY
+      this.height / 2 - scale * midY
     ];
     
     this.svg.transition()
@@ -170,61 +182,14 @@ export class NetworkViz {
     this.render();
   }
 
-  // Convert hierarchical class names to package hierarchy
-  packageHierarchy(classes) {
-    const map = {};
-    
-    function find(name, data) {
-      let node = map[name];
-      if (!node) {
-        node = map[name] = data || { name: name, children: [] };
-        if (name.length) {
-          const i = name.lastIndexOf(".");
-          node.parent = find(name.substring(0, i));
-          node.parent.children.push(node);
-          node.key = name.substring(i + 1);
-        }
-      }
-      return node;
-    }
-    
-    classes.forEach(d => find(d.name, d));
-    return d3.hierarchy(map[""]);
-  }
-
-  // Generate imports/links between nodes
-  packageImports(nodes) {
-    const map = {};
-    const imports = [];
-    
-    // Create name to node mapping
-    nodes.forEach(d => {
-      map[d.data.name || d.data.id] = d;
-    });
-    
-    // Generate paths between connected nodes
-    nodes.forEach(d => {
-      if (d.data.imports) {
-        d.data.imports.forEach(i => {
-          const sourcePath = map[d.data.name || d.data.id];
-          const targetPath = map[i];
-          if (sourcePath && targetPath) {
-            const path = sourcePath.path(targetPath);
-            // Ensure the path has proper source and target endpoints
-            if (path && path.length >= 2) {
-              imports.push(path);
-            }
-          }
-        });
-      }
-    });
-    
-    return imports;
-  }
-
   render() {
     // Clear previous content
     d3.select(this.container).selectAll("svg").remove();
+    
+    // Stop previous simulation if exists
+    if (this.simulation) {
+      this.simulation.stop();
+    }
     
     // Create SVG with zoom behavior
     this.svg = d3.select(this.container)
@@ -234,183 +199,310 @@ export class NetworkViz {
       .attr("class", "networkviz-container")
       .call(this.zoom);
     
-    // Create zoom group that will contain all zoomable content
+    // Create zoom group
     this.zoomGroup = this.svg
       .append("g")
-      .attr("transform", `translate(${this.radius},${this.radius})`);
+      .attr("transform", `translate(${this.width / 2},${this.height / 2})`);
 
     // If no nodes, return early
     if (this.data.nodes.length === 0) return;
 
-    // Convert flat node/link structure to hierarchy if needed
-    let root;
-    
-    // Check if nodes have hierarchical names (contain dots)
-    const hasHierarchicalNames = this.data.nodes.some(n => n.name && n.name.includes('.'));
-    
-    if (hasHierarchicalNames) {
-      // Use hierarchical structure with package names
-      root = this.packageHierarchy(this.data.nodes);
-      if (root.children && root.children.length > 0) {
-        root = root.children[0]; // Use first child as root if empty root
+    // Prepare nodes with visual properties based on type
+    // Using color palette: information-1, information-2, information-3 for hierarchy
+    const nodes = this.data.nodes.map(d => {
+      let radius, color, fontSize, fontWeight;
+      
+      switch(d.type) {
+        case 'project':
+          radius = 20;
+          color = '#00BCD4';  // --information-1 (cyan)
+          fontSize = '18px';
+          fontWeight = '700';
+          break;
+        case 'doc':
+          radius = 14;
+          color = '#03A9F4';  // --information-2 (light blue)
+          fontSize = '15px';
+          fontWeight = '600';
+          break;
+        case 'card':
+          radius = 9;
+          color = '#8BC34A';  // --information-3 (green)
+          fontSize = '13px';
+          fontWeight = '400';
+          break;
+        default:
+          radius = 10;
+          color = '#757575';  // --disabled (gray)
+          fontSize = '12px';
+          fontWeight = '400';
       }
-    } else {
-      // Convert flat structure to hierarchy using parent/child relationships
-      try {
-        root = d3.stratify()
-          .id(d => d.id)
-          .parentId(d => d.parent)(this.data.nodes);
-      } catch (e) {
-        // Fallback: create artificial hierarchy
-        const rootNode = { id: "root", name: "root" };
-        const hierarchicalNodes = [rootNode, ...this.data.nodes.map(n => ({ ...n, parent: "root" }))];
-        root = d3.stratify()
-          .id(d => d.id)
-          .parentId(d => d.parent)(hierarchicalNodes);
-      }
-    }
-
-    // Apply cluster layout
-    this.cluster(root);
-
-    // Create node map for link generation
-    const nodeById = new Map();
-    root.descendants().forEach(d => {
-      // Map by ID (most important for our graph structure)
-      if (d.data.id) {
-        nodeById.set(d.data.id, d);
-      }
-      // Also map by name for fallback
-      const key = d.data.name || d.data.id;
-      if (key) {
-        nodeById.set(key, d);
-      }
+      
+      return {
+        ...d,
+        radius,
+        color,
+        fontSize,
+        fontWeight
+      };
     });
 
-    // Also map by just the leaf name for better matching
-    root.leaves().forEach(d => {
-      const fullName = d.data.name || d.data.id;
-      const leafName = d.data.key || (fullName && fullName.split('.').pop()) || fullName;
-      if (leafName && !nodeById.has(leafName)) {
-        nodeById.set(leafName, d);
-      }
-    });
-
-    // Generate links
-    let linkData = [];
+    // Prepare links
+    const links = this.data.links.map(d => ({ ...d }));
     
-    if (hasHierarchicalNames) {
-      // Use package imports method for hierarchical data
-      linkData = this.packageImports(root.leaves());
-    } else {
-      // Convert regular links to paths, preserving type information
-      linkData = this.data.links
-        .map(l => {
-          const source = nodeById.get(l.source);
-          const target = nodeById.get(l.target);
-          if (source && target) {
-            const path = source.path(target);
-            if (path && path.length >= 2) {
-              // Attach link type to the path object
-              path.linkType = l.type || 'hierarchy';
-              return path;
-            }
-            return null;
-          } else {
-            console.warn("Could not find nodes for link:", l.source, "->", l.target);
-            return null;
-          }
-        })
-        .filter(d => d !== null);
-    }
-    
-    console.log("Generated", linkData.length, "links from", this.data.links.length, "link definitions");
+    // Filter links for force simulation - only use hierarchy links
+    const hierarchyLinks = links.filter(d => d.type === 'hierarchy');
 
-    // Create link group (inside zoom group)
-    const linkGroup = this.zoomGroup.append("g").selectAll(".link");
-    const nodeGroup = this.zoomGroup.append("g").selectAll(".node");
+    // Create force simulation with only hierarchy links
+    this.simulation = d3.forceSimulation(nodes)
+      .force("link", d3.forceLink(hierarchyLinks)
+        .id(d => d.id)
+        .distance(120)
+        .strength(0.8))
+      .force("charge", d3.forceManyBody()
+        .strength(d => {
+          // Stronger repulsion for bigger nodes
+          if (d.type === 'project') return -1000;
+          if (d.type === 'doc') return -400;
+          return -200;
+        }))
+      .force("center", d3.forceCenter(0, 0))
+      .force("collision", d3.forceCollide()
+        .radius(d => d.radius + 25))
+      .force("x", d3.forceX(0).strength(0.03))
+      .force("y", d3.forceY(0).strength(0.03));
 
-    // Draw links with bundled curves, styled by type
-    const links = linkGroup
-      .data(linkData)
-      .enter().append("path")
-      .each(function(d) { 
-        d.source = d[0];
-        d.target = d[d.length - 1]; 
-      })
-      .attr("class", d => `link link--${d.linkType || 'hierarchy'}`)
-      .attr("d", d => {
-        // Ensure we have a valid path array
-        if (!Array.isArray(d) || d.length < 2) return null;
-        return this.line(d);
-      })
-      .attr("fill", "none")
-      .attr("stroke", d => {
-        // Different colors for different link types
-        return d.linkType === 'reference' ? "#FF6B6B" : "#00BCD4";
-      })
-      .attr("stroke-opacity", d => {
-        // Reference links slightly more transparent
-        return d.linkType === 'reference' ? 0.4 : 0.6;
-      })
-      .attr("stroke-width", d => {
-        // Hierarchy links thicker, reference links thinner
-        return d.linkType === 'reference' ? 1 : 2;
-      })
-      .style("pointer-events", "none");
+    // Create link elements
+    const linkGroup = this.zoomGroup.append("g")
+      .attr("class", "links");
 
-    // Draw nodes as text labels with interactivity
-    const allNodes = root.descendants(); // Include all nodes including root
-    const nodes = nodeGroup
-      .data(allNodes)
-      .enter().append("text")
-      .attr("class", d => {
-        if (d.depth === 0) return "node node--root"; // Root node (project)
-        return d.children ? "node node--internal" : "node node--leaf";
-      })
-      .attr("dy", "0.31em")
-      .attr("transform", d => {
-        const rotation = d.x - 90;
-        const translation = d.y + 8;
-        // Keep text horizontal by counter-rotating
-        return `rotate(${rotation}) translate(${translation},0) rotate(${-rotation})`;
-      })
-      .attr("text-anchor", "middle")
-      .text(d => {
-        // Show the node name based on available data
-        return d.data.key || d.data.name || d.data.id;
-      })
-      .attr("font-size", d => {
-        if (d.depth === 0) return "14px"; // Root node (project)
-        return d.children ? "9px" : "10px"; // Internal nodes vs leaf nodes
-      })
-      .attr("font-family", "Helvetica Neue, Helvetica, Arial, sans-serif")
-      .attr("font-weight", d => {
-        if (d.depth === 0) return "700"; // Root node (project)
-        return d.children ? "400" : "300"; // Internal nodes vs leaf nodes
-      })
-      .attr("fill", d => {
-        if (d.depth === 0) return "#00BCD4"; // Root node (project) - bright cyan
-        return d.children ? "#666" : "#bbb"; // Internal nodes vs leaf nodes
-      })
-      .style("cursor", "pointer")
-      .on("mouseover", (event, d) => this.mouseovered(d))
-      .on("mouseout", (event, d) => this.mouseouted(d))
+    const link = linkGroup.selectAll("line")
+      .data(links)
+      .enter().append("line")
+      .attr("class", d => `link link--${d.type || 'hierarchy'}`)
+      .attr("stroke-width", d => d.type === 'reference' ? 2 : 3)
+      .on("mouseover", (event, d) => this.highlightLink(d, nodes, links))
+      .on("mouseout", () => this.clearHighlight());
+
+    // Create node groups
+    const nodeGroup = this.zoomGroup.append("g")
+      .attr("class", "nodes");
+
+    const node = nodeGroup.selectAll("g")
+      .data(nodes)
+      .enter().append("g")
+      .attr("class", "node")
+      .call(d3.drag()
+        .on("start", (event, d) => this.dragstarted(event, d))
+        .on("drag", (event, d) => this.dragged(event, d))
+        .on("end", (event, d) => this.dragended(event, d)));
+
+    // Add circles with entrance animation
+    node.append("circle")
+      .attr("class", "node-circle")
+      .attr("r", 0)
+      .attr("fill", d => d.color)
       .on("click", (event, d) => {
         event.stopPropagation();
         if (this.onNodeClick) {
-          this.onNodeClick(d.data);
+          this.onNodeClick(d);
         }
-      });
+      })
+      .on("mouseover", (event, d) => this.highlightNode(d, nodes, links))
+      .on("mouseout", () => this.clearHighlight())
+      .transition()
+      .duration(500)
+      .ease(d3.easeBounceOut)
+      .attr("r", d => d.radius);
 
-    // Store references for interactivity
-    this.linkElements = this.zoomGroup.selectAll(".link");
-    this.nodeElements = nodes;
+    // Add text background rectangles
+    const textBg = node.append("rect")
+      .attr("class", "node-label-bg")
+      .attr("opacity", 0);
 
-    this.svg.call(
-      this.zoom.transform,
-      d3.zoomIdentity.translate(this.radius, this.radius)
-    );
+    // Add text labels
+    const text = node.append("text")
+      .attr("class", "node-label")
+      .attr("dy", d => d.radius + 20)
+      .attr("font-size", d => d.fontSize)
+      .attr("font-weight", d => d.fontWeight)
+      .attr("fill", "#E0E0E0")
+      .attr("opacity", 0)
+      .text(d => d.name || d.id);
+
+    // Calculate text dimensions and set background sizes
+    text.each(function(d) {
+      const bbox = this.getBBox();
+      d.textWidth = bbox.width;
+      d.textHeight = bbox.height;
+    });
+
+    textBg
+      .attr("x", d => -(d.textWidth / 2 + 6))
+      .attr("y", d => d.radius + 20 - d.textHeight / 2 - 4)
+      .attr("width", d => d.textWidth + 12)
+      .attr("height", d => d.textHeight + 8)
+      .transition()
+      .delay(300)
+      .duration(300)
+      .attr("opacity", 1);
+
+    text
+      .transition()
+      .delay(300)
+      .duration(300)
+      .attr("opacity", 1);
+
+    // Store references
+    this.linkElements = link;
+    this.nodeElements = node;
+    
+    // Create node lookup map for reference links
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+    // Update positions on each tick
+    this.simulation.on("tick", () => {
+      link
+        .attr("x1", d => {
+          // For reference links, look up the node
+          if (d.type === 'reference') {
+            const sourceNode = nodeMap.get(d.source);
+            return sourceNode ? sourceNode.x : 0;
+          }
+          // For hierarchy links, use the simulation's source object
+          return d.source.x;
+        })
+        .attr("y1", d => {
+          if (d.type === 'reference') {
+            const sourceNode = nodeMap.get(d.source);
+            return sourceNode ? sourceNode.y : 0;
+          }
+          return d.source.y;
+        })
+        .attr("x2", d => {
+          if (d.type === 'reference') {
+            const targetNode = nodeMap.get(d.target);
+            return targetNode ? targetNode.x : 0;
+          }
+          return d.target.x;
+        })
+        .attr("y2", d => {
+          if (d.type === 'reference') {
+            const targetNode = nodeMap.get(d.target);
+            return targetNode ? targetNode.y : 0;
+          }
+          return d.target.y;
+        });
+
+      node
+        .attr("transform", d => `translate(${d.x},${d.y})`);
+    });
+
+    // Initial zoom to fit
+    setTimeout(() => this.zoomToFit(), 1000);
+  }
+
+  // Drag handlers
+  dragstarted(event, d) {
+    if (!event.active) this.simulation.alphaTarget(0.3).restart();
+    d.fx = d.x;
+    d.fy = d.y;
+  }
+
+  dragged(event, d) {
+    d.fx = event.x;
+    d.fy = event.y;
+  }
+
+  dragended(event, d) {
+    if (!event.active) this.simulation.alphaTarget(0);
+    d.fx = null;
+    d.fy = null;
+  }
+
+  // Highlight a node and its neighbors
+  highlightNode(hoveredNode, nodes, links) {
+    const connectedNodeIds = new Set();
+    const connectedLinks = new Set();
+    
+    // Add the hovered node itself
+    connectedNodeIds.add(hoveredNode.id);
+    
+    // Find all connected nodes and links
+    links.forEach(link => {
+      const sourceId = link.source.id || link.source;
+      const targetId = link.target.id || link.target;
+      
+      if (sourceId === hoveredNode.id) {
+        connectedNodeIds.add(targetId);
+        connectedLinks.add(link);
+      } else if (targetId === hoveredNode.id) {
+        connectedNodeIds.add(sourceId);
+        connectedLinks.add(link);
+      }
+    });
+    
+    // Apply dimmed/highlighted classes to nodes
+    this.nodeElements.selectAll("circle")
+      .classed("dimmed", d => !connectedNodeIds.has(d.id))
+      .classed("highlighted", d => connectedNodeIds.has(d.id));
+    
+    this.nodeElements.selectAll("text")
+      .classed("dimmed", d => !connectedNodeIds.has(d.id))
+      .classed("highlighted", d => connectedNodeIds.has(d.id));
+    
+    this.nodeElements.selectAll("rect")
+      .classed("dimmed", d => !connectedNodeIds.has(d.id))
+      .classed("highlighted", d => connectedNodeIds.has(d.id));
+    
+    // Apply dimmed/highlighted classes to links
+    this.linkElements
+      .classed("dimmed", l => !connectedLinks.has(l))
+      .classed("highlighted", l => connectedLinks.has(l));
+  }
+
+  // Highlight a link and its connected nodes
+  highlightLink(hoveredLink, nodes, links) {
+    const sourceId = hoveredLink.source.id || hoveredLink.source;
+    const targetId = hoveredLink.target.id || hoveredLink.target;
+    const connectedNodeIds = new Set([sourceId, targetId]);
+    
+    // Apply dimmed/highlighted classes to nodes
+    this.nodeElements.selectAll("circle")
+      .classed("dimmed", d => !connectedNodeIds.has(d.id))
+      .classed("highlighted", d => connectedNodeIds.has(d.id));
+    
+    this.nodeElements.selectAll("text")
+      .classed("dimmed", d => !connectedNodeIds.has(d.id))
+      .classed("highlighted", d => connectedNodeIds.has(d.id));
+    
+    this.nodeElements.selectAll("rect")
+      .classed("dimmed", d => !connectedNodeIds.has(d.id))
+      .classed("highlighted", d => connectedNodeIds.has(d.id));
+    
+    // Apply dimmed/highlighted classes to links
+    this.linkElements
+      .classed("dimmed", l => l !== hoveredLink)
+      .classed("highlighted", l => l === hoveredLink);
+  }
+
+  // Clear all highlighting
+  clearHighlight() {
+    this.nodeElements.selectAll("circle")
+      .classed("dimmed", false)
+      .classed("highlighted", false);
+    
+    this.nodeElements.selectAll("text")
+      .classed("dimmed", false)
+      .classed("highlighted", false);
+    
+    this.nodeElements.selectAll("rect")
+      .classed("dimmed", false)
+      .classed("highlighted", false);
+    
+    this.linkElements
+      .classed("dimmed", false)
+      .classed("highlighted", false);
   }
 
   // Method to update data and re-render
@@ -420,35 +512,5 @@ export class NetworkViz {
       links: [...(newData.links || [])]
     };
     this.render();
-  }
-
-  // Interactive hover methods
-  mouseovered(d) {
-    this.nodeElements
-      .each(function(n) { n.target = n.source = false; });
-
-    this.linkElements
-      .classed("link--target", l => {
-        if (l.target === d) return l.source.source = true;
-      })
-      .classed("link--source", l => {
-        if (l.source === d) return l.target.target = true;
-      })
-      .filter(l => l.target === d || l.source === d)
-      .each(function() { this.parentNode.appendChild(this); }); // Raise to front
-
-    this.nodeElements
-      .classed("node--target", n => n.target)
-      .classed("node--source", n => n.source);
-  }
-
-  mouseouted(d) {
-    this.linkElements
-      .classed("link--target", false)
-      .classed("link--source", false);
-
-    this.nodeElements
-      .classed("node--target", false)
-      .classed("node--source", false);
   }
 }
