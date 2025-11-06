@@ -1,8 +1,17 @@
 import { v4 as uuidv4 } from 'uuid';
+import { marked } from 'marked';
 import Modal from './modal.js';
 
+// Configure marked for better rendering
+marked.setOptions({
+    breaks: true,        // Convert \n to <br>
+    gfm: true,          // GitHub Flavored Markdown
+    headerIds: false,   // Don't add IDs to headers
+    mangle: false       // Don't escape email addresses
+});
+
 class Card {
-    constructor(title, content, modal = null, updateNetworkCallback = null, onCardClick = null) {
+    constructor(title, content, modal = null, updateNetworkCallback = null) {
         this.title = title;
         this.content = content;
         this.id = null; // unique identifier
@@ -11,12 +20,29 @@ class Card {
         this.innerHTML = null;
         this.modal = modal || new Modal(); // use provided modal or create new one
         this.updateNetworkCallback = updateNetworkCallback; // callback to update network viz
-        this.onCardClick = onCardClick; // callback when card is clicked for referencing
     }
 
     create() {
         const cardElement = document.createElement("div");
         cardElement.classList.add("card");
+        
+        // Render markdown content
+        const renderedContent = marked.parse(this.content);
+        
+        // Build links section if there are any links
+        let linksHTML = '';
+        if (this.links && this.links.length > 0) {
+            const linkTags = this.links.map(link => 
+                `<span class="card-link" data-link="${link}">@${link}</span>`
+            ).join('');
+            linksHTML = `
+                <div class="card-links-section">
+                    <span class="card-links-label">References:</span>
+                    ${linkTags}
+                </div>
+            `;
+        }
+        
         cardElement.innerHTML = `
             <div class="card_header">
                 <div class="card_actions" style="justify-content: flex-end;">
@@ -28,7 +54,8 @@ class Card {
                     <p class="">${this.id}</p>
                 </div>
             </div>
-            <p>${this.content}</p>`;
+            ${linksHTML}
+            <div class="card-content markdown-body">${renderedContent}</div>`;
         return cardElement;
     }
 
@@ -67,21 +94,76 @@ class Card {
         const removeBtn = this.innerHTML.querySelector('.alert_btn');
         if (removeBtn) {
             removeBtn.addEventListener('click', (e) => {
-                e.stopPropagation(); // Prevent card click from firing
+                e.stopPropagation();
                 this.remove();
             });
         }
         
-        // Attach click listener to the card itself for @referencing
-        if (this.onCardClick) {
-            this.innerHTML.addEventListener('click', (e) => {
-                // Only trigger if not clicking the remove button
-                if (!e.target.classList.contains('alert_btn')) {
-                    this.onCardClick(this.title);
-                }
+        // Attach click handlers to all link tags
+        const linkElements = this.innerHTML.querySelectorAll('.card-link');
+        linkElements.forEach(linkEl => {
+            linkEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const linkedCardTitle = linkEl.getAttribute('data-link');
+                this.navigateToCard(linkedCardTitle);
             });
-            // Add visual feedback that card is clickable
-            this.innerHTML.style.cursor = 'pointer';
+        });
+    }
+    
+    navigateToCard(cardTitle) {
+        // Navigate to a referenced card by finding it and switching to its document
+        console.log("Navigating to card:", cardTitle);
+        
+        // Access the main manager through the global window object
+        if (!window.mainManager) {
+            console.error("MainManager not found");
+            return;
+        }
+        
+        const project = window.mainManager.currentProject;
+        if (!project) {
+            console.error("No current project");
+            return;
+        }
+        
+        // Search for the card across all documents
+        const allDocs = project.getAllDocs();
+        for (const doc of allDocs) {
+            const targetCard = doc.getAllCards().find(c => c.title === cardTitle);
+            if (targetCard) {
+                console.log("Found card in doc:", doc.title);
+                
+                // Switch to the document
+                window.mainManager.switchToDoc(doc);
+                
+                // Scroll to the card after switching
+                setTimeout(() => {
+                    const docContent = document.getElementById('doc-content');
+                    const cardElements = Array.from(docContent.querySelectorAll('.card'));
+                    const cardElement = cardElements.find(el => {
+                        const titleEl = el.querySelector('.card_details h4');
+                        return titleEl && titleEl.textContent === cardTitle;
+                    });
+                    
+                    if (cardElement) {
+                        cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        // Brief highlight animation
+                        cardElement.style.transition = 'background-color 0.3s';
+                        const originalBg = cardElement.style.backgroundColor;
+                        cardElement.style.backgroundColor = 'rgba(0, 188, 212, 0.2)';
+                        setTimeout(() => {
+                            cardElement.style.backgroundColor = originalBg;
+                        }, 1000);
+                    }
+                }, 100);
+                
+                return;
+            }
+        }
+        
+        console.warn("Card not found:", cardTitle);
+        if (this.modal) {
+            this.modal.alert(`Card "@${cardTitle}" not found`);
         }
     }
 }

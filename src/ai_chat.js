@@ -311,13 +311,12 @@ export class ChatManager {
                 const referencedTitles = this.parseReferences(promptText);
                 console.log("Card will link to:", referencedTitles);
                 
-                // Create and add the card with click callback for @referencing
+                // Create and add the card
                 const card = new Card(
                     cardTitle, 
                     this.chatContent.innerHTML, 
                     this.modal, 
-                    this.updateNetworkCallback,
-                    (title) => this.insertAtCursor(`@${title} `)
+                    this.updateNetworkCallback
                 );
                 card.init();
                 

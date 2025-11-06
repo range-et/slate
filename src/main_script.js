@@ -287,10 +287,6 @@ class MainManager {
             if (!card.modal) {
                 card.modal = this.modal;
             }
-            // Ensure card has the click callback for @referencing
-            if (!card.onCardClick && this.chatManager) {
-                card.onCardClick = (title) => this.chatManager.insertAtCursor(`@${title} `);
-            }
             // Re-initialize the card's DOM element
             card.init();
             doc_content.appendChild(card.innerHTML);
@@ -327,10 +323,43 @@ class MainManager {
             return;
         }
         
-        // If it's a card node, we could potentially scroll to it or highlight it
-        if (nodeData.type === "card") {
+        // If it's a card node, switch to the document containing that card
+        if (nodeData.type === "card" && nodeData.id) {
             console.log("Card node clicked:", nodeData.name);
-            // For now, just log it. Could add scroll-to-card functionality later
+            
+            // Find which document contains this card
+            const allDocs = this.currentProject.getAllDocs();
+            for (const doc of allDocs) {
+                const card = doc.getCard(nodeData.id);
+                if (card) {
+                    console.log("Found card in doc:", doc.title, "- switching to it");
+                    this.switchToDoc(doc);
+                    
+                    // Scroll to the card after switching
+                    setTimeout(() => {
+                        const cardElements = Array.from(doc_content.querySelectorAll('.card'));
+                        const cardElement = cardElements.find(el => {
+                            const cardId = el.querySelector('.card_details p').textContent;
+                            return cardId === nodeData.id;
+                        });
+                        
+                        if (cardElement) {
+                            cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            // Brief highlight animation
+                            cardElement.style.transition = 'background-color 0.3s';
+                            const originalBg = cardElement.style.backgroundColor;
+                            cardElement.style.backgroundColor = 'rgba(0, 188, 212, 0.2)';
+                            setTimeout(() => {
+                                cardElement.style.backgroundColor = originalBg;
+                            }, 1000);
+                        }
+                    }, 100);
+                    
+                    return;
+                }
+            }
+            
+            console.warn("Card not found in any document:", nodeData.id);
         }
     }
 
