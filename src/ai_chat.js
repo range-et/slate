@@ -1,5 +1,6 @@
 import Card from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
+import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor } from "./codemirror_setup.js";
 
 /**
  * Sanitize a title to follow naming conventions:
@@ -21,9 +22,9 @@ export function sanitizeTitle(title) {
  * ChatManager handles all chat-related functionality
  */
 export class ChatManager {
-    constructor(chatContent, promptInput, cardTitleInput, docContent, aiAgent, modal, currentDoc, updateNetworkCallback = null) {
+    constructor(chatContent, promptEditor, cardTitleInput, docContent, aiAgent, modal, currentDoc, updateNetworkCallback = null) {
         this.chatContent = chatContent;
-        this.promptInput = promptInput;
+        this.promptEditor = promptEditor; // CodeMirror EditorView instance
         this.cardTitleInput = cardTitleInput;
         this.docContent = docContent;
         this.aiAgent = aiAgent;
@@ -44,146 +45,6 @@ export class ChatManager {
                 this.cardTitleInput.value = sanitized;
             }
         });
-
-        // Add live syntax highlighting for @references
-        this.promptInput.addEventListener('input', () => this.highlightReferences());
-    }
-
-    /**
-     * Highlight @references in the prompt as user types
-     * @param {boolean} skipCursorRestore - If true, don't restore cursor (used when inserting text)
-     */
-    highlightReferences(skipCursorRestore = false) {
-        // Get plain text content first
-        const text = this.promptInput.innerText;
-        
-        // Don't process if empty
-        if (!text) {
-            return;
-        }
-
-        // Calculate cursor position as text offset (before any HTML changes)
-        let cursorOffset = 0;
-        if (!skipCursorRestore) {
-            const selection = window.getSelection();
-            if (selection.rangeCount > 0) {
-                const range = selection.getRangeAt(0);
-                
-                // Walk through all text nodes before the cursor to calculate offset
-                const walker = document.createTreeWalker(
-                    this.promptInput,
-                    NodeFilter.SHOW_TEXT,
-                    null,
-                    false
-                );
-                
-                let node;
-                let found = false;
-                while (node = walker.nextNode()) {
-                    if (node === range.startContainer) {
-                        cursorOffset += range.startOffset;
-                        found = true;
-                        break;
-                    } else {
-                        cursorOffset += node.textContent.length;
-                    }
-                }
-            }
-        }
-
-        // Replace @references with styled spans
-        const regex = /@([\w]+)/g;
-        let lastIndex = 0;
-        let html = '';
-        let match;
-
-        while ((match = regex.exec(text)) !== null) {
-            // Add text before the match
-            html += this.escapeHtml(text.substring(lastIndex, match.index));
-            
-            // Add styled @reference
-            html += `<span style="color: #00BCD4; font-weight: 500;">@${match[1]}</span>`;
-            
-            lastIndex = regex.lastIndex;
-        }
-        
-        // Add remaining text
-        html += this.escapeHtml(text.substring(lastIndex));
-
-        // Only update if content actually changed (avoid infinite loop)
-        if (this.promptInput.innerHTML !== html) {
-            this.promptInput.innerHTML = html;
-            
-            // Restore cursor position only if not skipped
-            if (!skipCursorRestore) {
-                this.restoreCursor(cursorOffset, text);
-            }
-        }
-    }
-
-    /**
-     * Escape HTML special characters
-     */
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    /**
-     * Restore cursor position after updating innerHTML
-     * @param {number} offset - Character offset in the text
-     * @param {string} originalText - The original text content
-     */
-    restoreCursor(offset, originalText) {
-        try {
-            const selection = window.getSelection();
-            const range = document.createRange();
-            
-            // Clamp offset to valid range
-            const textLength = this.promptInput.innerText.length;
-            const targetOffset = Math.min(Math.max(0, offset), textLength);
-            
-            // Find the text node and position by walking through all text nodes
-            let currentOffset = 0;
-            let found = false;
-            
-            const walker = document.createTreeWalker(
-                this.promptInput,
-                NodeFilter.SHOW_TEXT,
-                null,
-                false
-            );
-            
-            let node;
-            while (node = walker.nextNode()) {
-                const nodeLength = node.textContent.length;
-                
-                if (currentOffset + nodeLength >= targetOffset) {
-                    // Found the node containing our cursor
-                    const localOffset = targetOffset - currentOffset;
-                    // Ensure we don't exceed the node's length
-                    const safeOffset = Math.min(localOffset, nodeLength);
-                    
-                    range.setStart(node, safeOffset);
-                    range.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(range);
-                    found = true;
-                    break;
-                }
-                
-                currentOffset += nodeLength;
-            }
-            
-            // If not found, place cursor at the end
-            if (!found) {
-                this.moveCursorToEnd();
-            }
-        } catch (e) {
-            // Cursor restoration failed, not critical
-            console.warn("Could not restore cursor position:", e);
-        }
     }
 
     /**
@@ -215,7 +76,7 @@ export class ChatManager {
     clearAll() {
         this.setDefaultMessage();
         this.cardTitleInput.value = "";
-        this.promptInput.innerText = "";
+        clearEditor(this.promptEditor);
     }
 
     /**
@@ -311,69 +172,19 @@ export class ChatManager {
     }
 
     /**
-     * Insert text at cursor position in contenteditable element
+     * Insert text at cursor position in the editor
      * @param {string} text - The text to insert
      */
     insertAtCursor(text) {
-        // Always append to the end for consistency when clicking cards
-        const currentText = this.promptInput.innerText;
-        this.promptInput.innerText = currentText + text;
-        
-        // Trigger highlighting after inserting text, skip cursor restoration
-        this.highlightReferences(true);
-        
-        // Move cursor to the end immediately
-        this.moveCursorToEnd();
-        
-        // Focus the prompt input
-        this.promptInput.focus();
-    }
-
-    /**
-     * Move cursor to the end of the prompt input
-     */
-    moveCursorToEnd() {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        
-        try {
-            // Find the last text node
-            const walker = document.createTreeWalker(
-                this.promptInput,
-                NodeFilter.SHOW_TEXT,
-                null,
-                false
-            );
-            
-            let lastNode = null;
-            let node;
-            while (node = walker.nextNode()) {
-                lastNode = node;
-            }
-            
-            if (lastNode) {
-                // Place cursor at end of last text node
-                range.setStart(lastNode, lastNode.textContent.length);
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
-            } else if (this.promptInput.lastChild) {
-                // No text nodes, place after last child
-                range.selectNodeContents(this.promptInput);
-                range.collapse(false);
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
-        } catch (e) {
-            console.warn("Could not move cursor to end:", e);
-        }
+        // Use CodeMirror's insert function
+        cmInsertAtCursor(this.promptEditor, text);
     }
 
     /**
      * Generate AI response based on user input
      */
     async askAI() {
-        const userInput = this.promptInput.innerText;
+        const userInput = getEditorText(this.promptEditor);
         console.log("User input:", userInput);
         
         // Parse @references from the input
@@ -496,7 +307,7 @@ export class ChatManager {
                 }
                 
                 // Parse @references from the prompt to establish links
-                const promptText = this.promptInput.innerText;
+                const promptText = getEditorText(this.promptEditor);
                 const referencedTitles = this.parseReferences(promptText);
                 console.log("Card will link to:", referencedTitles);
                 

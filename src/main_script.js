@@ -6,6 +6,7 @@ import Project from "./project.js";
 import Modal from "./modal.js";
 import ChatManager, { sanitizeTitle } from "./ai_chat.js";
 import generateRandomName from "./random_name_generator.js";
+import { setupCodeMirrorEditor } from "./codemirror_setup.js";
 // dummy data
 import data from "./dummy_data.js";
 
@@ -65,6 +66,7 @@ class MainManager {
         this.data = data; // store data
         this.ai_agent = null;
         this.modal = new Modal(); // custom modal for alerts and confirms
+        this.promptEditor = null; // will hold the CodeMirror editor instance
         this.chatManager = null; // will hold the chat manager instance
         this.currentProject = null; // will hold the current project instance (root node)
         this.currentDoc = null; // will hold the current document instance
@@ -645,10 +647,17 @@ class MainManager {
         // Create a new blank document (will be added to project and update viz)
         this.createNewDoc(docName);
         
+        // Initialize CodeMirror editor for the prompt
+        this.promptEditor = setupCodeMirrorEditor(
+            this.buttons.prompt,
+            () => this.currentDoc,
+            () => this.currentProject
+        );
+        
         // Initialize the chat manager
         this.chatManager = new ChatManager(
             this.buttons.chat_content,
-            this.buttons.prompt,
+            this.promptEditor,
             this.buttons.card_title_input,
             doc_content,
             this.ai_agent,
