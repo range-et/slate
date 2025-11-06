@@ -1,6 +1,5 @@
 import { NetworkViz } from "./network_viz.js";
 import OpenAIAgent from "./ai_utils.js";
-import Card from "./cards.js";
 import Doc from "./doc.js";
 import Project from "./project.js";
 import Modal from "./modal.js";
