@@ -28,14 +28,17 @@ Slate is a hierarchical document management system that combines:
 - Automatic bibliography construction from references
 - AI-generated document summaries (automatically created when cards are added)
 - Reference document summaries instead of individual cards
+- **Markdown formatting**: All AI responses rendered with beautiful markdown
+- **Prompt preservation**: Original prompts saved with each card
 - Seamless integration with your workflow
 
 ### 🔗 Smart Linking & References
 - Use `@card_title` to reference any card in your project
 - Use `@doc_title` to reference entire document summaries
-- **Autocomplete**: Type `@` to see all available cards and documents
-- **Syntax Highlighting**: @references appear in cyan color
-- Click cards to instantly insert references into your prompt
+- **Project-wide Autocomplete**: Type `@` to see ALL cards from ALL documents
+- **Context-aware**: Autocomplete shows which document each card belongs to
+- **Syntax Highlighting**: @references appear in green within prompts
+- **Clickable Links**: Click @references in card prompts to navigate
 - Directed graph edges show relationships
 - Cross-document references supported
 
@@ -62,10 +65,19 @@ Slate is a hierarchical document management system that combines:
 ### ✨ Enhanced Editor Experience
 - **CodeMirror 6 Integration**: Modern, powerful text editor
 - **Real-time Syntax Highlighting**: @references highlighted in cyan
-- **Intelligent Autocomplete**: Context-aware suggestions for cards and documents
+- **Intelligent Autocomplete**: Context-aware suggestions for ALL cards and documents
+- **Project-wide Search**: See cards from every document when typing `@`
 - **Line Wrapping**: Automatically handles long prompts
 - **Keyboard Navigation**: Full keyboard support for autocomplete
 - **Visual Feedback**: Immediate visual feedback for references
+
+### 📝 Markdown Support
+- **Beautiful Formatting**: All content rendered with GitHub Flavored Markdown
+- **Neutral Color Scheme**: Grey/white markdown doesn't compete with UI colors
+- **Card Prompts**: Original prompts displayed in italics with highlighted @references
+- **AI Responses**: Markdown-formatted responses with headings, lists, code blocks
+- **Summaries**: Document summaries rendered with full markdown support
+- **Live Chat**: Real-time markdown rendering in chat window
 
 ## Quick Start
 
@@ -103,9 +115,11 @@ npm run dev
 2. **Add Documents**: Click the `+` button
 3. **Generate Cards**:
    - Enter a prompt in the CodeMirror editor area
-   - Click **SEND** to generate AI response
+   - Use `@` to reference other cards or documents (autocomplete shows ALL cards)
+   - Click **SEND** to generate markdown-formatted AI response
    - Click **ADD TO DOC** to save as a card
    - Card titles auto-generate or can be customized
+   - **Card Structure**: Each card preserves both the prompt and response
    - Document summaries are automatically generated in the background
 
 ### Using References with Autocomplete
@@ -136,11 +150,24 @@ Summarize the key points from @design_doc and compare with @api_spec
 - **View Summaries**: Click the **SUMMARY** button to view
 - **Reference in Prompts**: Use `@doc_title` to include summary as context
 
+### Card Anatomy
+
+Each card has two sections:
+1. **Prompt Section** (blue-grey, italics):
+   - Shows the original prompt that created the card
+   - @references are highlighted in green and clickable
+   - Click any @reference to navigate to that card
+2. **Response Section** (markdown-rendered):
+   - AI-generated response with full markdown formatting
+   - Headings, lists, code blocks, tables, etc.
+   - Neutral grey color scheme for readability
+
 ### Navigation
 
 - **Search**: Type a title in the search bar, press Enter
-- **Click Cards**: Add `@card_title` to your prompt
-- **Network Viz**: Click nodes to switch documents/cards
+- **Click @references**: In card prompts, click green @references to navigate
+- **Network Viz**: Click any node (project/doc/card) to navigate
+- **Card Nodes**: Click card in graph to jump to its document
 - **Doc Switching**: Preserves your current prompt
 
 ### Managing Documents
@@ -207,30 +234,37 @@ slate/
 - Serializes to/from JSON with summary data
 
 #### `Card`
-- Stores title, content, and links
+- Stores title, content, **prompt**, and links
+- **Dual-section rendering**: Prompt (italics) + Response (markdown)
 - Tracks @references to other cards
+- **Clickable @references**: Navigate by clicking links in prompt
 - Handles DOM creation and removal
-- **Click-to-reference functionality** (insert @card_title)
 - Parent document relationship tracking
+- Markdown rendering for all content
 
 #### `ChatManager`
 - Manages AI interactions
 - Parses @references from prompts (cards and docs)
 - Builds bibliography with card content or doc summaries
-- Handles card creation workflow
+- **Markdown rendering**: Converts AI responses to formatted HTML
+- Handles card creation workflow with prompt preservation
 - **Triggers automatic summary generation** when cards are added
 - CodeMirror editor integration
 
 #### `NetworkViz`
-- D3.js radial tree visualization
-- Interactive node clicking
-- Zoom and pan controls
+- D3.js force-directed graph visualization
+- **Centered layout**: Graph stays centered during interactions
+- Interactive node clicking for navigation
+- **Click card nodes**: Jump to card's document
+- Zoom and pan controls with smooth transitions
 - Styled edges by type (hierarchy vs reference)
 
 #### `CodeMirror Setup`
 - Custom theme matching app color scheme
-- **@reference syntax highlighting** (cyan color)
-- **Autocomplete for @references** (cards and docs)
+- **@reference syntax highlighting** (cyan color in editor)
+- **Project-wide autocomplete**: Shows ALL cards from ALL documents
+- **Context indicators**: Shows which document each card belongs to
+- Color-coded suggestions (green for cards, blue for docs)
 - Line wrapping and modern editing features
 - Helper functions for text manipulation
 
@@ -275,19 +309,20 @@ All titles are automatically sanitized:
 - **View summaries** to get document overviews
 
 ### AI Prompting Best Practices
-- **Use autocomplete**: Type `@` to see all available references
+- **Use autocomplete**: Type `@` to see ALL cards from ALL documents
+- **Autocomplete shows context**: See which document each card belongs to
 - Reference multiple cards for rich context
 - **Reference documents** for broader context instead of individual cards
-- Cards can reference cards from other documents
 - The AI sees the full content of referenced cards or document summaries
 - Use descriptive card titles for better reference matching
-- **Click cards** to quickly insert references
+- **AI formats in markdown**: Responses include headings, lists, code, tables
 
-### Editor Features
-- **Syntax highlighting**: @references appear in cyan
-- **Autocomplete navigation**: Use arrow keys and Enter
-- **Line wrapping**: Long prompts automatically wrap
-- **Click to reference**: Click any card to insert its @reference
+### Navigation & Links
+- **Click @references in prompts**: Navigate to referenced cards instantly
+- **Network graph navigation**: Click any node to jump to that location
+- **Search**: Find cards or documents by title (exact or partial match)
+- **Card links are green**: Easy to spot and click in prompt sections
+- **Preserved prompts**: See the original question that created each card
 
 ## Data Format
 
@@ -301,12 +336,13 @@ All titles are automatically sanitized:
     {
       "id": "uuid-v4",
       "title": "doc_title",
-      "summary": "AI-generated summary of document content",
+      "summary": "AI-generated markdown summary",
       "cards": [
         {
           "id": "uuid-v4",
           "title": "card_title",
-          "content": "<html content>",
+          "content": "<rendered markdown html>",
+          "prompt": "Original prompt text with @references",
           "links": ["referenced_card_1", "referenced_card_2"]
         }
       ],
@@ -325,9 +361,10 @@ All titles are automatically sanitized:
 ## Technical Details
 
 ### Dependencies
-- **D3.js v7.9.0**: Network visualization with radial tree layout
+- **D3.js v7.9.0**: Network visualization with force-directed layout
 - **OpenAI v5.15.0**: AI content generation (GPT-4o-mini model)
 - **CodeMirror v6.0.2**: Advanced text editor with autocomplete
+- **Marked v11.2.0**: GitHub Flavored Markdown parser and renderer
 - **UUID v11.1.0**: Unique identifier generation
 - **Vite v7.1.3**: Build tool and development server
 
@@ -350,10 +387,14 @@ All titles are automatically sanitized:
 ### Recently Completed ✅
 - [x] CodeMirror editor integration with syntax highlighting
 - [x] @reference autocomplete for cards and documents
-- [x] AI-generated document summaries
-- [x] Click-to-reference card functionality
-- [x] Visual feedback for summary generation
+- [x] **Project-wide autocomplete** - see ALL cards from ALL documents
+- [x] AI-generated document summaries with visual feedback
+- [x] **Markdown rendering** for all content (cards, chat, summaries)
+- [x] **Prompt preservation** - cards store original prompts
+- [x] **Clickable @references** in card prompts for navigation
+- [x] **Neutral markdown colors** - grey/white scheme
 - [x] Cross-document reference support
+- [x] **Centered graph layout** - no jarring translations
 
 ### Potential Features
 - [ ] Undo/Redo functionality
@@ -391,9 +432,10 @@ Contributions welcome! Areas for improvement:
 ## Acknowledgments
 
 Built with:
-- [D3.js](https://d3js.org/) - Data visualization
+- [D3.js](https://d3js.org/) - Data visualization and force-directed graphs
 - [OpenAI](https://openai.com/) - AI language models (GPT-4o-mini)
 - [CodeMirror](https://codemirror.net/) - Advanced text editor
+- [Marked](https://marked.js.org/) - Markdown parser and renderer
 - [Vite](https://vitejs.dev/) - Build tool
 
 ---

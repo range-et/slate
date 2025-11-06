@@ -8,8 +8,6 @@ import ChatManager, { sanitizeTitle } from "./ai_chat.js";
 import generateRandomName from "./random_name_generator.js";
 import { setupCodeMirrorEditor } from "./codemirror_setup.js";
 import { marked } from 'marked';
-// dummy data
-import data from "./dummy_data.js";
 
 // Select all the dom elements
 const network = document.getElementById("network");
@@ -58,13 +56,12 @@ const buttons = {
 
 // main manager
 class MainManager {
-    constructor(network, log, chat, data, buttons) {
+    constructor(network, log, chat, buttons) {
         this.network = network; // this is the network data structure
         this.log = log; // this is the log of events
         this.chat = chat; // this is the chat interface
         this.viz = null; // this will hold the network visualization instance
         this.buttons = buttons; // store button references
-        this.data = data; // store data
         this.ai_agent = null;
         this.modal = new Modal(); // custom modal for alerts and confirms
         this.promptEditor = null; // will hold the CodeMirror editor instance
@@ -714,7 +711,7 @@ class MainManager {
 }
 
 // Initialize the main manager
-const mainManager = new MainManager(network, doc_content, chat_content, data, buttons);
+const mainManager = new MainManager(network, doc_content, chat_content, buttons);
 await mainManager.init();
 
 // Expose mainManager globally for cross-component access (e.g., ChatManager accessing project)
