@@ -235,7 +235,7 @@ input[type="text"]::placeholder {
 }
 
 #chat-content.card_container {
-  flex: 1 1 0;
+  flex: 2 1 0;  /* 2/3 of the space */
   min-height: 0;
   overflow-y: auto;
   display: flex;
@@ -263,7 +263,7 @@ input[type="text"]::placeholder {
 }
 
 #chat-prompt {
-  flex: 1 1 0;
+  flex: 1 1 0;  /* 1/3 of the space */
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--information-2);
