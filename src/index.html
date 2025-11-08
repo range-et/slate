@@ -41,16 +41,32 @@
             <button class="finish_btn" id="export_btn">EXPORT</button>
             <button class="success_btn" id="import_btn">IMPORT</button>
             <div style="flex: 1;"></div>
+            <button class="info_btn">FEEDBACK</button>
             <button class="info_btn" id="api_key_btn">API KEY</button>
         </div>
         <div id="content">
-            <!-- NETWORK SECTION -->
-            <div id="network">
-                <div class="network_heading">
-                    <h4>PROJECT :</h4>
-                    <input type="text" id="project_title_input" placeholder="untitled project" maxlength="100">
-                    <button class="info_btn" id="resetZoom">RESET ZOOM</button>
+            <!-- CHAT SECTION -->
+            <div id="chat">
+                <div class="chat_title_heading">
+                    <h4>CARD :</h4>
+                    <input type="text" id="card_title_input" placeholder="enter card title..." maxlength="100">
                 </div>
+                
+                <h4>PROMPT</h4>
+                <div class="response_container">
+                    <div id="image-preview-container"></div>
+                    <div id="chat-prompt"></div>
+                    <div class="response_control_panel">
+                        <button class="info_btn" id="attach_image">ATTACH IMAGE</button>
+                        <button class="info_btn" id="send_prompt">SEND</button>
+                        <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
+                    </div>
+                    
+                </div>
+
+                <h4>CHAT</h4>
+                <div class="card_container" id="chat-content"></div>
+                
             </div>
             <!-- DOC SECTION -->
             <div id="doc">
@@ -64,30 +80,13 @@
                     
                 </div>
             </div>
-            <!-- CHAT SECTION -->
-            <div id="chat">
-                <div class="chat_title_heading">
-                    <h4>CARD :</h4>
-                    <input type="text" id="card_title_input" placeholder="enter card title..." maxlength="100">
+            <!-- NETWORK SECTION -->
+            <div id="network">
+                <div class="network_heading">
+                    <h4>PROJECT :</h4>
+                    <input type="text" id="project_title_input" placeholder="untitled project" maxlength="100">
+                    <button class="info_btn" id="resetZoom">RESET ZOOM</button>
                 </div>
-                
-                <h4>CHAT</h4>
-                <div class="card_container" id="chat-content"></div>
-                
-
-                <h4>PROMPT</h4>
-                <div class="response_container">
-                    <div id="image-preview-container"></div>
-                    <div id="chat-prompt"></div>
-                    <div class="response_control_panel">
-                        <button class="info_btn" id="send_prompt">SEND</button>
-                        <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
-                        <button class="info_btn" id="attach_image">ATTACH IMAGE</button>
-                    </div>
-                    
-                </div>
-
-                
             </div>
         </div>
     </div>  

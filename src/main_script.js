@@ -522,6 +522,11 @@ class MainManager {
                     this.createNewDoc(newDocName);
                 }
                 
+                // Clear chat content, prompt, and images
+                if (this.chatManager) {
+                    this.chatManager.clearAll();
+                }
+                
                 console.log("Project imported successfully:", importedProject.name);
                 await this.modal.alert("Project imported successfully!");
             } catch (err) {

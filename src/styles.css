@@ -145,10 +145,11 @@ input[type="text"]::placeholder {
 }
 
 #network {
-  flex: 0 0 40%;
-  max-width: 40%;
+  flex: 0 0 30%;  /* Reduced from 40% (20% smaller) */
+  max-width: 30%;
   box-sizing: border-box;
-  padding-left: var(--global_padding);
+  padding-left: var(--global_padding);  /* Matches topbar */
+  padding-right: var(--global_padding);  /* Matches topbar */
   padding-top: calc(var(--global_padding) / 2);
   display: flex;
   flex-direction: column;
@@ -157,10 +158,11 @@ input[type="text"]::placeholder {
 
 #doc,
 #chat {
-  flex: 0 0 30%;
-  max-width: 30%;
+  flex: 0 0 35%;  /* Increased from 30% (wider) */
+  max-width: 35%;
   box-sizing: border-box;
-  padding-left: calc(var(--global_padding) / 2);
+  padding-left: var(--global_padding);  /* Matches topbar */
+  padding-right: var(--global_padding);  /* Matches topbar */
   padding-top: calc(var(--global_padding) / 2);
   padding-bottom: calc(var(--global_padding) / 2);
   display: flex;
@@ -170,8 +172,8 @@ input[type="text"]::placeholder {
   background-color: var(--background);
 }
 
-#chat {
-  padding-right: calc(var(--global_padding) / 2);
+#network {
+  border-left: 1px solid var(--information-1);
 }
 
 #network-canvas {
@@ -200,6 +202,7 @@ input[type="text"]::placeholder {
 
 .doc_heading button {
   margin-left: auto;
+  margin-right: calc(var(--global_padding) / 2);  /* Gap before divider */
 }
 
 #doc_title_input {
