@@ -52,3 +52,14 @@ This is exactly what Slate does.
 
 Slate rejects the illusion of LLM memory. Instead, it embraces the stateless nature of LLMs and gives you the tools to build your own persistent knowledge structure. 
 
+This isn't just a different interface - it's a fundamentally different way of thinking about AI-assisted knowledge work.
+
+---
+
+## Try Slate
+
+**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
+
+- **[Readme](readme.md)** - Feature overview, usage guide, and getting started instructions
+- **[Deployment Guide](deployment.md)** - Instructions for deploying Slate as a static site
+

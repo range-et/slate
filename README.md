@@ -4,6 +4,16 @@ A graph-based document editor with AI-powered card creation and intelligent refe
 
 ![Slate - Graph-Based Document Editor](https://img.shields.io/badge/status-MVP-blue) ![JavaScript](https://img.shields.io/badge/javascript-ES6-yellow) ![D3.js](https://img.shields.io/badge/d3.js-v7-orange) ![CodeMirror](https://img.shields.io/badge/codemirror-v6-green)
 
+**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
+
+## Why Slate?
+
+Slate addresses a limitation of current LLM interfaces: LLMs are stateless machines. Most chat interfaces maintain a sliding context window of the last N exchanges, which forgets information when conversations exceed the context length.
+
+Slate provides explicit control over context. Users select which parts of generated content to include as context for the next generation, rather than relying on a sliding window.
+
+[Read the full motivation](motivation.md) for details on the philosophy and approach.
+
 ## Overview
 
 Slate is a hierarchical document management system that combines:
@@ -14,7 +24,7 @@ Slate is a hierarchical document management system that combines:
 - **Document Summaries**: AI-generated summaries of document content
 - **Advanced Editor**: CodeMirror-powered prompt editor with syntax highlighting
 - **Cross-Document Context**: Reference cards across different documents
-- **Card Management**: Move cards between documents seamlessly
+- **Card Management**: Move cards between documents
 
 ## Features
 
@@ -31,13 +41,13 @@ Slate is a hierarchical document management system that combines:
 - Automatic bibliography construction from references
 - AI-generated document summaries (automatically created when cards are added)
 - Reference document summaries instead of individual cards
-- **Markdown formatting**: All AI responses rendered with beautiful markdown
+- **Markdown formatting**: All AI responses rendered as markdown
 - **Prompt preservation**: Original prompts and images saved with each card
-- Seamless integration with your workflow
+- Integration with your workflow
 
 ### 🖼️ Image Support
 - **Attach Images**: Click "ATTACH IMAGE" button to select from file system
-- **Copy-Paste**: Just like ChatGPT - copy any image and paste directly into the app
+- **Copy-Paste**: Copy any image and paste directly into the app
 - **Multiple Images**: Add multiple images to a single prompt
 - **Preview & Remove**: See thumbnails before sending, remove unwanted images
 - **Base64 Storage**: Images encoded and stored in JSON (no external file dependencies)
@@ -80,7 +90,7 @@ Slate is a hierarchical document management system that combines:
 - Real-time updates when cards are moved between documents
 
 ### ✨ Enhanced Editor Experience
-- **CodeMirror 6 Integration**: Modern, powerful text editor
+- **CodeMirror 6 Integration**: Text editor with syntax highlighting
 - **Real-time Syntax Highlighting**: @references highlighted in cyan
 - **Intelligent Autocomplete**: Context-aware suggestions for ALL cards and documents
 - **Project-wide Search**: See cards from every document when typing `@`
@@ -89,12 +99,20 @@ Slate is a hierarchical document management system that combines:
 - **Visual Feedback**: Immediate visual feedback for references
 
 ### 📝 Markdown Support
-- **Beautiful Formatting**: All content rendered with GitHub Flavored Markdown
+- **Markdown Formatting**: All content rendered with GitHub Flavored Markdown
 - **Neutral Color Scheme**: Grey/white markdown doesn't compete with UI colors
 - **Card Prompts**: Original prompts displayed in italics with highlighted @references
 - **AI Responses**: Markdown-formatted responses with headings, lists, code blocks
 - **Summaries**: Document summaries rendered with full markdown support
 - **Live Chat**: Real-time markdown rendering in chat window
+
+## Documentation
+
+- **[Motivation](motivation.md)** - Why Slate exists and the philosophy behind user-controlled context
+- **[Deployment Guide](DEPLOYMENT.md)** - How to deploy Slate as a static site
+- **[Readme](README.md)** - This file (feature overview and usage guide)
+
+**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
 
 ## Quick Start
 
@@ -389,7 +407,7 @@ All titles are automatically sanitized:
 - **Click @references in prompts**: Navigate to referenced cards instantly
 - **Network graph navigation**: Click any node to jump to that location
 - **Search**: Find cards or documents by title (exact or partial match)
-- **Card links are green**: Easy to spot and click in prompt sections
+- **Card links are green**: Clickable references in prompt sections
 - **Preserved prompts**: See the original question that created each card
 
 ## Data Format
@@ -511,9 +529,14 @@ Contributions welcome! Areas for improvement:
 - Document summary customization (length, style)
 - Advanced search (full-text, filters, regex)
 
+## Related Documentation
+
+- **[Motivation](motivation.md)** - Deep dive into why Slate exists and the problems it solves
+- **[Deployment Guide](DEPLOYMENT.md)** - Step-by-step deployment instructions for various hosting options
+
 ## License
 
-[Add your license here]
+slate notebook editor © 2025 by Indrajeet Haldar is licensed under CC BY-NC-ND 4.0. To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
 ## Acknowledgments
 

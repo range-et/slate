@@ -494,12 +494,15 @@ class MainManager {
             <p style="margin-bottom: 15px; line-height: 1.6;">
                 Made by <strong>Indrajeet Haldar</strong>
             </p>
-            <p style="margin-bottom: 0;">
+            <p style="margin-bottom: 15px;">
                 Check out more of my work at 
                 <a href="https://www.indrajeethaldar.com" target="_blank" 
                    style="color: var(--information-1); text-decoration: underline;">
                     www.indrajeethaldar.com
                 </a>
+            </p>
+            <p style="margin-bottom: 0; font-size: x-small; line-height: 1.6; border-top: 1px solid var(--information-2); padding-top: 15px;">
+                <a href="https://www.slate-notepad.com/">slate notebook editor</a> © 2025 by <a href="https://www.indrajeethaldar.com/">Indrajeet Haldar</a> is licensed under <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/">CC BY-NC-ND 4.0</a><img src="https://mirrors.creativecommons.org/presskit/icons/cc.svg" alt="" style="max-width: 1em;max-height:1em;margin-left: .2em;"><img src="https://mirrors.creativecommons.org/presskit/icons/by.svg" alt="" style="max-width: 1em;max-height:1em;margin-left: .2em;"><img src="https://mirrors.creativecommons.org/presskit/icons/nc.svg" alt="" style="max-width: 1em;max-height:1em;margin-left: .2em;"><img src="https://mirrors.creativecommons.org/presskit/icons/nd.svg" alt="" style="max-width: 1em;max-height:1em;margin-left: .2em;">
             </p>
         `;
 
