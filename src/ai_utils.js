@@ -7,13 +7,27 @@ class OpenAIAgent {
         // Config is optional - only exists locally, not in production
         const apiKey = localStorage.getItem('openai_api_key') || OPENAI_API_KEY || "";
         
+        this.apiKey = apiKey; // Store for validation
+        
         this.client = new OpenAI({
             apiKey: apiKey,
             dangerouslyAllowBrowser: true
         });
     }
+    
+    /**
+     * Check if API key is set
+     * @returns {boolean} True if API key exists
+     */
+    hasApiKey() {
+        return this.apiKey && this.apiKey.trim() !== "";
+    }
 
     async generateSummary(content) {
+        if (!this.hasApiKey()) {
+            throw new Error("API_KEY_MISSING");
+        }
+        
         const response = await this.client.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
@@ -33,6 +47,10 @@ class OpenAIAgent {
     }
 
     async generateResponse(prompt, images = []) {
+        if (!this.hasApiKey()) {
+            throw new Error("API_KEY_MISSING");
+        }
+        
         // Build the user message content
         let userContent;
         
@@ -75,6 +93,18 @@ class OpenAIAgent {
             max_tokens: 500
         });
         return response.choices[0].message.content;
+    }
+    
+    /**
+     * Update the API key and recreate the client
+     * @param {string} apiKey - The new API key
+     */
+    updateApiKey(apiKey) {
+        this.apiKey = apiKey;
+        this.client = new OpenAI({
+            apiKey: apiKey,
+            dangerouslyAllowBrowser: true
+        });
     }
 }
 

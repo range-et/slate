@@ -422,7 +422,7 @@ class MainManager {
             <p style="margin-top: 10px; font-size: x-small;">Your API key will be stored locally in your browser.</p>
         `;
 
-        await this.modal.custom(inputContainer, [
+        const result = await this.modal.custom(inputContainer, [
             {
                 text: 'Cancel',
                 className: 'alert_btn',
@@ -433,6 +433,20 @@ class MainManager {
                 className: 'alert_btn',
                 callback: () => {
                     localStorage.removeItem('openai_api_key');
+                    // Update AI agent to remove key
+                    if (this.ai_agent && this.ai_agent.updateApiKey) {
+                        this.ai_agent.updateApiKey("");
+                    } else {
+                        this.ai_agent = new OpenAIAgent();
+                    }
+                    // Update ChatManager's AI agent reference
+                    if (this.chatManager && this.chatManager.aiAgent) {
+                        if (this.chatManager.aiAgent.updateApiKey) {
+                            this.chatManager.aiAgent.updateApiKey("");
+                        } else {
+                            this.chatManager.aiAgent = this.ai_agent;
+                        }
+                    }
                     return 'cleared';
                 }
             },
@@ -444,14 +458,33 @@ class MainManager {
                     const apiKey = apiKeyInput.value.trim();
                     if (apiKey) {
                         localStorage.setItem('openai_api_key', apiKey);
-                        // Reinitialize the AI agent with the new key
-                        this.ai_agent = new OpenAIAgent();
+                        // Update the AI agent with the new key (or recreate if needed)
+                        if (this.ai_agent && this.ai_agent.updateApiKey) {
+                            this.ai_agent.updateApiKey(apiKey);
+                        } else {
+                            this.ai_agent = new OpenAIAgent();
+                        }
+                        // Also update the ChatManager's AI agent reference
+                        if (this.chatManager && this.chatManager.aiAgent) {
+                            if (this.chatManager.aiAgent.updateApiKey) {
+                                this.chatManager.aiAgent.updateApiKey(apiKey);
+                            } else {
+                                this.chatManager.aiAgent = this.ai_agent;
+                            }
+                        }
                         return 'saved';
                     }
                     return 'empty';
                 }
             }
         ]);
+        
+        // Show success message if key was saved
+        if (result === 'saved') {
+            await this.modal.alert("API key saved successfully! You can now use AI features.");
+        } else if (result === 'cleared') {
+            await this.modal.alert("API key cleared. You'll need to set it again to use AI features.");
+        }
     }
 
     async showAboutModal() {

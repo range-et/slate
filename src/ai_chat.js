@@ -335,9 +335,51 @@ export class ChatManager {
             // Render the response as markdown
             const renderedResponse = marked.parse(res);
             this.chatContent.innerHTML = `<div class="markdown-body">${renderedResponse}</div>`;
-        }).catch((err) => {
+        }).catch(async (err) => {
             console.error("Error generating response:", err);
-            this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response</p>';
+            
+            // Extract error details from OpenAI API errors
+            const errorMessage = err.message || "";
+            const errorStatus = err.status || err.response?.status || err.statusCode;
+            const errorCode = err.code || err.error?.code;
+            
+            // Handle specific error cases
+            if (err.message === "API_KEY_MISSING" || 
+                errorMessage.includes("API key") || 
+                errorMessage.includes("Invalid API key") ||
+                errorStatus === 401 ||
+                errorCode === "invalid_api_key") {
+                // API key is missing or invalid
+                await this.modal.custom(
+                    `<div>
+                        <p style="margin-bottom: 15px; line-height: 1.6;">
+                            <strong>API Key Required</strong>
+                        </p>
+                        <p style="margin-bottom: 15px;">
+                            You need to set your OpenAI API key to use AI features.
+                        </p>
+                        <p style="margin-bottom: 0; font-size: x-small;">
+                            Click the <strong>API KEY</strong> button in the top bar to add your key.
+                        </p>
+                    </div>`,
+                    [
+                        {
+                            text: 'OK',
+                            className: 'info_btn',
+                            callback: () => null
+                        }
+                    ]
+                );
+                this.chatContent.innerHTML = '<p style="color: var(--alert);">Please set your API key to continue.</p>';
+            } else if (err.message?.includes("rate limit") || err.status === 429) {
+                // Rate limit error
+                await this.modal.alert("Rate limit exceeded. Please wait a moment and try again.");
+                this.chatContent.innerHTML = '<p style="color: var(--alert);">Rate limit exceeded. Please try again later.</p>';
+            } else {
+                // Other errors
+                await this.modal.alert(`Failed to generate response: ${err.message || "Unknown error"}. Please check your API key and try again.`);
+                this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response. Please try again.</p>';
+            }
         });
     }
 
@@ -381,11 +423,28 @@ export class ChatManager {
         } catch (err) {
             console.error("Failed to generate summary:", err);
             this.currentDoc.summaryGenerating = false;
-            this.currentDoc.summaryError = err.message || "Unknown error occurred";
+            
+            // Extract error details
+            const errorMessage = err.message || "";
+            const errorStatus = err.status || err.response?.status || err.statusCode;
+            const errorCode = err.code || err.error?.code;
+            
+            // Handle API key errors specifically
+            if (err.message === "API_KEY_MISSING" || 
+                errorMessage.includes("API key") || 
+                errorMessage.includes("Invalid API key") ||
+                errorStatus === 401 ||
+                errorCode === "invalid_api_key") {
+                this.currentDoc.summaryError = "API key required";
+                // Show helpful modal
+                await this.modal.alert("API key required to generate summaries. Please set your API key using the API KEY button in the top bar.");
+            } else {
+                this.currentDoc.summaryError = err.message || "Unknown error occurred";
+            }
             
             // Notify mainManager to indicate error
             if (window.mainManager && window.mainManager.summaryError) {
-                window.mainManager.summaryError(err.message);
+                window.mainManager.summaryError(this.currentDoc.summaryError);
             }
         }
     }
