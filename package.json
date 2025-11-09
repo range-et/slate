@@ -4,10 +4,13 @@
   "description": "A webapp template that I use for everything - a python/flask backend with a node based HTML/CSS/JS front end",
   "scripts": {
     "clean": "rimraf dist/",
-    "prebuild": "npm run clean",
+    "ensure-config": "node scripts/ensure-config.js",
+    "prebuild": "npm run ensure-config && npm run clean",
     "build": "vite build",
     "start": "vite",
-    "dev": "vite --open"
+    "dev": "vite --open",
+    "preview": "vite preview",
+    "serve": "vite preview --host"
   },
   "keywords": [],
   "author": "Indrajeet Haldar",

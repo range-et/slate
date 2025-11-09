@@ -1,10 +1,11 @@
 import OpenAI from "openai";
-import { OPENAI_API_KEY } from "./config";
+import { OPENAI_API_KEY } from "./config_loader.js";
 
 class OpenAIAgent {
     constructor() {
-        // Try to load API key from localStorage first, then fall back to config
-        const apiKey = localStorage.getItem('openai_api_key') || OPENAI_API_KEY;
+        // Try to load API key from localStorage first, then fall back to config (if available)
+        // Config is optional - only exists locally, not in production
+        const apiKey = localStorage.getItem('openai_api_key') || OPENAI_API_KEY || "";
         
         this.client = new OpenAI({
             apiKey: apiKey,
