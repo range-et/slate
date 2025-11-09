@@ -491,9 +491,6 @@ class MainManager {
         // Show about modal with creator info and link
         const aboutContent = document.createElement('div');
         aboutContent.innerHTML = `
-            <p style="margin-bottom: 15px; line-height: 1.6;">
-                Made by <strong>Indrajeet Haldar</strong>
-            </p>
             <p style="margin-bottom: 15px;">
                 Check out more of my work at 
                 <a href="https://www.indrajeethaldar.com" target="_blank" 
