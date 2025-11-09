@@ -189,7 +189,6 @@ input[type="text"]::placeholder {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--information-1);
 }
 
 .doc_heading{

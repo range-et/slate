@@ -26,6 +26,8 @@ const undo_btn = document.getElementById("undo_btn");
 const export_btn = document.getElementById("export_btn");
 const import_btn = document.getElementById("import_btn");
 const api_key_btn = document.getElementById("api_key_btn");
+const feedback_btn = document.getElementById("feedback_btn");
+const about_btn = document.getElementById("about_btn");
 // chat stuff
 const chat_content = document.getElementById("chat-content");
 const prompt = document.getElementById("chat-prompt");
@@ -48,6 +50,8 @@ const buttons = {
     export_btn: export_btn,
     import_btn: import_btn,
     api_key_btn: api_key_btn,
+    feedback_btn: feedback_btn,
+    about_btn: about_btn,
     send_prompt: send_prompt,
     add_to_doc: add_to_doc,
     prompt: prompt,
@@ -450,6 +454,31 @@ class MainManager {
         ]);
     }
 
+    async showAboutModal() {
+        // Show about modal with creator info and link
+        const aboutContent = document.createElement('div');
+        aboutContent.innerHTML = `
+            <p style="margin-bottom: 15px; line-height: 1.6;">
+                Made by <strong>Indrajeet Haldar</strong>
+            </p>
+            <p style="margin-bottom: 0;">
+                Check out more of my work at 
+                <a href="https://www.indrajeethaldar.com" target="_blank" 
+                   style="color: var(--information-1); text-decoration: underline;">
+                    www.indrajeethaldar.com
+                </a>
+            </p>
+        `;
+
+        await this.modal.custom(aboutContent, [
+            {
+                text: 'OK',
+                className: 'info_btn',
+                callback: () => null
+            }
+        ]);
+    }
+
     exportProject() {
         // Export the entire project as JSON
         if (!this.currentProject) {
@@ -633,6 +662,10 @@ class MainManager {
         this.buttons.add_to_doc.addEventListener("click", () => this.chatManager.addToDoc());
         this.buttons.send_prompt.addEventListener("click", () => this.chatManager.askAI());
         this.buttons.api_key_btn.addEventListener("click", () => this.show_api_key_modal());
+        this.buttons.about_btn.addEventListener("click", () => this.showAboutModal());
+        this.buttons.feedback_btn.addEventListener("click", () => {
+            window.open("https://forms.gle/BVk3YMzqoRELDy2C9", "_blank");
+        });
         this.buttons.export_btn.addEventListener("click", () => this.exportProject());
         this.buttons.import_btn.addEventListener("click", () => this.importProject());
         this.buttons.search_btn.addEventListener("click", () => this.searchAndNavigate());
