@@ -28,6 +28,12 @@ Instead of pretending the LLM has memory, why not be honest? Let users **pick an
 
 This is exactly what Slate does.
 
+## A different visualization 
+![Alternate vis of rabbit holes](assets/slate_diagram_2.jpg)
+
+The above is an alternate visualization. If we imagine each pair of prompt and response events as a node A chat like interface almost encourages a user to stay in one linear lane of questioning and exploration. The ways to fix this has in the past been to show the user some version of the sliding window as discussed above or a vector database - where the user no longer has access to the data locally. 
+
+
 ### How Slate Works
 
 1. **Cards as Context Units**: Each LLM response is saved as a card - a discrete, reusable piece of content.
@@ -47,6 +53,7 @@ This is exactly what Slate does.
 - **Reusable Knowledge**: Cards can be referenced across different conversations and documents
 - **Transparency**: You see exactly what context is being sent to the AI
 - **Scalability**: Your knowledge graph can grow indefinitely without hitting context limits
+- **Privacy**: The alternative is a vector database where a user's data is stored online somewhere and the user does not have control over the data locally.
 
 ## The Philosophy
 
