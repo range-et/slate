@@ -6,12 +6,13 @@ const path = require('path');
 
 const configPath = path.join(__dirname, '../src/config.js');
 const defaultConfig = `// Local development config - this file is gitignored
-// Set your OpenAI API key here for local development
-// In production, this will be null and users will set their key via the UI
+// Set your API keys here for local development
+// In production, these will be null and users will set their keys via the UI
 
-const OPENAI_API_KEY = null; // Set your API key here: "sk-..."
+const OPENAI_API_KEY = null; // Set your OpenAI API key here: "sk-..."
+const GEMINI_API_KEY = null; // Set your Gemini API key here (from Google AI Studio)
 
-export { OPENAI_API_KEY };
+export { OPENAI_API_KEY, GEMINI_API_KEY };
 `;
 
 if (!fs.existsSync(configPath)) {

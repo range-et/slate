@@ -114,3 +114,4 @@ instance/
 .env.local
 
 src/config.js
+scratch/scatch_notes.txt

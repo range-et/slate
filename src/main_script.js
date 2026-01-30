@@ -1,5 +1,5 @@
 import { NetworkViz } from "./network_viz.js";
-import OpenAIAgent from "./ai_utils.js";
+import OpenAIAgent, { GeminiAgent } from "./ai_utils.js";
 import Doc from "./doc.js";
 import Project from "./project.js";
 import Modal from "./modal.js";
@@ -410,16 +410,38 @@ class MainManager {
         });
     }
 
+    getAgentForProvider(provider, openaiKey, geminiKey) {
+        if (provider === 'gemini') {
+            const agent = new GeminiAgent();
+            if (geminiKey) agent.updateApiKey(geminiKey);
+            return agent;
+        }
+        const agent = new OpenAIAgent();
+        if (openaiKey) agent.updateApiKey(openaiKey);
+        return agent;
+    }
+
     async show_api_key_modal() {
-        // Create a custom modal with an input field for API key
-        const currentKey = localStorage.getItem('openai_api_key');
+        const currentOpenAI = localStorage.getItem('openai_api_key') || '';
+        const currentGemini = localStorage.getItem('gemini_api_key') || '';
+        const currentProvider = localStorage.getItem('ai_provider') || 'openai';
         const inputContainer = document.createElement('div');
         inputContainer.innerHTML = `
-            <h4 style="margin-bottom: 15px;">OpenAI API Key</h4>
-            <input type="password" id="api_key_input" placeholder="sk-..." 
+            <h4 style="margin-bottom: 12px;">AI provider & API keys</h4>
+            <label style="display: block; margin-bottom: 4px; font-size: small;">Use model</label>
+            <select id="ai_provider_select" style="width: 100%; padding: 8px; margin-bottom: 12px; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);">
+                <option value="openai" ${currentProvider === 'openai' ? 'selected' : ''}>OpenAI (GPT)</option>
+                <option value="gemini" ${currentProvider === 'gemini' ? 'selected' : ''}>Gemini</option>
+            </select>
+            <label style="display: block; margin-bottom: 4px; font-size: small;">OpenAI API key</label>
+            <input type="password" id="openai_api_key_input" placeholder="sk-..." 
+                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); margin-bottom: 12px;" 
+                   value="${currentOpenAI}">
+            <label style="display: block; margin-bottom: 4px; font-size: small;">Gemini API key</label>
+            <input type="password" id="gemini_api_key_input" placeholder="Gemini key (Google AI Studio)..." 
                    style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);" 
-                   value="${currentKey || ''}">
-            <p style="margin-top: 10px; font-size: x-small;">Your API key will be stored locally in your browser.</p>
+                   value="${currentGemini}">
+            <p style="margin-top: 10px; font-size: x-small;">Keys are stored locally in your browser.</p>
         `;
 
         const result = await this.modal.custom(inputContainer, [
@@ -429,23 +451,15 @@ class MainManager {
                 callback: () => null
             },
             {
-                text: 'Clear',
+                text: 'Clear all',
                 className: 'alert_btn',
                 callback: () => {
                     localStorage.removeItem('openai_api_key');
-                    // Update AI agent to remove key
-                    if (this.ai_agent && this.ai_agent.updateApiKey) {
-                        this.ai_agent.updateApiKey("");
-                    } else {
-                        this.ai_agent = new OpenAIAgent();
-                    }
-                    // Update ChatManager's AI agent reference
+                    localStorage.removeItem('gemini_api_key');
+                    localStorage.setItem('ai_provider', 'openai');
+                    this.ai_agent = new OpenAIAgent();
                     if (this.chatManager && this.chatManager.aiAgent) {
-                        if (this.chatManager.aiAgent.updateApiKey) {
-                            this.chatManager.aiAgent.updateApiKey("");
-                        } else {
-                            this.chatManager.aiAgent = this.ai_agent;
-                        }
+                        this.chatManager.aiAgent = this.ai_agent;
                     }
                     return 'cleared';
                 }
@@ -454,36 +468,27 @@ class MainManager {
                 text: 'Save',
                 className: 'success_btn',
                 callback: () => {
-                    const apiKeyInput = document.getElementById('api_key_input');
-                    const apiKey = apiKeyInput.value.trim();
-                    if (apiKey) {
-                        localStorage.setItem('openai_api_key', apiKey);
-                        // Update the AI agent with the new key (or recreate if needed)
-                        if (this.ai_agent && this.ai_agent.updateApiKey) {
-                            this.ai_agent.updateApiKey(apiKey);
-                        } else {
-                            this.ai_agent = new OpenAIAgent();
-                        }
-                        // Also update the ChatManager's AI agent reference
-                        if (this.chatManager && this.chatManager.aiAgent) {
-                            if (this.chatManager.aiAgent.updateApiKey) {
-                                this.chatManager.aiAgent.updateApiKey(apiKey);
-                            } else {
-                                this.chatManager.aiAgent = this.ai_agent;
-                            }
-                        }
-                        return 'saved';
+                    const provider = document.getElementById('ai_provider_select').value;
+                    const openaiKey = document.getElementById('openai_api_key_input').value.trim();
+                    const geminiKey = document.getElementById('gemini_api_key_input').value.trim();
+                    localStorage.setItem('ai_provider', provider);
+                    if (openaiKey) localStorage.setItem('openai_api_key', openaiKey);
+                    else localStorage.removeItem('openai_api_key');
+                    if (geminiKey) localStorage.setItem('gemini_api_key', geminiKey);
+                    else localStorage.removeItem('gemini_api_key');
+                    this.ai_agent = this.getAgentForProvider(provider, openaiKey, geminiKey);
+                    if (this.chatManager && this.chatManager.aiAgent) {
+                        this.chatManager.aiAgent = this.ai_agent;
                     }
-                    return 'empty';
+                    return 'saved';
                 }
             }
         ]);
-        
-        // Show success message if key was saved
+
         if (result === 'saved') {
-            await this.modal.alert("API key saved successfully! You can now use AI features.");
+            await this.modal.alert("Settings saved. You can use AI with the selected model.");
         } else if (result === 'cleared') {
-            await this.modal.alert("API key cleared. You'll need to set it again to use AI features.");
+            await this.modal.alert("API keys cleared. Set a key and choose a model to use AI.");
         }
     }
 
@@ -742,8 +747,11 @@ class MainManager {
             (nodeData) => this.handleNodeClick(nodeData)
         );
         
-        // Initialize the AI agent
-        this.ai_agent = new OpenAIAgent();
+        // Initialize the AI agent (OpenAI or Gemini based on saved preference)
+        const provider = localStorage.getItem('ai_provider') || 'openai';
+        const openaiKey = localStorage.getItem('openai_api_key') || "";
+        const geminiKey = localStorage.getItem('gemini_api_key') || "";
+        this.ai_agent = this.getAgentForProvider(provider, openaiKey, geminiKey);
         
         // Generate and set random doc name
         const docName = generateRandomName();

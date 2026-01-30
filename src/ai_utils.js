@@ -1,5 +1,10 @@
 import OpenAI from "openai";
-import { OPENAI_API_KEY } from "./config_loader.js";
+import { GoogleGenAI } from "@google/genai";
+import { OPENAI_API_KEY, GEMINI_API_KEY } from "./config_loader.js";
+
+// Shared prompt templates (used by both OpenAI and Gemini)
+const SUMMARY_SYSTEM_PROMPT = "You are a helpful assistant that creates concise summaries of documents. Provide a clear, informative summary that captures the key points. Format your response using Markdown with numbered lists, bold text for emphasis, and proper structure.";
+const CHAT_SYSTEM_PROMPT = "You are a helpful assistant that provides concise, informative responses. Keep your answers brief and to the point while maintaining clarity. Focus on the essential information and avoid unnecessary elaboration. Format your response using Markdown with headings, lists, bold/italic text, code blocks, and other formatting as appropriate for clarity and readability.";
 
 class OpenAIAgent {
     constructor() {
@@ -31,14 +36,8 @@ class OpenAIAgent {
         const response = await this.client.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
-                {
-                    role: "system",
-                    content: "You are a helpful assistant that creates concise summaries of documents. Provide a clear, informative summary that captures the key points. Format your response using Markdown with numbered lists, bold text for emphasis, and proper structure."
-                },
-                {
-                    role: "user",
-                    content: `Generate a summary of the following content:\n\n${content}`
-                }
+                { role: "system", content: SUMMARY_SYSTEM_PROMPT },
+                { role: "user", content: `Generate a summary of the following content:\n\n${content}` }
             ],
             temperature: 0.7,
             max_tokens: 500
@@ -80,17 +79,11 @@ class OpenAIAgent {
         const response = await this.client.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
-                {
-                    role: "system",
-                    content: "You are a helpful assistant that provides concise, informative responses. Keep your answers brief and to the point while maintaining clarity. Focus on the essential information and avoid unnecessary elaboration. Format your response using Markdown with headings, lists, bold/italic text, code blocks, and other formatting as appropriate for clarity and readability."
-                },
-                {
-                    role: "user",
-                    content: userContent
-                }
+                { role: "system", content: CHAT_SYSTEM_PROMPT },
+                { role: "user", content: userContent }
             ],
             temperature: 0.7,
-            max_tokens: 500
+            max_tokens: 4096
         });
         return response.choices[0].message.content;
     }
@@ -108,4 +101,61 @@ class OpenAIAgent {
     }
 }
 
+class GeminiAgent {
+    constructor() {
+        const apiKey = localStorage.getItem('gemini_api_key') || GEMINI_API_KEY || "";
+        this.apiKey = apiKey;
+        this.client = new GoogleGenAI({ apiKey });
+    }
+
+    hasApiKey() {
+        return this.apiKey && this.apiKey.trim() !== "";
+    }
+
+    async generateSummary(content) {
+        if (!this.hasApiKey()) {
+            throw new Error("API_KEY_MISSING");
+        }
+        const response = await this.client.models.generateContent({
+            model: "gemini-2.5-flash",
+            systemInstruction: SUMMARY_SYSTEM_PROMPT,
+            config: { temperature: 0.7, maxOutputTokens: 500 },
+            contents: `Generate a summary of the following content:\n\n${content}`
+        });
+        return response.text ?? "";
+    }
+
+    async generateResponse(prompt, images = []) {
+        if (!this.hasApiKey()) {
+            throw new Error("API_KEY_MISSING");
+        }
+        let contents;
+        if (images.length > 0) {
+            const parts = [{ text: prompt }];
+            for (const img of images) {
+                const match = (img.data || "").match(/^data:([^;]+);base64,(.+)$/);
+                const mimeType = match ? match[1] : (img.mimeType || "image/png");
+                const data = match ? match[2] : (img.data || "").replace(/^data:[^;]+;base64,/, "");
+                parts.push({ inlineData: { mimeType, data } });
+            }
+            contents = parts;
+        } else {
+            contents = prompt;
+        }
+        const response = await this.client.models.generateContent({
+            model: "gemini-2.5-flash",
+            systemInstruction: CHAT_SYSTEM_PROMPT,
+            config: { temperature: 0.7, maxOutputTokens: 4096 },
+            contents
+        });
+        return response.text ?? "";
+    }
+
+    updateApiKey(apiKey) {
+        this.apiKey = apiKey;
+        this.client = new GoogleGenAI({ apiKey });
+    }
+}
+
 export default OpenAIAgent;
+export { GeminiAgent };
