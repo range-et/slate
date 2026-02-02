@@ -1,6 +1,6 @@
 # Why Slate Exists
 
-## The Problem with Current LLMInterfaces
+## The Problem with Current LLM Interfaces
 
 Most LLM chat interfaces present a fundamental lie: they pretend the LLM "remembers" your conversation. But the truth is, **LLMs are stateless machines**. You give them input, they return output. They have no memory of what came before.
 
