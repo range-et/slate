@@ -538,4 +538,19 @@ export class NetworkViz {
     // Force a complete re-render to ensure old nodes are removed
     this.render();
   }
+
+  // Resize the SVG and zoom transform when the container size changes
+  resize(width, height) {
+    if (width <= 0 || height <= 0) return;
+    this.width = width;
+    this.height = height;
+    if (!this.svg) return;
+    this.svg
+      .attr("width", this.width)
+      .attr("height", this.height);
+    this.svg.call(
+      this.zoom.transform,
+      d3.zoomIdentity.translate(this.width / 2, this.height / 2).scale(1)
+    );
+  }
 }

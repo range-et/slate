@@ -732,6 +732,104 @@ class MainManager {
         });
     }
 
+    setupContentResizers() {
+        const content = document.getElementById("content");
+        const chat = document.getElementById("chat");
+        const doc = document.getElementById("doc");
+        const network = document.getElementById("network");
+        const resizerChatDoc = document.getElementById("resizer-chat-doc");
+        const resizerDocNetwork = document.getElementById("resizer-doc-network");
+        const MIN_PANEL = 180;
+
+        function startResize(resizer, leftPanel, rightPanel) {
+            let startX = 0;
+            let startLeft = 0;
+            let startRight = 0;
+
+            function onMove(e) {
+                const dx = e.clientX - startX;
+                const contentRect = content.getBoundingClientRect();
+                const total = contentRect.width;
+                const resizerW = 8;
+                const minLeft = MIN_PANEL;
+                const minRight = MIN_PANEL;
+                let newLeft = startLeft + dx;
+                let newRight = startRight - dx;
+                if (newLeft < minLeft) {
+                    newLeft = minLeft;
+                    newRight = startLeft + startRight - minLeft;
+                } else if (newRight < minRight) {
+                    newRight = minRight;
+                    newLeft = startLeft + startRight - minRight;
+                }
+                leftPanel.style.flex = `0 0 ${newLeft}px`;
+                rightPanel.style.flex = `0 0 ${newRight}px`;
+                startX = e.clientX;
+                startLeft = newLeft;
+                startRight = newRight;
+            }
+
+            function onUp() {
+                document.removeEventListener("mousemove", onMove);
+                document.removeEventListener("mouseup", onUp);
+                document.body.style.cursor = "";
+                document.body.style.userSelect = "";
+            }
+
+            resizer.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                startX = e.clientX;
+                startLeft = leftPanel.getBoundingClientRect().width;
+                startRight = rightPanel.getBoundingClientRect().width;
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+                document.body.style.cursor = "col-resize";
+                document.body.style.userSelect = "none";
+            });
+        }
+
+        startResize(resizerChatDoc, chat, doc);
+        startResize(resizerDocNetwork, doc, network);
+    }
+
+    setupNetworkResizeObserver() {
+        const container = this.network;
+        if (!container || !this.viz) return;
+        const ro = new ResizeObserver(() => {
+            const w = container.clientWidth;
+            const h = container.clientHeight;
+            if (w > 0 && h > 0) this.viz.resize(w, h);
+        });
+        ro.observe(container);
+    }
+
+    setupMobileTabs() {
+        const tabs = document.getElementById("bottom-tabs");
+        if (!tabs) return;
+        const panels = { chat: document.getElementById("chat"), doc: document.getElementById("doc"), network: document.getElementById("network") };
+        const tabButtons = tabs.querySelectorAll(".mobile-tab");
+
+        function showPanel(panelId) {
+            tabButtons.forEach((btn) => {
+                const id = btn.getAttribute("data-panel");
+                const isActive = id === panelId;
+                btn.classList.toggle("active", isActive);
+                btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+                if (panels[id]) {
+                    panels[id].classList.toggle("mobile-active", isActive);
+                }
+            });
+        }
+
+        tabButtons.forEach((btn) => {
+            btn.addEventListener("click", () => showPanel(btn.getAttribute("data-panel")));
+        });
+
+        if (window.matchMedia("(max-width: 768px)").matches) {
+            showPanel("chat");
+        }
+    }
+
     async init() {
         // Create a new project (root node)
         const projectName = generateRandomName();
@@ -795,6 +893,21 @@ class MainManager {
         this.setupDocTitleSanitization();
         // set default chat message
         this.chatManager.setDefaultMessage();
+        // resizable content panels
+        this.setupContentResizers();
+        this.setupNetworkResizeObserver();
+        this.setupMobileTabs();
+
+        window.addEventListener("resize", () => {
+            if (window.matchMedia("(max-width: 768px)").matches) {
+                const active = document.querySelector("#content .panel.mobile-active");
+                if (!active) {
+                    document.getElementById("chat").classList.add("mobile-active");
+                    document.querySelector('.mobile-tab[data-panel="chat"]').classList.add("active");
+                    document.querySelector('.mobile-tab[data-panel="chat"]').setAttribute("aria-pressed", "true");
+                }
+            }
+        });
     }
 }
 

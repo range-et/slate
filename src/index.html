@@ -30,7 +30,7 @@
 
     <div id="container">
         <div id="topbar">
-            <h3 style="font-family: 'couriers new', monospace;">slate</h3> 
+            <h3 class="app-title">Slate</h3> 
                 <h4>| ADD / REMOVE DOC</h4>
             <button class="success_btn" id="add_doc">+</button>
             <button class="alert_btn" id="remove_doc">—</button>
@@ -47,49 +47,57 @@
         </div>
         <div id="content">
             <!-- CHAT SECTION -->
-            <div id="chat">
-                <div class="chat_title_heading">
-                    <h4>CARD :</h4>
+            <div id="chat" class="panel">
+                <div class="panel-header chat_title_heading">
+                    <h4>Card</h4>
                     <input type="text" id="card_title_input" placeholder="enter card title..." maxlength="100">
                 </div>
-                
-                <h4>PROMPT</h4>
-                <div class="response_container">
-                    <div id="image-preview-container"></div>
-                    <div id="chat-prompt"></div>
-                    <div class="response_control_panel">
-                        <button class="info_btn" id="attach_image">ATTACH IMAGE</button>
-                        <button class="info_btn" id="send_prompt">SEND</button>
-                        <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
+                <div class="panel-body">
+                    <h4>Prompt</h4>
+                    <div class="response_container">
+                        <div id="image-preview-container"></div>
+                        <div id="chat-prompt"></div>
+                        <div class="response_control_panel">
+                            <button class="info_btn" id="attach_image">ATTACH IMAGE</button>
+                            <button class="info_btn" id="send_prompt">SEND</button>
+                            <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
+                        </div>
                     </div>
-                    
+                    <h4>Chat</h4>
+                    <div class="card_container" id="chat-content"></div>
                 </div>
-
-                <h4>CHAT</h4>
-                <div class="card_container" id="chat-content"></div>
-                
             </div>
+            <div class="content-resizer" id="resizer-chat-doc" aria-label="Resize chat and document"></div>
             <!-- DOC SECTION -->
-            <div id="doc">
-                <div class="doc_heading">
-                    <h4>DOC :</h4>
+            <div id="doc" class="panel">
+                <div class="panel-header doc_heading">
+                    <h4>Doc</h4>
                     <input type="text" id="doc_title_input" placeholder="untitled" maxlength="100">
                     <button class="info_btn" id="summary_btn">SUMMARY</button>
                 </div>
-                
-                <div class="card_container" id="doc-content" style="flex: 1 1 0;">
-                    
+                <div class="panel-body">
+                    <div class="card_container" id="doc-content" style="flex: 1 1 0;"></div>
                 </div>
             </div>
+            <div class="content-resizer" id="resizer-doc-network" aria-label="Resize document and network"></div>
             <!-- NETWORK SECTION -->
-            <div id="network">
-                <div class="network_heading">
-                    <h4>PROJECT :</h4>
+            <div id="network" class="panel">
+                <div class="panel-header network_heading">
+                    <h4>Project</h4>
                     <input type="text" id="project_title_input" placeholder="untitled project" maxlength="100">
                     <button class="info_btn" id="resetZoom">RESET ZOOM</button>
                 </div>
+                <!-- SVG appended here by NetworkViz -->
             </div>
         </div>
+        <nav class="bottom-tabs" id="bottom-tabs" aria-label="Switch section">
+            <button type="button" class="mobile-tab active" data-panel="chat" aria-pressed="true">Chat</button>
+            <button type="button" class="mobile-tab" data-panel="doc" aria-pressed="false">Doc</button>
+            <button type="button" class="mobile-tab" data-panel="network" aria-pressed="false">Network</button>
+        </nav>
+        <footer class="status-bar" id="status-bar">
+            <span class="status-bar-item" id="status-bar-project">Slate</span>
+        </footer>
     </div>  
 
     <script type="module" src="main_script.js"></script>
