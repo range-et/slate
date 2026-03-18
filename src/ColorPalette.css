@@ -1,13 +1,10 @@
 /*
- * Source of truth: design-tokens/build/monad.css
- * Bundled as a git submodule — range-et/default_colors.
+ * Monad System tokens are loaded via <link href="/monad.css"> in index.html.
+ * monad.css is served from design-tokens/build/ (publicDir in vite.config.js).
  *
- * To update colors from upstream:
- *   git submodule update --remote design-tokens
- * To regenerate build artifacts after editing colors.json:
- *   cd design-tokens && python src/compile_color.py --json_path colors.json --output_path build/
+ * Source: github.com/range-et/default_colors (git submodule at design-tokens/)
+ * To pull latest: git submodule update --remote design-tokens
  */
-@import '../design-tokens/build/monad.css';
 
 /* Backward-compatibility aliases: old names → Strata tokens */
 :root {
