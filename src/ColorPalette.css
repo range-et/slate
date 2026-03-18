@@ -1,17 +1,28 @@
+/*
+ * Source of truth: design-tokens/build/monad.css
+ * Bundled as a git submodule — range-et/default_colors.
+ *
+ * To update colors from upstream:
+ *   git submodule update --remote design-tokens
+ * To regenerate build artifacts after editing colors.json:
+ *   cd design-tokens && python src/compile_color.py --json_path colors.json --output_path build/
+ */
+@import '../design-tokens/build/monad.css';
 
+/* Backward-compatibility aliases: old names → Strata tokens */
 :root {
-    --background: #121212;
-    --primary-text: #E0E0E0;
-    --secondary-text: #B0B0B0;
-    --information-1: #00BCD4; 
-    --information-2: #03A9F4;
-    --information-3: #8BC34A;
-    --warning: #FFC107;
-    --alert: #F44336;
-    --highlight: #FFEB3B;
-    --disabled: #757575;
-    --start: #4CAF50;
-    --finish: #9C27B0;
-    --foot: #FFEB3B;
-    --hand: #03A9F4;
+  --background:     var(--strata-bg);
+  --primary-text:   var(--strata-text-primary);
+  --secondary-text: var(--strata-text-secondary);
+  --information-1:  var(--strata-info);
+  --information-2:  var(--strata-interactive);
+  --information-3:  var(--strata-success);
+  --warning:        var(--strata-warning);
+  --alert:          var(--strata-error);
+  --highlight:      var(--strata-highlight);
+  --disabled:       var(--strata-disabled);
+  --start:          var(--strata-move-start);
+  --finish:         var(--strata-move-finish);
+  --foot:           var(--strata-move-foot);
+  --hand:           var(--strata-move-hand);
 }

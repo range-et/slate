@@ -109,7 +109,7 @@ class MainManager {
         const renderedSummary = marked.parse(this.currentDoc.summary);
         summaryContainer.innerHTML = `
             <h4 style="margin-bottom: 15px;">Summary of "${this.currentDoc.title}"</h4>
-            <div class="markdown-body" style="max-height: 400px; overflow-y: auto; padding: 10px; background: var(--background); border: 1px solid var(--information-2); border-radius: 4px;">
+            <div class="markdown-body" style="max-height: 400px; overflow-y: auto; padding: 10px; background: var(--strata-layer-01); border: 1px solid var(--strata-interactive);">
                 ${renderedSummary}
             </div>
         `;
@@ -354,13 +354,8 @@ class MainManager {
                         
                         if (cardElement) {
                             cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            // Brief highlight animation
-                            cardElement.style.transition = 'background-color 0.3s';
-                            const originalBg = cardElement.style.backgroundColor;
-                            cardElement.style.backgroundColor = 'rgba(0, 188, 212, 0.2)';
-                            setTimeout(() => {
-                                cardElement.style.backgroundColor = originalBg;
-                            }, 1000);
+                            cardElement.classList.add('card--flash');
+                            setTimeout(() => cardElement.classList.remove('card--flash'), 500);
                         }
                     }, 100);
                     
@@ -650,13 +645,8 @@ class MainManager {
                     
                     if (cardElement) {
                         cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        // Brief highlight animation
-                        cardElement.style.transition = 'background-color 0.3s';
-                        const originalBg = cardElement.style.backgroundColor;
-                        cardElement.style.backgroundColor = 'rgba(0, 188, 212, 0.2)';
-                        setTimeout(() => {
-                            cardElement.style.backgroundColor = originalBg;
-                        }, 1000);
+                        cardElement.classList.add('card--flash');
+                        setTimeout(() => cardElement.classList.remove('card--flash'), 500);
                     }
                 }, 100);
                 

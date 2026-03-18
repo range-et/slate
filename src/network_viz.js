@@ -38,10 +38,10 @@ export class NetworkViz {
         cursor: grabbing;
       }
       .node-circle {
-        stroke: #fff;
+        stroke: var(--strata-bg);
         stroke-width: 2px;
         cursor: pointer;
-        transition: opacity 0.3s ease, stroke-width 0.2s ease;
+        transition: opacity var(--threshold-fast), stroke-width var(--threshold-fast);
       }
       .node-circle:hover {
         stroke-width: 3px;
@@ -56,10 +56,11 @@ export class NetworkViz {
       .node-label {
         pointer-events: none;
         user-select: none;
-        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+        font-family: var(--font-mono);
+        fill: var(--strata-text-primary);
         text-anchor: middle;
         dominant-baseline: middle;
-        transition: opacity 0.3s ease;
+        transition: opacity var(--threshold-fast);
       }
       .node-label.dimmed {
         opacity: 0.15;
@@ -68,10 +69,8 @@ export class NetworkViz {
         opacity: 1;
       }
       .node-label-bg {
-        fill: rgba(0, 0, 0, 0.75);
-        rx: 4px;
-        ry: 4px;
-        transition: opacity 0.3s ease;
+        fill: var(--strata-overlay);
+        transition: opacity var(--threshold-fast);
       }
       .node-label-bg.dimmed {
         opacity: 0.15;
@@ -80,16 +79,16 @@ export class NetworkViz {
         opacity: 1;
       }
       .link {
-        stroke-linecap: round;
-        transition: opacity 0.3s ease;
+        stroke-linecap: square;
+        transition: opacity var(--threshold-fast);
         cursor: pointer;
       }
       .link--hierarchy {
-        stroke: #03A9F4;  /* --information-2 */
+        stroke: var(--strata-interactive);
         stroke-opacity: 0.6;
       }
       .link--reference {
-        stroke: #F44336;  /* --alert (red for references) */
+        stroke: var(--strata-error);
         stroke-opacity: 0.4;
         stroke-dasharray: 4 2;
       }
@@ -213,33 +212,41 @@ export class NetworkViz {
     // If no nodes, return early
     if (this.data.nodes.length === 0) return;
 
+    // Read Strata colors from CSS custom properties at render time
+    const cs = getComputedStyle(document.documentElement);
+    const strataColors = {
+      info:        cs.getPropertyValue('--strata-info').trim(),
+      interactive: cs.getPropertyValue('--strata-interactive').trim(),
+      success:     cs.getPropertyValue('--strata-success').trim(),
+      disabled:    cs.getPropertyValue('--strata-disabled').trim(),
+    };
+
     // Prepare nodes with visual properties based on type
-    // Using color palette: information-1, information-2, information-3 for hierarchy
     const nodes = this.data.nodes.map(d => {
       let radius, color, fontSize, fontWeight;
       
       switch(d.type) {
         case 'project':
           radius = 20;
-          color = '#00BCD4';  // --information-1 (cyan)
+          color = strataColors.info;
           fontSize = '18px';
           fontWeight = '700';
           break;
         case 'doc':
           radius = 14;
-          color = '#03A9F4';  // --information-2 (light blue)
+          color = strataColors.interactive;
           fontSize = '15px';
           fontWeight = '600';
           break;
         case 'card':
           radius = 9;
-          color = '#8BC34A';  // --information-3 (green)
+          color = strataColors.success;
           fontSize = '13px';
           fontWeight = '400';
           break;
         default:
           radius = 10;
-          color = '#757575';  // --disabled (gray)
+          color = strataColors.disabled;
           fontSize = '12px';
           fontWeight = '400';
       }
@@ -342,13 +349,12 @@ export class NetworkViz {
       .attr("class", "node-label-bg")
       .attr("opacity", 0);
 
-    // Add text labels
+    // Add text labels (fill comes from .node-label CSS class)
     const text = node.append("text")
       .attr("class", "node-label")
       .attr("dy", d => d.radius + 20)
       .attr("font-size", d => d.fontSize)
       .attr("font-weight", d => d.fontWeight)
-      .attr("fill", "#E0E0E0")
       .attr("opacity", 0)
       .text(d => d.name || d.id);
 

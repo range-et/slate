@@ -100,7 +100,7 @@ class Modal {
             const container = document.createElement("div");
             container.innerHTML = `
                 <p style="margin-bottom: 12px;">${message}</p>
-                <select class="modal-select" style="width: 100%; padding: 8px; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); border-radius: 4px;">
+                <select class="modal-select" style="width: 100%; padding: 8px; font-size: small; background: var(--strata-layer-01); color: var(--strata-text-primary); border: 1px solid var(--strata-interactive);">
                     ${options.map((opt, index) => `<option value="${index}">${opt}</option>`).join('')}
                 </select>
             `;

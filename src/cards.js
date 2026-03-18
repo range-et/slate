@@ -257,13 +257,8 @@ class Card {
                     
                     if (cardElement) {
                         cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        // Brief highlight animation
-                        cardElement.style.transition = 'background-color 0.3s';
-                        const originalBg = cardElement.style.backgroundColor;
-                        cardElement.style.backgroundColor = 'rgba(0, 188, 212, 0.2)';
-                        setTimeout(() => {
-                            cardElement.style.backgroundColor = originalBg;
-                        }, 1000);
+                        cardElement.classList.add('card--flash');
+                        setTimeout(() => cardElement.classList.remove('card--flash'), 500);
                     }
                 }, 100);
                 

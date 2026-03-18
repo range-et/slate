@@ -42,33 +42,28 @@ const customTheme = EditorView.theme({
         opacity: "0.3"
     },
     ".cm-tooltip-autocomplete": {
-        backgroundColor: "var(--background)",
-        border: "1px solid var(--information-2)",
-        borderRadius: "4px",
-        boxShadow: "0 4px 8px rgba(0,0,0,0.3)",
+        backgroundColor: "var(--strata-layer-01)",
+        border: "1px solid var(--strata-interactive)",
         "& ul": {
-            fontFamily: "inherit",
+            fontFamily: "var(--font-sans)",
             maxHeight: "300px",
             overflowY: "auto"
         },
         "& li": {
-            color: "var(--primary-text)",
+            color: "var(--strata-text-primary)",
             padding: "6px 10px",
             cursor: "pointer",
-            borderRadius: "2px"
         },
         "& li[aria-selected]": {
-            backgroundColor: "#03A9F4",  // information-2 (light blue)
-            color: "#1A1A1A"  // Dark background for contrast
+            backgroundColor: "var(--strata-interactive)",
+            color: "var(--strata-bg)"
         }
     },
-    // Info panel that shows additional details
     ".cm-tooltip.cm-tooltip-autocomplete.cm-completionInfo": {
-        backgroundColor: "var(--background)",
-        border: "1px solid var(--information-2)",
-        color: "var(--primary-text)",
+        backgroundColor: "var(--strata-layer-01)",
+        border: "1px solid var(--strata-interactive)",
+        color: "var(--strata-text-primary)",
         padding: "8px 12px",
-        boxShadow: "0 4px 8px rgba(0,0,0,0.3)"
     },
     ".cm-completionInfo": {
         backgroundColor: "var(--background)",
@@ -99,8 +94,9 @@ const customTheme = EditorView.theme({
         backgroundColor: "transparent !important"
     },
     ".cm-reference": {
-        color: "#00BCD4",
-        fontWeight: "500"
+        color: "var(--strata-info)",
+        fontWeight: "500",
+        fontFamily: "var(--font-mono)"
     }
 });
 
