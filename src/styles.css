@@ -13,8 +13,8 @@
   --leading-relaxed: 1.6;
   /* Chrome — Strata layer tokens */
   --title-bar-bg:    var(--strata-layer-01);
-  --panel-header-bg: var(--strata-bg);
-  --border-subtle:   color-mix(in srgb, var(--strata-interactive) 18%, transparent);
+  --panel-header-bg: var(--strata-layer-01);
+  --border-subtle:   var(--strata-border-subtle);
   --resizer-width: 4px;
 }
 

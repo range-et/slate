@@ -1,12 +1,10 @@
-
 /*
- * ColorPalette.css — legacy variable aliases.
+ * Slate palette bridge (legacy aliases → Monad System tokens).
  *
- * `index.html` loads `monad.css` which defines the canonical `--strata-*` tokens
- * and the light/dark theme switch ([data-strata="light"]).
- *
- * This file only bridges the old slate variable names to the Monad System
- * tokens, so the theme toggle updates correctly across the whole UI.
+ * Important: This file is intentionally NOT named ColorPalette.css because the
+ * Monad System build folder also contains a ColorPalette.css, and Vite's
+ * `publicDir` copies those files into `dist/` which would overwrite Slate's
+ * bridge and break light mode.
  */
 
 :root {
@@ -28,3 +26,4 @@
   --foot: var(--strata-move-foot);
   --hand: var(--strata-move-hand);
 }
+

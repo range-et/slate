@@ -1,3 +1,3 @@
 [submodule "design-tokens"]
 	path = design-tokens
-	url = https://github.com/range-et/default_colors.git
+	url = git@github.com:range-et/monad_system.git
