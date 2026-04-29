@@ -11,16 +11,19 @@
  * sits well next to the editor. The .slate-host-vscode class is set by the
  * state-bridge during boot, before any UI paints. */
 html.slate-host-vscode {
-  font-size: 12px;
+  font-size: 11px;
 }
 html.slate-host-vscode body {
-  font-size: 12px;
+  font-size: 11px;
 }
 html.slate-host-vscode button {
-  font-size: 11px;
-  padding: 3px 8px;
+  font-size: 10px;
+  padding: 2px 6px;
 }
 html.slate-host-vscode h4 {
+  font-size: 10px;
+}
+html.slate-host-vscode h3 {
   font-size: 11px;
 }
 html.slate-host-vscode .info_btn,
@@ -33,16 +36,52 @@ html.slate-host-vscode button:hover {
   border-color: var(--strata-text-secondary, currentColor);
 }
 html.slate-host-vscode #content .panel .panel-header {
-  padding: 4px 8px;
-  min-height: 28px;
+  padding: 3px 8px;
+  min-height: 24px;
   gap: 6px;
 }
 html.slate-host-vscode #content .panel .panel-body {
-  padding: 6px 8px;
+  padding: 4px 8px;
 }
 html.slate-host-vscode #topbar {
-  padding: 3px 8px;
+  padding: 2px 8px;
   gap: 4px;
+  min-height: 26px;
+}
+/* Cards run dense in the webview — the user is scanning a graph, not reading prose. */
+html.slate-host-vscode .card {
+  padding: 6px 8px;
+  margin: 4px 0;
+}
+html.slate-host-vscode .card_details h4 {
+  font-size: 11px;
+}
+html.slate-host-vscode .card_details .card_id {
+  font-size: 9px;
+}
+html.slate-host-vscode .card-prompt-section {
+  padding: 4px 8px;
+  margin-bottom: 6px;
+}
+html.slate-host-vscode .card-prompt-label {
+  margin-bottom: 2px;
+  font-size: 9px;
+}
+html.slate-host-vscode .card-prompt-text {
+  font-size: 11px;
+  line-height: 1.45;
+}
+html.slate-host-vscode .card-content {
+  font-size: 11px;
+}
+html.slate-host-vscode .card-code-block {
+  font-size: 11px;
+  padding: 6px 8px;
+}
+/* Card move button — cap its inflated 16px size in dense mode. */
+html.slate-host-vscode .card-move-btn {
+  font-size: 11px;
+  padding: 2px 6px;
 }
 
 * {
@@ -691,42 +730,43 @@ input[type="text"]::placeholder {
 }
 
 .card_header {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 0;
+  padding: 0;
+  margin-bottom: 6px;
 }
 
 .card_details {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;   /* title stacks above the uuid */
+  gap: 1px;
 }
 
 .card_details h4 {
-  flex-shrink: 0;
+  margin: 0;
+  line-height: 1.2;
 }
 
 .card_details .card_id {
-  flex: 1 1 auto;
-  min-width: 0;
+  margin: 0;
+  font-size: 10px;
+  opacity: 0.45;
+  font-family: var(--font-mono);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--type-xs, 11px);
-  opacity: 0.55;
-  font-family: var(--font-mono);
+  line-height: 1.2;
 }
 
 .card_actions {
   display: flex;
   flex-shrink: 0;
-  gap: var(--space-1);
+  gap: 4px;
 }
 
 .network_heading {

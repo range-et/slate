@@ -53,7 +53,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./ && node -e \"require('fs').copyFileSync('src/state-bridge.js','out/state-bridge.js')\"",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "sync-dist": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.cpSync('../dist','dist',{recursive:true})\""
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

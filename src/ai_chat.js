@@ -1,6 +1,6 @@
 import Card, { CARD_TYPE_CODE, CARD_TYPE_MARKDOWN, stripPythonFences, escapeHtml } from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
-import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor } from "./codemirror_setup.js";
+import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor, setupCodeMirrorEditor } from "./codemirror_setup.js";
 import { marked } from 'marked';
 
 /**
@@ -39,6 +39,12 @@ export class ChatManager {
 
         // Code-card mode flag — set by the CODE toggle, consumed by askAI/addToDoc
         this.codeMode = false;
+
+        // Response editor: a live CodeMirror instance over the AI response, so
+        // the user can tweak it before committing to the doc. Null until the
+        // first response arrives or after clearAll/setDefaultMessage.
+        this.responseEditor = null;
+        this.responseCardType = null;  // tracks whether the editor is for a code or markdown response
         
         // Auto-sanitize title on blur (when user leaves the field) and ensure uniqueness
         this.cardTitleInput.addEventListener('blur', () => {
@@ -53,6 +59,54 @@ export class ChatManager {
                 this.cardTitleInput.value = sanitized;
             }
         });
+    }
+
+    /**
+     * Tear down the live response editor (if any) and clear chatContent.
+     * Safe to call when no editor is mounted.
+     */
+    disposeResponseEditor() {
+        if (this.responseEditor) {
+            try { this.responseEditor.destroy(); } catch (e) { /* already gone */ }
+            this.responseEditor = null;
+        }
+        this.responseCardType = null;
+        this.chatContent.innerHTML = '';
+    }
+
+    /**
+     * Mount the response in an editable CodeMirror surface so the user can
+     * tweak it before clicking ADD TO DOC. `isCode` flips the language mode.
+     */
+    renderResponseEditor(text, { isCode }) {
+        this.disposeResponseEditor();
+        const wrap = document.createElement('div');
+        wrap.className = 'response-editor-wrap';
+        wrap.style.height = '100%';
+        wrap.style.display = 'flex';
+        wrap.style.flexDirection = 'column';
+        this.chatContent.appendChild(wrap);
+
+        // Reuse the prompt editor factory — it already supplies the slate
+        // theme, line wrapping, and (harmlessly) @-reference autocomplete.
+        this.responseEditor = setupCodeMirrorEditor(
+            wrap,
+            () => this.currentDoc,
+            () => window.mainManager?.currentProject,
+            { language: isCode ? 'python' : 'plain' }
+        );
+        // Seed the editor with the response text.
+        setEditorText(this.responseEditor, text || '');
+        this.responseCardType = isCode ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
+    }
+
+    /**
+     * Read the current text out of the response editor. Returns '' when no
+     * editor is mounted (e.g. while the placeholder is showing).
+     */
+    getResponseText() {
+        if (!this.responseEditor) return '';
+        return getEditorText(this.responseEditor);
     }
 
     /**
@@ -78,11 +132,12 @@ export class ChatManager {
      * Set a helpful default message in the chat window
      */
     setDefaultMessage() {
+        this.disposeResponseEditor();
         this.chatContent.innerHTML = `
             <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.7; text-align: center; padding: var(--space-2);">
                 <p style="line-height: 1.6;">
                     Write a prompt above and hit <strong>SEND</strong>.<br>
-                    The response shows here; <strong>ADD TO DOC</strong> commits it as a card.
+                    The response is editable here; <strong>ADD TO DOC</strong> commits it as a card.
                 </p>
             </div>
         `;
@@ -387,21 +442,12 @@ export class ChatManager {
         const codeSystemPrompt = `Output only valid Python source for one symbol named \`${cardTitle}\`. No prose, no markdown fences, no triple backticks, no commentary. The output will be saved as the body of \`${cardTitle}\` in \`${docTitle}.py\`. Reference any \`# from <doc>: <name>\` blocks above as if they were already importable.`;
         const generateOptions = codeMode ? { systemPrompt: codeSystemPrompt } : {};
 
+        this.disposeResponseEditor();
         this.chatContent.innerHTML = '<div class="loading-text">Waiting for response...</div>';
-        delete this.chatContent.dataset.cardType;
-        delete this.chatContent.dataset.codeSource;
 
         agent.generateResponse(fullPrompt, this.attachedImages, generateOptions).then((res) => {
-            if (codeMode) {
-                // Strip any markdown fences the model leaked despite instructions, then render as code.
-                const stripped = stripPythonFences(res).trim();
-                this.chatContent.innerHTML = `<pre class="card-code-block language-python"><code>${escapeHtml(stripped)}</code></pre>`;
-                this.chatContent.dataset.cardType = 'code';
-                this.chatContent.dataset.codeSource = stripped;
-            } else {
-                const renderedResponse = marked.parse(res);
-                this.chatContent.innerHTML = `<div class="markdown-body">${renderedResponse}</div>`;
-            }
+            const text = codeMode ? stripPythonFences(res).trim() : (res || '');
+            this.renderResponseEditor(text, { isCode: codeMode });
         }).catch(async (err) => {
             console.error("Error generating response:", err);
 
@@ -419,6 +465,7 @@ export class ChatManager {
                     "  OLLAMA_ORIGINS='*' ollama serve\n\n" +
                     "and that the model in the API KEY modal matches an installed tag (e.g. `qwen2.5-coder:7b`)."
                 );
+                this.disposeResponseEditor();
                 this.chatContent.innerHTML = '<p style="color: var(--alert);">Local model unreachable. Start Ollama and try again.</p>';
                 return;
             }
@@ -449,14 +496,15 @@ export class ChatManager {
                         }
                     ]
                 );
+                this.disposeResponseEditor();
                 this.chatContent.innerHTML = '<p style="color: var(--alert);">Please set your API key to continue.</p>';
             } else if (err.message?.includes("rate limit") || err.status === 429) {
-                // Rate limit error
                 await this.modal.alert("Rate limit exceeded. Please wait a moment and try again.");
+                this.disposeResponseEditor();
                 this.chatContent.innerHTML = '<p style="color: var(--alert);">Rate limit exceeded. Please try again later.</p>';
             } else {
-                // Other errors
                 await this.modal.alert(`Failed to generate response: ${err.message || "Unknown error"}. Please check your API key and try again.`);
+                this.disposeResponseEditor();
                 this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response. Please try again.</p>';
             }
         });
@@ -533,84 +581,64 @@ export class ChatManager {
      */
     async addToDoc() {
         try {
-            // Get content and title
-            const contentText = this.chatContent.innerText.trim();
+            // The response editor is the source of truth — what's in it now is
+            // what the user wants in the doc, including any tweaks they made
+            // after the AI responded.
+            const responseText = this.getResponseText();
             let cardTitle = this.cardTitleInput.value.trim();
-                
-                // Validate content is not empty, loading, or the default welcome message
-                if (contentText === "" || 
-                    contentText === "Waiting for response..." || 
-                    contentText.includes("Welcome to Slate") ||
-                    this.chatContent.querySelector('.loading-text')) {
-                    throw new Error("Please generate a response first");
-                }
-                
-                // Validate title is not empty
-                if (cardTitle === "") {
-                    throw new Error("Card title is required");
-                }
-                
-                // Sanitize the title
-                cardTitle = sanitizeTitle(cardTitle);
-                
-                // Ensure title is unique (append _1, _2, etc. if needed)
-                if (this.currentDoc) {
-                    cardTitle = this.currentDoc.getUniqueCardTitle(cardTitle);
-                }
-                
-                // Parse @references from the prompt to establish links
-                const promptText = getEditorText(this.promptEditor);
-                const referencedTitles = this.parseReferences(promptText);
-                console.log("Card will link to:", referencedTitles);
-                
-                // The chat preview holds the source for code cards or rendered markdown for prose cards.
-                // Code cards persist plain text (the Python source after fence-stripping), prose cards keep HTML.
-                const isCodeCard = this.chatContent.dataset.cardType === CARD_TYPE_CODE;
-                const cardType = isCodeCard ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
-                let cardContent;
-                if (isCodeCard) {
-                    cardContent = this.chatContent.dataset.codeSource || this.chatContent.innerText.trim();
-                } else {
-                    const markdownBodyDiv = this.chatContent.querySelector('.markdown-body');
-                    cardContent = markdownBodyDiv ? markdownBodyDiv.innerHTML : this.chatContent.innerHTML;
-                }
 
-                // Create and add the card with the prompt and images
-                const card = new Card(
-                    cardTitle,
-                    cardContent,
-                    this.modal,
-                    this.updateNetworkCallback,
-                    promptText,  // Pass the original prompt
-                    [...this.attachedImages],  // Pass a copy of attached images
-                    cardType
-                );
-                card.init();
-                
-                // Set the links array with referenced card titles
-                card.links = referencedTitles;
-                
-                // Add card to the current document instance
-                if (this.currentDoc) {
-                    this.currentDoc.addCard(card);
-                    console.log("Card added to document:", card.id, "| Doc now has", this.currentDoc.getCardCount(), "cards");
-                }
-                
-                // Add card to the DOM
-                this.docContent.appendChild(card.innerHTML);
-                
-                // Update the network visualization
-                if (this.updateNetworkCallback) {
-                    this.updateNetworkCallback();
-                }
-                
-                // Trigger async summary generation for the doc
-                this.generateDocSummary();
-                
-                // Clear everything (including prompt) after adding card
-                this.clearAll();
+            if (!this.responseEditor || !responseText.trim()) {
+                throw new Error("Please generate a response first");
             }
-        catch (err) {
+            if (cardTitle === "") {
+                throw new Error("Card title is required");
+            }
+
+            cardTitle = sanitizeTitle(cardTitle);
+            if (this.currentDoc) {
+                cardTitle = this.currentDoc.getUniqueCardTitle(cardTitle);
+            }
+
+            const promptText = getEditorText(this.promptEditor);
+            const referencedTitles = this.parseReferences(promptText);
+            console.log("Card will link to:", referencedTitles);
+
+            // Code cards store raw Python source (rendered as a code block on
+            // the card). Markdown cards store rendered HTML (Card.create()
+            // doesn't double-render so we render here).
+            const isCodeCard = this.responseCardType === CARD_TYPE_CODE;
+            const cardType = isCodeCard ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
+            const cardContent = isCodeCard ? responseText : marked.parse(responseText);
+
+            const card = new Card(
+                cardTitle,
+                cardContent,
+                this.modal,
+                this.updateNetworkCallback,
+                promptText,
+                [...this.attachedImages],
+                cardType
+            );
+            card.init();
+            card.links = referencedTitles;
+
+            if (this.currentDoc) {
+                this.currentDoc.addCard(card);
+                console.log("Card added to document:", card.id, "| Doc now has", this.currentDoc.getCardCount(), "cards");
+            }
+
+            this.docContent.appendChild(card.innerHTML);
+
+            if (this.updateNetworkCallback) {
+                this.updateNetworkCallback();
+            }
+
+            // Trigger async summary generation for the doc
+            this.generateDocSummary();
+
+            // Clear everything (including prompt) after adding card
+            this.clearAll();
+        } catch (err) {
             console.error("Didn't add card to document:", err);
             await this.modal.alert("Cannot add: " + err.message);
         }

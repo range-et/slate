@@ -19,20 +19,22 @@ From the slate repo root:
 
 ```bash
 npm install
-npm run build                       # builds dist/
-cp -R dist vscode-extension/dist    # copy slate UI bundle into the extension
+npm run build              # builds dist/
 
 cd vscode-extension
 npm install
-npm run compile
+npm run sync-dist          # wipes & syncs ../dist into ./dist (avoids nesting on re-run)
+npm run compile            # compiles extension TS
 ```
 
-Then open `vscode-extension/` in VS Code and press **F5**. An Extension Development Host launches; in it, run **Slate: Open Panel**.
+Then press **F5** with `vscode-extension/` open in VS Code. An Extension Development Host launches; double-click any `*.slate.json` in your workspace, or use the Slate icon in the activity bar.
 
-A symlink works too instead of copy:
+**Iteration loop**: after editing slate source, run `npm run build` (slate root) + `npm run sync-dist` (extension), then **Cmd+R** the dev host webview.
+
+A symlink also works instead of `sync-dist`:
 
 ```bash
-ln -s ../dist vscode-extension/dist
+ln -s ../dist vscode-extension/dist   # one-time, then `npm run build` is enough
 ```
 
 ## Smoke flow
