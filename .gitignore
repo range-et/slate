@@ -132,3 +132,7 @@ vscode-extension/dist/
 !vscode-extension/.vscode/
 !vscode-extension/.vscode/launch.json
 !vscode-extension/.vscode/tasks.json
+
+# Backup created by scripts/package-extension.js while stubbing keys
+.config.js.backup
+

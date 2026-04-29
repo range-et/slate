@@ -10,7 +10,8 @@
     "start": "vite",
     "dev": "vite --open",
     "preview": "vite preview",
-    "serve": "vite preview --host"
+    "serve": "vite preview --host",
+    "package-extension": "node scripts/package-extension.js"
   },
   "keywords": [],
   "author": "Indrajeet Haldar",

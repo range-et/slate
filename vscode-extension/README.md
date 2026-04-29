@@ -31,6 +31,19 @@ Then press **F5** with `vscode-extension/` open in VS Code. An Extension Develop
 
 **Iteration loop**: after editing slate source, run `npm run build` (slate root) + `npm run sync-dist` (extension), then **Cmd+R** the dev host webview.
 
+## Permanent install (build once, install as a real extension)
+
+From the slate repo root:
+
+```bash
+npm run package-extension -- --install   # build, package, install via `code` CLI
+npm run package-extension                # build + package only; prints the install command
+```
+
+This script stubs `src/config.js` (so your local OpenAI/Gemini keys never get baked into the bundle), runs the full build + sync + `vsce package`, and restores your config — even if anything fails partway. The `.vsix` lands at `vscode-extension/slate-code-<version>.vsix`.
+
+After installing, run **Developer: Reload Window** in VS Code to pick up the new build.
+
 A symlink also works instead of `sync-dist`:
 
 ```bash
