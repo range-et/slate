@@ -11,29 +11,46 @@
  * sits well next to the editor. The .slate-host-vscode class is set by the
  * state-bridge during boot, before any UI paints. */
 html.slate-host-vscode {
-  font-size: 11px;
+  font-size: 12px;
 }
 html.slate-host-vscode body {
-  font-size: 11px;
+  font-size: 12px;
 }
 html.slate-host-vscode button {
-  font-size: 10px;
-  padding: 2px 6px;
+  font-size: 11px;
+  padding: 3px 7px;
 }
 html.slate-host-vscode h4 {
-  font-size: 10px;
-}
-html.slate-host-vscode h3 {
   font-size: 11px;
 }
+html.slate-host-vscode h3 {
+  font-size: 12px;
+}
+/* Muted at rest, accents on hover — keeps the slate identity but stops the
+ * borders from competing with VS Code's chrome.
+ * The :hover rules need higher specificity than the global `button:hover`
+ * so we re-anchor on the slate-host-vscode root. */
 html.slate-host-vscode .info_btn,
 html.slate-host-vscode .success_btn,
 html.slate-host-vscode .alert_btn,
 html.slate-host-vscode .finish_btn {
   border-color: var(--strata-border, color-mix(in srgb, currentColor 35%, transparent));
 }
-html.slate-host-vscode button:hover {
-  border-color: var(--strata-text-secondary, currentColor);
+html.slate-host-vscode .info_btn:hover {
+  border-color: var(--information-1);
+  background-color: color-mix(in srgb, var(--information-1) 10%, transparent);
+}
+html.slate-host-vscode .success_btn:hover {
+  border-color: var(--information-3);
+  background-color: color-mix(in srgb, var(--information-3) 10%, transparent);
+}
+html.slate-host-vscode .alert_btn:hover {
+  border-color: var(--alert);
+  background-color: color-mix(in srgb, var(--alert) 10%, transparent);
+}
+html.slate-host-vscode .finish_btn:hover {
+  border-color: var(--finish);
+  background-color: color-mix(in srgb, var(--finish) 10%, transparent);
 }
 html.slate-host-vscode #content .panel .panel-header {
   padding: 3px 8px;
@@ -54,33 +71,33 @@ html.slate-host-vscode .card {
   margin: 4px 0;
 }
 html.slate-host-vscode .card_details h4 {
-  font-size: 11px;
+  font-size: 12px;
 }
 html.slate-host-vscode .card_details .card_id {
-  font-size: 9px;
+  font-size: 10px;
 }
 html.slate-host-vscode .card-prompt-section {
-  padding: 4px 8px;
+  padding: 5px 8px;
   margin-bottom: 6px;
 }
 html.slate-host-vscode .card-prompt-label {
-  margin-bottom: 2px;
-  font-size: 9px;
+  margin-bottom: 3px;
+  font-size: 10px;
 }
 html.slate-host-vscode .card-prompt-text {
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
 }
 html.slate-host-vscode .card-content {
-  font-size: 11px;
+  font-size: 12px;
 }
 html.slate-host-vscode .card-code-block {
-  font-size: 11px;
+  font-size: 12px;
   padding: 6px 8px;
 }
 /* Card move button — cap its inflated 16px size in dense mode. */
 html.slate-host-vscode .card-move-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 6px;
 }
 
