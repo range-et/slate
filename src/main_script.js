@@ -888,16 +888,35 @@ class MainManager {
         this.setupNetworkResizeObserver();
         this.setupMobileTabs();
 
-        window.addEventListener("resize", () => {
-            if (window.matchMedia("(max-width: 768px)").matches) {
-                const active = document.querySelector("#content .panel.mobile-active");
-                if (!active) {
-                    document.getElementById("chat").classList.add("mobile-active");
-                    document.querySelector('.mobile-tab[data-panel="chat"]').classList.add("active");
-                    document.querySelector('.mobile-tab[data-panel="chat"]').setAttribute("aria-pressed", "true");
+        let resizeTimer = null;
+        this._resizeHandler = () => {
+            if (resizeTimer !== null) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+                resizeTimer = null;
+                if (window.matchMedia("(max-width: 768px)").matches) {
+                    const active = document.querySelector("#content .panel.mobile-active");
+                    if (!active) {
+                        document.getElementById("chat").classList.add("mobile-active");
+                        document.querySelector('.mobile-tab[data-panel="chat"]').classList.add("active");
+                        document.querySelector('.mobile-tab[data-panel="chat"]').setAttribute("aria-pressed", "true");
+                    }
                 }
-            }
-        });
+            }, 100);
+        };
+        window.addEventListener("resize", this._resizeHandler);
+    }
+
+    /**
+     * Detach global listeners and tear down children. Safe to call multiple times.
+     */
+    destroy() {
+        if (this._resizeHandler) {
+            window.removeEventListener("resize", this._resizeHandler);
+            this._resizeHandler = null;
+        }
+        if (this.chatManager && typeof this.chatManager.destroy === "function") {
+            this.chatManager.destroy();
+        }
     }
 }
 

@@ -57,7 +57,7 @@ export class ChatManager {
      */
     setDefaultMessage() {
         this.chatContent.innerHTML = `
-            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.7; text-align: center; padding: var(--global_padding);">
+            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.7; text-align: center; padding: var(--space-2);">
                 <p style="font-size: medium; line-height: 1.6;">
                     Enter a prompt below and click <strong>SEND</strong> to start a conversation.<br>
                     Your response will appear here.
@@ -208,10 +208,10 @@ export class ChatManager {
         });
         
         // Handle paste events for copy-paste images
-        document.addEventListener('paste', (e) => {
+        this._pasteHandler = (e) => {
             const items = e.clipboardData?.items;
             if (!items) return;
-            
+
             for (let i = 0; i < items.length; i++) {
                 if (items[i].type.indexOf('image') !== -1) {
                     const file = items[i].getAsFile();
@@ -221,7 +221,18 @@ export class ChatManager {
                     }
                 }
             }
-        });
+        };
+        document.addEventListener('paste', this._pasteHandler);
+    }
+
+    /**
+     * Detach global listeners. Safe to call multiple times.
+     */
+    destroy() {
+        if (this._pasteHandler) {
+            document.removeEventListener('paste', this._pasteHandler);
+            this._pasteHandler = null;
+        }
     }
 
     /**
