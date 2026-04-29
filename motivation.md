@@ -1,3 +1,7 @@
+---
+tags: [project, slate, northstar, explicit-context, human-in-the-loop]
+---
+
 # Why Slate Exists
 
 ## The Problem with Current LLM Interfaces
