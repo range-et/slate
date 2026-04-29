@@ -1,0 +1,30 @@
+{
+  "name": "slate-code",
+  "displayName": "Slate Code",
+  "description": "Architect code in slate, run it in VS Code. Hosts the slate notebook in a webview and writes compiled .py files to the workspace.",
+  "version": "0.1.0",
+  "publisher": "indrajeet-haldar",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Notebooks"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "slate.openPanel", "title": "Slate: Open Panel" },
+      { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
+      { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./ && node -e \"require('fs').copyFileSync('src/state-bridge.js','out/state-bridge.js')\"",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

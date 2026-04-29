@@ -162,7 +162,8 @@ class Doc {
                 content: card.content,
                 prompt: card.prompt || "",
                 images: card.images || [],
-                links: card.links
+                links: card.links,
+                cardType: card.cardType || 'markdown'
             })),
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
@@ -186,12 +187,13 @@ class Doc {
         if (jsonData.cards && Array.isArray(jsonData.cards)) {
             jsonData.cards.forEach(cardData => {
                 const card = new Card(
-                    cardData.title, 
-                    cardData.content, 
-                    null, 
-                    null, 
+                    cardData.title,
+                    cardData.content,
+                    null,
+                    null,
                     cardData.prompt || "",
-                    cardData.images || []
+                    cardData.images || [],
+                    cardData.cardType || 'markdown'  // backward-compat default
                 );
                 card.id = cardData.id;
                 card.links = cardData.links || [];

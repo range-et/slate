@@ -60,6 +60,7 @@
                         <div id="chat-prompt"></div>
                         <div class="response_control_panel">
                             <button class="info_btn" id="attach_image">ATTACH IMAGE</button>
+                            <button class="info_btn" id="code_toggle" aria-pressed="false" title="Toggle code-card mode for the next generation">CODE</button>
                             <button class="info_btn" id="send_prompt">SEND</button>
                             <button class="info_btn" id="add_to_doc">ADD TO DOC</button>
                         </div>
@@ -75,6 +76,7 @@
                     <h4>Doc</h4>
                     <input type="text" id="doc_title_input" placeholder="untitled" maxlength="100">
                     <button class="info_btn" id="summary_btn">SUMMARY</button>
+                    <button class="info_btn" id="compile_btn" title="Compile this doc's code cards into a .py file">COMPILE</button>
                 </div>
                 <div class="panel-body">
                     <div class="card_container" id="doc-content" style="flex: 1 1 0;"></div>

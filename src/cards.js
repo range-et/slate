@@ -10,12 +10,33 @@ marked.setOptions({
     mangle: false       // Don't escape email addresses
 });
 
+export const CARD_TYPE_MARKDOWN = 'markdown';
+export const CARD_TYPE_CODE = 'code';
+
+export function stripPythonFences(text) {
+    if (!text) return "";
+    // Match ```python ... ``` or ``` ... ``` and return inner content if present.
+    const fenced = text.match(/```(?:python|py)?\s*\n?([\s\S]*?)```/i);
+    if (fenced) return fenced[1].trimEnd();
+    return text;
+}
+
+export function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 class Card {
-    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "", images = []) {
+    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "", images = [], cardType = CARD_TYPE_MARKDOWN) {
         this.title = title;
         this.content = content;
         this.prompt = prompt; // the original prompt that created this card
         this.images = images; // array of image objects {data: base64, mimeType: string, name: string}
+        this.cardType = cardType === CARD_TYPE_CODE ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
         this.id = null; // unique identifier
         this.links = []; // array of linked card titles (extracted from prompt)
         this.parent = null; // reference to the parent doc
@@ -24,13 +45,36 @@ class Card {
         this.updateNetworkCallback = updateNetworkCallback; // callback to update network viz
     }
 
+    /**
+     * For code cards, return the raw Python source with markdown fences stripped.
+     * For markdown cards, returns null. Local models often ignore "no fences"
+     * instructions, so this strips defensively.
+     */
+    getPythonSource() {
+        if (this.cardType !== CARD_TYPE_CODE) return null;
+        // Prefer plaintext if content was stored as HTML (innerText path).
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = this.content || "";
+        const plain = tempDiv.innerText || tempDiv.textContent || this.content || "";
+        return stripPythonFences(plain).trim();
+    }
+
     create() {
         const cardElement = document.createElement("div");
         cardElement.classList.add("card");
-        
-        // Render markdown content (AI response)
-        const renderedContent = marked.parse(this.content);
-        
+        if (this.cardType === CARD_TYPE_CODE) {
+            cardElement.classList.add("card--code");
+        }
+
+        // Render the response: markdown for prose cards, syntax-highlighted Python for code cards.
+        let renderedContent;
+        if (this.cardType === CARD_TYPE_CODE) {
+            const source = this.getPythonSource() || "";
+            renderedContent = `<pre class="card-code-block language-python"><code>${escapeHtml(source)}</code></pre>`;
+        } else {
+            renderedContent = marked.parse(this.content);
+        }
+
         // Build prompt section with highlighted @references and images
         let promptHTML = '';
         if (this.prompt && this.prompt.trim() !== '') {

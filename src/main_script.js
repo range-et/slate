@@ -1,5 +1,7 @@
 import { NetworkViz } from "./network_viz.js";
-import OpenAIAgent, { GeminiAgent } from "./ai_utils.js";
+import OpenAIAgent, { GeminiAgent, LocalAgent, DEFAULT_LOCAL_BASE_URL, DEFAULT_LOCAL_MODEL } from "./ai_utils.js";
+import { compileDocToPython } from "./code_compile.js";
+import { saveCompiled, isRunningInVsCode } from "./host_bridge.js";
 import Doc from "./doc.js";
 import Project from "./project.js";
 import Modal from "./modal.js";
@@ -36,6 +38,8 @@ const add_to_doc = document.getElementById("add_to_doc");
 const card_title_input = document.getElementById("card_title_input");
 const attach_image = document.getElementById("attach_image");
 const image_preview_container = document.getElementById("image-preview-container");
+const code_toggle = document.getElementById("code_toggle");
+const compile_btn = document.getElementById("compile_btn");
 
 const buttons = {
     resetZoom: resetZoom,
@@ -58,7 +62,9 @@ const buttons = {
     chat_content: chat_content,
     card_title_input: card_title_input,
     attach_image: attach_image,
-    image_preview_container: image_preview_container
+    image_preview_container: image_preview_container,
+    code_toggle: code_toggle,
+    compile_btn: compile_btn
 };
 
 // main manager
@@ -405,11 +411,67 @@ class MainManager {
         });
     }
 
+    toggleCodeMode() {
+        if (!this.chatManager) return;
+        this.chatManager.codeMode = !this.chatManager.codeMode;
+        const btn = this.buttons.code_toggle;
+        if (btn) {
+            btn.setAttribute('aria-pressed', String(this.chatManager.codeMode));
+            btn.classList.toggle('toggle-active', this.chatManager.codeMode);
+        }
+        if (this.promptEditor && typeof this.promptEditor.setLanguage === 'function') {
+            this.promptEditor.setLanguage(this.chatManager.codeMode ? 'python' : 'plain');
+        }
+    }
+
+    setupHostMessageListener() {
+        if (typeof window === 'undefined') return;
+        // Bridge for VS Code commands (slate.compile, slate.toggleCodeCard) that
+        // postMessage into the webview. In a plain browser these never fire.
+        this._hostMessageHandler = (event) => {
+            const msg = event && event.data;
+            if (!msg || typeof msg.type !== 'string') return;
+            switch (msg.type) {
+                case 'compile-current':
+                    this.compileCurrentDoc();
+                    break;
+                case 'toggle-code':
+                    this.toggleCodeMode();
+                    break;
+            }
+        };
+        window.addEventListener('message', this._hostMessageHandler);
+    }
+
+    async compileCurrentDoc() {
+        if (!this.currentDoc) {
+            await this.modal.alert("No document to compile.");
+            return;
+        }
+        try {
+            const { filename, source, warnings } = compileDocToPython(this.currentDoc, this.currentProject);
+            const delivery = saveCompiled({ filename, source });
+            const where = delivery.delivered === 'vscode'
+                ? `Wrote ${filename} to the VS Code workspace.`
+                : `Downloaded ${filename}.`;
+            const warningTxt = warnings && warnings.length ? `\n\nWarnings:\n${warnings.join('\n')}` : '';
+            await this.modal.alert(`Compiled successfully. ${where}${warningTxt}`);
+        } catch (err) {
+            console.error('Compile failed:', err);
+            await this.modal.alert(`Compile failed:\n${err.message}`);
+        }
+    }
+
     getAgentForProvider(provider, openaiKey, geminiKey) {
         if (provider === 'gemini') {
             const agent = new GeminiAgent();
             if (geminiKey) agent.updateApiKey(geminiKey);
             return agent;
+        }
+        if (provider === 'local') {
+            const baseURL = localStorage.getItem('local_base_url') || DEFAULT_LOCAL_BASE_URL;
+            const modelName = localStorage.getItem('local_model_name') || DEFAULT_LOCAL_MODEL;
+            return new LocalAgent(baseURL, modelName);
         }
         const agent = new OpenAIAgent();
         if (openaiKey) agent.updateApiKey(openaiKey);
@@ -420,6 +482,8 @@ class MainManager {
         const currentOpenAI = localStorage.getItem('openai_api_key') || '';
         const currentGemini = localStorage.getItem('gemini_api_key') || '';
         const currentProvider = localStorage.getItem('ai_provider') || 'openai';
+        const currentLocalBaseURL = localStorage.getItem('local_base_url') || DEFAULT_LOCAL_BASE_URL;
+        const currentLocalModel = localStorage.getItem('local_model_name') || DEFAULT_LOCAL_MODEL;
         const inputContainer = document.createElement('div');
         inputContainer.innerHTML = `
             <h4 style="margin-bottom: 12px;">AI provider & API keys</h4>
@@ -427,16 +491,25 @@ class MainManager {
             <select id="ai_provider_select" style="width: 100%; padding: 8px; margin-bottom: 12px; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);">
                 <option value="openai" ${currentProvider === 'openai' ? 'selected' : ''}>OpenAI (GPT)</option>
                 <option value="gemini" ${currentProvider === 'gemini' ? 'selected' : ''}>Gemini</option>
+                <option value="local" ${currentProvider === 'local' ? 'selected' : ''}>Local (Ollama)</option>
             </select>
             <label style="display: block; margin-bottom: 4px; font-size: small;">OpenAI API key</label>
-            <input type="password" id="openai_api_key_input" placeholder="sk-..." 
-                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); margin-bottom: 12px;" 
+            <input type="password" id="openai_api_key_input" placeholder="sk-..."
+                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); margin-bottom: 12px;"
                    value="${currentOpenAI}">
             <label style="display: block; margin-bottom: 4px; font-size: small;">Gemini API key</label>
-            <input type="password" id="gemini_api_key_input" placeholder="Gemini key (Google AI Studio)..." 
-                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);" 
+            <input type="password" id="gemini_api_key_input" placeholder="Gemini key (Google AI Studio)..."
+                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); margin-bottom: 12px;"
                    value="${currentGemini}">
-            <p style="margin-top: 10px; font-size: x-small;">Keys are stored locally in your browser.</p>
+            <label style="display: block; margin-bottom: 4px; font-size: small;">Local base URL</label>
+            <input type="text" id="local_base_url_input" placeholder="http://localhost:11434/v1"
+                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); margin-bottom: 12px;"
+                   value="${currentLocalBaseURL}">
+            <label style="display: block; margin-bottom: 4px; font-size: small;">Local model name</label>
+            <input type="text" id="local_model_name_input" placeholder="qwen2.5-coder:30b"
+                   style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);"
+                   value="${currentLocalModel}">
+            <p style="margin-top: 10px; font-size: x-small;">Keys are stored locally in your browser. For local models via Ollama, run <code>OLLAMA_ORIGINS='*' ollama serve</code> so the browser can reach it.</p>
         `;
 
         const result = await this.modal.custom(inputContainer, [
@@ -451,6 +524,8 @@ class MainManager {
                 callback: () => {
                     localStorage.removeItem('openai_api_key');
                     localStorage.removeItem('gemini_api_key');
+                    localStorage.removeItem('local_base_url');
+                    localStorage.removeItem('local_model_name');
                     localStorage.setItem('ai_provider', 'openai');
                     this.ai_agent = new OpenAIAgent();
                     if (this.chatManager && this.chatManager.aiAgent) {
@@ -466,11 +541,17 @@ class MainManager {
                     const provider = document.getElementById('ai_provider_select').value;
                     const openaiKey = document.getElementById('openai_api_key_input').value.trim();
                     const geminiKey = document.getElementById('gemini_api_key_input').value.trim();
+                    const localBaseURL = document.getElementById('local_base_url_input').value.trim();
+                    const localModel = document.getElementById('local_model_name_input').value.trim();
                     localStorage.setItem('ai_provider', provider);
                     if (openaiKey) localStorage.setItem('openai_api_key', openaiKey);
                     else localStorage.removeItem('openai_api_key');
                     if (geminiKey) localStorage.setItem('gemini_api_key', geminiKey);
                     else localStorage.removeItem('gemini_api_key');
+                    if (localBaseURL) localStorage.setItem('local_base_url', localBaseURL);
+                    else localStorage.removeItem('local_base_url');
+                    if (localModel) localStorage.setItem('local_model_name', localModel);
+                    else localStorage.removeItem('local_model_name');
                     this.ai_agent = this.getAgentForProvider(provider, openaiKey, geminiKey);
                     if (this.chatManager && this.chatManager.aiAgent) {
                         this.chatManager.aiAgent = this.ai_agent;
@@ -689,6 +770,12 @@ class MainManager {
         this.buttons.remove_doc.addEventListener("click", () => this.removeDocButton());
         this.buttons.add_to_doc.addEventListener("click", () => this.chatManager.addToDoc());
         this.buttons.send_prompt.addEventListener("click", () => this.chatManager.askAI());
+        if (this.buttons.code_toggle) {
+            this.buttons.code_toggle.addEventListener("click", () => this.toggleCodeMode());
+        }
+        if (this.buttons.compile_btn) {
+            this.buttons.compile_btn.addEventListener("click", () => this.compileCurrentDoc());
+        }
         this.buttons.api_key_btn.addEventListener("click", () => this.show_api_key_modal());
         this.buttons.about_btn.addEventListener("click", () => this.showAboutModal());
         this.buttons.feedback_btn.addEventListener("click", () => {
@@ -873,6 +960,8 @@ class MainManager {
             this.buttons.image_preview_container
         );
         
+        // listen for inbound messages from a VS Code extension host (no-op in browser)
+        this.setupHostMessageListener();
         // map all the buttons
         this.mapButtons();
         // attach listeners to existing static cards
@@ -916,6 +1005,10 @@ class MainManager {
         }
         if (this.chatManager && typeof this.chatManager.destroy === "function") {
             this.chatManager.destroy();
+        }
+        if (this._hostMessageHandler) {
+            window.removeEventListener('message', this._hostMessageHandler);
+            this._hostMessageHandler = null;
         }
     }
 }

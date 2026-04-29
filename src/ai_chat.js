@@ -1,4 +1,4 @@
-import Card from "./cards.js";
+import Card, { CARD_TYPE_CODE, CARD_TYPE_MARKDOWN, stripPythonFences, escapeHtml } from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
 import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor } from "./codemirror_setup.js";
 import { marked } from 'marked';
@@ -36,6 +36,9 @@ export class ChatManager {
         // Image support
         this.attachedImages = []; // Array of {data: base64String, mimeType: string, name: string}
         this.imagePreviewContainer = null; // Will be set by setupImageSupport
+
+        // Code-card mode flag — set by the CODE toggle, consumed by askAI/addToDoc
+        this.codeMode = false;
         
         // Auto-sanitize title on blur (when user leaves the field) and ensure uniqueness
         this.cardTitleInput.addEventListener('blur', () => {
@@ -50,6 +53,25 @@ export class ChatManager {
                 this.cardTitleInput.value = sanitized;
             }
         });
+    }
+
+    /**
+     * Pick the agent to use for the next generation. Code cards prefer the local
+     * provider regardless of what the user picked in the settings modal — that's
+     * the whole point of slate-code. Falls back to the active agent if no local
+     * is available, or if MainManager isn't reachable.
+     */
+    resolveAgentFor(codeMode) {
+        if (!codeMode) return this.aiAgent;
+        const mm = window.mainManager;
+        if (mm && typeof mm.getAgentForProvider === 'function') {
+            try {
+                return mm.getAgentForProvider('local');
+            } catch (err) {
+                console.warn('Failed to construct local agent for code card; falling back:', err);
+            }
+        }
+        return this.aiAgent;
     }
 
     /**
@@ -104,18 +126,20 @@ export class ChatManager {
     }
 
     /**
-     * Build a bibliography of referenced cards and docs
-     * Searches across all documents in the project
-     * @param {Array<string>} references - Array of card/doc titles
-     * @returns {string} - Formatted bibliography text
+     * Build a bibliography of referenced cards and docs.
+     * In code mode, code-card refs render as `# from <doc>: <title>\n<source>`
+     * comment blocks so the model sees them as Python it can call.
      */
-    buildBibliography(references) {
+    buildBibliography(references, { codeMode = false } = {}) {
         if (references.length === 0) {
             return "";
         }
 
         const bibliography = [];
-        bibliography.push("\n\n--- CONTEXT (Referenced Content) ---\n");
+        const header = codeMode
+            ? "\n\n# --- REFERENCED CODE ---\n"
+            : "\n\n--- CONTEXT (Referenced Content) ---\n";
+        bibliography.push(header);
 
         references.forEach(ref => {
             let foundCard = null;
@@ -126,12 +150,15 @@ export class ChatManager {
             if (window.mainManager && window.mainManager.currentProject) {
                 const allDocs = window.mainManager.currentProject.getAllDocs();
                 foundDoc = allDocs.find(d => d.title === ref);
-                
+
                 if (foundDoc) {
-                    // Use doc summary if available
+                    if (codeMode) {
+                        bibliography.push(`\n# @${foundDoc.title} (document) — refer to its code cards by name.\n`);
+                        return;
+                    }
                     if (foundDoc.summary) {
                         bibliography.push(`\n@${foundDoc.title} (document summary):\n${foundDoc.summary}\n`);
-                        return; // Skip card search
+                        return;
                     } else {
                         bibliography.push(`\n@${ref} (document - summary not yet generated)\n`);
                         return;
@@ -139,15 +166,10 @@ export class ChatManager {
                 }
             }
 
-            // Not a doc, search for card in the current doc
             if (this.currentDoc) {
                 foundCard = this.currentDoc.getAllCards().find(c => c.title === ref);
-                if (foundCard) {
-                    foundInDocTitle = this.currentDoc.title;
-                }
+                if (foundCard) foundInDocTitle = this.currentDoc.title;
             }
-
-            // If not found in current doc, search across all docs
             if (!foundCard && window.mainManager && window.mainManager.currentProject) {
                 const allDocs = window.mainManager.currentProject.getAllDocs();
                 for (const doc of allDocs) {
@@ -160,20 +182,27 @@ export class ChatManager {
             }
 
             if (foundCard) {
-                // Extract plain text from HTML content
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = foundCard.content;
-                const plainText = tempDiv.innerText || tempDiv.textContent;
-                
-                bibliography.push(`\n@${foundCard.title} (card from doc: ${foundInDocTitle}):\n${plainText}\n`);
+                if (codeMode && foundCard.cardType === 'code') {
+                    const source = (typeof foundCard.getPythonSource === 'function')
+                        ? foundCard.getPythonSource()
+                        : foundCard.content;
+                    bibliography.push(`\n# from ${foundInDocTitle}: ${foundCard.title}\n${source || ''}\n`);
+                } else {
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = foundCard.content;
+                    const plainText = tempDiv.innerText || tempDiv.textContent;
+                    const linePrefix = codeMode ? '# ' : '';
+                    bibliography.push(`\n${linePrefix}@${foundCard.title} (card from doc: ${foundInDocTitle}):\n${plainText}\n`);
+                }
             } else {
-                // Reference not found - note it in the bibliography
-                bibliography.push(`\n@${ref}: [Reference not found]\n`);
+                bibliography.push(codeMode
+                    ? `\n# @${ref}: [Reference not found]\n`
+                    : `\n@${ref}: [Reference not found]\n`);
             }
         });
 
-        bibliography.push("\n--- END CONTEXT ---\n");
-        
+        bibliography.push(codeMode ? "\n# --- END REFERENCED CODE ---\n" : "\n--- END CONTEXT ---\n");
+
         return bibliography.join("");
     }
 
@@ -306,27 +335,22 @@ export class ChatManager {
     }
 
     /**
-     * Generate AI response based on user input
+     * Generate AI response based on user input.
+     * In code mode, the system prompt is swapped, the response is rendered as
+     * a syntax-highlighted Python block, and routing favors the local provider.
      */
     async askAI() {
         const userInput = getEditorText(this.promptEditor);
-        console.log("User input:", userInput);
-        
-        // Parse @references from the input
+        const codeMode = !!this.codeMode;
+        console.log("User input:", userInput, "| codeMode:", codeMode);
+
         const references = this.parseReferences(userInput);
         console.log("Found references:", references);
-        
-        // Build bibliography with referenced card content
-        const bibliography = this.buildBibliography(references);
-        
-        // Construct the full prompt with context
-        const fullPrompt = userInput + bibliography;
-        console.log("Full prompt with bibliography:", fullPrompt);
-        
-        // Generate a random card title if the field is empty
+        const bibliography = this.buildBibliography(references, { codeMode });
+
+        // Pick the title now (random if empty), so we can pass it into the system prompt.
         if (this.cardTitleInput.value.trim() === "") {
             let randomTitle = generateRandomName();
-            // Ensure the random title is unique
             if (this.currentDoc) {
                 while (this.currentDoc.cardTitleExists(randomTitle)) {
                     randomTitle = generateRandomName();
@@ -334,18 +358,34 @@ export class ChatManager {
             }
             this.cardTitleInput.value = randomTitle;
         } else {
-            // Sanitize the existing title (uniqueness will be checked when adding to doc)
             this.cardTitleInput.value = sanitizeTitle(this.cardTitleInput.value);
         }
-        
-        // Show loading animation
+        const cardTitle = this.cardTitleInput.value;
+        const docTitle = this.currentDoc ? this.currentDoc.title : 'untitled';
+
+        const fullPrompt = userInput + bibliography;
+        console.log("Full prompt with bibliography:", fullPrompt);
+
+        // Resolve which agent to use. Code cards prefer the local agent if one is configured.
+        const agent = this.resolveAgentFor(codeMode);
+        const codeSystemPrompt = `Output only valid Python source for one symbol named \`${cardTitle}\`. No prose, no markdown fences, no triple backticks, no commentary. The output will be saved as the body of \`${cardTitle}\` in \`${docTitle}.py\`. Reference any \`# from <doc>: <name>\` blocks above as if they were already importable.`;
+        const generateOptions = codeMode ? { systemPrompt: codeSystemPrompt } : {};
+
         this.chatContent.innerHTML = '<div class="loading-text">Waiting for response...</div>';
-        
-        // Send the full prompt (with bibliography) and images to the AI
-        this.aiAgent.generateResponse(fullPrompt, this.attachedImages).then((res) => {
-            // Render the response as markdown
-            const renderedResponse = marked.parse(res);
-            this.chatContent.innerHTML = `<div class="markdown-body">${renderedResponse}</div>`;
+        delete this.chatContent.dataset.cardType;
+        delete this.chatContent.dataset.codeSource;
+
+        agent.generateResponse(fullPrompt, this.attachedImages, generateOptions).then((res) => {
+            if (codeMode) {
+                // Strip any markdown fences the model leaked despite instructions, then render as code.
+                const stripped = stripPythonFences(res).trim();
+                this.chatContent.innerHTML = `<pre class="card-code-block language-python"><code>${escapeHtml(stripped)}</code></pre>`;
+                this.chatContent.dataset.cardType = 'code';
+                this.chatContent.dataset.codeSource = stripped;
+            } else {
+                const renderedResponse = marked.parse(res);
+                this.chatContent.innerHTML = `<div class="markdown-body">${renderedResponse}</div>`;
+            }
         }).catch(async (err) => {
             console.error("Error generating response:", err);
             
@@ -495,18 +535,27 @@ export class ChatManager {
                 const referencedTitles = this.parseReferences(promptText);
                 console.log("Card will link to:", referencedTitles);
                 
-                // Get the rendered markdown content (extract from the markdown-body div if present)
-                const markdownBodyDiv = this.chatContent.querySelector('.markdown-body');
-                const cardContent = markdownBodyDiv ? markdownBodyDiv.innerHTML : this.chatContent.innerHTML;
-                
+                // The chat preview holds the source for code cards or rendered markdown for prose cards.
+                // Code cards persist plain text (the Python source after fence-stripping), prose cards keep HTML.
+                const isCodeCard = this.chatContent.dataset.cardType === CARD_TYPE_CODE;
+                const cardType = isCodeCard ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
+                let cardContent;
+                if (isCodeCard) {
+                    cardContent = this.chatContent.dataset.codeSource || this.chatContent.innerText.trim();
+                } else {
+                    const markdownBodyDiv = this.chatContent.querySelector('.markdown-body');
+                    cardContent = markdownBodyDiv ? markdownBodyDiv.innerHTML : this.chatContent.innerHTML;
+                }
+
                 // Create and add the card with the prompt and images
                 const card = new Card(
-                    cardTitle, 
-                    cardContent, 
-                    this.modal, 
+                    cardTitle,
+                    cardContent,
+                    this.modal,
                     this.updateNetworkCallback,
                     promptText,  // Pass the original prompt
-                    [...this.attachedImages]  // Pass a copy of attached images
+                    [...this.attachedImages],  // Pass a copy of attached images
+                    cardType
                 );
                 card.init();
                 

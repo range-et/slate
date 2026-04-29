@@ -1,0 +1,50 @@
+# Slate Code (VS Code extension)
+
+Hosts the slate notebook UI in a VS Code webview, and writes compiled `.py` files into your workspace.
+
+> Architect the code in slate. Run it in VS Code.
+
+## What you get
+
+- **Slate: Open Panel** — opens slate in a webview tab.
+- **Slate: Compile Current Doc** — sends a "compile" signal into the open panel; the active doc's code cards get compiled to `<doc_title>.py` in your workspace root.
+- **Slate: Toggle Code Card** — flips the next generation between markdown and code modes.
+
+`localStorage` (API keys, provider choice, local model name, base URL) is shimmed onto VS Code `globalState`, so your settings persist across restarts.
+
+## Develop
+
+From the slate repo root:
+
+```bash
+npm install
+npm run build                       # builds dist/
+cp -R dist vscode-extension/dist    # copy slate UI bundle into the extension
+
+cd vscode-extension
+npm install
+npm run compile
+```
+
+Then open `vscode-extension/` in VS Code and press **F5**. An Extension Development Host launches; in it, run **Slate: Open Panel**.
+
+A symlink works too instead of copy:
+
+```bash
+ln -s ../dist vscode-extension/dist
+```
+
+## Smoke flow
+
+1. With Ollama running locally (`OLLAMA_ORIGINS='*' ollama serve`), open Slate and pick **Local (Ollama)** in the API key modal. Default tag: `qwen2.5-coder:30b`.
+2. Click **CODE** to flip into code-card mode.
+3. Type a prompt that references other cards via `@name`, hit **SEND**.
+4. **ADD TO DOC** to commit the result as a code card.
+5. **COMPILE** to write `<doc_title>.py` into your workspace.
+6. Open the file in VS Code and run it with the existing Python tooling.
+
+## Notes
+
+- Slate runs entirely client-side. The extension only writes files; it doesn't proxy LLM calls.
+- The webview's CSP allows Google Fonts (used by the design system) and connections to `localhost:*` (Ollama), `api.openai.com`, and `generativelanguage.googleapis.com`.
+- If `dist/` is missing inside the extension, opening the panel will surface a helpful error explaining how to populate it.

@@ -1,7 +1,9 @@
 import { EditorView, keymap, Decoration, ViewPlugin } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Compartment } from "@codemirror/state";
 import { defaultKeymap } from "@codemirror/commands";
 import { autocompletion } from "@codemirror/autocomplete";
+import { syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { python } from "@codemirror/lang-python";
 
 /**
  * Custom theme for the editor
@@ -195,50 +197,50 @@ function createReferenceCompletion(getCurrentDoc, getCurrentProject) {
 }
 
 /**
- * Setup CodeMirror editor with @reference support
+ * Setup CodeMirror editor with @reference support.
+ * Returns the EditorView with a `setLanguage(name)` helper that swaps between
+ * 'plain' and 'python' at runtime via a Compartment.
  */
-export function setupCodeMirrorEditor(container, getCurrentDoc, getCurrentProject) {
+export function setupCodeMirrorEditor(container, getCurrentDoc, getCurrentProject, options = {}) {
     const completionSource = createReferenceCompletion(getCurrentDoc, getCurrentProject);
-    
+    const languageCompartment = new Compartment();
+    const initialLanguage = options.language === 'python' ? 'python' : 'plain';
+    const languageExtensionFor = name => (name === 'python' ? [python(), syntaxHighlighting(defaultHighlightStyle)] : []);
+
     const state = EditorState.create({
         doc: "",
         extensions: [
-            // Basic setup
             keymap.of([
                 ...defaultKeymap,
                 {
                     key: "Enter",
-                    run: () => {
-                        // Don't handle Enter - let the form handle it
-                        return false;
-                    }
+                    run: () => false  // let the form handle Enter
                 }
             ]),
-            
-            // Custom theme
             customTheme,
-            
-            // Reference highlighter
             referenceHighlighter,
-            
-            // Autocomplete for @references
             autocompletion({
                 override: [completionSource],
                 activateOnTyping: true,
                 closeOnBlur: true,
                 defaultKeymap: true
             }),
-            
-            // Line wrapping
-            EditorView.lineWrapping
+            EditorView.lineWrapping,
+            languageCompartment.of(languageExtensionFor(initialLanguage))
         ]
     });
-    
+
     const view = new EditorView({
         state,
         parent: container
     });
-    
+
+    view.setLanguage = name => {
+        view.dispatch({
+            effects: languageCompartment.reconfigure(languageExtensionFor(name === 'python' ? 'python' : 'plain'))
+        });
+    };
+
     return view;
 }
 

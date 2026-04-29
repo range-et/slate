@@ -105,6 +105,30 @@ button:active{
   color: var(--background);
 }
 
+button.toggle-active {
+  background-color: var(--strata-info, var(--information-1));
+  color: var(--background);
+  border-color: var(--strata-info, var(--information-1));
+}
+
+.card--code .card-content,
+.card-code-block {
+  font-family: var(--font-mono, 'Courier New', monospace);
+  font-size: var(--type-sm, 0.9em);
+  background: var(--strata-layer-01, var(--background));
+  border-left: 2px solid var(--strata-info, var(--information-1));
+  padding: var(--space-2, 8px);
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.4;
+}
+
+.card-code-block code {
+  background: transparent;
+  font-family: inherit;
+  white-space: pre;
+}
+
 input[type="text"] {
   width: 100%;
   padding: 6px 10px;
