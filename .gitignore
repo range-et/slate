@@ -115,3 +115,11 @@ instance/
 
 src/config.js
 scratch/scatch_notes.txt
+
+# AI / agent session artifacts
+.playwright-mcp/
+.assemblage.toml
+.claude/
+slate-after-*.png
+slate-textured-*.png
+*.screenshot.png
