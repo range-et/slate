@@ -416,7 +416,13 @@ class SlateEditorProvider implements vscode.CustomTextEditorProvider {
                         document.positionAt(document.getText().length)
                     );
                     edit.replace(document.uri, fullRange, msg.state);
-                    await vscode.workspace.applyEdit(edit);
+                    const applied = await vscode.workspace.applyEdit(edit);
+                    if (applied && document.isDirty) {
+                        // Auto-save: slate's edits are direct user mutations of
+                        // the project, so persist immediately. No reason to
+                        // require Cmd+S for slate-driven changes.
+                        try { await document.save(); } catch { /* save raced w/ another save — fine */ }
+                    }
                     break;
                 }
                 case 'compile': {

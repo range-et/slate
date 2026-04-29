@@ -109,14 +109,13 @@ class Card {
         
         cardElement.innerHTML = `
             <div class="card_header">
-                <div class="card_actions" style="justify-content: flex-end;">
-                    <button class="info_btn card-move-btn" title="Move to another document">↗</button>
-                    <button class="alert_btn">x</button>
-                </div>
-                <br>
                 <div class="card_details">
                     <h4>${this.title}</h4>
-                    <p class="">${this.id}</p>
+                    <p class="card_id">${this.id}</p>
+                </div>
+                <div class="card_actions">
+                    <button class="info_btn card-move-btn" title="Move to another document">↗</button>
+                    <button class="alert_btn" title="Remove card">x</button>
                 </div>
             </div>
             ${promptHTML}

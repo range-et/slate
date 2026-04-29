@@ -11,10 +11,17 @@
  * sits well next to the editor. The .slate-host-vscode class is set by the
  * state-bridge during boot, before any UI paints. */
 html.slate-host-vscode {
-  font-size: 13px;
+  font-size: 12px;
 }
 html.slate-host-vscode body {
-  font-size: var(--type-sm, 13px);
+  font-size: 12px;
+}
+html.slate-host-vscode button {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+html.slate-host-vscode h4 {
+  font-size: 11px;
 }
 html.slate-host-vscode .info_btn,
 html.slate-host-vscode .success_btn,
@@ -24,6 +31,18 @@ html.slate-host-vscode .finish_btn {
 }
 html.slate-host-vscode button:hover {
   border-color: var(--strata-text-secondary, currentColor);
+}
+html.slate-host-vscode #content .panel .panel-header {
+  padding: 4px 8px;
+  min-height: 28px;
+  gap: 6px;
+}
+html.slate-host-vscode #content .panel .panel-body {
+  padding: 6px 8px;
+}
+html.slate-host-vscode #topbar {
+  padding: 3px 8px;
+  gap: 4px;
 }
 
 * {
@@ -673,20 +692,41 @@ input[type="text"]::placeholder {
 
 .card_header {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
 }
 
 .card_details {
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: row;
-  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.card_details h4 {
+  flex-shrink: 0;
+}
+
+.card_details .card_id {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-xs, 11px);
+  opacity: 0.55;
+  font-family: var(--font-mono);
 }
 
 .card_actions {
   display: flex;
-  justify-content: right;
-  gap: var(--space-1);;
+  flex-shrink: 0;
+  gap: var(--space-1);
 }
 
 .network_heading {

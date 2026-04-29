@@ -80,9 +80,9 @@ export class ChatManager {
     setDefaultMessage() {
         this.chatContent.innerHTML = `
             <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.7; text-align: center; padding: var(--space-2);">
-                <p style="font-size: medium; line-height: 1.6;">
-                    Enter a prompt below and click <strong>SEND</strong> to start a conversation.<br>
-                    Your response will appear here.
+                <p style="line-height: 1.6;">
+                    Write a prompt above and hit <strong>SEND</strong>.<br>
+                    The response shows here; <strong>ADD TO DOC</strong> commits it as a card.
                 </p>
             </div>
         `;
