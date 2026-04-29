@@ -448,30 +448,92 @@ input[type="text"]::placeholder {
   flex-direction: column;
 }
 
-.doc_heading{
+/* The doc heading is three stacked, left-aligned rows: column labels, the
+   folder/file inputs, and action buttons. */
+.doc_heading {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;     /* float everything left */
   justify-content: flex-start;
-  align-items: center;
+  gap: 4px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.doc_heading_row {
+  display: flex;
   flex-direction: row;
-  gap: 10px;
+  align-items: center;
+  justify-content: flex-start;  /* explicit float-left override */
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
 }
 
-.doc_heading button {
-  margin-left: auto;
-  margin-right: var(--space-1);  /* Gap before divider */
-}
-
-#doc_title_input {
-  width: 200px;
-  padding: var(--space-1) 12px;
-  font-size: var(--type-sm);
-  margin: 0;
+/* Label row — must align to the inputs underneath. Uses the same flex basis
+   as the inputs so the words "folder" and "file" sit over their boxes. */
+.doc_path_labels {
+  font-family: var(--font-mono, 'Courier New', monospace);
+  font-size: calc(var(--type-sm) * 0.78);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--secondary-text);
+  opacity: 0.65;
   margin-bottom: 0;
+  padding-left: 2px;
+}
+.doc_path_col-folder,
+.doc_path_col-file {
+  flex: 0 0 auto;
+  min-width: 160px;             /* matches the input flex basis */
+}
+.doc_path_col-sep {
+  flex: 0 0 auto;
+  opacity: 0;                   /* invisible spacer in the label row */
+  width: 8px;
+}
+
+/* Inputs row — folder / file with a visible separator and a static .py suffix. */
+.doc_path_inputs {
+  font-family: var(--font-mono, 'Courier New', monospace);
+  font-size: var(--type-sm);
+}
+.doc_path_inputs .doc_path_col-sep {
+  opacity: 0.5;                 /* visible in the input row */
+  font-size: 1.2em;
+}
+.doc_path_ext {
+  flex: 0 0 auto;
+  opacity: 0.55;
+  font-size: 0.95em;
+}
+
+#doc_destination_input,
+#doc_title_input {
+  flex: 1 1 160px;
+  min-width: 100px;
+  max-width: 240px;
+  padding: var(--space-1) 10px;
+  font-family: inherit;
+  font-size: inherit;
+  margin: 0;
   border-width: 1px;
   height: auto;
   line-height: 1.4;
   display: inline-flex;
   align-items: center;
+}
+#doc_destination_input::placeholder,
+#doc_title_input::placeholder {
+  font-style: italic;
+  opacity: 0.55;
+}
+
+.doc_heading_actions {
+  margin-top: 4px;
+}
+.doc_heading_actions button {
+  margin: 0;
 }
 
 /* CHAT PANEL */

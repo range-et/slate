@@ -25,28 +25,43 @@ export function isRunningInVsCode() {
     return !!getVsCodeApi();
 }
 
-export function saveCompiled({ filename, source }) {
+export function saveCompiled({ filename, source, destination = '' }) {
     if (!filename || typeof source !== 'string') {
         throw new Error('saveCompiled: filename and source are required.');
     }
 
     const vscode = getVsCodeApi();
     if (vscode) {
-        vscode.postMessage({ type: 'compile', filename, source });
+        vscode.postMessage({ type: 'compile', filename, source, destination });
         return { delivered: 'vscode' };
     }
 
-    // Browser fallback: trigger a download.
+    // Browser fallback: trigger a download. Destination is informational only —
+    // the browser's download flow can't write into a subdir, so we prefix the
+    // suggested filename with a flattened path hint.
+    const flatHint = destination ? destination.replace(/[\/\\]+/g, '_') + '__' : '';
     const blob = new Blob([source], { type: 'text/x-python;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = filename;
+    a.download = `${flatHint}${filename}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     return { delivered: 'browser' };
+}
+
+/**
+ * Ask the host to read a doc's compiled .py back from disk and post a
+ * `rehydrate-result` message with its current source. Browser host has no disk
+ * to read from, so this returns false there.
+ */
+export function requestRehydrate({ filename, destination = '', docId }) {
+    const vscode = getVsCodeApi();
+    if (!vscode) return false;
+    vscode.postMessage({ type: 'rehydrate', filename, destination, docId });
+    return true;
 }
 
 /**

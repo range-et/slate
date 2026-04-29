@@ -74,10 +74,22 @@
             <!-- DOC SECTION -->
             <div id="doc" class="panel">
                 <div class="panel-header doc_heading">
-                    <h4>Doc</h4>
-                    <input type="text" id="doc_title_input" placeholder="untitled" maxlength="100">
-                    <button class="info_btn" id="summary_btn">SUMMARY</button>
-                    <button class="info_btn" id="compile_btn" title="Compile this doc's code cards into a .py file">COMPILE</button>
+                    <div class="doc_heading_row doc_path_labels" aria-hidden="true">
+                        <span class="doc_path_col-folder">folder</span>
+                        <span class="doc_path_col-sep">/</span>
+                        <span class="doc_path_col-file">file</span>
+                    </div>
+                    <div class="doc_heading_row doc_path_inputs" title="Where this doc reads from and writes to on disk">
+                        <input type="text" id="doc_destination_input" placeholder="src/lib" maxlength="200" aria-label="Folder path under workspace">
+                        <span class="doc_path_col-sep">/</span>
+                        <input type="text" id="doc_title_input" placeholder="untitled" maxlength="100" aria-label="File name (without .py extension)">
+                        <span class="doc_path_ext">.py</span>
+                    </div>
+                    <div class="doc_heading_row doc_heading_actions">
+                        <button class="info_btn" id="summary_btn">SUMMARY</button>
+                        <button class="info_btn" id="compile_btn" title="Compile this doc's code cards into a .py file">COMPILE</button>
+                        <button class="info_btn" id="rehydrate_btn" title="Re-read the compiled .py file from disk and update this doc's code cards">REHYDRATE</button>
+                    </div>
                 </div>
                 <div class="panel-body">
                     <div class="card_container" id="doc-content" style="flex: 1 1 0;"></div>

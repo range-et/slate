@@ -32,6 +32,7 @@ export interface ScannedDoc {
     id: string;
     title: string;
     summary: string | null;
+    destination: string;
     cards: ScannedCard[];
     createdAt: string;
     updatedAt: string;
@@ -77,22 +78,28 @@ function listPyFiles(root: string): string[] {
     return out.sort();
 }
 
-/**
- * Convert a relative file path under the project root into a slate-friendly
- * doc title: snake_case, dotted-path style. e.g. `source/apps/main.py` →
- * `source_apps_main`. Slate sanitizes titles aggressively so this respects
- * the same rules.
- */
-function relPathToDocTitle(rel: string): string {
-    const noExt = rel.replace(/\.py$/, '');
-    return noExt
-        .split(path.sep)
-        .filter(Boolean)
-        .join('_')
+function sanitizeSegment(seg: string): string {
+    return seg
         .toLowerCase()
         .replace(/[^a-z0-9_]/g, '_')
         .replace(/^_+|_+$/g, '')
         .replace(/_+/g, '_');
+}
+
+/**
+ * Split a relative .py path into (destination, docTitle). e.g.
+ *   `source/apps/main.py` -> { destination: 'source/apps', title: 'main' }
+ *   `main.py`             -> { destination: '',            title: 'main' }
+ * Each path segment is independently snake_cased so slate's title sanitizer
+ * accepts the result without further mangling.
+ */
+function splitRelPath(rel: string): { destination: string; title: string } {
+    const noExt = rel.replace(/\.py$/, '');
+    const segs = noExt.split(path.sep).filter(Boolean);
+    if (segs.length === 0) return { destination: '', title: 'untitled' };
+    const titleSeg = sanitizeSegment(segs[segs.length - 1]) || 'untitled';
+    const destSegs = segs.slice(0, -1).map(sanitizeSegment).filter(Boolean);
+    return { destination: destSegs.join('/'), title: titleSeg };
 }
 
 /**
@@ -193,12 +200,13 @@ export function scanWorkspace(root: string, projectName: string): ScannedProject
     if (files.length === 0) return project;
 
     // Track every symbol name we've seen, to resolve import references later.
-    const symbolToDoc = new Map<string, string>(); // symbolName → docTitle
-    const fileBlocks: { rel: string; docTitle: string; blocks: Block[]; imports: ReturnType<typeof extractImports> }[] = [];
+    const symbolToDoc = new Map<string, string>(); // symbolName → unique docTitle
+    const usedTitles = new Set<string>();
+    const fileBlocks: { rel: string; docTitle: string; destination: string; blocks: Block[]; imports: ReturnType<typeof extractImports> }[] = [];
 
     for (const file of files) {
         const rel = path.relative(root, file);
-        const docTitle = relPathToDocTitle(rel);
+        const { destination, title } = splitRelPath(rel);
         let text: string;
         try {
             text = fs.readFileSync(file, 'utf8');
@@ -211,8 +219,21 @@ export function scanWorkspace(root: string, projectName: string): ScannedProject
         // Skip files with no top-level symbols (empty __init__.py, scripts with only main blocks, etc.)
         if (blocks.length === 0) continue;
 
+        // Disambiguate when two paths produce the same filename — slate Doc
+        // titles are project-unique. Suffix with a destination-derived hash.
+        let docTitle = title;
+        if (usedTitles.has(docTitle)) {
+            const destHint = destination.replace(/[\/\\]+/g, '_') || 'root';
+            docTitle = `${title}__${destHint}`;
+            let n = 1;
+            while (usedTitles.has(docTitle)) {
+                docTitle = `${title}__${destHint}_${n++}`;
+            }
+        }
+        usedTitles.add(docTitle);
+
         for (const blk of blocks) symbolToDoc.set(blk.name, docTitle);
-        fileBlocks.push({ rel, docTitle, blocks, imports });
+        fileBlocks.push({ rel, docTitle, destination, blocks, imports });
     }
 
     // Build docs + cards now that we have the global symbol table.
@@ -231,6 +252,7 @@ export function scanWorkspace(root: string, projectName: string): ScannedProject
             id: uuid(),
             title: entry.docTitle,
             summary: null,
+            destination: entry.destination,
             cards: [],
             createdAt: now,
             updatedAt: now,

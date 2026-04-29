@@ -1,13 +1,17 @@
 import { NetworkViz } from "./network_viz.js";
 import OpenAIAgent, { GeminiAgent, LocalAgent, DEFAULT_LOCAL_BASE_URL, DEFAULT_LOCAL_MODEL } from "./ai_utils.js";
 import { compileDocToPython } from "./code_compile.js";
-import { saveCompiled, isRunningInVsCode } from "./host_bridge.js";
-import Doc from "./doc.js";
+import { saveCompiled, isRunningInVsCode, requestRehydrate } from "./host_bridge.js";
+import Doc, { sanitizeDestination } from "./doc.js";
 import Project from "./project.js";
 import Modal from "./modal.js";
 import ChatManager, { sanitizeTitle } from "./ai_chat.js";
 import generateRandomName from "./random_name_generator.js";
 import { setupCodeMirrorEditor } from "./codemirror_setup.js";
+import { scanPythonSource } from "./python_parser.js";
+import Card, { CARD_TYPE_CODE } from "./cards.js";
+import { sanitizeDocFilename } from "./code_compile.js";
+import { v4 as uuidv4 } from 'uuid';
 import { marked } from 'marked';
 
 // Select all the dom elements
@@ -23,6 +27,7 @@ const summary_btn = document.getElementById("summary_btn");
 const add_doc = document.getElementById("add_doc");
 const remove_doc = document.getElementById("remove_doc");
 const doc_title_input = document.getElementById("doc_title_input");
+const doc_destination_input = document.getElementById("doc_destination_input");
 // editor actions
 const undo_btn = document.getElementById("undo_btn");
 const export_btn = document.getElementById("export_btn");
@@ -40,6 +45,7 @@ const attach_image = document.getElementById("attach_image");
 const image_preview_container = document.getElementById("image-preview-container");
 const code_toggle = document.getElementById("code_toggle");
 const compile_btn = document.getElementById("compile_btn");
+const rehydrate_btn = document.getElementById("rehydrate_btn");
 const exit_edit = document.getElementById("exit_edit");
 
 const buttons = {
@@ -51,6 +57,7 @@ const buttons = {
     add_doc: add_doc,
     remove_doc: remove_doc,
     doc_title_input: doc_title_input,
+    doc_destination_input: doc_destination_input,
     undo_btn: undo_btn,
     export_btn: export_btn,
     import_btn: import_btn,
@@ -66,6 +73,7 @@ const buttons = {
     image_preview_container: image_preview_container,
     code_toggle: code_toggle,
     compile_btn: compile_btn,
+    rehydrate_btn: rehydrate_btn,
     exit_edit: exit_edit
 };
 
@@ -296,7 +304,10 @@ class MainManager {
         
         // Update the doc title input
         this.buttons.doc_title_input.value = doc.title;
-        
+        if (this.buttons.doc_destination_input) {
+            this.buttons.doc_destination_input.value = doc.destination || '';
+        }
+
         // Clear and repopulate the doc content area
         doc_content.innerHTML = "";
         
@@ -396,6 +407,19 @@ class MainManager {
         });
     }
 
+    setupDocDestinationInput() {
+        const input = this.buttons.doc_destination_input;
+        if (!input) return;
+        input.addEventListener('blur', () => {
+            const cleaned = sanitizeDestination(input.value);
+            input.value = cleaned;
+            if (this.currentDoc && this.currentDoc.destination !== cleaned) {
+                this.currentDoc.updateDestination(cleaned);
+                this.notifyProjectChanged();
+            }
+        });
+    }
+
     setupDocTitleSanitization() {
         // Auto-sanitize doc title on blur and ensure uniqueness
         this.buttons.doc_title_input.addEventListener('blur', () => {
@@ -446,6 +470,9 @@ class MainManager {
                 case 'toggle-code':
                     this.toggleCodeMode();
                     break;
+                case 'rehydrate-result':
+                    this.applyRehydrate(msg);
+                    break;
                 case 'load-state':
                     if (typeof msg.state === 'string' && msg.state.length > 0) {
                         try {
@@ -473,16 +500,158 @@ class MainManager {
         }
     }
 
+    /**
+     * Ask the host to read this doc's compiled .py off disk so we can re-parse
+     * it. Browser host has no disk — the user can paste source via the modal
+     * fallback instead.
+     */
+    async rehydrateCurrentDoc() {
+        if (!this.currentDoc) {
+            await this.modal.alert("No document to rehydrate.");
+            return;
+        }
+        const docId = this.currentDoc.id;
+        const docName = sanitizeDocFilename(this.currentDoc.title);
+        const filename = `${docName}.py`;
+        const destination = this.currentDoc.destination || '';
+        const ok = requestRehydrate({ filename, destination, docId });
+        if (ok) return;
+
+        // Browser fallback: prompt the user to paste source.
+        const container = document.createElement('div');
+        container.innerHTML = `
+            <h4 style="margin-bottom: 8px;">Rehydrate "${this.currentDoc.title}"</h4>
+            <p style="font-size: small; margin-bottom: 8px;">Paste the current contents of <code>${filename}</code> below. Slate will re-derive cards from the top-level <code>def</code>/<code>class</code> blocks.</p>
+            <textarea id="rehydrate_source" rows="14"
+                style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small;
+                       background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);"></textarea>
+        `;
+        const result = await this.modal.custom(container, [
+            { text: 'Cancel', className: 'alert_btn', callback: () => null },
+            {
+                text: 'Rehydrate',
+                className: 'success_btn',
+                callback: () => document.getElementById('rehydrate_source').value
+            }
+        ]);
+        if (result === null || typeof result !== 'string') return;
+        this.applyRehydrate({ docId, source: result, filename });
+    }
+
+    /**
+     * Replace the doc's code cards with what's in `source`. Existing code cards
+     * with matching titles keep their id and prompt; their content updates.
+     * New blocks become new cards. Code cards no longer in the file are removed.
+     * Markdown cards are left untouched — they don't compile, so they don't
+     * rehydrate.
+     */
+    async applyRehydrate({ docId, source, filename, error }) {
+        if (error) {
+            await this.modal.alert(`Rehydrate failed: ${error}`);
+            return;
+        }
+        const doc = this.currentProject ? this.currentProject.getDoc(docId) : null;
+        const target = doc || this.currentDoc;
+        if (!target) {
+            await this.modal.alert("Rehydrate target doc no longer exists.");
+            return;
+        }
+        if (typeof source !== 'string') {
+            await this.modal.alert(`Rehydrate failed: no source returned for ${filename || target.title}.`);
+            return;
+        }
+
+        const { blocks, imports } = scanPythonSource(source);
+        if (blocks.length === 0) {
+            await this.modal.alert(`Rehydrate: ${filename || target.title} contained no top-level def/class blocks.`);
+            return;
+        }
+
+        // Index existing code cards by title for in-place updates.
+        const existingByTitle = new Map();
+        target.getAllCards().forEach(c => {
+            if (c.cardType === CARD_TYPE_CODE) existingByTitle.set(c.title, c);
+        });
+
+        const seenTitles = new Set();
+        const newCardOrder = [];
+        const importHeader = imports.length ? imports.join('\n') + '\n\n' : '';
+
+        let added = 0;
+        let updated = 0;
+        blocks.forEach((block, idx) => {
+            seenTitles.add(block.name);
+            // Stash all module-level imports on the first card so they survive
+            // the next compile cycle. The compiler hoists + dedupes anyway, so
+            // it's safe even if the user later reorders cards.
+            const blockSource = idx === 0 ? importHeader + block.source : block.source;
+            const existing = existingByTitle.get(block.name);
+            if (existing) {
+                existing.content = blockSource;
+                existing.prompt = existing.prompt || `imported from ${filename || target.title}`;
+                newCardOrder.push(existing);
+                updated++;
+            } else {
+                const card = new Card(
+                    block.name,
+                    blockSource,
+                    this.modal,
+                    () => this.updateNetworkViz(),
+                    `imported from ${filename || target.title}`,
+                    [],
+                    CARD_TYPE_CODE
+                );
+                card.id = uuidv4();
+                card.parent = target;
+                newCardOrder.push(card);
+                added++;
+            }
+        });
+
+        // Drop code cards no longer present in the file. Keep markdown cards
+        // (they aren't compiled, so they aren't represented in the .py).
+        const removedTitles = [];
+        const keptMarkdown = [];
+        target.getAllCards().forEach(c => {
+            if (c.cardType !== CARD_TYPE_CODE) {
+                keptMarkdown.push(c);
+            } else if (!seenTitles.has(c.title)) {
+                removedTitles.push(c.title);
+            }
+        });
+
+        // New ordering: code cards in file order, then any markdown cards that were already present.
+        target.cards = [...newCardOrder, ...keptMarkdown];
+        target.updatedAt = new Date().toISOString();
+
+        // Refresh the DOM if we're looking at this doc.
+        if (target === this.currentDoc) {
+            this.switchToDoc(target);
+        }
+        this.updateNetworkViz();
+
+        const summary = [
+            `${added} added`,
+            `${updated} updated`,
+            `${removedTitles.length} removed`
+        ].join(', ');
+        const removedTxt = removedTitles.length
+            ? `\n\nRemoved: ${removedTitles.join(', ')}`
+            : '';
+        await this.modal.alert(`Rehydrated "${target.title}" — ${summary}.${removedTxt}`);
+    }
+
     async compileCurrentDoc() {
         if (!this.currentDoc) {
             await this.modal.alert("No document to compile.");
             return;
         }
         try {
-            const { filename, source, warnings } = compileDocToPython(this.currentDoc, this.currentProject);
-            const delivery = saveCompiled({ filename, source });
+            const { filename, source, destination, warnings } = compileDocToPython(this.currentDoc, this.currentProject);
+            const delivery = saveCompiled({ filename, source, destination });
+            const relPath = destination ? `${destination}/${filename}` : filename;
             const where = delivery.delivered === 'vscode'
-                ? `Wrote ${filename} to the VS Code workspace.`
+                ? `Wrote ${relPath} to the VS Code workspace.`
                 : `Downloaded ${filename}.`;
             const warningTxt = warnings && warnings.length ? `\n\nWarnings:\n${warnings.join('\n')}` : '';
             await this.modal.alert(`Compiled successfully. ${where}${warningTxt}`);
@@ -833,6 +1002,9 @@ class MainManager {
         if (this.buttons.compile_btn) {
             this.buttons.compile_btn.addEventListener("click", () => this.compileCurrentDoc());
         }
+        if (this.buttons.rehydrate_btn) {
+            this.buttons.rehydrate_btn.addEventListener("click", () => this.rehydrateCurrentDoc());
+        }
         if (this.buttons.exit_edit) {
             this.buttons.exit_edit.addEventListener("click", () => this.chatManager.cancelEdit());
         }
@@ -1038,6 +1210,8 @@ class MainManager {
         this.setupProjectTitleSanitization();
         // setup doc title sanitization
         this.setupDocTitleSanitization();
+        // setup doc destination input
+        this.setupDocDestinationInput();
         // set default chat message
         this.chatManager.setDefaultMessage();
         // resizable content panels

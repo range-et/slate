@@ -193,12 +193,37 @@ function buildSlateHtml(
 }
 
 /**
- * Write a compiled file at `targetDir/filename`, prompting before overwriting,
- * and surface it to the user. Used by both the freestanding SlatePanel
- * (writes to workspace root) and the custom editor (writes alongside the
- * `.slate.json` file).
+ * Sanitize a destination path coming from the webview into a safe relative
+ * path under the workspace root: forward slashes only, no `..` or absolute
+ * segments. Returns an empty string if everything was stripped.
  */
-async function writeCompiledFile(targetDir: vscode.Uri, filename: unknown, source: unknown) {
+function sanitizeDestination(raw: unknown): string {
+    if (typeof raw !== 'string') return '';
+    return raw
+        .replace(/\\/g, '/')
+        .split('/')
+        .map(s => s.trim())
+        .filter(seg => seg.length > 0 && seg !== '.' && seg !== '..')
+        .join('/');
+}
+
+async function ensureDir(dirUri: vscode.Uri) {
+    try {
+        await vscode.workspace.fs.createDirectory(dirUri);
+    } catch (err) {
+        // createDirectory is idempotent in VS Code's FS provider; only surface
+        // unexpected failures.
+        if ((err as any)?.code !== 'FileExists') throw err;
+    }
+}
+
+/**
+ * Write a compiled file at `<rootDir>/<destination>/<filename>`, prompting
+ * before overwriting, and surface it to the user. Used by both the
+ * freestanding SlatePanel (rootDir = workspace root) and the custom editor
+ * (rootDir = directory containing the .slate.json).
+ */
+async function writeCompiledFile(rootDir: vscode.Uri, filename: unknown, source: unknown, destination?: unknown) {
     if (typeof filename !== 'string' || typeof source !== 'string') {
         vscode.window.showErrorMessage('Slate: invalid compile message.');
         return;
@@ -208,11 +233,16 @@ async function writeCompiledFile(targetDir: vscode.Uri, filename: unknown, sourc
         vscode.window.showErrorMessage(`Slate: refusing to write file with unsafe name "${filename}".`);
         return;
     }
+    const cleanedDest = sanitizeDestination(destination);
+    const targetDir = cleanedDest ? vscode.Uri.joinPath(rootDir, cleanedDest) : rootDir;
+    if (cleanedDest) await ensureDir(targetDir);
+
     const target = vscode.Uri.joinPath(targetDir, safeName);
+    const relPath = cleanedDest ? `${cleanedDest}/${safeName}` : safeName;
     try {
         await vscode.workspace.fs.stat(target);
         const choice = await vscode.window.showWarningMessage(
-            `${safeName} already exists. Overwrite?`,
+            `${relPath} already exists. Overwrite?`,
             { modal: true },
             'Overwrite'
         );
@@ -223,7 +253,39 @@ async function writeCompiledFile(targetDir: vscode.Uri, filename: unknown, sourc
     await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(source));
     const doc = await vscode.workspace.openTextDocument(target);
     await vscode.window.showTextDocument(doc, { preview: false });
-    vscode.window.showInformationMessage(`Slate: wrote ${safeName}`);
+    vscode.window.showInformationMessage(`Slate: wrote ${relPath}`);
+}
+
+/**
+ * Read a compiled .py back off disk so slate can re-derive cards from edits
+ * the user made in VS Code. Posts a `rehydrate-result` back to the webview;
+ * the webview owns the merge logic.
+ */
+async function readForRehydrate(rootDir: vscode.Uri, msg: any, post: (m: unknown) => void) {
+    const filename = typeof msg?.filename === 'string' ? msg.filename : '';
+    if (!filename) {
+        vscode.window.showErrorMessage('Slate: rehydrate request missing filename.');
+        return;
+    }
+    const safeName = path.basename(filename);
+    if (safeName !== filename) {
+        vscode.window.showErrorMessage(`Slate: refusing to read unsafe path "${filename}".`);
+        return;
+    }
+    const cleanedDest = sanitizeDestination(msg?.destination);
+    const targetDir = cleanedDest ? vscode.Uri.joinPath(rootDir, cleanedDest) : rootDir;
+    const target = vscode.Uri.joinPath(targetDir, safeName);
+    const relPath = cleanedDest ? `${cleanedDest}/${safeName}` : safeName;
+    try {
+        const bytes = await vscode.workspace.fs.readFile(target);
+        const source = new TextDecoder().decode(bytes);
+        post({ type: 'rehydrate-result', docId: msg.docId, filename: relPath, source });
+    } catch (err: any) {
+        const reason = err?.code === 'FileNotFound' || err?.name === 'EntryNotFound'
+            ? `${relPath} not found in workspace`
+            : err?.message || String(err);
+        post({ type: 'rehydrate-result', docId: msg.docId, filename: relPath, error: reason });
+    }
 }
 
 async function persistStateWrite(context: vscode.ExtensionContext, key: unknown, value: unknown) {
@@ -303,7 +365,16 @@ class SlatePanel {
                     vscode.window.showErrorMessage('Slate: open a workspace folder before compiling.');
                     return;
                 }
-                await writeCompiledFile(folder.uri, msg.filename, msg.source);
+                await writeCompiledFile(folder.uri, msg.filename, msg.source, msg.destination);
+                break;
+            }
+            case 'rehydrate': {
+                const folder = vscode.workspace.workspaceFolders?.[0];
+                if (!folder) {
+                    vscode.window.showErrorMessage('Slate: open a workspace folder before rehydrating.');
+                    return;
+                }
+                await readForRehydrate(folder.uri, msg, (m) => this.postMessage(m));
                 break;
             }
             case 'state-write':
@@ -426,8 +497,13 @@ class SlateEditorProvider implements vscode.CustomTextEditorProvider {
                     break;
                 }
                 case 'compile': {
-                    const targetDir = vscode.Uri.file(path.dirname(document.uri.fsPath));
-                    await writeCompiledFile(targetDir, msg.filename, msg.source);
+                    const rootDir = vscode.Uri.file(path.dirname(document.uri.fsPath));
+                    await writeCompiledFile(rootDir, msg.filename, msg.source, msg.destination);
+                    break;
+                }
+                case 'rehydrate': {
+                    const rootDir = vscode.Uri.file(path.dirname(document.uri.fsPath));
+                    await readForRehydrate(rootDir, msg, (m) => panel.webview.postMessage(m));
                     break;
                 }
                 case 'state-write':

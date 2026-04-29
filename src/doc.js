@@ -2,6 +2,21 @@ import { v4 as uuidv4 } from 'uuid';
 import Card from './cards.js';
 
 /**
+ * Strip a destination path to a safe, forward-slash relative path. Drops
+ * `..` segments, leading/trailing slashes, and collapses internal whitespace.
+ * Empty input → empty string (= "compile at workspace root").
+ */
+export function sanitizeDestination(raw) {
+    if (raw === null || typeof raw === 'undefined') return '';
+    return String(raw)
+        .replace(/\\/g, '/')
+        .split('/')
+        .map(s => s.trim())
+        .filter(seg => seg.length > 0 && seg !== '.' && seg !== '..')
+        .join('/');
+}
+
+/**
  * Document class - represents a collection of cards with a title and unique ID
  */
 class Doc {
@@ -14,6 +29,20 @@ class Doc {
         this.summaryError = null; // stores error message if summary generation fails
         this.createdAt = null; // timestamp when doc was created
         this.updatedAt = null; // timestamp when doc was last updated
+        this.destination = ''; // relative folder path under workspace root for compiled .py output
+    }
+
+    /**
+     * Update where this doc compiles to. Sanitizes to a forward-slash relative
+     * path with no leading/trailing slashes and no `..` segments — both for
+     * filesystem safety and so the compiler can derive a valid Python module
+     * path from it.
+     */
+    updateDestination(rawPath) {
+        const cleaned = sanitizeDestination(rawPath);
+        this.destination = cleaned;
+        this.updatedAt = new Date().toISOString();
+        return cleaned;
     }
 
     /**
@@ -156,6 +185,7 @@ class Doc {
             id: this.id,
             title: this.title,
             summary: this.summary,
+            destination: this.destination || '',
             cards: this.cards.map(card => ({
                 id: card.id,
                 title: card.title,
@@ -181,6 +211,7 @@ class Doc {
         // Self-heal IDs the same way Project.fromJSON does — see comment there.
         doc.id = jsonData.id || uuidv4();
         doc.summary = jsonData.summary || null;
+        doc.destination = sanitizeDestination(jsonData.destination || '');
         doc.createdAt = jsonData.createdAt;
         doc.updatedAt = jsonData.updatedAt;
 
