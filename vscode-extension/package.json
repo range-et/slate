@@ -10,7 +10,8 @@
   "categories": ["Other", "Notebooks"],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onView:slate.launcher"
+    "onView:slate.launcher",
+    "onCustomEditor:slate.editor"
   ],
   "contributes": {
     "viewsContainers": {
@@ -31,8 +32,19 @@
         }
       ]
     },
+    "customEditors": [
+      {
+        "viewType": "slate.editor",
+        "displayName": "Slate Notebook",
+        "selector": [
+          { "filenamePattern": "*.slate.json" }
+        ],
+        "priority": "default"
+      }
+    ],
     "commands": [
-      { "command": "slate.openPanel", "title": "Slate: Open Panel" },
+      { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
+      { "command": "slate.newProject", "title": "Slate: New Project…" },
       { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
       { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
     ]

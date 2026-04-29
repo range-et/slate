@@ -138,6 +138,9 @@ class MainManager {
     }
 
     summarySuccess() {
+        // Summary writeback is a real project-state change but doesn't trigger
+        // viz updates, so notify the host explicitly.
+        this.notifyProjectChanged();
         // Remove generating animation, show success briefly
         if (this.buttons.summary_btn) {
             this.buttons.summary_btn.classList.remove('summary-generating');
@@ -203,6 +206,9 @@ class MainManager {
             this.viz.updateData(graphData);
             console.log("Network viz updated:", graphData.nodes.length, "nodes,", graphData.links.length, "links");
         }
+        // Every structural mutation (card add/remove, doc add/remove, title rename)
+        // funnels through updateNetworkViz, so this is the natural sync point.
+        this.notifyProjectChanged();
     }
 
     addDocButton() {
@@ -426,8 +432,8 @@ class MainManager {
 
     setupHostMessageListener() {
         if (typeof window === 'undefined') return;
-        // Bridge for VS Code commands (slate.compile, slate.toggleCodeCard) that
-        // postMessage into the webview. In a plain browser these never fire.
+        // Bridge for VS Code commands and the custom-editor sync protocol.
+        // Browser hosts never receive any of these.
         this._hostMessageHandler = (event) => {
             const msg = event && event.data;
             if (!msg || typeof msg.type !== 'string') return;
@@ -438,9 +444,31 @@ class MainManager {
                 case 'toggle-code':
                     this.toggleCodeMode();
                     break;
+                case 'load-state':
+                    if (typeof msg.state === 'string' && msg.state.length > 0) {
+                        try {
+                            const data = JSON.parse(msg.state);
+                            this.loadProjectFromJson(data);
+                        } catch (err) {
+                            console.warn('load-state: invalid project JSON:', err);
+                        }
+                    }
+                    break;
             }
         };
         window.addEventListener('message', this._hostMessageHandler);
+
+        // If the host baked an initial project into the page (custom editor case),
+        // hydrate from it now. Done after listener wiring so any subsequent
+        // load-state arrives at a consistent moment.
+        if (typeof window.__slateInitialProject === 'string' && window.__slateInitialProject.length > 0) {
+            try {
+                const data = JSON.parse(window.__slateInitialProject);
+                this.loadProjectFromJson(data);
+            } catch (err) {
+                console.warn('Failed to hydrate from __slateInitialProject:', err);
+            }
+        }
     }
 
     async compileCurrentDoc() {
@@ -633,7 +661,7 @@ class MainManager {
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
         fileInput.accept = 'application/json,.json';
-        
+
         fileInput.onchange = async (e) => {
             const file = e.target.files[0];
             if (!file) {
@@ -643,43 +671,70 @@ class MainManager {
             try {
                 const text = await file.text();
                 const projectData = JSON.parse(text);
-                
-                // Create project from JSON
-                const importedProject = Project.fromJSON(projectData);
-                
-                // Replace current project
-                this.currentProject = importedProject;
-                this.buttons.project_title_input.value = importedProject.name;
-                
-                // Update network visualization
-                this.updateNetworkViz();
-                
-                // Load the first document if it exists
-                if (importedProject.getDocCount() > 0) {
-                    const firstDoc = importedProject.getAllDocs()[0];
-                    this.switchToDoc(firstDoc);
-                } else {
-                    // No docs in imported project, create a new one
-                    const newDocName = generateRandomName();
-                    this.buttons.doc_title_input.value = newDocName;
-                    this.createNewDoc(newDocName);
-                }
-                
-                // Clear chat content, prompt, and images
-                if (this.chatManager) {
-                    this.chatManager.clearAll();
-                }
-                
-                console.log("Project imported successfully:", importedProject.name);
+                this.loadProjectFromJson(projectData);
+                console.log("Project imported successfully:", this.currentProject.name);
                 await this.modal.alert("Project imported successfully!");
             } catch (err) {
                 console.error("Import failed:", err);
                 await this.modal.alert("Import failed: " + err.message);
             }
         };
-        
+
         // Trigger file picker
         fileInput.click();
+    }
+
+    /**
+     * Replace the in-memory project with one parsed from JSON. Used by the
+     * standard import flow and by the VS Code custom editor when hydrating
+     * a `.slate.json` file. Suppresses dirty notifications while loading.
+     */
+    loadProjectFromJson(jsonData) {
+        const importedProject = Project.fromJSON(jsonData);
+
+        this._hydrating = true;
+        try {
+            this.currentProject = importedProject;
+            this.buttons.project_title_input.value = importedProject.name || '';
+
+            this.updateNetworkViz();
+
+            if (importedProject.getDocCount() > 0) {
+                const firstDoc = importedProject.getAllDocs()[0];
+                this.switchToDoc(firstDoc);
+            } else {
+                const newDocName = generateRandomName();
+                this.buttons.doc_title_input.value = newDocName;
+                this.createNewDoc(newDocName);
+            }
+
+            if (this.chatManager) {
+                this.chatManager.clearAll();
+            }
+        } finally {
+            this._hydrating = false;
+        }
+    }
+
+    /**
+     * Debounced notification to the host that the project state has changed.
+     * No-op in plain browsers (no host to talk to). Skipped during hydration.
+     */
+    notifyProjectChanged() {
+        if (this._hydrating) return;
+        if (typeof window === 'undefined') return;
+        if (!window.__slateVscode) return;       // only fires inside VS Code
+        if (this._notifyTimer) clearTimeout(this._notifyTimer);
+        this._notifyTimer = setTimeout(() => {
+            this._notifyTimer = null;
+            if (!this.currentProject) return;
+            try {
+                const json = JSON.stringify(this.currentProject.toJSON(), null, 2);
+                window.__slateVscode.postMessage({ type: 'state-changed', state: json });
+            } catch (err) {
+                console.warn('Failed to serialize project for host:', err);
+            }
+        }, 250);
     }
 
     async searchAndNavigate() {

@@ -6,10 +6,10 @@ Hosts the slate notebook UI in a VS Code webview, and writes compiled `.py` file
 
 ## What you get
 
-- A **Slate icon in the activity bar**. Click it once and the main slate panel opens in your editor area; the sidebar holds a tiny "Open Slate" launcher you can use to bring the panel back any time.
-- **Slate: Open Panel** — opens slate in a webview tab.
-- **Slate: Compile Current Doc** — sends a "compile" signal into the open panel; the active doc's code cards get compiled to `<doc_title>.py` in your workspace root.
-- **Slate: Toggle Code Card** — flips the next generation between markdown and code modes.
+- **`*.slate.json` files open in slate.** Double-click any `.slate.json` in your workspace and VS Code routes it to the slate custom editor instead of the JSON viewer. Edits round-trip through VS Code's standard dirty/save flow.
+- A **Slate icon in the activity bar**. The sidebar offers two buttons: **New Slate Project…** (prompts for a name and creates `<name>.slate.json` in the workspace) and **Open Empty Panel** (an unbound, ephemeral slate panel).
+- **Compile alongside the source.** Compile from a `.slate.json`-backed editor and the `<doc>.py` lands next to the source file. Compile from the empty panel and it lands at the workspace root.
+- **Commands**: `Slate: New Project…`, `Slate: Open Empty Panel`, `Slate: Compile Current Doc`, `Slate: Toggle Code Card`.
 
 `localStorage` (API keys, provider choice, local model name, base URL) is shimmed onto VS Code `globalState`, so your settings persist across restarts.
 
