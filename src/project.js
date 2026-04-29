@@ -220,18 +220,20 @@ class Project {
      */
     static fromJSON(jsonData) {
         const project = new Project(jsonData.name);
-        project.id = jsonData.id;
+        // Self-heal IDs: external tools (the workspace scanner, hand-authored
+        // slate.json, copy-pasted projects) often skip the UUIDs. The graph
+        // viz keys nodes by id, so missing ids would silently kill all edges.
+        project.id = jsonData.id || uuidv4();
         project.createdAt = jsonData.createdAt;
         project.updatedAt = jsonData.updatedAt;
-        
-        // Restore documents
+
         if (jsonData.docs && Array.isArray(jsonData.docs)) {
             jsonData.docs.forEach(docData => {
                 const doc = Doc.fromJSON(docData);
                 project.docs.push(doc);
             });
         }
-        
+
         return project;
     }
 

@@ -12,9 +12,14 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
+
+function uuid(): string {
+    return crypto.randomUUID();
+}
 
 export interface ScannedCard {
-    id?: string;
+    id: string;
     title: string;
     content: string;
     prompt: string;
@@ -24,7 +29,7 @@ export interface ScannedCard {
 }
 
 export interface ScannedDoc {
-    id?: string;
+    id: string;
     title: string;
     summary: string | null;
     cards: ScannedCard[];
@@ -34,6 +39,7 @@ export interface ScannedDoc {
 }
 
 export interface ScannedProject {
+    id: string;
     name: string;
     docs: ScannedDoc[];
     createdAt: string;
@@ -174,6 +180,7 @@ function extractImports(source: string): { module: string; names: string[] }[] {
 export function scanWorkspace(root: string, projectName: string): ScannedProject {
     const now = new Date().toISOString();
     const project: ScannedProject = {
+        id: uuid(),
         name: projectName,
         docs: [],
         createdAt: now,
@@ -221,6 +228,7 @@ export function scanWorkspace(root: string, projectName: string): ScannedProject
         }
 
         const doc: ScannedDoc = {
+            id: uuid(),
             title: entry.docTitle,
             summary: null,
             cards: [],
@@ -236,6 +244,7 @@ export function scanWorkspace(root: string, projectName: string): ScannedProject
                 return re.test(blk.source);
             });
             doc.cards.push({
+                id: uuid(),
                 title: blk.name,
                 content: blk.source,
                 prompt: `imported from ${entry.rel}`,

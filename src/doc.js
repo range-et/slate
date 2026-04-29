@@ -178,12 +178,12 @@ class Doc {
      */
     static fromJSON(jsonData) {
         const doc = new Doc(jsonData.title);
-        doc.id = jsonData.id;
+        // Self-heal IDs the same way Project.fromJSON does — see comment there.
+        doc.id = jsonData.id || uuidv4();
         doc.summary = jsonData.summary || null;
         doc.createdAt = jsonData.createdAt;
         doc.updatedAt = jsonData.updatedAt;
-        
-        // Restore cards (Note: this creates new Card instances without DOM elements)
+
         if (jsonData.cards && Array.isArray(jsonData.cards)) {
             jsonData.cards.forEach(cardData => {
                 const card = new Card(
@@ -193,14 +193,14 @@ class Doc {
                     null,
                     cardData.prompt || "",
                     cardData.images || [],
-                    cardData.cardType || 'markdown'  // backward-compat default
+                    cardData.cardType || 'markdown'
                 );
-                card.id = cardData.id;
+                card.id = cardData.id || uuidv4();
                 card.links = cardData.links || [];
                 doc.cards.push(card);
             });
         }
-        
+
         return doc;
     }
 
