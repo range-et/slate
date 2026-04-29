@@ -9,8 +9,28 @@
   },
   "categories": ["Other", "Notebooks"],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:slate.launcher"
+  ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "slate",
+          "title": "Slate",
+          "icon": "media/slate-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "slate": [
+        {
+          "type": "webview",
+          "id": "slate.launcher",
+          "name": "Slate"
+        }
+      ]
+    },
     "commands": [
       { "command": "slate.openPanel", "title": "Slate: Open Panel" },
       { "command": "slate.compile", "title": "Slate: Compile Current Doc" },

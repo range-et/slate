@@ -6,3 +6,4 @@ out/**/*.map
 node_modules/**
 .gitignore
 tsconfig.json
+!media/**

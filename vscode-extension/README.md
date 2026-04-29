@@ -6,6 +6,7 @@ Hosts the slate notebook UI in a VS Code webview, and writes compiled `.py` file
 
 ## What you get
 
+- A **Slate icon in the activity bar**. Click it once and the main slate panel opens in your editor area; the sidebar holds a tiny "Open Slate" launcher you can use to bring the panel back any time.
 - **Slate: Open Panel** — opens slate in a webview tab.
 - **Slate: Compile Current Doc** — sends a "compile" signal into the open panel; the active doc's code cards get compiled to `<doc_title>.py` in your workspace root.
 - **Slate: Toggle Code Card** — flips the next generation between markdown and code modes.

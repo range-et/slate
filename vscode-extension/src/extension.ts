@@ -26,7 +26,8 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
             panel.postMessage({ type: 'toggle-code' });
-        })
+        }),
+        vscode.window.registerWebviewViewProvider('slate.launcher', new SlateLauncherView(context))
     );
 }
 
@@ -218,4 +219,61 @@ function makeNonce(): string {
     let out = '';
     for (let i = 0; i < 32; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
     return out;
+}
+
+/**
+ * The activity-bar entry. Auto-opens the main slate panel the first time the
+ * user reveals it, then shows a friendly placeholder with a Reopen button so
+ * the icon is always a one-click launcher.
+ */
+class SlateLauncherView implements vscode.WebviewViewProvider {
+    constructor(private readonly context: vscode.ExtensionContext) {}
+
+    resolveWebviewView(view: vscode.WebviewView) {
+        view.webview.options = { enableScripts: true };
+        view.webview.html = this.renderHtml(view.webview);
+        view.webview.onDidReceiveMessage(msg => {
+            if (msg && msg.type === 'open') {
+                vscode.commands.executeCommand('slate.openPanel');
+            }
+        });
+        // Auto-open the main panel on first reveal so the user lands directly in slate.
+        if (!SlatePanel.current) {
+            vscode.commands.executeCommand('slate.openPanel');
+        }
+    }
+
+    private renderHtml(webview: vscode.Webview): string {
+        const nonce = makeNonce();
+        const csp = [
+            `default-src 'none'`,
+            `style-src ${webview.cspSource} 'unsafe-inline'`,
+            `script-src 'nonce-${nonce}'`
+        ].join('; ');
+        return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; line-height: 1.5; }
+  h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.8; }
+  p { margin: 0 0 12px; font-size: 12px; opacity: 0.75; }
+  button { width: 100%; padding: 6px 10px; font: inherit; cursor: pointer;
+           background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+           border: 1px solid var(--vscode-button-border, transparent); border-radius: 2px; }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+</style>
+</head>
+<body>
+  <h3>Slate</h3>
+  <p>Architect the code, then run it in VS Code.</p>
+  <button id="open">Open Slate</button>
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    document.getElementById('open').addEventListener('click', () => vscode.postMessage({ type: 'open' }));
+  </script>
+</body>
+</html>`;
+    }
 }
