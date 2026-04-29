@@ -6,99 +6,65 @@
   --resizer-width: 4px;
 }
 
-/* When slate runs inside a VS Code webview the surrounding chrome is dark and
- * compact; scale the base font down and dim the bright accent borders so it
- * sits well next to the editor. The .slate-host-vscode class is set by the
- * state-bridge during boot, before any UI paints. */
+/* When slate runs inside a VS Code webview, anchor the rem cascade at 14px so
+ * monad's --type-* tokens (rem-based) match VS Code's editor scale. Almost
+ * everything else flows from monad tokens already defined in the slate styles
+ * above; we only override what genuinely differs from the standalone web app:
+ *  - the type root (14px vs 16px),
+ *  - muted button borders that re-saturate on hover,
+ *  - tightened chrome padding using --space-1.
+ * Set by state-bridge.js on the <html> element before any UI paints. */
 html.slate-host-vscode {
-  font-size: 12px;
+  font-size: 14px;
 }
-html.slate-host-vscode body {
-  font-size: 12px;
-}
-html.slate-host-vscode button {
-  font-size: 11px;
-  padding: 3px 7px;
-}
-html.slate-host-vscode h4 {
-  font-size: 11px;
-}
-html.slate-host-vscode h3 {
-  font-size: 12px;
-}
-/* Muted at rest, accents on hover — keeps the slate identity but stops the
- * borders from competing with VS Code's chrome.
- * The :hover rules need higher specificity than the global `button:hover`
- * so we re-anchor on the slate-host-vscode root. */
+
+/* Muted at rest, slate accents on hover. */
 html.slate-host-vscode .info_btn,
 html.slate-host-vscode .success_btn,
 html.slate-host-vscode .alert_btn,
 html.slate-host-vscode .finish_btn {
-  border-color: var(--strata-border, color-mix(in srgb, currentColor 35%, transparent));
+  border-color: var(--strata-border);
 }
 html.slate-host-vscode .info_btn:hover {
-  border-color: var(--information-1);
-  background-color: color-mix(in srgb, var(--information-1) 10%, transparent);
+  border-color: var(--strata-info);
+  background-color: var(--strata-info-bg);
 }
 html.slate-host-vscode .success_btn:hover {
-  border-color: var(--information-3);
-  background-color: color-mix(in srgb, var(--information-3) 10%, transparent);
+  border-color: var(--strata-success);
+  background-color: var(--strata-success-bg);
 }
 html.slate-host-vscode .alert_btn:hover {
-  border-color: var(--alert);
-  background-color: color-mix(in srgb, var(--alert) 10%, transparent);
+  border-color: var(--strata-error);
+  background-color: var(--strata-error-bg);
 }
 html.slate-host-vscode .finish_btn:hover {
-  border-color: var(--finish);
-  background-color: color-mix(in srgb, var(--finish) 10%, transparent);
+  border-color: var(--strata-move-finish);
+  background-color: color-mix(in srgb, var(--strata-move-finish) 12%, transparent);
 }
+
+/* Tighter chrome on a webview embed. Uses monad space tokens (--space-1 = 8px). */
+html.slate-host-vscode #topbar,
 html.slate-host-vscode #content .panel .panel-header {
-  padding: 3px 8px;
-  min-height: 24px;
-  gap: 6px;
+  padding-block: calc(var(--space-1) / 2);
+  padding-inline: var(--space-1);
 }
 html.slate-host-vscode #content .panel .panel-body {
-  padding: 4px 8px;
+  padding: calc(var(--space-1) / 2) var(--space-1);
 }
-html.slate-host-vscode #topbar {
-  padding: 2px 8px;
-  gap: 4px;
-  min-height: 26px;
-}
-/* Cards run dense in the webview — the user is scanning a graph, not reading prose. */
 html.slate-host-vscode .card {
-  padding: 6px 8px;
-  margin: 4px 0;
-}
-html.slate-host-vscode .card_details h4 {
-  font-size: 12px;
-}
-html.slate-host-vscode .card_details .card_id {
-  font-size: 10px;
+  padding: var(--space-1);
+  margin: calc(var(--space-1) / 2) 0;
 }
 html.slate-host-vscode .card-prompt-section {
-  padding: 5px 8px;
-  margin-bottom: 6px;
+  padding: calc(var(--space-1) / 2) var(--space-1);
 }
-html.slate-host-vscode .card-prompt-label {
-  margin-bottom: 3px;
-  font-size: 10px;
+html.slate-host-vscode .card_details .card_id {
+  font-size: var(--type-xs);   /* monad: 0.75rem = 10.5px at 14px base */
 }
-html.slate-host-vscode .card-prompt-text {
-  font-size: 12px;
-  line-height: 1.5;
-}
-html.slate-host-vscode .card-content {
-  font-size: 12px;
-}
-html.slate-host-vscode .card-code-block {
-  font-size: 12px;
-  padding: 6px 8px;
-}
-/* Card move button — cap its inflated 16px size in dense mode. */
+/* The card-move-btn arrow renders huge at 16px from its specific style;
+ * fold it into the standard button scale when embedded. */
 html.slate-host-vscode .card-move-btn {
-  font-size: 12px;
-  padding: 2px 6px;
+  font-size: var(--type-sm);
 }
 
 * {
@@ -610,6 +576,9 @@ body.slate-editing-card #add_to_doc {
 body.slate-editing-card #add_to_doc::before {
   content: '✎ ';
 }
+/* EXIT EDIT button only exists while editing — hide otherwise. */
+#exit_edit { display: none; }
+body.slate-editing-card #exit_edit { display: inline-flex; }
 /* Small "EDITING" hint above the prompt panel when active. */
 body.slate-editing-card .panel-body > h4:first-of-type::after {
   content: ' · editing';

@@ -40,6 +40,7 @@ const attach_image = document.getElementById("attach_image");
 const image_preview_container = document.getElementById("image-preview-container");
 const code_toggle = document.getElementById("code_toggle");
 const compile_btn = document.getElementById("compile_btn");
+const exit_edit = document.getElementById("exit_edit");
 
 const buttons = {
     resetZoom: resetZoom,
@@ -64,7 +65,8 @@ const buttons = {
     attach_image: attach_image,
     image_preview_container: image_preview_container,
     code_toggle: code_toggle,
-    compile_btn: compile_btn
+    compile_btn: compile_btn,
+    exit_edit: exit_edit
 };
 
 // main manager
@@ -831,6 +833,17 @@ class MainManager {
         if (this.buttons.compile_btn) {
             this.buttons.compile_btn.addEventListener("click", () => this.compileCurrentDoc());
         }
+        if (this.buttons.exit_edit) {
+            this.buttons.exit_edit.addEventListener("click", () => this.chatManager.cancelEdit());
+        }
+        // ESC anywhere also exits edit mode (unless focus is in a CodeMirror
+        // editor where ESC has its own meaning — we still hijack it because
+        // there's no other ESC binding worth preserving in slate today).
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && document.body.classList.contains('slate-editing-card')) {
+                this.chatManager.cancelEdit();
+            }
+        });
         this.buttons.api_key_btn.addEventListener("click", () => this.show_api_key_modal());
         this.buttons.about_btn.addEventListener("click", () => this.showAboutModal());
         this.buttons.feedback_btn.addEventListener("click", () => {

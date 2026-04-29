@@ -123,6 +123,16 @@ export class ChatManager {
     }
 
     /**
+     * Bail out of edit-in-place mode without saving. Drops the editingCard
+     * pointer, clears prompt/response/title/images, and removes the yellow
+     * stripes. Wired to the EXIT EDIT button and the ESC key.
+     */
+    cancelEdit() {
+        if (!this.editingCard) return;
+        this.clearAll();
+    }
+
+    /**
      * Tear down the live response editor (if any) and clear chatContent.
      * Safe to call when no editor is mounted.
      */
