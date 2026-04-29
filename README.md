@@ -1,3 +1,7 @@
+---
+tags: [project, slate, readme, node-graph, explicit-context, visualization]
+---
+
 # Slate
 
 A graph-based document editor with AI-powered card creation and intelligent reference linking. Organize your thoughts, documents, and AI conversations in an interconnected knowledge graph. The main reason for this interface is to demonstrate that a single line of thought "chat" interface doesn't have to be the default method of brainstorming how we come up with ideas. 
@@ -550,3 +554,8 @@ Built with:
 ---
 
 **Note**: This is an MVP (Minimum Viable Product). Features are actively being developed and refined.
+
+
+---
+
+*Related: [motivation](motivation.md)*
