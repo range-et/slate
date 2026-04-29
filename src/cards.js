@@ -114,6 +114,7 @@ class Card {
                     <p class="card_id">${this.id}</p>
                 </div>
                 <div class="card_actions">
+                    <button class="success_btn card-edit-btn" title="Edit this card in the prompt pane">✎</button>
                     <button class="info_btn card-move-btn" title="Move to another document">↗</button>
                     <button class="alert_btn" title="Remove card">x</button>
                 </div>
@@ -171,7 +172,25 @@ class Card {
                 this.moveToAnotherDoc();
             });
         }
-        
+
+        // Edit button: pushes the card's prompt + response back into the
+        // edit zone so the user can tweak and save in place.
+        const editBtn = this.innerHTML.querySelector('.card-edit-btn');
+        if (editBtn) {
+            editBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.loadIntoEditor();
+            });
+        }
+        // Right-click anywhere on the card also enters edit mode (since
+        // left-click on @-references is reserved for navigation).
+        this.innerHTML.addEventListener('contextmenu', (e) => {
+            // Don't hijack right-click on the inline @-reference links.
+            if (e.target.closest('.card-link-inline')) return;
+            e.preventDefault();
+            this.loadIntoEditor();
+        });
+
         // Attach click handlers to all @reference links in the prompt
         const linkElements = this.innerHTML.querySelectorAll('.card-link-inline');
         linkElements.forEach(linkEl => {
@@ -183,6 +202,16 @@ class Card {
         });
     }
     
+    /**
+     * Forward to the active ChatManager so it can hydrate the prompt + response
+     * panes from this card, ready for in-place edits.
+     */
+    loadIntoEditor() {
+        const cm = window.mainManager?.chatManager;
+        if (!cm || typeof cm.loadCardForEdit !== 'function') return;
+        cm.loadCardForEdit(this);
+    }
+
     async moveToAnotherDoc() {
         // Move this card to a different document
         if (!window.mainManager) {

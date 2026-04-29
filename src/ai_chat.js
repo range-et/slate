@@ -45,6 +45,10 @@ export class ChatManager {
         // first response arrives or after clearAll/setDefaultMessage.
         this.responseEditor = null;
         this.responseCardType = null;  // tracks whether the editor is for a code or markdown response
+
+        // Edit-in-place state. When non-null, addToDoc updates the existing
+        // card instead of creating a new one. Cleared by clearAll.
+        this.editingCard = null;
         
         // Auto-sanitize title on blur (when user leaves the field) and ensure uniqueness
         this.cardTitleInput.addEventListener('blur', () => {
@@ -59,6 +63,63 @@ export class ChatManager {
                 this.cardTitleInput.value = sanitized;
             }
         });
+    }
+
+    /**
+     * Hydrate the prompt + response panes from an existing card so the user
+     * can edit it in place. Sets editingCard so the next addToDoc updates
+     * the same card instead of creating a new one. Toggles the edit-mode
+     * styling (yellow diagonal stripes) on.
+     */
+    loadCardForEdit(card) {
+        if (!card) return;
+
+        // If we were already editing another card, abandon those edits.
+        this.editingCard = card;
+
+        // Match the card's mode so SEND re-generation respects code-vs-markdown.
+        const isCode = card.cardType === CARD_TYPE_CODE;
+        if (this.codeMode !== isCode && window.mainManager?.toggleCodeMode) {
+            window.mainManager.toggleCodeMode();   // flips codeMode + button + prompt language
+        }
+
+        // Title.
+        this.cardTitleInput.value = card.title || '';
+
+        // Prompt.
+        clearEditor(this.promptEditor);
+        if (card.prompt) setEditorText(this.promptEditor, card.prompt);
+
+        // Images.
+        this.attachedImages = Array.isArray(card.images) ? [...card.images] : [];
+        this.renderImagePreviews();
+
+        // Response: code cards have raw source; markdown cards may have raw
+        // markdown (new) or HTML (legacy). Either way, drop it into the editor.
+        const responseText = isCode
+            ? (card.getPythonSource() || '')
+            : (card.content || '');
+        this.renderResponseEditor(responseText, { isCode });
+
+        // Visual: tag the response container so styles.css can paint the
+        // diagonal yellow stripes that signal "you're editing".
+        this.applyEditingChrome(true);
+
+        // Pop the user up to the chat panel on mobile.
+        const chatPanel = document.getElementById('chat');
+        if (chatPanel && window.matchMedia('(max-width: 768px)').matches) {
+            document.querySelectorAll('.panel.mobile-active').forEach(el => el.classList.remove('mobile-active'));
+            chatPanel.classList.add('mobile-active');
+        }
+    }
+
+    /**
+     * Toggle the edit-mode styling on/off. Hooked up via a body-level class
+     * so the CSS can style the prompt + response containers + add-to-doc
+     * button without needing to wire each element individually.
+     */
+    applyEditingChrome(on) {
+        document.body.classList.toggle('slate-editing-card', !!on);
     }
 
     /**
@@ -153,13 +214,16 @@ export class ChatManager {
     }
 
     /**
-     * Clear everything including the prompt (used after adding to doc)
+     * Clear everything including the prompt (used after adding to doc).
+     * Also exits edit-in-place mode if we were in it.
      */
     clearAll() {
         this.setDefaultMessage();
         this.cardTitleInput.value = "";
         clearEditor(this.promptEditor);
         this.clearImages();
+        this.editingCard = null;
+        this.applyEditingChrome(false);
     }
 
     /**
@@ -581,9 +645,6 @@ export class ChatManager {
      */
     async addToDoc() {
         try {
-            // The response editor is the source of truth — what's in it now is
-            // what the user wants in the doc, including any tweaks they made
-            // after the AI responded.
             const responseText = this.getResponseText();
             let cardTitle = this.cardTitleInput.value.trim();
 
@@ -594,25 +655,53 @@ export class ChatManager {
                 throw new Error("Card title is required");
             }
 
+            const promptText = getEditorText(this.promptEditor);
+            const referencedTitles = this.parseReferences(promptText);
+            const isCodeCard = this.responseCardType === CARD_TYPE_CODE;
+            const cardType = isCodeCard ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
+
+            if (this.editingCard) {
+                // Edit-in-place: mutate the existing card and re-render its DOM.
+                const card = this.editingCard;
+                const oldTitle = card.title;
+                let newTitle = sanitizeTitle(cardTitle);
+                // Title uniqueness check excludes the card itself (so re-saving with
+                // the same title doesn't append _1).
+                if (newTitle !== oldTitle && this.currentDoc) {
+                    newTitle = this.currentDoc.getUniqueCardTitle(newTitle);
+                }
+                card.title = newTitle;
+                card.content = responseText;
+                card.cardType = cardType;
+                card.prompt = promptText;
+                card.images = [...this.attachedImages];
+                card.links = referencedTitles;
+
+                // Re-render: build a fresh DOM element and swap it in for the old one.
+                const oldEl = card.innerHTML;
+                card.innerHTML = card.create();
+                if (oldEl && oldEl.parentNode) {
+                    oldEl.parentNode.replaceChild(card.innerHTML, oldEl);
+                }
+                // Re-attach handlers on the new DOM (init() does this, but it would also re-set the id).
+                this.reattachCardHandlers(card);
+
+                if (this.updateNetworkCallback) this.updateNetworkCallback();
+                this.generateDocSummary();
+                this.clearAll();
+                console.log("Card updated in place:", card.id);
+                return;
+            }
+
+            // Create-new path.
             cardTitle = sanitizeTitle(cardTitle);
             if (this.currentDoc) {
                 cardTitle = this.currentDoc.getUniqueCardTitle(cardTitle);
             }
 
-            const promptText = getEditorText(this.promptEditor);
-            const referencedTitles = this.parseReferences(promptText);
-            console.log("Card will link to:", referencedTitles);
-
-            // Code cards store raw Python source (rendered as a code block on
-            // the card). Markdown cards store rendered HTML (Card.create()
-            // doesn't double-render so we render here).
-            const isCodeCard = this.responseCardType === CARD_TYPE_CODE;
-            const cardType = isCodeCard ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
-            const cardContent = isCodeCard ? responseText : marked.parse(responseText);
-
             const card = new Card(
                 cardTitle,
-                cardContent,
+                responseText,    // raw markdown for prose cards, raw Python for code cards
                 this.modal,
                 this.updateNetworkCallback,
                 promptText,
@@ -633,15 +722,37 @@ export class ChatManager {
                 this.updateNetworkCallback();
             }
 
-            // Trigger async summary generation for the doc
             this.generateDocSummary();
-
-            // Clear everything (including prompt) after adding card
             this.clearAll();
         } catch (err) {
             console.error("Didn't add card to document:", err);
             await this.modal.alert("Cannot add: " + err.message);
         }
+    }
+
+    /**
+     * Re-bind the listeners that Card.init() normally attaches when the DOM
+     * element was rebuilt by edit-in-place. We can't call card.init() again
+     * because it would mint a new UUID via the missing-id branch.
+     */
+    reattachCardHandlers(card) {
+        const removeBtn = card.innerHTML.querySelector('.alert_btn');
+        if (removeBtn) removeBtn.addEventListener('click', (e) => { e.stopPropagation(); card.remove(); });
+        const moveBtn = card.innerHTML.querySelector('.card-move-btn');
+        if (moveBtn) moveBtn.addEventListener('click', (e) => { e.stopPropagation(); card.moveToAnotherDoc(); });
+        const editBtn = card.innerHTML.querySelector('.card-edit-btn');
+        if (editBtn) editBtn.addEventListener('click', (e) => { e.stopPropagation(); card.loadIntoEditor(); });
+        card.innerHTML.addEventListener('contextmenu', (e) => {
+            if (e.target.closest('.card-link-inline')) return;
+            e.preventDefault();
+            card.loadIntoEditor();
+        });
+        card.innerHTML.querySelectorAll('.card-link-inline').forEach(linkEl => {
+            linkEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                card.navigateToCard(linkEl.getAttribute('data-link'));
+            });
+        });
     }
 }
 

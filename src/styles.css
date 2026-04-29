@@ -581,6 +581,44 @@ input[type="text"]::placeholder {
   margin-top: var(--space-1);
 }
 
+/* ---------- EDIT-IN-PLACE MODE ---------- */
+/* When body has .slate-editing-card, the prompt + response panes wear
+ * yellow diagonal stripes so it's obvious you're editing an existing
+ * card rather than authoring a new one. ADD TO DOC effectively becomes
+ * SAVE EDIT in this state. */
+body.slate-editing-card #chat-prompt,
+body.slate-editing-card #chat-content {
+  border: 1px solid var(--strata-warning, #FFC107);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0,
+    transparent 8px,
+    color-mix(in srgb, var(--strata-warning, #FFC107) 12%, transparent) 8px,
+    color-mix(in srgb, var(--strata-warning, #FFC107) 12%, transparent) 10px
+  );
+}
+/* The CodeMirror editors paint their own backgrounds; punch a hole so
+ * the stripes only show on the container's chrome (border + padding gutter). */
+body.slate-editing-card #chat-prompt .cm-editor,
+body.slate-editing-card #chat-content .cm-editor {
+  background-color: var(--background);
+}
+body.slate-editing-card #add_to_doc {
+  border-color: var(--strata-warning, #FFC107);
+  color: var(--strata-warning, #FFC107);
+}
+body.slate-editing-card #add_to_doc::before {
+  content: '✎ ';
+}
+/* Small "EDITING" hint above the prompt panel when active. */
+body.slate-editing-card .panel-body > h4:first-of-type::after {
+  content: ' · editing';
+  color: var(--strata-warning, #FFC107);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-left: 6px;
+}
+
 /* Card styles */
 .card {
   background: var(--background);
