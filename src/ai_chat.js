@@ -344,6 +344,22 @@ export class ChatManager {
         const codeMode = !!this.codeMode;
         console.log("User input:", userInput, "| codeMode:", codeMode);
 
+        if (!userInput || !userInput.trim()) {
+            await this.modal.alert("Type a prompt before clicking SEND.");
+            return;
+        }
+
+        // Preflight: make sure we have a usable agent before showing the loading state.
+        const preflightAgent = this.resolveAgentFor(codeMode);
+        if (!preflightAgent || (typeof preflightAgent.hasApiKey === 'function' && !preflightAgent.hasApiKey())) {
+            const which = codeMode ? "Local model" : "AI provider";
+            await this.modal.alert(
+                `${which} not configured. Click API KEY in the toolbar to add a key, ` +
+                `or switch the provider to Local (Ollama) for code cards.`
+            );
+            return;
+        }
+
         const references = this.parseReferences(userInput);
         console.log("Found references:", references);
         const bibliography = this.buildBibliography(references, { codeMode });
@@ -388,15 +404,27 @@ export class ChatManager {
             }
         }).catch(async (err) => {
             console.error("Error generating response:", err);
-            
-            // Extract error details from OpenAI API errors
+
             const errorMessage = err.message || "";
             const errorStatus = err.status || err.response?.status || err.statusCode;
             const errorCode = err.code || err.error?.code;
-            
-            // Handle specific error cases
-            if (err.message === "API_KEY_MISSING" || 
-                errorMessage.includes("API key") || 
+
+            // Local model unreachable — most common when Ollama isn't running or CORS blocks the browser.
+            const looksLikeNetwork = errorMessage.includes("fetch") || errorMessage.includes("Failed to fetch")
+                || errorMessage.includes("NetworkError") || errorMessage.includes("ECONNREFUSED")
+                || err.cause?.code === 'ECONNREFUSED';
+            if (codeMode && looksLikeNetwork) {
+                await this.modal.alert(
+                    "Couldn't reach the local model. Make sure Ollama is running:\n\n" +
+                    "  OLLAMA_ORIGINS='*' ollama serve\n\n" +
+                    "and that the model in the API KEY modal matches an installed tag (e.g. `qwen2.5-coder:7b`)."
+                );
+                this.chatContent.innerHTML = '<p style="color: var(--alert);">Local model unreachable. Start Ollama and try again.</p>';
+                return;
+            }
+
+            if (err.message === "API_KEY_MISSING" ||
+                errorMessage.includes("API key") ||
                 errorMessage.includes("Invalid API key") ||
                 errorStatus === 401 ||
                 errorCode === "invalid_api_key") {

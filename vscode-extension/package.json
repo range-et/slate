@@ -45,6 +45,7 @@
     "commands": [
       { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
       { "command": "slate.newProject", "title": "Slate: New Project…" },
+      { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
       { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
       { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
     ]

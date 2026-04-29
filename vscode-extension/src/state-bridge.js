@@ -15,7 +15,13 @@
         try { vscode = window.acquireVsCodeApi(); } catch (e) { /* already acquired */ }
     }
     // Cache for host_bridge.js to reuse without re-acquiring.
-    if (vscode) window.__slateVscode = vscode;
+    if (vscode) {
+        window.__slateVscode = vscode;
+        // Tag the document so styles.css can scope down font/border for VS Code chrome.
+        if (document.documentElement) {
+            document.documentElement.classList.add('slate-host-vscode');
+        }
+    }
 
     function flush(key, value) {
         if (!vscode) return;

@@ -127,3 +127,8 @@ slate-textured-*.png
 # VS Code extension build artifacts
 vscode-extension/out/
 vscode-extension/dist/
+
+# But ship the extension's launch/tasks config so F5 works for anyone
+!vscode-extension/.vscode/
+!vscode-extension/.vscode/launch.json
+!vscode-extension/.vscode/tasks.json

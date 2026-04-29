@@ -6,6 +6,26 @@
   --resizer-width: 4px;
 }
 
+/* When slate runs inside a VS Code webview the surrounding chrome is dark and
+ * compact; scale the base font down and dim the bright accent borders so it
+ * sits well next to the editor. The .slate-host-vscode class is set by the
+ * state-bridge during boot, before any UI paints. */
+html.slate-host-vscode {
+  font-size: 13px;
+}
+html.slate-host-vscode body {
+  font-size: var(--type-sm, 13px);
+}
+html.slate-host-vscode .info_btn,
+html.slate-host-vscode .success_btn,
+html.slate-host-vscode .alert_btn,
+html.slate-host-vscode .finish_btn {
+  border-color: var(--strata-border, color-mix(in srgb, currentColor 35%, transparent));
+}
+html.slate-host-vscode button:hover {
+  border-color: var(--strata-text-secondary, currentColor);
+}
+
 * {
   font-family: var(--font-sans);
   font-optical-sizing: auto;
@@ -232,6 +252,12 @@ input[type="text"]::placeholder {
 
 #content .panel .panel-header input {
   min-width: 0;
+  flex: 1 1 60px;       /* shrink before pushing buttons off */
+}
+
+#content .panel .panel-header button {
+  white-space: nowrap;  /* RESET ZOOM, COMPILE etc must never wrap */
+  flex-shrink: 0;
 }
 
 #content .panel .panel-body {

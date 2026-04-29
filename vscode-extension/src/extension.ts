@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { scanWorkspace } from './python_scan';
 
 const STATE_KEY = 'slate.persistedState';
 
@@ -38,6 +39,7 @@ export function activate(context: vscode.ExtensionContext) {
             panel.postMessage({ type: 'toggle-code' });
         }),
         vscode.commands.registerCommand('slate.newProject', () => createNewSlateProject()),
+        vscode.commands.registerCommand('slate.scanWorkspace', () => scanWorkspaceToFile()),
         vscode.window.registerWebviewViewProvider('slate.launcher', new SlateLauncherView(context)),
         vscode.window.registerCustomEditorProvider(
             'slate.editor',
@@ -78,6 +80,49 @@ async function createNewSlateProject() {
         const starter = JSON.stringify(STARTER_PROJECT(name), null, 2);
         await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(starter));
     }
+    await vscode.commands.executeCommand('vscode.openWith', target, 'slate.editor');
+}
+
+/**
+ * Walk the active workspace for *.py files, extract top-level symbols into a
+ * slate project, write `<workspace_name>.slate.json`, and open it.
+ */
+async function scanWorkspaceToFile() {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first.');
+        return;
+    }
+    const projectName = folder.name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'project';
+    const target = vscode.Uri.joinPath(folder.uri, `${projectName}.slate.json`);
+
+    let overwrite = true;
+    try {
+        await vscode.workspace.fs.stat(target);
+        const choice = await vscode.window.showWarningMessage(
+            `${projectName}.slate.json exists. Replace it with a fresh scan?`,
+            { modal: true },
+            'Replace'
+        );
+        overwrite = choice === 'Replace';
+    } catch {
+        // Doesn't exist — we'll create it.
+    }
+    if (!overwrite) return;
+
+    const project = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Slate: scanning Python workspace…', cancellable: false },
+        async () => scanWorkspace(folder.uri.fsPath, projectName)
+    );
+
+    if (project.totalCards === 0) {
+        vscode.window.showWarningMessage('Slate: no top-level Python symbols found. Wrote an empty project file.');
+    } else {
+        vscode.window.showInformationMessage(`Slate: scanned ${project.docCount} files, ${project.totalCards} symbols.`);
+    }
+
+    const data = new TextEncoder().encode(JSON.stringify(project, null, 2));
+    await vscode.workspace.fs.writeFile(target, data);
     await vscode.commands.executeCommand('vscode.openWith', target, 'slate.editor');
 }
 
@@ -286,6 +331,7 @@ class SlateLauncherView implements vscode.WebviewViewProvider {
             if (!msg) return;
             if (msg.type === 'open') vscode.commands.executeCommand('slate.openPanel');
             else if (msg.type === 'new-project') vscode.commands.executeCommand('slate.newProject');
+            else if (msg.type === 'scan') vscode.commands.executeCommand('slate.scanWorkspace');
         });
         // Don't auto-open here anymore — with `.slate.json` files driving the
         // primary flow, the activity bar is just a launcher menu.
@@ -320,11 +366,13 @@ class SlateLauncherView implements vscode.WebviewViewProvider {
   <h3>Slate</h3>
   <p>Architect a Python app as a graph of cards. Compile to <code>.py</code>; run in VS Code.</p>
   <button id="new">New Slate Project…</button>
+  <button id="scan">Scan Python Workspace</button>
   <button id="open" class="secondary">Open Empty Panel</button>
   <small>Existing <code>*.slate.json</code> files open in the slate editor automatically.</small>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     document.getElementById('new').addEventListener('click', () => vscode.postMessage({ type: 'new-project' }));
+    document.getElementById('scan').addEventListener('click', () => vscode.postMessage({ type: 'scan' }));
     document.getElementById('open').addEventListener('click', () => vscode.postMessage({ type: 'open' }));
   </script>
 </body>
