@@ -1,5 +1,16 @@
 import { v4 as uuidv4 } from 'uuid';
-import Card from './cards.js';
+import Card, { CARD_KIND_HEADER, CARD_KIND_BODY, HEADER_CARD_TITLE, isValidCardKind } from './cards.js';
+
+/**
+ * Build the auto-created header card for a doc. Empty content; the user fills
+ * it with module-scope setup (imports, constants, type aliases). Pinned at
+ * index 0 by Doc.addCard, undeletable by Doc.removeCard. v0.2 §2.
+ */
+function buildHeaderCard() {
+    const card = new Card(HEADER_CARD_TITLE, '', null, null, '', [], 'markdown', CARD_KIND_HEADER);
+    card.id = uuidv4();
+    return card;
+}
 
 /**
  * Strip a destination path to a safe, forward-slash relative path. Drops
@@ -46,48 +57,80 @@ class Doc {
     }
 
     /**
-     * Initialize the document with a UUID and timestamps
+     * Initialize the document with a UUID, timestamps, and the auto-created
+     * header card (v0.2 §2 — every doc has exactly one header card pinned at
+     * index 0).
      */
     init() {
         this.id = uuidv4();
         this.createdAt = new Date().toISOString();
         this.updatedAt = new Date().toISOString();
+        // Auto-create header card. addCard handles the index-0 pinning.
+        this.addCard(buildHeaderCard());
     }
 
     /**
-     * Add a card to the document
+     * Add a card to the document.
+     *
+     * Header cards (kind: 'header') are pinned to index 0 and a doc may have
+     * at most one. Non-header cards are appended after the header (or at end
+     * if no header exists yet — only happens during deserialization).
+     *
      * @param {Card} card - The card to add
+     * @returns {boolean} - True on success, false on rejection (duplicate id,
+     *                      second header, or non-Card argument)
      */
     addCard(card) {
-        if (card instanceof Card) {
-            // Check if card already exists in this document (prevent duplicates)
-            const existingCard = this.cards.find(c => c.id === card.id);
-            if (existingCard) {
-                console.warn(`Card ${card.id} already exists in document ${this.title}, skipping add`);
-                return;
-            }
-            
-            this.cards.push(card);
-            card.parent = this; // Set parent reference
-            this.updatedAt = new Date().toISOString();
-        } else {
+        if (!(card instanceof Card)) {
             console.error("Can only add Card instances to a document");
+            return false;
         }
+
+        // Check if card already exists in this document (prevent duplicates)
+        const existingCard = this.cards.find(c => c.id === card.id);
+        if (existingCard) {
+            console.warn(`Card ${card.id} already exists in document ${this.title}, skipping add`);
+            return false;
+        }
+
+        // v0.2 §2 — at most one header card per doc.
+        if (card.isHeader && card.isHeader()) {
+            const existingHeader = this.cards.find(c => c.isHeader && c.isHeader());
+            if (existingHeader) {
+                console.warn(`Doc ${this.title} already has a header card; refusing to add another.`);
+                return false;
+            }
+            // Pin to index 0.
+            this.cards.unshift(card);
+        } else {
+            this.cards.push(card);
+        }
+
+        card.parent = this; // Set parent reference
+        this.updatedAt = new Date().toISOString();
+        return true;
     }
 
     /**
-     * Remove a card from the document by its ID
+     * Remove a card from the document by its ID. Header cards (kind: 'header')
+     * are undeletable per v0.2 §2 — the call returns false and logs a warning.
+     *
      * @param {string} cardId - The UUID of the card to remove
      * @returns {boolean} - True if card was found and removed, false otherwise
      */
     removeCard(cardId) {
         const index = this.cards.findIndex(card => card.id === cardId);
-        if (index !== -1) {
-            this.cards.splice(index, 1);
-            this.updatedAt = new Date().toISOString();
-            return true;
+        if (index === -1) return false;
+
+        const target = this.cards[index];
+        if (target.isHeader && target.isHeader()) {
+            console.warn(`Refusing to remove header card from doc "${this.title}" (header cards are pinned per v0.2 §2).`);
+            return false;
         }
-        return false;
+
+        this.cards.splice(index, 1);
+        this.updatedAt = new Date().toISOString();
+        return true;
     }
 
     /**
@@ -193,7 +236,8 @@ class Doc {
                 prompt: card.prompt || "",
                 images: card.images || [],
                 links: card.links,
-                cardType: card.cardType || 'markdown'
+                cardType: card.cardType || 'markdown',
+                kind: card.kind || CARD_KIND_BODY
             })),
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
@@ -217,6 +261,7 @@ class Doc {
 
         if (jsonData.cards && Array.isArray(jsonData.cards)) {
             jsonData.cards.forEach(cardData => {
+                const kind = isValidCardKind(cardData.kind) ? cardData.kind : CARD_KIND_BODY;
                 const card = new Card(
                     cardData.title,
                     cardData.content,
@@ -224,12 +269,24 @@ class Doc {
                     null,
                     cardData.prompt || "",
                     cardData.images || [],
-                    cardData.cardType || 'markdown'
+                    cardData.cardType || 'markdown',
+                    kind
                 );
                 card.id = cardData.id || uuidv4();
                 card.links = cardData.links || [];
+                card.parent = doc;
                 doc.cards.push(card);
             });
+        }
+
+        // v0.2 §2 — legacy projects predate header cards. If this doc has no
+        // header, synthesize an empty one and pin it at index 0. The synthesized
+        // header has a fresh UUID and will persist on the next save.
+        const hasHeader = doc.cards.some(c => c.isHeader && c.isHeader());
+        if (!hasHeader) {
+            const header = buildHeaderCard();
+            header.parent = doc;
+            doc.cards.unshift(header);
         }
 
         return doc;

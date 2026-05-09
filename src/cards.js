@@ -13,6 +13,21 @@ marked.setOptions({
 export const CARD_TYPE_MARKDOWN = 'markdown';
 export const CARD_TYPE_CODE = 'code';
 
+// v0.2 §2 — card kinds. Independent of cardType/language: a card has both
+// a kind ('header' | 'body' | 'class') and a cardType/language. Default 'body'.
+// Header cards are pinned to index 0, undeletable, and hold module-scope setup
+// (imports, constants, type aliases).
+export const CARD_KIND_HEADER = 'header';
+export const CARD_KIND_BODY = 'body';
+export const CARD_KIND_CLASS = 'class';     // wired in phase 5; accepted in serde now for forward-compat
+
+// Reserved title for the auto-created header card. Not user-renameable.
+export const HEADER_CARD_TITLE = '__header__';
+
+export function isValidCardKind(kind) {
+    return kind === CARD_KIND_HEADER || kind === CARD_KIND_BODY || kind === CARD_KIND_CLASS;
+}
+
 export function stripPythonFences(text) {
     if (!text) return "";
     // Match ```python ... ``` or ``` ... ``` and return inner content if present.
@@ -31,18 +46,27 @@ export function escapeHtml(text) {
 }
 
 class Card {
-    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "", images = [], cardType = CARD_TYPE_MARKDOWN) {
+    constructor(title, content, modal = null, updateNetworkCallback = null, prompt = "", images = [], cardType = CARD_TYPE_MARKDOWN, kind = CARD_KIND_BODY) {
         this.title = title;
         this.content = content;
         this.prompt = prompt; // the original prompt that created this card
         this.images = images; // array of image objects {data: base64, mimeType: string, name: string}
         this.cardType = cardType === CARD_TYPE_CODE ? CARD_TYPE_CODE : CARD_TYPE_MARKDOWN;
+        this.kind = isValidCardKind(kind) ? kind : CARD_KIND_BODY; // v0.2 §2 — header | body | class
         this.id = null; // unique identifier
         this.links = []; // array of linked card titles (extracted from prompt)
         this.parent = null; // reference to the parent doc
         this.innerHTML = null;
         this.modal = modal || new Modal(); // use provided modal or create new one
         this.updateNetworkCallback = updateNetworkCallback; // callback to update network viz
+    }
+
+    /**
+     * v0.2 §2 — true if this is the doc's pinned header card. Header cards
+     * cannot be removed, moved between docs, or have their position changed.
+     */
+    isHeader() {
+        return this.kind === CARD_KIND_HEADER;
     }
 
     /**
@@ -65,10 +89,21 @@ class Card {
         if (this.cardType === CARD_TYPE_CODE) {
             cardElement.classList.add("card--code");
         }
+        if (this.isHeader()) {
+            cardElement.classList.add("card--header");
+        }
 
         // Render the response: markdown for prose cards, syntax-highlighted Python for code cards.
+        // Header cards always render as preformatted text since they typically hold
+        // import lines / module-scope setup, not prose. (When the v0.2 §1 language
+        // field lands in phase 4, this will follow the language; for now we trust the kind.)
         let renderedContent;
-        if (this.cardType === CARD_TYPE_CODE) {
+        if (this.isHeader()) {
+            const headerSource = (this.content || "").trim();
+            renderedContent = headerSource
+                ? `<pre class="card-code-block language-python"><code>${escapeHtml(headerSource)}</code></pre>`
+                : `<p class="card-header-empty">Empty header. Edit (✎) to add module-scope imports, constants, or type aliases.</p>`;
+        } else if (this.cardType === CARD_TYPE_CODE) {
             const source = this.getPythonSource() || "";
             renderedContent = `<pre class="card-code-block language-python"><code>${escapeHtml(source)}</code></pre>`;
         } else {
@@ -107,16 +142,26 @@ class Card {
             `;
         }
         
+        // Header cards skip the move + remove buttons (they're pinned and undeletable per v0.2 §2).
+        // They also render a "header" pill so they're visibly distinct from body cards.
+        const actionsHTML = this.isHeader()
+            ? `<button class="success_btn card-edit-btn" title="Edit module-scope setup">✎</button>`
+            : `<button class="success_btn card-edit-btn" title="Edit this card in the prompt pane">✎</button>
+               <button class="info_btn card-move-btn" title="Move to another document">↗</button>
+               <button class="alert_btn" title="Remove card">x</button>`;
+
+        const kindPill = this.isHeader()
+            ? `<span class="card-kind-pill card-kind-pill--header" title="Module-scope setup, prepended to compiled output and to every code card's bibliography">header</span>`
+            : '';
+
         cardElement.innerHTML = `
             <div class="card_header">
                 <div class="card_details">
-                    <h4>${this.title}</h4>
+                    <h4>${this.title} ${kindPill}</h4>
                     <p class="card_id">${this.id}</p>
                 </div>
                 <div class="card_actions">
-                    <button class="success_btn card-edit-btn" title="Edit this card in the prompt pane">✎</button>
-                    <button class="info_btn card-move-btn" title="Move to another document">↗</button>
-                    <button class="alert_btn" title="Remove card">x</button>
+                    ${actionsHTML}
                 </div>
             </div>
             ${promptHTML}

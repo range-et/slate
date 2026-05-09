@@ -184,6 +184,45 @@ button.toggle-active {
   line-height: 1.4;
 }
 
+/* v0.2 §2 — header card. Pinned, undeletable; module-scope setup for the doc.
+   Distinct accent (success/green) so it doesn't visually collide with
+   card--code (info/cyan). */
+.card--header {
+  border-left: 3px solid var(--strata-success, #6EAD45);
+  background: var(--strata-success-bg, transparent);
+}
+
+.card--header .card-code-block {
+  border-left-color: var(--strata-success, #6EAD45);
+}
+
+.card-header-empty {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--type-sm, 0.85em);
+  color: var(--strata-text-secondary, var(--strata-text-primary));
+  opacity: 0.7;
+  margin: var(--space-2, 8px) 0;
+  font-style: italic;
+}
+
+.card-kind-pill {
+  display: inline-block;
+  margin-left: var(--space-2, 8px);
+  padding: 1px 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.7em;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  vertical-align: middle;
+}
+
+.card-kind-pill--header {
+  color: var(--strata-success, #6EAD45);
+  background: var(--strata-success-bg, transparent);
+}
+
 .card-code-block code {
   background: transparent;
   font-family: inherit;
@@ -580,7 +619,79 @@ input[type="text"]::placeholder {
   overflow-y: auto;
   border: 1px solid var(--information-2);
   padding: var(--space-1);
-  font-size: var(--type-base);
+  font-size: var(--type-sm);
+  line-height: 1.5;
+}
+
+/* ---------- CodeMirror autocomplete (monad themed) ----------
+ * CM portals the autocomplete tooltip outside the editor's scope, so
+ * EditorView.theme styles get out-prioritized by CM's defaults. We override
+ * with global selectors + !important. Same colors as the rest of the slate
+ * UI: layer-01 background, interactive border, info accent for selection. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background-color: var(--strata-layer-01) !important;
+  border: 1px solid var(--strata-interactive, var(--information-2)) !important;
+  color: var(--strata-text-primary) !important;
+  font-family: var(--font-sans) !important;
+  font-size: var(--type-xs) !important;
+  box-shadow: none !important;
+}
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  font-family: var(--font-sans) !important;
+  max-height: 300px;
+  background: transparent !important;
+}
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  color: var(--strata-text-primary) !important;
+  background: transparent !important;
+  padding: 4px 10px !important;
+  cursor: pointer;
+  font-family: var(--font-sans) !important;
+  font-size: var(--type-xs) !important;
+}
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background-color: var(--strata-info-bg, color-mix(in srgb, var(--strata-info) 20%, transparent)) !important;
+  color: var(--strata-info) !important;
+  border-left: 2px solid var(--strata-info) !important;
+  padding-left: 8px !important;
+}
+/* Section headers (Cards / Documents) — disabled list items used as labels */
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-disabled="true"] {
+  padding: 6px 10px 2px !important;
+  font-size: 0.7em !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--strata-text-secondary, var(--information-2)) !important;
+  opacity: 0.8;
+  cursor: default;
+  background-color: transparent !important;
+  border-left: none !important;
+  padding-left: 10px !important;
+}
+.cm-completionLabel {
+  font-weight: 500;
+  color: inherit;
+  font-family: var(--font-mono) !important;
+}
+.cm-completionDetail {
+  font-style: normal !important;
+  font-size: 0.8em !important;
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--strata-text-secondary, var(--information-2)) !important;
+  opacity: 0.85;
+  font-family: var(--font-sans) !important;
+}
+/* Hover info card to the right of the listbox */
+.cm-tooltip.cm-completionInfo {
+  background-color: var(--strata-layer-01) !important;
+  border: 1px solid var(--strata-interactive, var(--information-2)) !important;
+  color: var(--strata-text-primary) !important;
+  padding: 8px 12px !important;
+  font-family: var(--font-sans) !important;
+  font-size: var(--type-xs) !important;
+  box-shadow: none !important;
 }
 
 #chat-prompt {
