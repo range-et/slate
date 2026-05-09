@@ -8,18 +8,24 @@ import { python } from "@codemirror/lang-python";
 /**
  * Custom theme for the editor
  */
+// Editor chrome only. Autocomplete tooltip styling lives in styles.css under
+// `/* ---------- CodeMirror autocomplete (monad themed) ----------*/`
+// because CM portals the tooltip outside the editor's scope, where
+// EditorView.theme styles get out-prioritized by CM defaults.
 const customTheme = EditorView.theme({
     "&": {
         backgroundColor: "var(--background)",
         color: "var(--primary-text)",
-        fontSize: "medium",
+        fontSize: "var(--type-sm, 13px)",
         fontFamily: "inherit",
         height: "100%",
         width: "100%"
     },
     ".cm-scroller": {
         overflow: "auto",
-        height: "100%"
+        height: "100%",
+        fontFamily: "var(--font-mono, 'Courier New', monospace)",
+        lineHeight: "1.5"
     },
     ".cm-content": {
         caretColor: "var(--primary-text)",
@@ -42,58 +48,6 @@ const customTheme = EditorView.theme({
     "&.cm-focused .cm-selectionBackground": {
         backgroundColor: "var(--information-2) !important",
         opacity: "0.3"
-    },
-    ".cm-tooltip-autocomplete": {
-        backgroundColor: "var(--strata-layer-01)",
-        border: "1px solid var(--strata-interactive)",
-        "& ul": {
-            fontFamily: "var(--font-sans)",
-            maxHeight: "300px",
-            overflowY: "auto"
-        },
-        "& li": {
-            color: "var(--strata-text-primary)",
-            padding: "6px 10px",
-            cursor: "pointer",
-        },
-        "& li[aria-selected]": {
-            backgroundColor: "var(--strata-interactive)",
-            color: "var(--strata-bg)"
-        }
-    },
-    ".cm-tooltip.cm-tooltip-autocomplete.cm-completionInfo": {
-        backgroundColor: "var(--strata-layer-01)",
-        border: "1px solid var(--strata-interactive)",
-        color: "var(--strata-text-primary)",
-        padding: "8px 12px",
-    },
-    ".cm-completionInfo": {
-        backgroundColor: "var(--background)",
-        color: "var(--primary-text)",
-        padding: "8px 12px"
-    },
-    // Completion item styling - matching network viz colors
-    ".cm-completionLabel": {
-        fontWeight: "500",
-        color: "var(--primary-text)"
-    },
-    ".cm-completionDetail": {
-        fontStyle: "normal",
-        fontSize: "0.85em",
-        marginLeft: "auto",
-        paddingLeft: "12px",
-        fontWeight: "600"
-    },
-    // Section headers in completion list
-    "ul[role=listbox] li[role=option][aria-disabled=true]": {
-        padding: "4px 10px 2px",
-        fontSize: "0.75em",
-        fontWeight: "700",
-        textTransform: "uppercase",
-        color: "var(--information-2)",
-        opacity: "0.8",
-        cursor: "default",
-        backgroundColor: "transparent !important"
     },
     ".cm-reference": {
         color: "var(--strata-info)",

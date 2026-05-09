@@ -51,10 +51,12 @@ program.
 6. **Code is code, not JSON.** A code card's payload is `{ language,
    prompt, source, tests, metadata }`. The compiled file embeds the prompt
    as a `# @slate:` comment so reviewers see intent next to code.
-7. **Markdown notebook stays first-class** as the browser product
-   (slate-notebook.com), with strict markdown schemas for tagged headings /
-   responses (carry-over from your earlier note). Code mode is a VS Code
-   extension feature; it does not displace the notebook.
+7. **One harness, two surfaces.** Slate is one product (LLM harness with
+   explicit context). The web build (GH Pages) ships the full harness
+   including code cards + compile-to-download; the VS Code extension adds
+   terminal hand-off, workspace fs writes, and the `.slate.json` custom
+   editor on top. Same JS bundle, host detection at runtime via
+   `host_bridge.js#isCodeHost()`. See §3.
 
 ## Non-goals (v0.2)
 
@@ -246,30 +248,55 @@ per compiler. v0.2 only implements Python.
 
 ---
 
-## 3 · Hosting: VS Code only, browser stays a notebook
+## 3 · Hosting: one harness, two surfaces
 
-**Code mode ships as a VS Code extension. The browser build is the
-markdown-notebook product (slate-notebook.com). Same codebase, two clearly
-scoped distributions, gated by `window.acquireVsCodeApi` presence.**
+**Slate is one product — an LLM harness with explicit context control —
+delivered as two surfaces with different powers. Same source, same JS
+bundle, no build split.** *(Updated 2026-05-09 — earlier framing called
+this "two products"; that was wrong. See §3 changelog at the bottom.)*
+
+| Surface | Delivery | What ships |
+|---|---|---|
+| **Web** | GitHub Pages, auto-deployed from `main` via `.github/workflows/pages.yml` | Full LLM harness: cards, @refs, header cards, code cards, language picker, model picker, streaming, distill+freeze, dep graph, token budget, system prompts, **compile-to-download** (browser save-as for the `.py`) |
+| **VS Code extension** | Sideload (VSIX) → marketplace later | Everything web has, **plus** terminal hand-off (`⌘⇧R`), compile-to-workspace (write `.py` directly), `.slate.json` custom editor, `.slate-map.json` drift index |
+
+The host-specific slice is small: terminal access, workspace fs writes,
+custom editor registration. Everything else (the entire LLM harness) is
+shared code that runs in both surfaces.
 
 ### Why not Electron
 
 - VS Code already provides: file system, workspace conventions, terminal,
   debugger, git, settings sync, marketplace install. Electron means
   re-implementing all of it.
-- Code mode's whole pitch is "compile next to your workspace, run
-  snippets in the workspace terminal." That *is* a VS Code workflow.
+- Code mode's juiciest workflow ("compile next to your workspace, run
+  snippets in the workspace terminal") *is* a VS Code workflow.
 
 ### What changes
 
-- `host_bridge.js` already detects host. Add `isCodeHost()` returning true
-  only inside VS Code.
-- Code-mode UI (language dropdown beyond markdown, model dropdown,
-  compile button, terminal hand-off button, class-nesting UI) only renders
-  when `isCodeHost()`.
-- Browser build remains a markdown-only notebook. The strict-schema
-  markdown idea (tagged headings, structured response slots) lives in the
-  browser product and is independent of code mode.
+- `host_bridge.js` already detects host. `isCodeHost()` returns true only
+  inside VS Code. It gates **only** the host-specific bits (terminal
+  hand-off button, "compile to workspace" path, `.slate-map.json` write,
+  `.slate.json` custom editor registration). It does **not** gate the
+  language/model dropdowns, code cards, draft/freeze, dep graph, token
+  budget, system prompts, or compile itself — those all run on the web.
+- Web compile path: the existing `host_bridge.js` already does the
+  `URL.createObjectURL` + synthesized `<a download>` flow when not in VS
+  Code. No new work.
+- **`slate-notebook.com` is retired.** Web build serves from
+  `https://<user>.github.io/slate/` (or a custom domain via a `CNAME`
+  file in `dist/` if we add one later). Vite's `base` is set via the
+  `BASE_URL` env in the workflow.
+- **`dist/` stays untracked.** GH Actions builds it on push; we don't
+  ship build artifacts in git.
+
+### §3 changelog
+
+- *2026-05-09 (this revision)*: Reframed from "two products, gated by
+  host" to "one harness, two surfaces; gate only host-specific bits."
+  Web is no longer "markdown notebook only" — it gets the full LLM
+  harness including code cards and compile-to-download. Domain retired
+  in favor of GH Pages. `dist/` stays untracked.
 
 ---
 

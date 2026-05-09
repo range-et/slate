@@ -20,51 +20,7 @@ issues are ordered by dependency. Each issue lists:
 
 ## Phase 1 · Header card primitive
 
-### #1 Add `kind` field to Card and migrate existing data
-- **Scope**: Add `kind: 'header' | 'body' | 'class'` to `Card` constructor with
-  default `'body'`. Round-trip through `toJSON`/`fromJSON`. Backward-compat
-  default for missing field.
-- **Acceptance**:
-  - Loading any pre-v0.2 project JSON produces all body cards (`kind: 'body'`)
-    with no warnings.
-  - Saving + reloading a project preserves `kind` exactly on every card.
-  - Existing tic-tac-toe-style smoke test (`npm run dev`, create project, add
-    cards, refresh) shows no regression.
-- **Blocks**: #2, #3, #4
-- **Files**: `src/cards.js`, `src/doc.js` (round-trip)
-
-### #2 Auto-create header card on `Doc.init()`
-- **Scope**: Every new `Doc` gets exactly one `kind: 'header'` card at index 0
-  with title `__header__` and empty source. Pre-existing docs without a header
-  get one synthesized on first save.
-- **Acceptance**:
-  - `new Doc('foo'); doc.init();` → `doc.cards.length === 1`, `doc.cards[0].kind === 'header'`.
-  - Loading an old project without headers → save → reload shows a header card
-    on every doc.
-  - Header card cannot be removed via `removeCard()` (returns false; logs a
-    warning).
-- **Blocks**: #3, #4, #5, header-aware compile (#22), bibliography injection (#27)
-- **Files**: `src/doc.js`, `src/header_card.js` (new)
-
-### #3 Header card UI rendering
-- **Scope**: Header card renders above the doc title with monad-accent border,
-  "header" pill badge, no `[× remove]`, no `[↗ move]` button. Editable
-  inline.
-- **Acceptance**:
-  - Visual diff: header card visibly distinct from body cards in dev server.
-  - Remove button absent; move button absent.
-  - Editing header card content persists across reload.
-- **Blocks**: #6 (one-click "extract imports")
-- **Files**: `src/cards.js` (`create()` branch on `kind`), `src/styles.css`
-
-### #4 Forbid duplicate header cards & enforce position 0
-- **Scope**: `addCard()` rejects a second `kind: 'header'` card per doc.
-  Header card always sorts to index 0; cannot be moved.
-- **Acceptance**:
-  - Adding a second header card returns false + logs a warning.
-  - Moving a body card to index 0 still leaves the header at 0 (header is pinned).
-- **Blocks**: nothing critical
-- **Files**: `src/doc.js`
+*All phase 1 issues shipped — see [features.md](features.md#phase-1--header-card-primitive).*
 
 ---
 
@@ -446,30 +402,118 @@ issues are ordered by dependency. Each issue lists:
 
 ---
 
-## Phase 10 · Hosting freeze
+## Phase 10 · Hosting freeze (reframed 2026-05-09 — see spec §3)
 
-### #31 `isCodeHost()` gates code-mode UI
-- **Scope**: Add `isCodeHost()` to `src/host_bridge.js` returning true iff
-  `window.acquireVsCodeApi` is defined. Gate language dropdown (beyond
-  markdown), model dropdown, compile button, terminal hand-off button,
-  and class-nesting UI behind it.
+### #31 `isCodeHost()` gates only host-specific bits
+- **Scope** *(reduced)*: Confirm `host_bridge.js#isCodeHost()` returns true
+  iff `window.acquireVsCodeApi` is defined. Gate **only** the truly
+  host-specific UI: terminal hand-off button (`⌘⇧R`), "compile to
+  workspace" path, `.slate-map.json` write, `.slate.json` custom editor
+  registration. Everything else (language dropdown, model dropdown, code
+  cards, compile-to-download, draft/freeze, dep graph, token budget,
+  system prompts) renders unconditionally on both surfaces.
 - **Acceptance**:
-  - `npm run dev` (browser) shows zero code-mode UI; markdown notebook
-    flow is identical to v0.1.
-  - VS Code extension loaded → all code-mode UI visible.
+  - GH Pages web build shows the full LLM harness; "compile" button
+    triggers a browser download instead of a workspace write.
+  - VS Code extension shows the same UI plus a terminal-handoff button
+    and routes "compile" to a workspace write.
+  - No regression in either surface.
 - **Blocks**: #32
-- **Files**: `src/host_bridge.js`, `src/main_script.js`
+- **Files**: `src/host_bridge.js`, `src/main_script.js`,
+  `src/terminal_handoff.js` (created by #20)
 
-### #32 README + landing copy update
-- **Scope**: Update `README.md` to describe the two products clearly:
-  browser = markdown notebook (slate-notebook.com), VS Code extension =
-  code harness. Update `vscode-extension/README.md`. Update
-  slate-notebook.com landing copy if applicable.
+### #32 README + install copy update
+- **Scope**: Update `README.md` to describe slate as **one harness, two
+  surfaces** (per spec §3). Web install: just visit the GH Pages URL.
+  VS Code install: download the VSIX or marketplace link. Drop all
+  references to `slate-notebook.com` and the "two products" framing.
 - **Acceptance**:
-  - README has a "Two surfaces" section explaining the split.
-  - Install instructions for the VS Code extension are present and tested.
-- **Blocks**: nothing (release-blocking only)
-- **Files**: `README.md`, `vscode-extension/README.md`
+  - README has a "One harness, two surfaces" section pointing to both.
+  - VS Code install instructions are present and tested.
+  - No `slate-notebook.com` references remain in docs.
+- **Blocks**: nothing
+- **Files**: `README.md`, `vscode-extension/README.md`,
+  `slate-code-v0.2-spec.md` (already updated)
+
+---
+
+## Phase 11 · Web deployment + decoupling (new — added 2026-05-09)
+
+### #37 GitHub Pages deploy workflow ✓ shipped
+- See [features.md](features.md) — landed alongside the styling fixes.
+
+### #38 Domain retirement (`slate-notebook.com`)
+- **Scope**: Take down or 301-redirect the `slate-notebook.com` domain.
+  Wherever it's currently hosted (Vercel/Netlify/registrar), point it at
+  the new GH Pages URL or simply unconfigure it. Remove all
+  `slate-notebook.com` references from code, README, and example assets.
+- **Acceptance**:
+  - `rg slate-notebook.com` returns no hits in the repo.
+  - Domain either resolves to GH Pages (via 301) or NXDOMAINs cleanly.
+- **Blocks**: nothing
+- **Files**: out-of-repo (DNS / hosting); plus `README.md`, `motivation.md`,
+  `slate-code-v0.2-spec.md`
+
+### #39 Verify GH Pages deploy end-to-end
+- **Scope**: After the first push to `main` with `pages.yml` in place,
+  confirm GH Actions runs cleanly, Pages is enabled in repo settings,
+  and the deployed bundle loads at the GH Pages URL.
+- **Acceptance**:
+  - Workflow `Deploy slate (web) to GitHub Pages` exists in Actions tab
+    and runs green.
+  - Visiting the GH Pages URL shows slate identically to local
+    `npm run dev`, modulo no API key set.
+  - Browser console: no 404s on JS/CSS assets (= `BASE_URL` resolved
+    correctly).
+- **Blocks**: #38
+- **Files**: out-of-repo (GH settings)
+
+---
+
+## Phase 12 · Editor + UI polish (new — added 2026-05-09)
+
+### #40 VS-Code-like editors with markdown / python syntax highlighting
+- **Scope**: The PROMPT and RESPONSE editors currently render with
+  CodeMirror but with sparse syntax highlighting (only `@references`
+  highlighted in the prompt; the response is HTML/markdown-rendered, not
+  editable as code). Make both editors VS-Code-like:
+  - Per-card language: markdown cards use `@codemirror/lang-markdown`,
+    code cards use `@codemirror/lang-python` (already installed). Switch
+    extension dynamically via Compartment.
+  - Apply a real VS Code-flavored theme (e.g. one-dark-pro tones, or
+    custom built from monad tokens) for syntax classes — keywords,
+    strings, comments, types.
+  - Convert the RESPONSE pane from rendered HTML back to a CodeMirror
+    editor in language-aware mode (so the response is editable + has
+    syntax highlighting). Markdown cards: render as markdown but make it
+    editable in source mode by default; toggle preview as a button.
+  - Reduce default font size from CM's "medium" → `var(--type-sm)` (done
+    in batch 2).
+- **Acceptance**:
+  - Code card prompt: Python keywords, strings, comments highlighted.
+  - Markdown card prompt: headings, lists, code fences, links highlighted.
+  - Response editor for code cards: same Python highlighting; editable.
+  - Theme matches monad palette; no jarring color clashes.
+- **Blocks**: nothing critical; user-experience polish
+- **Files**: `src/codemirror_setup.js`, `src/ai_chat.js` (response render
+  path), `src/styles.css`, `package.json` (add `@codemirror/lang-markdown`)
+
+### #41 Build-flag test split (lite vs full)
+- **Scope**: Forward-looking note from the user: the test strategy can
+  follow the build flag — `web` (lite, no Python) runs UI / data-model /
+  compiler-emit tests; `vscode` (full, with Python) additionally runs
+  `python -m pytest` on compiled outputs. Wire this into CI so the right
+  tests run for the right surface, and so contributors without Python
+  installed can still run the lite suite.
+- **Acceptance**:
+  - `npm test` (lite) runs without Python, exercises the JS data model
+    and compiler emit.
+  - `npm run test:full` runs lite + the Python pytest pass over compiled
+    examples.
+  - CI runs lite always; full only when Python is available in the
+    runner (always true on GH Actions ubuntu-latest).
+- **Blocks**: #29 (vitest setup) is the prerequisite
+- **Files**: `package.json`, `.github/workflows/ci.yml` (created by #30)
 
 ---
 
@@ -517,8 +561,9 @@ issues are ordered by dependency. Each issue lists:
 
 ## Tracking
 
-- **Open**: every issue above. As of v0.2 spec finalization, **all 36
-  issues are open**.
+- **Open**: every issue above. **36 of 41 open** (phase 1 shipped: #1–#4;
+  phase 11/12 partial: #37 + autocomplete/font polish — see
+  [features.md](features.md)).
 - **Workflow**: when an issue ships, cut+paste its block into
   [features.md](features.md) and append a `**Resolved:** YYYY-MM-DD —
   <commit-or-PR>` line at the bottom of the block. Do **not** leave shipped

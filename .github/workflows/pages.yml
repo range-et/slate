@@ -1,0 +1,78 @@
+name: Deploy slate (web) to GitHub Pages
+
+# Builds and deploys the slate web bundle to GitHub Pages on every push to
+# main. The VS Code extension is NOT built or published here — that's a
+# separate concern (see vscode-extension/ + a future marketplace workflow).
+#
+# Same source, two delivery surfaces: web (this workflow) and VS Code
+# extension (manual / marketplace). Host-specific behavior (terminal hand-off,
+# workspace fs writes) is gated at runtime via host_bridge.js#isCodeHost(),
+# so the same bundle ships to both — but only the web bundle gets deployed
+# here.
+#
+# To enable: in the GitHub repo settings → Pages, set "Source" to
+# "GitHub Actions". The first push to main after this file lands will
+# trigger the deploy. Pages URL will be:
+#   https://<user-or-org>.github.io/slate/
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, but don't cancel in-progress runs —
+# we want the latest commit's build to win without truncating an earlier
+# in-flight deploy mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive  # design-tokens is a submodule
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build slate web bundle
+        run: npm run build
+        env:
+          # Vite reads import.meta.env.BASE_URL from this. GH Pages serves
+          # at /<repo>/, so we need the bundle to know its base path.
+          # If you set up a CNAME / custom domain later, change this to '/'.
+          BASE_URL: '/slate/'
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
