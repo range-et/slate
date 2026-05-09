@@ -472,31 +472,29 @@ issues are ordered by dependency. Each issue lists:
 
 ## Phase 12 · Editor + UI polish (new — added 2026-05-09)
 
-### #40 VS-Code-like editors with markdown / python syntax highlighting
-- **Scope**: The PROMPT and RESPONSE editors currently render with
-  CodeMirror but with sparse syntax highlighting (only `@references`
-  highlighted in the prompt; the response is HTML/markdown-rendered, not
-  editable as code). Make both editors VS-Code-like:
-  - Per-card language: markdown cards use `@codemirror/lang-markdown`,
-    code cards use `@codemirror/lang-python` (already installed). Switch
-    extension dynamically via Compartment.
-  - Apply a real VS Code-flavored theme (e.g. one-dark-pro tones, or
-    custom built from monad tokens) for syntax classes — keywords,
-    strings, comments, types.
-  - Convert the RESPONSE pane from rendered HTML back to a CodeMirror
-    editor in language-aware mode (so the response is editable + has
-    syntax highlighting). Markdown cards: render as markdown but make it
-    editable in source mode by default; toggle preview as a button.
-  - Reduce default font size from CM's "medium" → `var(--type-sm)` (done
-    in batch 2).
+### #40 VS-Code-like editors — phase B (preview toggle + scroll polish)
+- **Status**: **Phase A shipped** (see [features.md](features.md) — real
+  monad-themed syntax highlighting in prompt + response + rendered cards;
+  language switching wired). Phase B is the remaining polish.
+- **Scope (phase B)**:
+  - Markdown response cards default to **source view** (already shipped)
+    but add a `[👁 preview]` toggle that swaps to a rendered-markdown
+    view (using `marked.parse`, same as a saved card's display) so users
+    can see the formatted output without committing.
+  - Audit the response editor's wrap + scroll behavior in tall code
+    cards (>30 lines): make sure horizontal scroll appears for long
+    lines and vertical scroll for the editor (not the page).
+  - Optional: line numbers for code cards only (not for markdown).
+  - Optional: consider whether the response editor should auto-resize
+    to content vs. fixed height with internal scroll.
 - **Acceptance**:
-  - Code card prompt: Python keywords, strings, comments highlighted.
-  - Markdown card prompt: headings, lists, code fences, links highlighted.
-  - Response editor for code cards: same Python highlighting; editable.
-  - Theme matches monad palette; no jarring color clashes.
-- **Blocks**: nothing critical; user-experience polish
-- **Files**: `src/codemirror_setup.js`, `src/ai_chat.js` (response render
-  path), `src/styles.css`, `package.json` (add `@codemirror/lang-markdown`)
+  - Toggle button on markdown response cards swaps source ↔ preview
+    cleanly.
+  - Code response with 100 lines: editor scrolls internally; page
+    layout doesn't shift.
+- **Blocks**: nothing
+- **Files**: `src/ai_chat.js`, `src/styles.css`, possibly
+  `src/codemirror_setup.js` (line numbers extension)
 
 ### #41 Build-flag test split (lite vs full)
 - **Scope**: Forward-looking note from the user: the test strategy can

@@ -452,7 +452,7 @@ class MainManager {
             btn.classList.toggle('toggle-active', this.chatManager.codeMode);
         }
         if (this.promptEditor && typeof this.promptEditor.setLanguage === 'function') {
-            this.promptEditor.setLanguage(this.chatManager.codeMode ? 'python' : 'plain');
+            this.promptEditor.setLanguage(this.chatManager.codeMode ? 'python' : 'markdown');
         }
     }
 
@@ -1175,11 +1175,14 @@ class MainManager {
         // Create a new blank document (will be added to project and update viz)
         this.createNewDoc(docName);
         
-        // Initialize CodeMirror editor for the prompt
+        // Initialize CodeMirror editor for the prompt. Defaults to markdown
+        // syntax highlighting (headings, lists, code fences, links — all
+        // monad-themed); flips to python when code mode toggles on.
         this.promptEditor = setupCodeMirrorEditor(
             this.buttons.prompt,
             () => this.currentDoc,
-            () => this.currentProject
+            () => this.currentProject,
+            { language: 'markdown' }
         );
         
         // Initialize the chat manager

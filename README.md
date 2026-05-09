@@ -8,7 +8,7 @@ A graph-based document editor with AI-powered card creation and intelligent refe
 
 ![Slate - Graph-Based Document Editor](https://img.shields.io/badge/status-MVP-blue) ![JavaScript](https://img.shields.io/badge/javascript-ES6-yellow) ![D3.js](https://img.shields.io/badge/d3.js-v7-orange) ![CodeMirror](https://img.shields.io/badge/codemirror-v6-green)
 
-**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
+**Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)
 
 ## Why Slate?
 

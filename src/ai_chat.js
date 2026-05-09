@@ -160,11 +160,13 @@ export class ChatManager {
 
         // Reuse the prompt editor factory — it already supplies the slate
         // theme, line wrapping, and (harmlessly) @-reference autocomplete.
+        // Markdown gets full lang highlighting (headings, lists, code fences,
+        // links) instead of 'plain' which leaves it as monospace text.
         this.responseEditor = setupCodeMirrorEditor(
             wrap,
             () => this.currentDoc,
             () => window.mainManager?.currentProject,
-            { language: isCode ? 'python' : 'plain' }
+            { language: isCode ? 'python' : 'markdown' }
         );
         // Seed the editor with the response text.
         setEditorText(this.responseEditor, text || '');

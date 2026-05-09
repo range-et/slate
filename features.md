@@ -183,6 +183,49 @@ without churn.
 
 ## Phase 12 · Editor + UI polish
 
+### #40 (phase A) Real syntax highlighting in editors + rendered cards
+- **Scope (this batch)**: First half of issue #40 — the part the user
+  called out as "writing code in a notepad app connected to an LLM."
+  - New `monadHighlightStyle` in `codemirror_setup.js` built on
+    `@lezer/highlight` tags, using monad tokens: `--strata-info` for
+    keywords/types, `--strata-warning` for strings, `--strata-success`
+    for numbers/booleans, `--strata-text-secondary` for comments
+    (italic) + punctuation, `--strata-highlight` for markdown headings.
+    Ships markdown rules too (heading sizes, emphasis, strong, link,
+    monospace, list, quote).
+  - Installed `@codemirror/lang-markdown`. `setupCodeMirrorEditor` now
+    accepts `'markdown'` as a third language and builds a markdown
+    extension that nests python in fenced code blocks.
+  - New `highlightCodeStatic(source, language)` exported from
+    `codemirror_setup.js`: runs the same Lezer parser + highlight style
+    used by the editor over a string, returns syntax-highlighted HTML.
+    Used by `Card.create()` so rendered cards show the same colors as
+    the editor — no separate highlight stack to keep in sync.
+  - Prompt editor now defaults to `'markdown'` (was `'plain'`).
+    `toggleCodeMode` flips between `'python'` ↔ `'markdown'` (was
+    `'python'` ↔ `'plain'`).
+  - Response editor uses `'markdown'` for non-code cards (was
+    `'plain'`).
+  - Added `readOnly` option to `setupCodeMirrorEditor` for future use
+    (e.g. inline editor inside a frozen card view).
+- **Acceptance**:
+  - Code card prompts: Python keywords, strings, comments, numbers
+    visibly highlighted in monad colors.
+  - Markdown card prompts: headings, lists, emphasis, code fences,
+    links highlighted.
+  - Rendered code cards (post-ADD TO DOC) show the same coloring; no
+    more flat monospace text.
+  - Header card: `import numpy as np` shows `import` cyan, `numpy` /
+    `np` white, `as` cyan.
+- **Resolved:** 2026-05-09 — same batch as #40 phase A
+- **Notes:** **Phase B is still open as issue #40** in issues.md —
+  remaining work is the toggle-between-source-and-preview button for
+  markdown response cards, plus a once-over to confirm the response
+  editor's wrap/scroll behavior is correct in tall code cards. The
+  existing `verify-phase1.mjs` smoke test was updated to stub more DOM
+  (the `@codemirror/view` module-load probe touches
+  `document.documentElement.style`); 21/21 still pass.
+
 ### Autocomplete dropdown monad theming + editor font size reduction
 - **Scope** *(part of in-flight #40 from issues.md, plus an interim fix
   for the jarring white autocomplete)*:

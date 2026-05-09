@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { marked } from 'marked';
 import Modal from './modal.js';
+import { highlightCodeStatic } from './codemirror_setup.js';
 
 // Configure marked for better rendering
 marked.setOptions({
@@ -93,19 +94,18 @@ class Card {
             cardElement.classList.add("card--header");
         }
 
-        // Render the response: markdown for prose cards, syntax-highlighted Python for code cards.
-        // Header cards always render as preformatted text since they typically hold
-        // import lines / module-scope setup, not prose. (When the v0.2 §1 language
-        // field lands in phase 4, this will follow the language; for now we trust the kind.)
+        // Render the response: markdown for prose cards, syntax-highlighted Python
+        // for code + header cards. Highlighting comes from highlightCodeStatic so
+        // the colors match what the editor would show — no separate highlight stack.
         let renderedContent;
         if (this.isHeader()) {
             const headerSource = (this.content || "").trim();
             renderedContent = headerSource
-                ? `<pre class="card-code-block language-python"><code>${escapeHtml(headerSource)}</code></pre>`
+                ? `<pre class="card-code-block language-python"><code>${highlightCodeStatic(headerSource, 'python')}</code></pre>`
                 : `<p class="card-header-empty">Empty header. Edit (✎) to add module-scope imports, constants, or type aliases.</p>`;
         } else if (this.cardType === CARD_TYPE_CODE) {
             const source = this.getPythonSource() || "";
-            renderedContent = `<pre class="card-code-block language-python"><code>${escapeHtml(source)}</code></pre>`;
+            renderedContent = `<pre class="card-code-block language-python"><code>${highlightCodeStatic(source, 'python')}</code></pre>`;
         } else {
             renderedContent = marked.parse(this.content);
         }

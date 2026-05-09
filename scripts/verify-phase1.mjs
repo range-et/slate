@@ -6,12 +6,13 @@
  * exercise pure data-layer behaviors from node.
  */
 
-// Minimal DOM stubs — enough for Modal's constructor and Card.create() to not crash.
-// We never render anything; we just need the imports to load.
+// Minimal DOM stubs — enough for Modal's constructor, Card.create(), and the
+// @codemirror/view module-load probe (`document.documentElement.style`) to not
+// crash. We never render anything.
 const noopElement = () => ({
     innerHTML: '',
     style: {},
-    classList: { add: () => {}, remove: () => {}, contains: () => false },
+    classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} },
     addEventListener: () => {},
     removeEventListener: () => {},
     appendChild: () => {},
@@ -20,12 +21,27 @@ const noopElement = () => ({
     setAttribute: () => {},
     getAttribute: () => null,
     remove: () => {},
+    parentNode: null,
+    children: [],
+    childNodes: [],
 });
+const documentElement = noopElement();
 globalThis.document = {
     getElementById: () => noopElement(),
     createElement: () => noopElement(),
     body: noopElement(),
+    documentElement,
+    head: noopElement(),
 };
+globalThis.window = globalThis;
+// Node ≥21 has navigator as a getter-only global; redefine instead of assign.
+if (!globalThis.navigator || !globalThis.navigator.userAgent) {
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { userAgent: 'node-stub' },
+        configurable: true,
+        writable: true,
+    });
+}
 
 const { default: Doc } = await import('../src/doc.js');
 const { default: Card, CARD_KIND_HEADER, CARD_KIND_BODY, HEADER_CARD_TITLE } = await import('../src/cards.js');
