@@ -15,10 +15,6 @@ import {
     switchToDoc as ctlSwitchToDoc,
     setupDocTitleSanitization as ctlSetupDocTitleSanitization,
     setupDocDestinationInput as ctlSetupDocDestinationInput,
-    showDocSummary as ctlShowDocSummary,
-    startSummaryAnimation as ctlStartSummaryAnimation,
-    summarySuccess as ctlSummarySuccess,
-    summaryError as ctlSummaryError,
 } from "./controllers/doc_ctl.js";
 import {
     initProjectCtl,
@@ -48,7 +44,6 @@ const search_input = document.getElementById("search_input");
 const search_btn = document.getElementById("search_btn");
 // docs stuff
 const doc_content = document.getElementById("doc-content");
-const summary_btn = document.getElementById("summary_btn");
 const add_doc = document.getElementById("add_doc");
 const remove_doc = document.getElementById("remove_doc");
 const doc_title_input = document.getElementById("doc_title_input");
@@ -79,7 +74,6 @@ const buttons = {
     project_title_input: project_title_input,
     search_input: search_input,
     search_btn: search_btn,
-    summary_btn: summary_btn,
     add_doc: add_doc,
     remove_doc: remove_doc,
     doc_title_input: doc_title_input,
@@ -130,10 +124,8 @@ class MainManager {
     // (Card callbacks, ChatManager, host message listener) still work, but
     // the implementation lives in src/controllers/*.
 
-    summary_btn() { return ctlShowDocSummary(); }
-    startSummaryAnimation() { return ctlStartSummaryAnimation(); }
-    summarySuccess() { return ctlSummarySuccess(); }
-    summaryError(msg) { return ctlSummaryError(msg); }
+    // (#51) Summary shims removed — see src/controllers/doc_ctl.js for the
+    // forwarding-pointer comment. Header card is the doc overview now.
 
     createNewProject(name) { return ctlCreateProject(name); }
     createNewDoc(title) { return ctlCreateDoc(title); }
@@ -641,7 +633,6 @@ class MainManager {
         }
 
         this.buttons.resetZoom.addEventListener("click", () => this.resetZoom());
-        this.buttons.summary_btn.addEventListener("click", () => this.summary_btn());
         this.buttons.add_doc.addEventListener("click", () => this.addDocButton());
         this.buttons.remove_doc.addEventListener("click", () => this.removeDocButton());
         // SEND, ADD TO DOC, CODE, ATTACH IMAGE, EXIT EDIT, and the global

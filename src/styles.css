@@ -1086,29 +1086,9 @@ body.slate-editing-card .panel-body > h4:first-of-type::after {
   padding: var(--space-2);
 }
 
-/* Summary generation animation */
-.summary-generating {
-  background: var(--strata-interactive) !important;
-  color: var(--strata-bg) !important;
-  font-weight: 600 !important;
-  animation: loading-blink 1.2s var(--threshold-ease-in-out) infinite !important;
-}
-
-/* Summary success state */
-.summary-success {
-  background: var(--strata-success) !important;
-  color: var(--strata-bg) !important;
-  font-weight: 600 !important;
-  transition: background var(--threshold-fast) !important;
-}
-
-/* Summary error state */
-.summary-error {
-  background: var(--strata-error) !important;
-  color: var(--strata-bg) !important;
-  font-weight: 600 !important;
-  transition: background var(--threshold-fast) !important;
-}
+/* (#51) The .summary-* button states (generating / success / error)
+   were removed alongside the SUMMARY button itself. The header card now
+   serves as the doc overview. */
 
 /* ===== MARKDOWN STYLES ===== */
 .markdown-body {

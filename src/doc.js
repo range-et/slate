@@ -35,9 +35,9 @@ class Doc {
         this.title = title;
         this.id = null; // unique identifier
         this.cards = []; // array of card objects
-        this.summary = null; // AI-generated summary of all cards
-        this.summaryGenerating = false; // flag to track if summary is being generated
-        this.summaryError = null; // stores error message if summary generation fails
+        // (#51) The legacy AI-generated `summary` was removed — the doc's
+        // header card (always at index 0) now serves as the canonical
+        // overview. Cross-doc @-refs resolve to the header's content.
         this.createdAt = null; // timestamp when doc was created
         this.updatedAt = null; // timestamp when doc was last updated
         this.destination = ''; // relative folder path under workspace root for compiled .py output
@@ -196,38 +196,14 @@ class Doc {
     }
 
     /**
-     * Get flattened content of all cards for summarization
-     * @returns {string} - All card content as plain text
-     */
-    getFlattenedContent() {
-        return this.cards.map(card => {
-            // Extract plain text from HTML content
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = card.content;
-            const plainText = tempDiv.innerText || tempDiv.textContent;
-            return `[${card.title}]\n${plainText}`;
-        }).join('\n\n');
-    }
-
-    /**
-     * Update the document summary
-     * @param {string} summary - The AI-generated summary
-     */
-    updateSummary(summary) {
-        this.summary = summary;
-        this.summaryGenerating = false;
-        this.updatedAt = new Date().toISOString();
-    }
-
-    /**
-     * Serialize the document to JSON
-     * @returns {object} - JSON representation of the document
+     * Serialize the document to JSON. (#51) The legacy `summary` field is
+     * no longer written; the header card carries the doc's overview now.
+     * Older files with `summary` set still load — fromJSON drops the field.
      */
     toJSON() {
         return {
             id: this.id,
             title: this.title,
-            summary: this.summary,
             destination: this.destination || '',
             cards: this.cards.map(card => ({
                 id: card.id,
@@ -254,7 +230,8 @@ class Doc {
         const doc = new Doc(jsonData.title);
         // Self-heal IDs the same way Project.fromJSON does — see comment there.
         doc.id = jsonData.id || uuidv4();
-        doc.summary = jsonData.summary || null;
+        // (#51) jsonData.summary is silently dropped — the header card is
+        // the doc's overview now.
         doc.destination = sanitizeDestination(jsonData.destination || '');
         doc.createdAt = jsonData.createdAt;
         doc.updatedAt = jsonData.updatedAt;

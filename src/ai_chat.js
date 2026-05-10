@@ -1,7 +1,7 @@
 import Card, { CARD_TYPE_CODE, CARD_TYPE_MARKDOWN } from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
 import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor, setupCodeMirrorEditor } from "./codemirror_setup.js";
-import { initChatCtl, buildBibliography } from "./controllers/chat_ctl.js";
+import { initChatCtl, buildBibliography, applyHeaderAdditions } from "./controllers/chat_ctl.js";
 import { on, emit } from "./event_bus.js";
 
 /**
@@ -50,6 +50,11 @@ export class ChatManager {
         // Edit-in-place state. When non-null, addToDoc updates the existing
         // card instead of creating a new one. Cleared by clearAll.
         this.editingCard = null;
+
+        // (#50) Pending module-scope additions from the most recent
+        // code-mode response, parsed by chat_ctl. Applied to the current
+        // doc's header card on ADD TO DOC, then cleared.
+        this.pendingHeaderAdditions = [];
         
         // Auto-sanitize title on blur (when user leaves the field) and ensure uniqueness
         this.cardTitleInput.addEventListener('blur', () => {
@@ -106,14 +111,19 @@ export class ChatManager {
             view.dispatch({ changes: { from: end, to: end, insert: delta } });
         });
 
-        on('chat:complete', ({ text, codeMode }) => {
+        on('chat:complete', ({ text, codeMode, headerAdditions }) => {
+            // (#50) Stash module-scope additions for the upcoming
+            // ADD TO DOC commit. clearAll() resets this back to [].
+            this.pendingHeaderAdditions = Array.isArray(headerAdditions) ? headerAdditions : [];
             if (!_streamingMounted) {
                 // Non-streaming agents land here without ever having emitted
                 // chat:streaming — mount the editor with the final text.
                 this.renderResponseEditor(text, { isCode: !!codeMode });
             } else if (codeMode) {
-                // Replace the streamed (possibly fenced) buffer with the
-                // fence-stripped final text so the saved card is clean Python.
+                // Replace the streamed buffer with the fence-stripped,
+                // additions-stripped final text so the saved card is clean
+                // Python (the function/class only — additions land on the
+                // header card on commit).
                 const view = this.responseEditor;
                 if (view) {
                     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
@@ -301,6 +311,49 @@ export class ChatManager {
         this.clearImages();
         this.editingCard = null;
         this.applyEditingChrome(false);
+        // (#50) Drop any unapplied additions; ADD TO DOC consumes them.
+        this.pendingHeaderAdditions = [];
+    }
+
+    /**
+     * (#50) On a successful ADD TO DOC commit, append any module-scope
+     * additions the model emitted to the current doc's header card and
+     * re-render that card's DOM in place. Pure no-op if there's nothing
+     * to apply, no current doc, or no header card. Returns true if the
+     * header was actually mutated (caller may use that to trigger a viz
+     * refresh, though updateNetworkCallback already runs separately).
+     */
+    applyPendingHeaderAdditions() {
+        const additions = this.pendingHeaderAdditions || [];
+        if (additions.length === 0) return false;
+        if (!this.currentDoc) return false;
+        const header = this.currentDoc.getAllCards().find(c => c.isHeader && c.isHeader());
+        if (!header) return false;
+
+        const before = header.content || '';
+        const after = applyHeaderAdditions(before, additions);
+        if (after === before) return false;
+
+        header.content = after;
+        if (this.currentDoc.updatedAt !== undefined) {
+            this.currentDoc.updatedAt = new Date().toISOString();
+        }
+
+        // Re-render the header card's DOM so the new lines show up
+        // immediately. The original element lives inside #doc-content.
+        const oldEl = header.innerHTML;
+        const fresh = header.create();
+        if (oldEl && oldEl.parentNode) {
+            oldEl.parentNode.replaceChild(fresh, oldEl);
+            header.innerHTML = fresh;
+            // Re-bind the edit button's handler — same logic as
+            // reattachCardHandlers, just for the header's edit-only action set.
+            const editBtn = fresh.querySelector('.card-edit-btn');
+            if (editBtn) {
+                editBtn.addEventListener('click', () => this.loadCardForEdit(header));
+            }
+        }
+        return true;
     }
 
     /**
@@ -560,79 +613,10 @@ export class ChatManager {
         this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response. Please try again.</p>';
     }
 
-    /**
-     * Generate summary for the current document asynchronously
-     */
-    async generateDocSummary() {
-        if (!this.currentDoc || this.currentDoc.getCardCount() === 0) {
-            return;
-        }
-        // Skip while GENERATE ALL is running. The summary kicks off a SECOND
-        // long-lived AI request after every ADD TO DOC commit, hogs the local
-        // model, and contends with the next walkthrough card's generation —
-        // sometimes failing in ways that interrupt the walkthrough state. The
-        // user can re-run SUMMARY manually once the walkthrough finishes.
-        if (window.mainManager && window.mainManager.walkthroughActive) {
-            return;
-        }
-
-        // Clear any previous error
-        this.currentDoc.summaryError = null;
-        
-        // Mark as generating
-        this.currentDoc.summaryGenerating = true;
-        
-        // Notify mainManager to start animation (if available)
-        if (window.mainManager && window.mainManager.startSummaryAnimation) {
-            window.mainManager.startSummaryAnimation();
-        }
-
-        console.log("Generating summary for doc:", this.currentDoc.title);
-
-        try {
-            // Get flattened content from all cards
-            const content = this.currentDoc.getFlattenedContent();
-            
-            // Generate summary using AI
-            const summary = await this.aiAgent.generateSummary(content);
-            
-            // Update doc with summary
-            this.currentDoc.updateSummary(summary);
-            
-            console.log("Summary generated successfully");
-            
-            // Notify mainManager to indicate success
-            if (window.mainManager && window.mainManager.summarySuccess) {
-                window.mainManager.summarySuccess();
-            }
-        } catch (err) {
-            console.error("Failed to generate summary:", err);
-            this.currentDoc.summaryGenerating = false;
-            
-            // Extract error details
-            const errorMessage = err.message || "";
-            const errorStatus = err.status || err.response?.status || err.statusCode;
-            const errorCode = err.code || err.error?.code;
-            
-            // Handle API key errors specifically
-            if (err.message === "API_KEY_MISSING" || 
-                errorMessage.includes("API key") || 
-                errorMessage.includes("Invalid API key") ||
-                errorStatus === 401 ||
-                errorCode === "invalid_api_key") {
-                this.currentDoc.summaryError = "API key required";
-                // Show helpful modal
-                await this.modal.alert("API key required to generate summaries. Please set your API key using the API KEY button in the top bar.");
-            } else {
-                this.currentDoc.summaryError = err.message || "Unknown error occurred";
-            }
-            
-            // Notify mainManager to indicate error
-            if (window.mainManager && window.mainManager.summaryError) {
-                window.mainManager.summaryError(this.currentDoc.summaryError);
-            }
-        }
-    }
+    // (#51) `generateDocSummary` was removed. The doc's header card (always
+    // pinned at index 0, fully editable) is the doc's canonical overview
+    // now — no second AI round-trip on every commit, no animated SUMMARY
+    // button to babysit.
 
     /**
      * Add the current chat content to the document as a card
@@ -681,7 +665,9 @@ export class ChatManager {
                 this.reattachCardHandlers(card);
 
                 if (this.updateNetworkCallback) this.updateNetworkCallback();
-                this.generateDocSummary();
+                // (#50) Apply any module-scope additions to the header card
+                // BEFORE clearAll wipes the pending list.
+                this.applyPendingHeaderAdditions();
                 this.clearAll();
                 console.log("Card updated in place:", card.id);
                 // GENERATE ALL walkthrough: advance to the next unresolved card.
@@ -720,7 +706,9 @@ export class ChatManager {
                 this.updateNetworkCallback();
             }
 
-            this.generateDocSummary();
+            // (#50) Apply any module-scope additions to the header card
+            // BEFORE clearAll wipes the pending list.
+            this.applyPendingHeaderAdditions();
             this.clearAll();
         } catch (err) {
             console.error("Didn't add card to document:", err);

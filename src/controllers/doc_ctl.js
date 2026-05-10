@@ -1,12 +1,13 @@
 /**
  * doc_ctl.js — orchestrates per-doc operations: create, remove, switch,
- * title/destination edits, summary lifecycle. Third controller in Phase B
- * per ARCHITECTURE.md.
+ * title/destination edits. Third controller in Phase B per ARCHITECTURE.md.
+ *
+ * (#51) The summary lifecycle was removed from this controller — the
+ * doc's header card serves as the doc overview now.
  *
  * Boundaries:
  *   - DOES use:   Doc model, Project model (via ctx), modal (via ctx),
- *                 generateRandomName, sanitizeTitle/sanitizeDestination,
- *                 marked (for the summary modal).
+ *                 generateRandomName, sanitizeTitle/sanitizeDestination.
  *   - Does NOT:   touch the network viz directly (calls ctx.updateViz()),
  *                 mount the chat manager (calls ctx.syncChat()), or know
  *                 about other controllers.
@@ -27,7 +28,6 @@
 import Doc, { sanitizeDestination } from '../doc.js';
 import { sanitizeTitle } from '../ai_chat.js';
 import generateRandomName from '../random_name_generator.js';
-import { marked } from 'marked';
 
 let _ctx = null;
 
@@ -156,66 +156,12 @@ export function setupDocDestinationInput() {
     });
 }
 
-/* ─── summary lifecycle ──────────────────────────────────────────────────── */
-
-/** "SUMMARY" button: show the current doc's summary, or a status message. */
-export async function showDocSummary() {
-    const doc = _ctx.getCurrentDoc();
-    const modal = _ctx.getModal();
-    if (!doc) { await modal.alert('No document to summarize'); return; }
-    if (doc.summaryGenerating) {
-        await modal.alert('Summary is still being generated. Please wait...');
-        return;
-    }
-    if (doc.summaryError) {
-        await modal.alert(`Summary generation failed: ${doc.summaryError}\n\nTry adding another card to regenerate.`);
-        return;
-    }
-    if (!doc.summary) {
-        await modal.alert('No summary available yet. Summary will be generated when you add cards to the document.');
-        return;
-    }
-    const container = document.createElement('div');
-    container.innerHTML = `
-        <h4 style="margin-bottom: 15px;">Summary of "${doc.title}"</h4>
-        <div class="markdown-body" style="max-height: 400px; overflow-y: auto; padding: 10px; background: var(--strata-layer-01); border: 1px solid var(--strata-interactive);">
-            ${marked.parse(doc.summary)}
-        </div>
-    `;
-    await modal.custom(container, [
-        { text: 'Close', className: 'info_btn', callback: () => null },
-    ]);
-}
-
-export function startSummaryAnimation() {
-    const btn = _ctx.getButtons().summary_btn;
-    if (!btn) return;
-    btn.classList.remove('summary-error', 'summary-success');
-    btn.classList.add('summary-generating');
-}
-
-export function summarySuccess() {
-    _ctx.notifyChange();
-    const btn = _ctx.getButtons().summary_btn;
-    if (!btn) return;
-    btn.classList.remove('summary-generating');
-    btn.classList.add('summary-success');
-    setTimeout(() => {
-        if (btn) {
-            btn.classList.remove('summary-success');
-            btn.style.removeProperty('background');
-            btn.style.removeProperty('color');
-        }
-    }, 3000);
-}
-
-export function summaryError(errorMessage) {
-    const btn = _ctx.getButtons().summary_btn;
-    if (!btn) return;
-    btn.classList.remove('summary-generating');
-    btn.classList.add('summary-error');
-    _ctx.getModal().alert(`Summary generation failed: ${errorMessage}`);
-}
+/* ─── summary lifecycle (removed in #51) ─────────────────────────────────── */
+// The doc's header card now serves as the doc overview. No second AI
+// round-trip on commit, no animated SUMMARY button to babysit. If you
+// land here looking for `showDocSummary`, `startSummaryAnimation`,
+// `summarySuccess`, or `summaryError`: they're gone — and so is the
+// SUMMARY button itself in src/index.html.
 
 /** Test-only. */
 export function __resetForTests() { _ctx = null; }

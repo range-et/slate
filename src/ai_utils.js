@@ -2,8 +2,9 @@ import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import { OPENAI_API_KEY, GEMINI_API_KEY } from "./config_loader.js";
 
-// Shared prompt templates (used by both OpenAI and Gemini)
-const SUMMARY_SYSTEM_PROMPT = "You are a helpful assistant that creates concise summaries of documents. Provide a clear, informative summary that captures the key points. Format your response using Markdown with numbered lists, bold text for emphasis, and proper structure.";
+// Shared prompt template (used by all three providers).
+// (#51) The legacy SUMMARY_SYSTEM_PROMPT was removed alongside the SUMMARY
+// button — the doc's header card serves as the doc overview now.
 const CHAT_SYSTEM_PROMPT = "You are a helpful assistant that provides concise, informative responses. Keep your answers brief and to the point while maintaining clarity. Focus on the essential information and avoid unnecessary elaboration. Format your response using Markdown with headings, lists, bold/italic text, code blocks, and other formatting as appropriate for clarity and readability.";
 
 class OpenAIAgent {
@@ -26,23 +27,6 @@ class OpenAIAgent {
      */
     hasApiKey() {
         return this.apiKey && this.apiKey.trim() !== "";
-    }
-
-    async generateSummary(content) {
-        if (!this.hasApiKey()) {
-            throw new Error("API_KEY_MISSING");
-        }
-        
-        const response = await this.client.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-                { role: "system", content: SUMMARY_SYSTEM_PROMPT },
-                { role: "user", content: `Generate a summary of the following content:\n\n${content}` }
-            ],
-            temperature: 0.7,
-            max_tokens: 500
-        });
-        return response.choices[0].message.content;
     }
 
     async generateResponse(prompt, images = [], { systemPrompt } = {}) {
@@ -117,19 +101,6 @@ class GeminiAgent {
 
     hasApiKey() {
         return this.apiKey && this.apiKey.trim() !== "";
-    }
-
-    async generateSummary(content) {
-        if (!this.hasApiKey()) {
-            throw new Error("API_KEY_MISSING");
-        }
-        const response = await this.client.models.generateContent({
-            model: "gemini-2.5-flash",
-            systemInstruction: SUMMARY_SYSTEM_PROMPT,
-            config: { temperature: 0.7, maxOutputTokens: 500 },
-            contents: `Generate a summary of the following content:\n\n${content}`
-        });
-        return response.text ?? "";
     }
 
     async generateResponse(prompt, images = [], { systemPrompt } = {}) {
@@ -210,19 +181,6 @@ class LocalAgent {
 
     hasApiKey() {
         return Boolean(this.baseURL && this.modelName);
-    }
-
-    async generateSummary(content) {
-        const response = await this.client.chat.completions.create({
-            model: this.modelName,
-            messages: [
-                { role: "system", content: SUMMARY_SYSTEM_PROMPT },
-                { role: "user", content: `Generate a summary of the following content:\n\n${content}` }
-            ],
-            temperature: 0.7,
-            max_tokens: 500
-        });
-        return response.choices[0].message.content;
     }
 
     async generateResponse(prompt, images = [], { systemPrompt } = {}) {

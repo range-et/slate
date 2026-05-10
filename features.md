@@ -340,6 +340,119 @@ without churn.
     "added/updated/removed" summary modal, and the starter-HTML card
     listener attaching to `.card` (not the older `.card-default-style`).
 
+### #45 Phase C-a · `prompt_bar` applet (first applet under the new convention)
+- **Scope**: First slice of #45 (the rest — `card_view/` per-kind applets
+  — is queued as Phase C-b). Establishes the `src/applets/` convention:
+  `mount(deps) → { destroy }`. The new applet
+  [src/applets/prompt_bar/index.js](src/applets/prompt_bar/index.js)
+  adopts the existing DOM (the `response_control_panel` defined in
+  `src/index.html`) and owns: SEND, ADD TO DOC, CODE toggle, ATTACH
+  IMAGE, EXIT EDIT button wiring + the global ESC-to-cancel binding +
+  CODE-toggle UI/editor language flip. Exposes `setCodeMode(true|false)`
+  so the GENERATE ALL walkthrough can force code mode without simulating
+  a click.
+- **Acceptance**:
+  - `mapButtons()` in `main_script.js` no longer wires SEND, ADD TO DOC,
+    CODE, ATTACH IMAGE, EXIT EDIT, or the ESC handler. ✓
+  - `MainManager.toggleCodeMode()` shrinks to a 3-line shim that
+    delegates to `this.promptBar.setCodeMode(...)`. ✓
+  - Walkthrough still flips into code mode correctly via the shim. ✓
+- **Resolved:** 2026-05-10 — Phase C kickoff
+- **Notes:** Sub-applets called out in the original #45 (model picker,
+  language picker, send button, stop button) stay inlined here for now;
+  Phase C-c will split them. The applet adopts the existing HTML rather
+  than rendering it — Phase D will move DOM ownership end-to-end.
+
+### #51 Drop SUMMARY UI; treat the header card as the doc overview
+- **Scope**: SUMMARY was a separate AI-generated description of a doc
+  regenerated on every card add. With editable header cards, the header
+  IS the doc overview, so SUMMARY became duplicate state + a wasted API
+  call on every commit.
+- **Acceptance**:
+  - SUMMARY button removed from `src/index.html`. ✓
+  - `Doc.summary`, `Doc.summaryGenerating`, `Doc.summaryError`,
+    `Doc.updateSummary`, and `Doc.getFlattenedContent` deleted. ✓
+  - `Doc.toJSON` no longer writes `summary`; `Doc.fromJSON` silently
+    drops it from older files. ✓
+  - `generateDocSummary` and its 2 callsites in `src/ai_chat.js`
+    deleted. ✓
+  - `showDocSummary`, `startSummaryAnimation`, `summarySuccess`,
+    `summaryError` removed from `doc_ctl`; `marked` import dropped. ✓
+  - `MainManager` summary shims (`summary_btn`, `startSummaryAnimation`,
+    `summarySuccess`, `summaryError`), the `summary_btn` element ref +
+    map entry, and the `summary_btn` click listener all removed. ✓
+  - `SUMMARY_SYSTEM_PROMPT` + 3 `generateSummary` methods (OpenAI,
+    Gemini, Local) removed from `src/ai_utils.js`. ✓
+  - Cross-doc `@docTitle` resolution in `buildBibliography` falls back
+    to the doc's header card content (raw Python in code mode, context
+    block in markdown mode) instead of the legacy summary. ✓
+  - `.summary-generating`, `.summary-success`, `.summary-error` CSS
+    classes removed. ✓
+  - Build green; old `.slate.json` files round-trip without `summary`.
+- **Resolved:** 2026-05-10 — alongside #49/#50 (header-as-context wave)
+- **Notes:** Forwarding-pointer comments left in each touched file so
+  future searches for "summary" land on a `(#51) ...` explanation
+  instead of a 404. Did NOT delete the unrelated `summary` local in
+  `card_ctl.js` — that's the rehydrate stat counter, not the SUMMARY
+  feature.
+
+### #49 Auto-include current doc's header card as bibliography context
+- **Scope**: The header pill's tooltip claimed it was prepended to every
+  code card's bibliography but `buildBibliography` only walked explicit
+  `@`-references. Now `chat_ctl.send()` opts in via
+  `includeCurrentDocHeader: true` and `buildBibliography` auto-prepends
+  the current doc's header card source.
+- **Acceptance**:
+  - In code mode, header source lands at the top of the bibliography as
+    raw Python (so the model sees imports + module-scope state). ✓
+  - In markdown mode, header lands as a context block. ✓
+  - Dedupe: explicit `@__header__` refs are skipped if the header was
+    already auto-included (id-set in `buildBibliography`). ✓
+  - Empty header → no auto-include, no marker noise. ✓
+  - Bibliography still returns `''` when there are no refs AND no
+    header to include (early-out preserved). ✓
+- **Resolved:** 2026-05-10 — alongside #50/#51
+- **Notes:** Cross-doc card refs were already supported (the pre-existing
+  fallback path searches all docs in the project); this issue only
+  changes the auto-include for the **current** doc's header. The two-doc
+  calculator example exercises the cross-doc path as a smoke test for
+  the future DAG topo solver in #15.
+
+### #50 Two-part code response schema (function + module-level additions)
+- **Scope**: The Python codegen system prompt now instructs the model to
+  optionally emit a `# @slate:header-additions` section after the
+  function body. Additions are routed to the doc's header card on
+  ADD TO DOC; the function lands as its own card (current behavior).
+- **Acceptance**:
+  - `composeCodeSystemPrompt` includes the two-section schema +
+    "omit the marker entirely if you don't need additions" instruction. ✓
+  - New pure helper `splitFunctionAndHeaderAdditions(text)` in
+    `chat_ctl.js`: case-insensitive marker, optional leading `#`,
+    whitespace-tolerant; falls back cleanly to "function only" when the
+    marker is absent or the additions section is empty. ✓
+  - New pure helper `applyHeaderAdditions(currentSrc, additions)`:
+    appends new lines, dedupes by trimmed-line equality, never deletes
+    or reorders existing header content. ✓
+  - `chat:complete` event payload extended with `headerAdditions`;
+    streaming + non-streaming paths both populate it. ✓
+  - View side (`ai_chat.js`) stashes `pendingHeaderAdditions` on
+    `chat:complete` and applies them in BOTH `addToDoc` paths
+    (edit-in-place + create-new) via a new `applyPendingHeaderAdditions`
+    method that mutates the header card's content + re-renders its DOM
+    in place + re-binds the edit button. ✓
+  - `clearAll()` resets `pendingHeaderAdditions` so abandoned
+    generations don't leak into the next commit. ✓
+  - Build green.
+- **Resolved:** 2026-05-10 — alongside #49/#51
+- **Notes:**
+  - Helpers exported as pure functions for future unit tests.
+  - The model can never **delete** from the header through this path,
+    only append — humans still own the header via the ✎ button.
+  - In markdown mode, the schema instruction is a no-op (system prompt
+    is only set when `codeMode` is true).
+  - Future polish: a diff-view in the response pane to preview which
+    lines are about to land on the header before clicking ADD TO DOC.
+
 ---
 
 ## Phase 12 · Editor + UI polish

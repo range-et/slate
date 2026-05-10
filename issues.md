@@ -531,116 +531,6 @@ issues are ordered by dependency. Each issue lists:
 - **Files**: `src/ai_chat.js`, `src/styles.css`, possibly
   `src/codemirror_setup.js` (line numbers extension)
 
-### #49 Auto-include current doc's header card as context in every prompt
-- **Scope**: The header pill tooltip claims it's "prepended to every code
-  card's bibliography" but
-  [`buildBibliography`](src/controllers/chat_ctl.js) only walks explicit
-  `@`-references — the doc's own `__header__` card is silently dropped
-  unless the user remembers to write `@__header__` themselves. The header
-  is supposed to be the doc's module-scope ground truth (imports,
-  constants, OPS table scaffold, cross-doc imports per #44 calc split),
-  so every code-card generation in that doc must see it for free.
-- **Approach**:
-  - In `chat_ctl.send()`, before calling `buildBibliography`, look up
-    `currentDoc.getAllCards().find(c => c.isHeader?.())` and prepend its
-    source verbatim to the bibliography in code mode (and as a context
-    block in markdown mode).
-  - Don't double-include if the user also wrote `@__header__` —
-    deduplicate by card id.
-  - Make sure the inclusion respects `codeMode`: code mode emits the
-    header as raw Python (so the model can actually see the imports and
-    OPS dict signature); markdown mode emits it as a context block.
-- **Acceptance**:
-  - Generating `add` in the calc operations doc with no explicit
-    `@__header__` ref still sees `from typing import Callable, Dict` and
-    the OPS table declaration in its prompt.
-  - The header is included exactly once even if the user `@`-refs it.
-  - Cross-doc generation (e.g. `main` in calculator referencing
-    `@register_ops` from operations) still works — that's a separate
-    cross-doc-ref path; this issue only auto-includes the **current**
-    doc's header.
-- **Blocks**: nothing immediate; tightens the contract assumed by the new
-  two-doc calculator example
-- **Files**: [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js),
-  [src/cards.js](src/cards.js) (just to expose a `isHeader()` check if
-  not already public on the Card public surface — it is)
-
-### #50 Two-part response schema: function body + module-level additions
-- **Scope**: Today the model is told "return one Python function". In
-  practice it often needs to add things at module scope too — a new
-  import, a helper constant, a typing alias. Either it inlines them
-  inside the function (ugly) or skips them (broken). We want a structured
-  response shape that lets the model say "here's the function body **and**
-  here's a patch to add to the doc's header card."
-- **Approach (sketch — finalize in PR)**:
-  - System prompt change in
-    [`composeCodeSystemPrompt`](src/controllers/chat_ctl.js): instruct the
-    model to emit a fenced response with two clearly delimited sections,
-    e.g.:
-    ```
-    # @slate:function
-    def add(a, b): ...
-    # @slate:header-additions
-    from typing import Final
-    PI: Final[float] = 3.14159
-    ```
-  - Parser in `chat_ctl` (or a new pure helper) splits on
-    `# @slate:header-additions` and routes the additions to the header
-    card via a controller-side helper (`card_ctl.applyHeaderAdditions`?).
-  - Header-additions are appended (deduped by line) — model can never
-    delete from the header through this path; only humans can.
-  - In ADD TO DOC, both parts commit atomically: the function lands as
-    its own card, the header card gets the new lines.
-- **Acceptance**:
-  - GENERATE ALL on the calc `read_two_numbers` card produces something
-    like a header addition `from typing import Tuple` (or whatever it
-    needs), and the header card's content updates in place.
-  - User can review header additions before clicking ADD TO DOC (diff
-    view in the response pane?).
-  - Parser is robust to the model omitting the second section — falls
-    back to "function only" cleanly.
-- **Blocks**: nothing; significantly improves the agentic loop quality
-- **Files**: [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js),
-  [src/controllers/card_ctl.js](src/controllers/card_ctl.js),
-  [src/ai_chat.js](src/ai_chat.js) (commit path)
-
-### #51 Remove the SUMMARY UI; treat the header card as the doc overview
-- **Scope**: SUMMARY adds a separate AI-generated description of a doc
-  that's regenerated on every card add. With editable header cards
-  (markdown notes mode + annotations), the header **is** the doc's
-  overview by construction — the user already writes "what this doc is
-  about" up there. The SUMMARY button + state is now duplicate UI and a
-  redundant background generation that costs API tokens for no new
-  signal.
-- **Approach**:
-  - Remove the SUMMARY button from
-    [src/index.html](src/index.html).
-  - Remove `summary*` state from [src/doc.js](src/doc.js) — drop
-    `summary`, `summaryGenerating`, `summaryError`, `updateSummary`.
-  - Remove `generateDocSummary` + the auto-trigger on card add from
-    [src/ai_chat.js](src/ai_chat.js).
-  - Remove `summary_btn` + summary lifecycle from
-    [src/controllers/doc_ctl.js](src/controllers/doc_ctl.js)
-    (`showDocSummary`, `startSummaryAnimation`, `summarySuccess`,
-    `summaryError`).
-  - Update cross-doc `@docTitle` reference resolution in
-    `buildBibliography`: instead of falling back to "doc summary," fall
-    back to the doc's **header card content** (which is the doc's
-    canonical preamble).
-  - Migrate existing `.slate.json` files: drop `summary` field on read;
-    don't write it on save.
-- **Acceptance**:
-  - SUMMARY button gone from UI.
-  - `.slate.json` round-trips without the `summary` field.
-  - Cross-doc `@operations` from a card in the calculator doc resolves
-    to the operations header card content.
-  - No API call is made on card add for summary generation.
-- **Blocks**: nothing
-- **Files**: [src/index.html](src/index.html), [src/doc.js](src/doc.js),
-  [src/ai_chat.js](src/ai_chat.js),
-  [src/controllers/doc_ctl.js](src/controllers/doc_ctl.js),
-  [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js)
-
 ### #48 Compile overwrite confirmation in Slate's modal (not the macOS native dialog)
 - **Scope**: Today, hitting COMPILE in the VS Code surface for a doc whose
   `.py` already exists fires a native macOS "modal" warning via
@@ -737,14 +627,13 @@ issues are ordered by dependency. Each issue lists:
 
 ## Tracking
 
-- **Open**: every issue above. **39 of 51 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **36 of 51 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
-  #43 chat_ctl + #44 doc/project/card controllers — see
-  [features.md](features.md); #48–#51 added 2026-05-10 — compile-overwrite
-  modal, auto-include header as context, two-part response schema
-  (function + module-level additions), drop SUMMARY in favor of the
-  header card).
+  #43 chat_ctl + #44 doc/project/card controllers + #51 drop SUMMARY +
+  #49 auto-header-context + #50 two-part response schema + Phase C-a
+  prompt_bar applet — see [features.md](features.md); #48 still open —
+  compile-overwrite modal in slate, not native macOS dialog).
 - **Workflow**: when an issue ships, cut+paste its block into
   [features.md](features.md) and append a `**Resolved:** YYYY-MM-DD —
   <commit-or-PR>` line at the bottom of the block. Do **not** leave shipped
