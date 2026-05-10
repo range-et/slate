@@ -33,6 +33,9 @@ import {
     attachExistingCardListeners as ctlAttachExistingCardListeners,
 } from "./controllers/card_ctl.js";
 import { mount as mountPromptBar } from "./applets/prompt_bar/index.js";
+import { mount as mountFeedbackWidget } from "./applets/feedback_widget/index.js";
+import { mount as mountTerminalHandoff } from "./applets/terminal_handoff/index.js";
+import { mount as mountLandingTour } from "./applets/landing_tour/index.js";
 import { emit, on } from "./event_bus.js";
 
 // Select all the dom elements
@@ -623,10 +626,12 @@ class MainManager {
     mapButtons() {
         // Hide browser-only chrome when slate is hosted inside VS Code. The
         // *.slate.json file IS the project on the VS Code surface — IMPORT,
-        // EXPORT, ABOUT, and FEEDBACK only make sense for the standalone
+        // EXPORT, and ABOUT only make sense for the standalone
         // web/GitHub-Pages surface where there's no host filesystem.
+        // (feedback_btn moved out of this list — feedback_widget applet
+        // gates itself via caps.feedbackWidget now.)
         if (isRunningInVsCode()) {
-            for (const id of ['import_btn', 'export_btn', 'about_btn', 'feedback_btn']) {
+            for (const id of ['import_btn', 'export_btn', 'about_btn']) {
                 const el = this.buttons[id];
                 if (el) el.style.display = 'none';
             }
@@ -649,9 +654,8 @@ class MainManager {
         }
         this.buttons.api_key_btn.addEventListener("click", () => this.show_api_key_modal());
         this.buttons.about_btn.addEventListener("click", () => this.showAboutModal());
-        this.buttons.feedback_btn.addEventListener("click", () => {
-            window.open("https://forms.gle/BVk3YMzqoRELDy2C9", "_blank");
-        });
+        // FEEDBACK button is owned by the feedback_widget applet (Phase
+        // C-c, #46) — gated by caps.feedbackWidget; mounted in init().
         this.buttons.export_btn.addEventListener("click", () => this.exportProject());
         this.buttons.import_btn.addEventListener("click", () => this.importProject());
         this.buttons.search_btn.addEventListener("click", () => this.searchAndNavigate());
@@ -865,6 +869,20 @@ class MainManager {
             promptEditor: this.promptEditor,
         });
 
+        // Phase C-c (#46) capability-gated applets. mount() is unconditional
+        // — each applet checks its own capability and no-ops on the wrong
+        // target. Add a new gated applet by dropping a folder under
+        // src/applets/ + a row in src/capabilities.js + a single mount line
+        // here. No new branches in main_script.
+        this.feedbackWidget = mountFeedbackWidget({ buttons: this.buttons });
+        this.terminalHandoff = mountTerminalHandoff({});
+        this.landingTour = mountLandingTour({ modal: this.modal });
+        // Expose the landing tour replay() handle for the console hint baked
+        // into its modal copy.
+        if (this.landingTour && typeof this.landingTour.replay === 'function') {
+            window.__slateLandingTour = this.landingTour;
+        }
+
         // listen for inbound messages from a VS Code extension host (no-op in browser)
         this.setupHostMessageListener();
         // wire the compile controller (Phase B per ARCHITECTURE.md)
@@ -916,6 +934,21 @@ class MainManager {
         if (this.promptBar && typeof this.promptBar.destroy === "function") {
             this.promptBar.destroy();
             this.promptBar = null;
+        }
+        if (this.feedbackWidget && typeof this.feedbackWidget.destroy === "function") {
+            this.feedbackWidget.destroy();
+            this.feedbackWidget = null;
+        }
+        if (this.terminalHandoff && typeof this.terminalHandoff.destroy === "function") {
+            this.terminalHandoff.destroy();
+            this.terminalHandoff = null;
+        }
+        if (this.landingTour && typeof this.landingTour.destroy === "function") {
+            this.landingTour.destroy();
+            this.landingTour = null;
+        }
+        if (window.__slateLandingTour) {
+            try { delete window.__slateLandingTour; } catch (_) { window.__slateLandingTour = undefined; }
         }
         if (this.chatManager && typeof this.chatManager.destroy === "function") {
             this.chatManager.destroy();

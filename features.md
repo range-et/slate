@@ -363,6 +363,75 @@ without churn.
   Phase C-c will split them. The applet adopts the existing HTML rather
   than rendering it — Phase D will move DOM ownership end-to-end.
 
+### #45 Phase C-b · `card_view/` per-kind applets
+- **Scope**: Second slice of #45. Card rendering moves out of
+  `src/cards.js` into a registry-backed applet folder. Each card kind is
+  one file that registers itself at import time:
+  [src/applets/card_view/header_card.js](src/applets/card_view/header_card.js),
+  [src/applets/card_view/code_card.js](src/applets/card_view/code_card.js),
+  [src/applets/card_view/markdown_card.js](src/applets/card_view/markdown_card.js),
+  [src/applets/card_view/class_card.js](src/applets/card_view/class_card.js).
+  [src/applets/card_view/registry.js](src/applets/card_view/registry.js)
+  exposes `selectKindKey(card)` (header → class → code/markdown by
+  `cardType`) and a `register(kind, render)` seam.
+  [src/applets/card_view/index.js](src/applets/card_view/index.js) is the
+  single import point; it owns prompt-section rendering (image rendering
+  + `@`-ref highlight) so per-kind files stay tiny.
+- **Acceptance**:
+  - `Card.create()` is now a 1-line delegation to `renderCard(this)`. ✓
+  - Adding a new card kind = new file under `src/applets/card_view/` +
+    one `register('foo', render)` call. No edits to existing kind files. ✓
+  - `Card.init()` event wiring (remove / move / right-click / edit /
+    `@`-link nav) is unchanged — render moved, behavior didn't. ✓
+  - Build green; header / code / markdown / class cards render
+    identically to before. ✓
+- **Resolved:** 2026-05-10 — Phase C-b
+- **Notes:** `class` card is intentionally still a placeholder pending
+  the real class-grouping UI; it just registers a kind so future work
+  doesn't have to touch the registry. `cards.js` shrunk from ~416 to
+  ~337 LOC.
+
+### #46 Phase C-c · Capability-gated applets (`feedback_widget`, `terminal_handoff`, `landing_tour`)
+- **Scope**: Three new applets, each gated by one row of
+  [src/capabilities.js](src/capabilities.js). Mount is unconditional;
+  every applet checks its own `can('...')` and no-ops on the wrong
+  target. Bootstrap stays target-agnostic.
+  - [src/applets/feedback_widget/index.js](src/applets/feedback_widget/index.js)
+    owns the FEEDBACK button → opens the public Slate feedback form in a
+    new tab. Hides the button entirely when `caps.feedbackWidget` is
+    false (vscode target).
+  - [src/applets/terminal_handoff/index.js](src/applets/terminal_handoff/index.js)
+    seeds the #20 paste-block flow. In vscode it installs
+    `window.__slateTerminalHandoff()` which compiles the active doc and
+    writes the source to the system clipboard. No new chrome yet —
+    surfaces (key binding, status-bar button, command palette) wire to
+    the same hook in #20. No-ops in web.
+  - [src/applets/landing_tour/index.js](src/applets/landing_tour/index.js)
+    is a one-shot welcome modal pointing newcomers at the calculator
+    example + the README. Uses Slate's own `Modal` (not `window.alert`).
+    Persists `slate.tourSeen.v1` in localStorage so refresh / reopen
+    doesn't re-prompt. Exposes `replay()` via
+    `window.__slateLandingTour` so the in-modal hint actually works.
+    Web-only.
+- **Acceptance**:
+  - Web build: FEEDBACK button visible + working; landing tour fires on
+    first visit only; `window.__slateTerminalHandoff` is undefined. ✓
+  - VS Code build: FEEDBACK button hidden; no landing tour;
+    `window.__slateTerminalHandoff` installed and copies compiled source
+    on call. ✓
+  - Adding a new gated applet = new folder under `src/applets/` + new
+    capability key in `src/capabilities.js` + one `mount...()` line in
+    `MainManager.init()`. Verified by the three applets all following
+    that exact shape. ✓
+  - Build green; `destroy()` tears down all three applets and clears the
+    landing-tour global hook. ✓
+- **Resolved:** 2026-05-10 — Phase C-c
+- **Notes:** This is the seam, not the final form. #20 will replace the
+  bare `__slateTerminalHandoff` hook with the proper ⌘⇧R bridge. The
+  `compile_ctl` static import in `terminal_handoff` keeps the build a
+  single chunk for now; per-target chunk splitting is a Phase D
+  concern.
+
 ### #51 Drop SUMMARY UI; treat the header card as the doc overview
 - **Scope**: SUMMARY was a separate AI-generated description of a doc
   regenerated on every card add. With editable header cards, the header

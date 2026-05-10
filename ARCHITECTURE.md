@@ -122,8 +122,8 @@ The full matrix lives in [src/capabilities.js](src/capabilities.js). Summary:
 
 | Concern | Today | Planned |
 |---|---|---|
-| App bootstrap, DOM wiring, dispatch | [src/main_script.js](src/main_script.js) (951 LOC) | shrinks further as `prompt_bar`/`card_view` applets land in Phase C |
-| **Prompt assembly, send loop, bibliography, error classification** | [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js) ✓ (view bits in [src/ai_chat.js](src/ai_chat.js), 759 LOC) | + `src/applets/prompt_bar/` in Phase C |
+| App bootstrap, DOM wiring, dispatch | [src/main_script.js](src/main_script.js) | shrinks as remaining applets land (Phase D) |
+| **Prompt assembly, send loop, bibliography, error classification** | [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js) ✓ (view bits in [src/ai_chat.js](src/ai_chat.js)) | `src/applets/prompt_bar/` ✓ owns the bar UI |
 | AI provider clients (OpenAI, Gemini, Ollama) | [src/ai_utils.js](src/ai_utils.js) | stays as-is (already a clean adapter layer) |
 | **Compile dispatch** | [src/controllers/compile_ctl.js](src/controllers/compile_ctl.js) ✓ | + `src/compilers/index.js` registry in Phase D |
 | **Doc lifecycle** (create/remove/switch, summary, title sanitization) | [src/controllers/doc_ctl.js](src/controllers/doc_ctl.js) ✓ | view-side summary modal moves into an applet in Phase C |
@@ -192,10 +192,10 @@ src/
 
 | File | LOC | Why it's a hotspot | Plan |
 |---|---|---|---|
-| [src/main_script.js](src/main_script.js) | 951 | Bootstrap + walkthrough + host bridge + settings (project/doc/card state extracted in #44) | Phase C: `prompt_bar`/`card_view` applets pull more out |
-| [src/ai_chat.js](src/ai_chat.js) | 833 | Controller + view + factory + bibliography | Phase B: → `chat_ctl.js` + `prompt_bar/` applet |
-| [src/network_viz.js](src/network_viz.js) | 562 | D3 viz; not bad, but mixes data + render | Re-evaluate after Phase C |
-| [src/cards.js](src/cards.js) | 416 | Model + render template + DOM events | Phase C: split render into `applets/card_view/` |
+| [src/main_script.js](src/main_script.js) | 968 | Bootstrap + walkthrough + host bridge + settings (project/doc/card state extracted in #44; applet mounts wired in Phase C-a/b/c) | Phase D: command palette + preset/compiler registry pull more out |
+| [src/ai_chat.js](src/ai_chat.js) | 746 | View shell + factory + image attach (controller logic now in `chat_ctl.js`; bar UI in `prompt_bar/`) | Phase D: presets own system-prompt selection |
+| [src/network_viz.js](src/network_viz.js) | 562 | D3 viz; not bad, but mixes data + render | Re-evaluate after Phase D |
+| [src/cards.js](src/cards.js) | 337 | Model + DOM events (render moved to `applets/card_view/` in Phase C-b) | Phase D: model-only after class-grouping UI lands |
 
 ---
 
@@ -246,10 +246,15 @@ imported from one place but not yet read anywhere.
   show the right modal copy.
 
 ### Phase C · Applets (extract from controllers)
-1. `src/applets/prompt_bar/` — prompt + model + lang + send + stop
-2. `src/applets/card_view/` — header, code, markdown, class
-3. Capability-gated applets: `terminal_handoff/`, `feedback_widget/`,
-   `landing_tour/`
+1. `src/applets/prompt_bar/` ✓ — prompt + model + lang + send + stop
+   (Phase C-a, #45)
+2. `src/applets/card_view/` ✓ — header, code, markdown, class
+   (Phase C-b, #45). Per-kind files self-register via
+   `card_view/registry.js`; adding a new kind is one new file with one
+   `register('foo', render)` call.
+3. Capability-gated applets ✓ — `feedback_widget/`, `terminal_handoff/`,
+   `landing_tour/` (Phase C-c, #46). `mount()` is unconditional; each
+   applet checks its own `can('...')` and no-ops on the wrong target.
 4. `src/applets/command_palette/` — ⌘K + ? overlay (issue #26)
 
 **Acceptance**: every applet is one folder, has its own README, mounts

@@ -450,41 +450,6 @@ issues are ordered by dependency. Each issue lists:
 > already shipped (capabilities matrix, map, event bus). Issues below cover
 > the remaining phases B → D. Each is one shippable PR.
 
-### #45 Phase C · Extract `prompt_bar/` and `card_view/` applets
-- **Scope**: First applet folders. Each is `mount(rootEl, props) →
-  { update, destroy }`, subscribes to event bus, renders to its own root.
-  `prompt_bar/` contains sub-applets for the model picker, language picker,
-  send button, stop button (`stop_button` declares `requires: ['streaming']`).
-  `card_view/` splits into `header_card.js`, `code_card.js`,
-  `markdown_card.js`, `class_card.js`.
-- **Acceptance**:
-  - `src/applets/prompt_bar/index.js` mounts the bar; no other file owns
-    its DOM.
-  - Adding a new card kind is one new file under `card_view/`, no edits
-    to existing applet files.
-- **Blocks**: #46
-- **Files**: `src/applets/prompt_bar/*` (new),
-  `src/applets/card_view/*` (new), `src/cards.js`, `src/ai_chat.js`
-
-### #46 Phase C · Capability-gated applets (`terminal_handoff`, `feedback_widget`, `landing_tour`)
-- **Scope**: Three applets, each gated by one row of `capabilities.js`.
-  `terminal_handoff` lands the #20 paste-block flow (vscode-only).
-  `feedback_widget` is a small "send feedback" button (web-only).
-  `landing_tour` is the first-run "try slate" overlay (web-only). Each is
-  ~one file plus styles; mount is unconditional but no-ops when its
-  capability is false.
-- **Acceptance**:
-  - Web build does not render the terminal-handoff button; vscode build
-    does.
-  - vscode build does not render the feedback widget; web build does.
-  - Adding a new capability-gated applet requires **only**: new applet
-    folder + new capability key in `capabilities.js` + one mount line in
-    bootstrap.
-- **Blocks**: #47
-- **Files**: `src/applets/terminal_handoff/*` (new),
-  `src/applets/feedback_widget/*` (new),
-  `src/applets/landing_tour/*` (new), `src/capabilities.js`
-
 ### #47 Phase D · Preset schemas + compiler registry
 - **Scope**: Land the preset system from
   [ARCHITECTURE.md § Phase D](ARCHITECTURE.md#phase-d--presets--compiler-registry).
@@ -627,12 +592,14 @@ issues are ordered by dependency. Each issue lists:
 
 ## Tracking
 
-- **Open**: every issue above. **36 of 51 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **34 of 51 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
   #43 chat_ctl + #44 doc/project/card controllers + #51 drop SUMMARY +
-  #49 auto-header-context + #50 two-part response schema + Phase C-a
-  prompt_bar applet — see [features.md](features.md); #48 still open —
+  #49 auto-header-context + #50 two-part response schema + #45 Phase C-a
+  prompt_bar applet + Phase C-b card_view applets + #46 Phase C-c
+  capability-gated applets (feedback_widget / terminal_handoff /
+  landing_tour) — see [features.md](features.md); #48 still open —
   compile-overwrite modal in slate, not native macOS dialog).
 - **Workflow**: when an issue ships, cut+paste its block into
   [features.md](features.md) and append a `**Resolved:** YYYY-MM-DD —

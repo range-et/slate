@@ -1,15 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
-import { marked } from 'marked';
 import Modal from './modal.js';
-import { highlightCodeStatic } from './codemirror_setup.js';
+import { renderCard } from './applets/card_view/index.js';
 
-// Configure marked for better rendering
-marked.setOptions({
-    breaks: true,        // Convert \n to <br>
-    gfm: true,          // GitHub Flavored Markdown
-    headerIds: false,   // Don't add IDs to headers
-    mangle: false       // Don't escape email addresses
-});
+// (Phase C-b, #45) Marked + the per-kind highlight pipeline now live
+// inside src/applets/card_view/. cards.js is the model + the controller-
+// side wiring (init / remove / move / navigate); render is fully owned
+// by the card_view applet and delegated through `create()` below.
 
 export const CARD_TYPE_MARKDOWN = 'markdown';
 export const CARD_TYPE_CODE = 'code';
@@ -108,89 +104,14 @@ class Card {
         return stripPythonFences(plain).trim();
     }
 
+    /**
+     * Build the DOM element for this card. Pure render — caller (init)
+     * attaches event handlers afterwards. Implementation lives in the
+     * card_view applet (src/applets/card_view/), one file per render kind
+     * (header / code / markdown / class).
+     */
     create() {
-        const cardElement = document.createElement("div");
-        cardElement.classList.add("card");
-        if (this.cardType === CARD_TYPE_CODE) {
-            cardElement.classList.add("card--code");
-        }
-        if (this.isHeader()) {
-            cardElement.classList.add("card--header");
-        }
-
-        // Render the response: markdown for prose cards, syntax-highlighted Python
-        // for code + header cards. Highlighting comes from highlightCodeStatic so
-        // the colors match what the editor would show — no separate highlight stack.
-        let renderedContent;
-        if (this.isHeader()) {
-            const headerSource = (this.content || "").trim();
-            renderedContent = headerSource
-                ? `<pre class="card-code-block language-python"><code>${highlightCodeStatic(headerSource, 'python')}</code></pre>`
-                : `<p class="card-header-empty">Empty header. Edit (✎) to add module-scope imports, constants, or type aliases.</p>`;
-        } else if (this.cardType === CARD_TYPE_CODE) {
-            const source = this.getPythonSource() || "";
-            renderedContent = `<pre class="card-code-block language-python"><code>${highlightCodeStatic(source, 'python')}</code></pre>`;
-        } else {
-            renderedContent = marked.parse(this.content);
-        }
-
-        // Build prompt section with highlighted @references and images
-        let promptHTML = '';
-        if (this.prompt && this.prompt.trim() !== '') {
-            // Highlight @references in the prompt
-            let highlightedPrompt = this.prompt;
-            
-            // Find all @references and make them clickable spans
-            highlightedPrompt = highlightedPrompt.replace(/@([\w]+)/g, (match, cardTitle) => {
-                return `<span class="card-link-inline" data-link="${cardTitle}">@${cardTitle}</span>`;
-            });
-            
-            // Build images HTML if images exist
-            let imagesHTML = '';
-            if (this.images && this.images.length > 0) {
-                imagesHTML = `
-                    <div class="card-prompt-images">
-                        ${this.images.map(img => `
-                            <img src="${img.data}" alt="${img.name}" class="card-prompt-image" />
-                        `).join('')}
-                    </div>
-                `;
-            }
-            
-            promptHTML = `
-                <div class="card-prompt-section">
-                    <span class="card-prompt-label">Prompt:</span>
-                    <div class="card-prompt-text">${highlightedPrompt}</div>
-                    ${imagesHTML}
-                </div>
-            `;
-        }
-        
-        // Header cards skip the move + remove buttons (they're pinned and undeletable per v0.2 §2).
-        // They also render a "header" pill so they're visibly distinct from body cards.
-        const actionsHTML = this.isHeader()
-            ? `<button class="success_btn card-edit-btn" title="Edit module-scope setup">✎</button>`
-            : `<button class="success_btn card-edit-btn" title="Edit this card in the prompt pane">✎</button>
-               <button class="info_btn card-move-btn" title="Move to another document">↗</button>
-               <button class="alert_btn" title="Remove card">x</button>`;
-
-        const kindPill = this.isHeader()
-            ? `<span class="card-kind-pill card-kind-pill--header" title="Module-scope setup, prepended to compiled output and to every code card's bibliography">header</span>`
-            : '';
-
-        cardElement.innerHTML = `
-            <div class="card_header">
-                <div class="card_details">
-                    <h4>${this.title} ${kindPill}</h4>
-                    <p class="card_id">${this.id}</p>
-                </div>
-                <div class="card_actions">
-                    ${actionsHTML}
-                </div>
-            </div>
-            ${promptHTML}
-            <div class="card-content markdown-body">${renderedContent}</div>`;
-        return cardElement;
+        return renderCard(this);
     }
 
     async remove() {
