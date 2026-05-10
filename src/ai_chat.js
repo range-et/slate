@@ -1,7 +1,7 @@
 import Card, { CARD_TYPE_CODE, CARD_TYPE_MARKDOWN } from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
 import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor, setupCodeMirrorEditor } from "./codemirror_setup.js";
-import { initChatCtl, buildBibliography, applyHeaderAdditions } from "./controllers/chat_ctl.js";
+import { initChatCtl, buildBibliography, applyHeaderAdditions, isUnsafeHeaderAdditionsAllowed } from "./controllers/chat_ctl.js";
 import { on, emit } from "./event_bus.js";
 
 /**
@@ -340,7 +340,9 @@ export class ChatManager {
         if (!header) return false;
 
         const before = header.content || '';
-        const after = applyHeaderAdditions(before, additions);
+        const after = applyHeaderAdditions(before, additions, {
+            allowUnsafe: isUnsafeHeaderAdditionsAllowed(),
+        });
         if (after === before) return false;
 
         header.content = after;

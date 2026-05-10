@@ -328,32 +328,52 @@ export function splitFunctionAndHeaderAdditions(text) {
  * skipping any line already present (whitespace-insensitive). Returns
  * the new header text. Called by ai_chat.addToDoc on commit.
  */
-export function applyHeaderAdditions(currentHeaderSrc, additions) {
+export function applyHeaderAdditions(currentHeaderSrc, additions, { allowUnsafe = false } = {}) {
     const additionsList = Array.isArray(additions) ? additions : [];
     if (additionsList.length === 0) return currentHeaderSrc || '';
     const existing = (currentHeaderSrc || '').split('\n').map(l => l.trim());
     const existingSet = new Set(existing);
-    // Drop unsafe lines BEFORE the dedup pass so the model can't sneak
-    // forward-ref module-scope statements past us by varying the
-    // quoting (`OPS["+"]` vs `OPS['+']`). Each passed line is tested
-    // by isSafeHeaderAdditionLine — anything that isn't an import,
-    // type alias, or literal-only constant gets rejected with a console
-    // warning and a discard. This is the actual fix for the calc bug
-    // the user kept hitting where `OPS["+"] = add` would land at module
+    // Default behavior: drop unsafe lines BEFORE dedup so the model
+    // can't sneak forward-ref module-scope statements past us by
+    // varying quoting. `OPS["+"] = add` and friends are rejected with
+    // a console warning. This is the actual fix for the calc bug the
+    // user kept hitting where `OPS["+"] = add` would land at module
     // top before `add` was defined.
-    const safe = additionsList.filter(line => {
-        if (isSafeHeaderAdditionLine(line)) return true;
-        if (typeof console !== 'undefined' && console.warn) {
-            console.warn(`[chat_ctl] dropping unsafe header addition: ${JSON.stringify(line)} — only imports, type aliases, and literal constants may live at module top`);
-        }
-        return false;
-    });
+    //
+    // Override: pass `{ allowUnsafe: true }` (or the user toggles the
+    // "ALLOW UNSAFE HEADERS" checkbox in the project header, which
+    // sets localStorage `slate.allowUnsafeHeaders.v1`) to bypass the
+    // filter. Off by default everywhere; tests force off.
+    const safe = allowUnsafe
+        ? additionsList
+        : additionsList.filter(line => {
+            if (isSafeHeaderAdditionLine(line)) return true;
+            if (typeof console !== 'undefined' && console.warn) {
+                console.warn(`[chat_ctl] dropping unsafe header addition: ${JSON.stringify(line)} — only imports, type aliases, and literal constants may live at module top (toggle "ALLOW UNSAFE HEADERS" to bypass)`);
+            }
+            return false;
+        });
     if (safe.length === 0) return currentHeaderSrc || '';
     const fresh = safe.filter(l => !existingSet.has(l.trim()));
     if (fresh.length === 0) return currentHeaderSrc || '';
     const base = (currentHeaderSrc || '').replace(/\s+$/, '');
     const sep = base.length === 0 ? '' : '\n';
     return base + sep + fresh.join('\n') + '\n';
+}
+
+/**
+ * Read the persisted "allow unsafe header additions" flag. Single
+ * source of truth so the applet checkbox + ai_chat.js callsite agree.
+ * Defaults to false. Returns false in non-browser contexts (tests).
+ */
+export const ALLOW_UNSAFE_HEADERS_KEY = 'slate.allowUnsafeHeaders.v1';
+export function isUnsafeHeaderAdditionsAllowed() {
+    if (typeof localStorage === 'undefined') return false;
+    try {
+        return localStorage.getItem(ALLOW_UNSAFE_HEADERS_KEY) === '1';
+    } catch {
+        return false;
+    }
 }
 
 /**

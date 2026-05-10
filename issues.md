@@ -588,11 +588,81 @@ issues are ordered by dependency. Each issue lists:
 - **Blocks**: #14
 - **Files**: spec doc, `src/code_compile.js`
 
+### #52 Phase E · Port the project graph from d3 to Cytoscape.js
+- **Scope**: `src/network_viz.js` (562 LOC of mixed concerns) is the
+  weakest part of the architecture map and the only place where
+  zoom-to-fit / camera-follow / layout tweaks felt genuinely awkward.
+  Cytoscape gives us native `cy.fit()`, `cy.center(node)`, `cy.layout(...)`
+  with dagre/grid/cola presets, declarative styling, and built-in
+  graph-algorithm helpers (handy for #15 DAG topo). Migration is cheap
+  because `Project.toGraphData()` already returns library-agnostic
+  `{ nodes, links }` shape — only the renderer changes.
+- **Acceptance**:
+  - `src/network_viz.js` replaced by a Cytoscape-backed module of the
+    same surface (`new NetworkViz(...)`, `updateData(graph)`,
+    `resetZoom()`, `zoomToFit()`, `zoomToNode(id)`).
+  - Existing callers (main_script.js + ai_chat.js loadCardForEdit hop)
+    keep working without changes.
+  - d3 dependency removed from package.json (or kept only if other
+    code still uses it — currently only viz does).
+  - Bundle size doesn't grow (Cytoscape core is comparable to d3-force).
+- **Files**: `src/network_viz.js` (rewrite), `package.json`,
+  `ARCHITECTURE.md` hotspots table.
+- **Notes**: Discussed in the d3-alternatives table from
+  [features.md](features.md#viz-zoom-to-fit-by-default--camera-follow-on-card-edit).
+  Cytoscape was the recommended target for long-term graph-algo work.
+
+### #53 Phase E · Round-trip code edits from .py back into cards
+- **Scope**: Editing the compiled .py file on disk and hitting
+  REHYDRATE today only round-trips `def`/`class` bodies (and silently
+  squashes ALL imports onto card 0). The user explicitly called this
+  the main point of friction: "the card to code to code edits back to
+  card needs to be discussed". The proposal is a VS-Studio-style
+  annotation block above each compiled section that carries the
+  card's id + title + prompt as machine-readable metadata, so
+  REHYDRATE can map every edited byte back to the originating card
+  without relying on title-matching (which breaks on rename) and
+  without losing the header card or prompt edits.
+- **Proposed annotation format** (subject to refinement during impl):
+  ```python
+  ## @slate id=card-uuid kind=body title=add doc=operations
+  ## prompt: Return a + b. Pure, no side effects.
+  def add(a: float, b: float) -> float:
+      ...
+  ```
+  - `## @slate ...` is a single-line tag the parser recognizes; rest
+    of the comment block is human-readable and round-trips into the
+    `prompt` field.
+  - For the header card: `## @slate kind=header doc=operations` over
+    the prelude block.
+  - Existing `# ─── prompt ───` separator deprecated in favor of the
+    structured block.
+- **Acceptance**:
+  - Compile emits annotation blocks above every card section
+    (header + body cards).
+  - REHYDRATE parses by id first (rename-safe), then falls back to
+    title for files compiled by older slate versions.
+  - Prompt edits made in the .py file (in the `## prompt:` block)
+    round-trip into the card's `prompt` field.
+  - Header card edits round-trip into the header card's content.
+  - Re-compile of a freshly rehydrated doc produces byte-identical
+    output to the file it was rehydrated from (idempotency check).
+  - Headless test in [test/calculator.test.js](test/calculator.test.js)
+    asserts compile→edit→rehydrate→compile is a fixed point.
+- **Blocks**: nothing immediately; unblocks "edit code in your real
+  editor of choice and never lose context" UX (the original Slate
+  pitch from `motivation.md`).
+- **Files**: `src/code_compile.js`, `src/controllers/card_ctl.js`
+  (rehydrate path), test fixtures, possibly a small `slate_annotations.js`
+  parser/emitter helper to keep both sides honest.
+- **Notes**: This issue is the missing half of #11 (rehydrate). The
+  current rehydrate is ~70% there; this finishes it.
+
 ---
 
 ## Tracking
 
-- **Open**: every issue above. **34 of 51 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **36 of 53 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
   #43 chat_ctl + #44 doc/project/card controllers + #51 drop SUMMARY +

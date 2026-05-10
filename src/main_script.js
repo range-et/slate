@@ -37,6 +37,7 @@ import { mount as mountFeedbackWidget } from "./applets/feedback_widget/index.js
 import { mount as mountTerminalHandoff } from "./applets/terminal_handoff/index.js";
 import { mount as mountLandingTour } from "./applets/landing_tour/index.js";
 import { mount as mountSummarizeHeader } from "./applets/summarize_header/index.js";
+import { mount as mountUnsafeHeadersToggle } from "./applets/unsafe_headers_toggle/index.js";
 import { emit, on } from "./event_bus.js";
 
 // Select all the dom elements
@@ -986,6 +987,9 @@ class MainManager {
         // Header SUMmarize button. Owns its own delegated click handler;
         // header_card.js just emits the `.card-summarize-btn` markup.
         this.summarizeHeader = mountSummarizeHeader({});
+        // Toggle for the chat_ctl unsafe-headers safety filter. Sits in
+        // the network panel header next to COMPILE ALL.
+        this.unsafeHeadersToggle = mountUnsafeHeadersToggle({});
         // Expose the landing tour replay() handle for the console hint baked
         // into its modal copy.
         if (this.landingTour && typeof this.landingTour.replay === 'function') {
@@ -1064,6 +1068,10 @@ class MainManager {
         if (this.summarizeHeader && typeof this.summarizeHeader.destroy === "function") {
             this.summarizeHeader.destroy();
             this.summarizeHeader = null;
+        }
+        if (this.unsafeHeadersToggle && typeof this.unsafeHeadersToggle.destroy === "function") {
+            this.unsafeHeadersToggle.destroy();
+            this.unsafeHeadersToggle = null;
         }
         if (window.__slateLandingTour) {
             try { delete window.__slateLandingTour; } catch (_) { window.__slateLandingTour = undefined; }

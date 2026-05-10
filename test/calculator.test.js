@@ -433,4 +433,14 @@ describe('chat_ctl · isSafeHeaderAdditionLine', () => {
         expect(after).not.toMatch(/OPS\["\+"\]/);
         expect(after).not.toMatch(/register_ops/);
     });
+
+    it('apply: { allowUnsafe: true } bypasses the filter (escape hatch)', () => {
+        const before = '"""doc."""\n';
+        const after = applyHeaderAdditions(before, [
+            'OPS["+"] = add',
+            'register_ops()',
+        ], { allowUnsafe: true });
+        expect(after).toMatch(/OPS\["\+"\]\s*=\s*add/);
+        expect(after).toMatch(/register_ops\(\)/);
+    });
 });
