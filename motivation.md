@@ -74,6 +74,6 @@ This isn't just a different interface - it's a fundamentally different way of th
 
 **Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)
 
-- **[Readme](readme.md)** - Feature overview, usage guide, and getting started instructions
-- **[Deployment Guide](deployment.md)** - Instructions for deploying Slate as a static site
+- **[README](README.md)** - Feature overview, usage guide, and getting started instructions
+- **[Deployment Guide](DEPLOYMENT.md)** - Instructions for deploying Slate as a static site
 

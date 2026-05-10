@@ -85,4 +85,4 @@ Same codebase. Just a new card type and a model picker.
 
 ---
 
-*Related: [motivation](motivation.md) · [readme](readme.md) · [Polaris](../../Polaris.md) · [Threads/Explicit context](../../Threads/Explicit%20context.md) · [Threads/Modularity and codegen](../../Threads/Modularity%20and%20codegen.md)*
+*Related: [motivation](motivation.md) · [README](README.md) · [Polaris](../../Polaris.md) · [Threads/Explicit context](../../Threads/Explicit%20context.md) · [Threads/Modularity and codegen](../../Threads/Modularity%20and%20codegen.md)*
