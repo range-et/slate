@@ -1,21 +1,42 @@
 import { NetworkViz } from "./network_viz.js";
 import OpenAIAgent, { GeminiAgent, LocalAgent, DEFAULT_LOCAL_BASE_URL, DEFAULT_LOCAL_MODEL } from "./ai_utils.js";
-import { isRunningInVsCode, requestRehydrate } from "./host_bridge.js";
-import Doc, { sanitizeDestination } from "./doc.js";
-import Project from "./project.js";
+import { isRunningInVsCode } from "./host_bridge.js";
 import Modal from "./modal.js";
-import ChatManager, { sanitizeTitle } from "./ai_chat.js";
+import ChatManager from "./ai_chat.js";
 import generateRandomName from "./random_name_generator.js";
 import { setupCodeMirrorEditor } from "./codemirror_setup.js";
-import { scanPythonSource } from "./python_parser.js";
-import Card, { CARD_TYPE_CODE } from "./cards.js";
-// sanitizeDocFilename is still imported here for rehydrate (the inverse of
-// compile). Compile orchestration itself moved to controllers/compile_ctl.js.
-import { sanitizeDocFilename } from "./code_compile.js";
+import { CARD_TYPE_CODE } from "./cards.js";
 import { initCompileCtl } from "./controllers/compile_ctl.js";
+import {
+    initDocCtl,
+    createDoc as ctlCreateDoc,
+    addNewDoc as ctlAddNewDoc,
+    removeCurrentDoc as ctlRemoveCurrentDoc,
+    switchToDoc as ctlSwitchToDoc,
+    setupDocTitleSanitization as ctlSetupDocTitleSanitization,
+    setupDocDestinationInput as ctlSetupDocDestinationInput,
+    showDocSummary as ctlShowDocSummary,
+    startSummaryAnimation as ctlStartSummaryAnimation,
+    summarySuccess as ctlSummarySuccess,
+    summaryError as ctlSummaryError,
+} from "./controllers/doc_ctl.js";
+import {
+    initProjectCtl,
+    createProject as ctlCreateProject,
+    setupProjectTitleSanitization as ctlSetupProjectTitleSanitization,
+    exportProject as ctlExportProject,
+    importProject as ctlImportProject,
+    loadProjectFromJson as ctlLoadProjectFromJson,
+    notifyProjectChanged as ctlNotifyProjectChanged,
+    searchAndNavigate as ctlSearchAndNavigate,
+} from "./controllers/project_ctl.js";
+import {
+    initCardCtl,
+    rehydrateCurrentDoc as ctlRehydrateCurrentDoc,
+    applyRehydrate as ctlApplyRehydrate,
+    attachExistingCardListeners as ctlAttachExistingCardListeners,
+} from "./controllers/card_ctl.js";
 import { emit, on } from "./event_bus.js";
-import { v4 as uuidv4 } from 'uuid';
-import { marked } from 'marked';
 
 // Select all the dom elements
 const network = document.getElementById("network");
@@ -103,241 +124,33 @@ class MainManager {
         // Don't call zoomToFit - keeps graph naturally centered
     }
 
-    async summary_btn() {
-        if (!this.currentDoc) {
-            await this.modal.alert("No document to summarize");
-            return;
-        }
+    /* ─── thin shims for controller delegation ─────────────────────────── */
+    // Each method below is preserved on MainManager so external callers
+    // (Card callbacks, ChatManager, host message listener) still work, but
+    // the implementation lives in src/controllers/*.
 
-        if (this.currentDoc.summaryGenerating) {
-            await this.modal.alert("Summary is still being generated. Please wait...");
-            return;
-        }
+    summary_btn() { return ctlShowDocSummary(); }
+    startSummaryAnimation() { return ctlStartSummaryAnimation(); }
+    summarySuccess() { return ctlSummarySuccess(); }
+    summaryError(msg) { return ctlSummaryError(msg); }
 
-        // Check if there was an error
-        if (this.currentDoc.summaryError) {
-            await this.modal.alert(`Summary generation failed: ${this.currentDoc.summaryError}\n\nTry adding another card to regenerate.`);
-            return;
-        }
-
-        if (!this.currentDoc.summary) {
-            await this.modal.alert("No summary available yet. Summary will be generated when you add cards to the document.");
-            return;
-        }
-
-        // Show the summary in a modal with markdown rendering
-        const summaryContainer = document.createElement('div');
-        const renderedSummary = marked.parse(this.currentDoc.summary);
-        summaryContainer.innerHTML = `
-            <h4 style="margin-bottom: 15px;">Summary of "${this.currentDoc.title}"</h4>
-            <div class="markdown-body" style="max-height: 400px; overflow-y: auto; padding: 10px; background: var(--strata-layer-01); border: 1px solid var(--strata-interactive);">
-                ${renderedSummary}
-            </div>
-        `;
-
-        await this.modal.custom(summaryContainer, [
-            {
-                text: 'Close',
-                className: 'info_btn',
-                callback: () => null
-            }
-        ]);
-    }
-
-    startSummaryAnimation() {
-        // Add pulsing/flashing gradient animation to summary button
-        if (this.buttons.summary_btn) {
-            this.buttons.summary_btn.classList.remove('summary-error', 'summary-success');
-            this.buttons.summary_btn.classList.add('summary-generating');
-        }
-    }
-
-    summarySuccess() {
-        // Summary writeback is a real project-state change but doesn't trigger
-        // viz updates, so notify the host explicitly.
-        this.notifyProjectChanged();
-        // Remove generating animation, show success briefly
-        if (this.buttons.summary_btn) {
-            this.buttons.summary_btn.classList.remove('summary-generating');
-            this.buttons.summary_btn.classList.add('summary-success');
-            
-            // Remove success state after 3 seconds and restore original styling
-            setTimeout(() => {
-                if (this.buttons.summary_btn) {
-                    this.buttons.summary_btn.classList.remove('summary-success');
-                    // Force a style reset to ensure proper color restoration
-                    this.buttons.summary_btn.style.removeProperty('background');
-                    this.buttons.summary_btn.style.removeProperty('color');
-                }
-            }, 3000);
-        }
-    }
-
-    summaryError(errorMessage) {
-        // Remove generating animation, show error state
-        if (this.buttons.summary_btn) {
-            this.buttons.summary_btn.classList.remove('summary-generating');
-            this.buttons.summary_btn.classList.add('summary-error');
-            
-            // Show error notification
-            this.modal.alert(`Summary generation failed: ${errorMessage}`);
-            
-            // Keep error state (will be cleared on next attempt)
-        }
-    }
-
-    createNewProject(name) {
-        // Create a new project with the given name
-        const project = new Project(name);
-        project.init();
-        this.currentProject = project;
-        console.log("Created new project:", project.id, "with name:", project.name);
-        return project;
-    }
-
-    createNewDoc(title) {
-        // Create a new document with the given title
-        const doc = new Doc(title);
-        doc.init();
-        this.currentDoc = doc;
-        
-        // Add document to the current project
-        if (this.currentProject) {
-            this.currentProject.addDoc(doc);
-            console.log("Created new document:", doc.id, "with title:", doc.title);
-            console.log("Project now has", this.currentProject.getDocCount(), "document(s)");
-            
-            // Update the network visualization
-            this.updateNetworkViz();
-        }
-        
-        return doc;
-    }
+    createNewProject(name) { return ctlCreateProject(name); }
+    createNewDoc(title) { return ctlCreateDoc(title); }
 
     updateNetworkViz() {
-        // Update the network visualization with current project graph data
         if (this.currentProject && this.viz) {
             const graphData = this.currentProject.toGraphData();
             this.viz.updateData(graphData);
-            console.log("Network viz updated:", graphData.nodes.length, "nodes,", graphData.links.length, "links");
         }
-        // Every structural mutation (card add/remove, doc add/remove, title rename)
-        // funnels through updateNetworkViz, so this is the natural sync point.
-        this.notifyProjectChanged();
+        // Every structural mutation funnels through here, so it's the
+        // natural sync point for host notification.
+        ctlNotifyProjectChanged();
     }
 
-    addDocButton() {
-        // Create a new blank document (current doc is saved in project)
-        // Clear the DOM
-        doc_content.innerHTML = "";
-        
-        // Generate new random name that doesn't already exist
-        let newDocName = generateRandomName();
-        if (this.currentProject) {
-            // Keep generating until we get a unique name
-            while (this.currentProject.docTitleExists(newDocName)) {
-                newDocName = generateRandomName();
-            }
-        }
-        this.buttons.doc_title_input.value = newDocName;
-        
-        // Create new document
-        this.createNewDoc(newDocName);
-        
-        // Update ChatManager's reference to the new document and clear chat
-        if (this.chatManager) {
-            this.chatManager.currentDoc = this.currentDoc;
-            this.chatManager.clearChat();
-        }
-        
-        console.log("New document created and ready");
-    }
-
-    async removeDocButton() {
-        // Remove the current document and all its cards
-        if (!this.currentDoc) {
-            await this.modal.alert("No document to remove");
-            return;
-        }
-        
-        const cardCount = this.currentDoc.getCardCount();
-        const message = cardCount > 0 
-            ? `Remove "${this.currentDoc.title}" and its ${cardCount} card(s)?`
-            : `Remove "${this.currentDoc.title}"?`;
-        
-        const confirmed = await this.modal.confirm(message);
-        if (confirmed) {
-            const docIdToRemove = this.currentDoc.id;
-            
-            // Remove from project
-            if (this.currentProject) {
-                this.currentProject.removeDoc(docIdToRemove);
-                console.log("Removed doc from project. Remaining docs:", this.currentProject.getDocCount());
-            }
-            
-            // Clear the DOM
-            doc_content.innerHTML = "";
-            
-            // If there are other docs, switch to the first one
-            if (this.currentProject && this.currentProject.getDocCount() > 0) {
-                const firstDoc = this.currentProject.getAllDocs()[0];
-                this.switchToDoc(firstDoc);
-            } else {
-                // No docs left, create a new one
-                const newDocName = generateRandomName();
-                this.buttons.doc_title_input.value = newDocName;
-                this.createNewDoc(newDocName);
-                
-                // Update ChatManager's reference and clear chat
-                if (this.chatManager) {
-                    this.chatManager.currentDoc = this.currentDoc;
-                    this.chatManager.clearChat();
-                }
-            }
-            
-            // Update the visualization
-            this.updateNetworkViz();
-        }
-    }
-
-    switchToDoc(doc) {
-        // Switch the view to display a different document
-        console.log("Switching to doc:", doc.title, "with", doc.getCardCount(), "cards");
-        
-        // Update current doc reference
-        this.currentDoc = doc;
-        
-        // Update the doc title input
-        this.buttons.doc_title_input.value = doc.title;
-        if (this.buttons.doc_destination_input) {
-            this.buttons.doc_destination_input.value = doc.destination || '';
-        }
-
-        // Clear and repopulate the doc content area
-        doc_content.innerHTML = "";
-        
-        // Render all cards from this doc
-        doc.getAllCards().forEach(card => {
-            // Ensure card has the network update callback
-            if (!card.updateNetworkCallback) {
-                card.updateNetworkCallback = () => this.updateNetworkViz();
-            }
-            // Ensure card has the modal
-            if (!card.modal) {
-                card.modal = this.modal;
-            }
-            // Re-initialize the card's DOM element
-            card.init();
-            doc_content.appendChild(card.innerHTML);
-        });
-        
-        // Update ChatManager's reference (but don't clear chat to preserve prompt)
-        if (this.chatManager) {
-            this.chatManager.currentDoc = this.currentDoc;
-        }
-        
-        console.log("Switched to doc successfully");
-    }
+    addDocButton() { return ctlAddNewDoc(); }
+    removeDocButton() { return ctlRemoveCurrentDoc(); }
+    switchToDoc(doc) { return ctlSwitchToDoc(doc); }
+    notifyProjectChanged() { return ctlNotifyProjectChanged(); }
 
     handleNodeClick(nodeData) {
         // Handle clicks on nodes in the network visualization
@@ -397,56 +210,9 @@ class MainManager {
         }
     }
 
-    setupProjectTitleSanitization() {
-        // Auto-sanitize project title on blur
-        this.buttons.project_title_input.addEventListener('blur', () => {
-            if (this.buttons.project_title_input.value.trim() !== "") {
-                this.buttons.project_title_input.value = sanitizeTitle(this.buttons.project_title_input.value);
-                // Update the current project name
-                if (this.currentProject) {
-                    this.currentProject.updateName(this.buttons.project_title_input.value);
-                    // Update the network visualization to reflect the new name
-                    this.updateNetworkViz();
-                }
-            }
-        });
-    }
-
-    setupDocDestinationInput() {
-        const input = this.buttons.doc_destination_input;
-        if (!input) return;
-        input.addEventListener('blur', () => {
-            const cleaned = sanitizeDestination(input.value);
-            input.value = cleaned;
-            if (this.currentDoc && this.currentDoc.destination !== cleaned) {
-                this.currentDoc.updateDestination(cleaned);
-                this.notifyProjectChanged();
-            }
-        });
-    }
-
-    setupDocTitleSanitization() {
-        // Auto-sanitize doc title on blur and ensure uniqueness
-        this.buttons.doc_title_input.addEventListener('blur', () => {
-            if (this.buttons.doc_title_input.value.trim() !== "") {
-                let sanitized = sanitizeTitle(this.buttons.doc_title_input.value);
-                
-                // Update the current document title
-                if (this.currentDoc && this.currentProject) {
-                    // If the title is different from the current doc title, ensure it's unique
-                    if (sanitized !== this.currentDoc.title) {
-                        // User changed the title - make it unique by appending numbers if needed
-                        sanitized = this.currentProject.getUniqueDocTitle(sanitized);
-                    }
-                    
-                    this.buttons.doc_title_input.value = sanitized;
-                    this.currentDoc.updateTitle(sanitized);
-                    // Update the network visualization to reflect the new name
-                    this.updateNetworkViz();
-                }
-            }
-        });
-    }
+    setupProjectTitleSanitization() { return ctlSetupProjectTitleSanitization(); }
+    setupDocDestinationInput() { return ctlSetupDocDestinationInput(); }
+    setupDocTitleSanitization() { return ctlSetupDocTitleSanitization(); }
 
     toggleCodeMode() {
         if (!this.chatManager) return;
@@ -518,146 +284,8 @@ class MainManager {
         }
     }
 
-    /**
-     * Ask the host to read this doc's compiled .py off disk so we can re-parse
-     * it. Browser host has no disk — the user can paste source via the modal
-     * fallback instead.
-     */
-    async rehydrateCurrentDoc() {
-        if (!this.currentDoc) {
-            await this.modal.alert("No document to rehydrate.");
-            return;
-        }
-        const docId = this.currentDoc.id;
-        const docName = sanitizeDocFilename(this.currentDoc.title);
-        const filename = `${docName}.py`;
-        const destination = this.currentDoc.destination || '';
-        const ok = requestRehydrate({ filename, destination, docId });
-        if (ok) return;
-
-        // Browser fallback: prompt the user to paste source.
-        const container = document.createElement('div');
-        container.innerHTML = `
-            <h4 style="margin-bottom: 8px;">Rehydrate "${this.currentDoc.title}"</h4>
-            <p style="font-size: small; margin-bottom: 8px;">Paste the current contents of <code>${filename}</code> below. Slate will re-derive cards from the top-level <code>def</code>/<code>class</code> blocks.</p>
-            <textarea id="rehydrate_source" rows="14"
-                style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small;
-                       background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);"></textarea>
-        `;
-        const result = await this.modal.custom(container, [
-            { text: 'Cancel', className: 'alert_btn', callback: () => null },
-            {
-                text: 'Rehydrate',
-                className: 'success_btn',
-                callback: () => document.getElementById('rehydrate_source').value
-            }
-        ]);
-        if (result === null || typeof result !== 'string') return;
-        this.applyRehydrate({ docId, source: result, filename });
-    }
-
-    /**
-     * Replace the doc's code cards with what's in `source`. Existing code cards
-     * with matching titles keep their id and prompt; their content updates.
-     * New blocks become new cards. Code cards no longer in the file are removed.
-     * Markdown cards are left untouched — they don't compile, so they don't
-     * rehydrate.
-     */
-    async applyRehydrate({ docId, source, filename, error }) {
-        if (error) {
-            await this.modal.alert(`Rehydrate failed: ${error}`);
-            return;
-        }
-        const doc = this.currentProject ? this.currentProject.getDoc(docId) : null;
-        const target = doc || this.currentDoc;
-        if (!target) {
-            await this.modal.alert("Rehydrate target doc no longer exists.");
-            return;
-        }
-        if (typeof source !== 'string') {
-            await this.modal.alert(`Rehydrate failed: no source returned for ${filename || target.title}.`);
-            return;
-        }
-
-        const { blocks, imports } = scanPythonSource(source);
-        if (blocks.length === 0) {
-            await this.modal.alert(`Rehydrate: ${filename || target.title} contained no top-level def/class blocks.`);
-            return;
-        }
-
-        // Index existing code cards by title for in-place updates.
-        const existingByTitle = new Map();
-        target.getAllCards().forEach(c => {
-            if (c.cardType === CARD_TYPE_CODE) existingByTitle.set(c.title, c);
-        });
-
-        const seenTitles = new Set();
-        const newCardOrder = [];
-        const importHeader = imports.length ? imports.join('\n') + '\n\n' : '';
-
-        let added = 0;
-        let updated = 0;
-        blocks.forEach((block, idx) => {
-            seenTitles.add(block.name);
-            // Stash all module-level imports on the first card so they survive
-            // the next compile cycle. The compiler hoists + dedupes anyway, so
-            // it's safe even if the user later reorders cards.
-            const blockSource = idx === 0 ? importHeader + block.source : block.source;
-            const existing = existingByTitle.get(block.name);
-            if (existing) {
-                existing.content = blockSource;
-                existing.prompt = existing.prompt || `imported from ${filename || target.title}`;
-                newCardOrder.push(existing);
-                updated++;
-            } else {
-                const card = new Card(
-                    block.name,
-                    blockSource,
-                    this.modal,
-                    () => this.updateNetworkViz(),
-                    `imported from ${filename || target.title}`,
-                    [],
-                    CARD_TYPE_CODE
-                );
-                card.id = uuidv4();
-                card.parent = target;
-                newCardOrder.push(card);
-                added++;
-            }
-        });
-
-        // Drop code cards no longer present in the file. Keep markdown cards
-        // (they aren't compiled, so they aren't represented in the .py).
-        const removedTitles = [];
-        const keptMarkdown = [];
-        target.getAllCards().forEach(c => {
-            if (c.cardType !== CARD_TYPE_CODE) {
-                keptMarkdown.push(c);
-            } else if (!seenTitles.has(c.title)) {
-                removedTitles.push(c.title);
-            }
-        });
-
-        // New ordering: code cards in file order, then any markdown cards that were already present.
-        target.cards = [...newCardOrder, ...keptMarkdown];
-        target.updatedAt = new Date().toISOString();
-
-        // Refresh the DOM if we're looking at this doc.
-        if (target === this.currentDoc) {
-            this.switchToDoc(target);
-        }
-        this.updateNetworkViz();
-
-        const summary = [
-            `${added} added`,
-            `${updated} updated`,
-            `${removedTitles.length} removed`
-        ].join(', ');
-        const removedTxt = removedTitles.length
-            ? `\n\nRemoved: ${removedTitles.join(', ')}`
-            : '';
-        await this.modal.alert(`Rehydrated "${target.title}" — ${summary}.${removedTxt}`);
-    }
+    rehydrateCurrentDoc() { return ctlRehydrateCurrentDoc(); }
+    applyRehydrate(payload) { return ctlApplyRehydrate(payload); }
 
     /**
      * Human-in-the-loop GENERATE ALL. Walks the current doc top-to-bottom and
@@ -995,204 +623,10 @@ class MainManager {
         ]);
     }
 
-    exportProject() {
-        // Export the entire project as JSON
-        if (!this.currentProject) {
-            this.modal.alert("No project to export");
-            return;
-        }
-
-        try {
-            const projectData = this.currentProject.toJSON();
-            const jsonString = JSON.stringify(projectData, null, 2);
-            
-            // Create a blob and download it
-            const blob = new Blob([jsonString], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `${sanitizeTitle(this.currentProject.name)}_${new Date().toISOString().split('T')[0]}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            console.log("Project exported successfully:", this.currentProject.name);
-        } catch (err) {
-            console.error("Export failed:", err);
-            this.modal.alert("Export failed: " + err.message);
-        }
-    }
-
-    async importProject() {
-        // Import a project from JSON file
-        const confirmed = await this.modal.confirm("Import project? Current project will be replaced.");
-        if (!confirmed) {
-            return;
-        }
-
-        // Create a file input element
-        const fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        fileInput.accept = 'application/json,.json';
-
-        fileInput.onchange = async (e) => {
-            const file = e.target.files[0];
-            if (!file) {
-                return;
-            }
-
-            try {
-                const text = await file.text();
-                const projectData = JSON.parse(text);
-                this.loadProjectFromJson(projectData);
-                console.log("Project imported successfully:", this.currentProject.name);
-                await this.modal.alert("Project imported successfully!");
-            } catch (err) {
-                console.error("Import failed:", err);
-                await this.modal.alert("Import failed: " + err.message);
-            }
-        };
-
-        // Trigger file picker
-        fileInput.click();
-    }
-
-    /**
-     * Replace the in-memory project with one parsed from JSON. Used by the
-     * standard import flow and by the VS Code custom editor when hydrating
-     * a `.slate.json` file. Suppresses dirty notifications while loading.
-     */
-    loadProjectFromJson(jsonData) {
-        const importedProject = Project.fromJSON(jsonData);
-
-        this._hydrating = true;
-        try {
-            this.currentProject = importedProject;
-            this.buttons.project_title_input.value = importedProject.name || '';
-
-            this.updateNetworkViz();
-
-            if (importedProject.getDocCount() > 0) {
-                const firstDoc = importedProject.getAllDocs()[0];
-                this.switchToDoc(firstDoc);
-            } else {
-                const newDocName = generateRandomName();
-                this.buttons.doc_title_input.value = newDocName;
-                this.createNewDoc(newDocName);
-            }
-
-            if (this.chatManager) {
-                this.chatManager.clearAll();
-            }
-        } finally {
-            this._hydrating = false;
-        }
-    }
-
-    /**
-     * Debounced notification to the host that the project state has changed.
-     * No-op in plain browsers (no host to talk to). Skipped during hydration.
-     */
-    notifyProjectChanged() {
-        if (this._hydrating) return;
-        if (typeof window === 'undefined') return;
-        if (!window.__slateVscode) return;       // only fires inside VS Code
-        if (this._notifyTimer) clearTimeout(this._notifyTimer);
-        this._notifyTimer = setTimeout(() => {
-            this._notifyTimer = null;
-            if (!this.currentProject) return;
-            try {
-                const json = JSON.stringify(this.currentProject.toJSON(), null, 2);
-                // Remember exactly what we shipped so the load-state echo that
-                // the custom editor will fire right back can be suppressed.
-                this._lastSentState = json;
-                window.__slateVscode.postMessage({ type: 'state-changed', state: json });
-            } catch (err) {
-                console.warn('Failed to serialize project for host:', err);
-            }
-        }, 250);
-    }
-
-    async searchAndNavigate() {
-        // Search for docs or cards by title and navigate to them
-        const searchQuery = this.buttons.search_input.value.trim().toLowerCase();
-        
-        if (!searchQuery) {
-            await this.modal.alert("Please enter a search term");
-            return;
-        }
-
-        if (!this.currentProject) {
-            await this.modal.alert("No project loaded");
-            return;
-        }
-
-        console.log("Searching for:", searchQuery);
-
-        // Search for exact doc title match first
-        const allDocs = this.currentProject.getAllDocs();
-        const docMatch = allDocs.find(doc => doc.title.toLowerCase() === searchQuery);
-        
-        if (docMatch) {
-            console.log("Found doc:", docMatch.title);
-            this.switchToDoc(docMatch);
-            this.buttons.search_input.value = ""; // Clear search after navigation
-            return;
-        }
-
-        // Search for exact card title match across all docs
-        for (const doc of allDocs) {
-            const cardMatch = doc.getAllCards().find(card => card.title.toLowerCase() === searchQuery);
-            if (cardMatch) {
-                console.log("Found card:", cardMatch.title, "in doc:", doc.title);
-                // Switch to the doc containing the card
-                this.switchToDoc(doc);
-                
-                // Scroll to the card and highlight it briefly
-                setTimeout(() => {
-                    const cardElement = Array.from(doc_content.querySelectorAll('.card')).find(el => {
-                        const titleEl = el.querySelector('h4');
-                        return titleEl && titleEl.textContent.toLowerCase() === searchQuery;
-                    });
-                    
-                    if (cardElement) {
-                        cardElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        cardElement.classList.add('card--flash');
-                        setTimeout(() => cardElement.classList.remove('card--flash'), 500);
-                    }
-                }, 100);
-                
-                this.buttons.search_input.value = ""; // Clear search after navigation
-                return;
-            }
-        }
-
-        // No exact match found, try partial matches
-        const docPartialMatch = allDocs.find(doc => doc.title.toLowerCase().includes(searchQuery));
-        if (docPartialMatch) {
-            console.log("Found partial doc match:", docPartialMatch.title);
-            this.switchToDoc(docPartialMatch);
-            this.buttons.search_input.value = ""; // Clear search after navigation
-            return;
-        }
-
-        // Search for partial card match
-        for (const doc of allDocs) {
-            const cardPartialMatch = doc.getAllCards().find(card => 
-                card.title.toLowerCase().includes(searchQuery)
-            );
-            if (cardPartialMatch) {
-                console.log("Found partial card match:", cardPartialMatch.title, "in doc:", doc.title);
-                this.switchToDoc(doc);
-                this.buttons.search_input.value = ""; // Clear search after navigation
-                return;
-            }
-        }
-
-        // Nothing found
-        await this.modal.alert(`No results found for "${searchQuery}"`);
-    }
+    exportProject() { return ctlExportProject(); }
+    importProject() { return ctlImportProject(); }
+    loadProjectFromJson(jsonData) { return ctlLoadProjectFromJson(jsonData); }
+    searchAndNavigate() { return ctlSearchAndNavigate(); }
 
 
     mapButtons() {
@@ -1253,21 +687,7 @@ class MainManager {
         });
     }
 
-    attachExistingCardListeners() {
-        // Attach event listeners to any existing static cards in the DOM
-        const existingCards = doc_content.querySelectorAll('.card');
-        existingCards.forEach(cardElement => {
-            const removeBtn = cardElement.querySelector('.alert_btn');
-            if (removeBtn) {
-                removeBtn.addEventListener('click', async () => {
-                    const confirmed = await this.modal.confirm("Are you sure you want to remove this card?");
-                    if (confirmed) {
-                        cardElement.remove();
-                    }
-                });
-            }
-        });
-    }
+    attachExistingCardListeners() { return ctlAttachExistingCardListeners(); }
 
     setupContentResizers() {
         const content = document.getElementById("content");
@@ -1368,6 +788,48 @@ class MainManager {
     }
 
     async init() {
+        // Wire up controller contexts BEFORE any controller-backed method runs.
+        // Order matters: project_ctl is consulted by updateNetworkViz (via
+        // ctlNotifyProjectChanged), and doc_ctl.createDoc calls updateViz on
+        // first project creation. card_ctl is wired here for symmetry.
+        initProjectCtl({
+            getProject: () => this.currentProject,
+            setProject: (p) => { this.currentProject = p; },
+            getCurrentDoc: () => this.currentDoc,
+            setCurrentDoc: (d) => { this.currentDoc = d; },
+            getModal: () => this.modal,
+            getButtons: () => this.buttons,
+            getDocContent: () => doc_content,
+            updateViz: () => this.updateNetworkViz(),
+            syncChat: () => { if (this.chatManager) this.chatManager.currentDoc = this.currentDoc; },
+            clearChat: () => { if (this.chatManager) this.chatManager.clearChat(); },
+            resetChat: () => { if (this.chatManager) this.chatManager.clearAll(); },
+            switchToDoc: (doc) => this.switchToDoc(doc),
+            setHydrating: (v) => { this._hydrating = v; },
+            isHydrating: () => !!this._hydrating,
+            recordLastSentState: (json) => { this._lastSentState = json; },
+        });
+        initDocCtl({
+            getProject: () => this.currentProject,
+            getCurrentDoc: () => this.currentDoc,
+            setCurrentDoc: (doc) => { this.currentDoc = doc; },
+            getModal: () => this.modal,
+            getDocContent: () => doc_content,
+            getButtons: () => this.buttons,
+            updateViz: () => this.updateNetworkViz(),
+            syncChat: () => { if (this.chatManager) this.chatManager.currentDoc = this.currentDoc; },
+            clearChat: () => { if (this.chatManager) this.chatManager.clearChat(); },
+            notifyChange: () => this.notifyProjectChanged(),
+        });
+        initCardCtl({
+            getProject: () => this.currentProject,
+            getCurrentDoc: () => this.currentDoc,
+            getModal: () => this.modal,
+            getDocContent: () => doc_content,
+            switchToDoc: (doc) => this.switchToDoc(doc),
+            updateViz: () => this.updateNetworkViz(),
+        });
+
         // Create a new project (root node)
         const projectName = generateRandomName();
         this.createNewProject(projectName);

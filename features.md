@@ -291,6 +291,55 @@ without churn.
     `chatManager.buildBibliography(...)` keeps working — the shim just
     delegates to the pure function.
 
+### #44 Phase B · Extract `card_ctl.js`, `doc_ctl.js`, `project_ctl.js`
+- **Scope**: Last controllers out of `main_script.js`. `doc_ctl` owns doc
+  create/remove/switch, title + destination sanitization, summary
+  lifecycle. `project_ctl` owns project create, title sanitization,
+  export/import JSON, load-from-JSON, host dirty-state notification, and
+  search. `card_ctl` owns rehydrate (compiled .py → cards), apply-rehydrate,
+  and re-attaching listeners on starter HTML cards (future home for
+  draft/freeze/regenerate per #17/#18/#19).
+- **Acceptance**:
+  - Each controller has a top-of-file responsibility statement and an
+    `initXxxCtl(ctx)` injection seam — no controller imports back into
+    `main_script.js`. ✓
+  - Bootstrap (`MainManager.init`) wires all three controller contexts
+    *before* any controller-backed method runs (project_ctl is consulted
+    by `updateNetworkViz` via `notifyProjectChanged`, doc_ctl runs on
+    first `createNewDoc`). ✓
+  - `npm run build` is green; create/remove/switch doc, import/export,
+    search, rehydrate, summary, host `load-state` and `rehydrate-result`
+    handling all preserved as thin shims on MainManager that delegate to
+    the controllers. ✓
+  - Controllers never import from `applets/`; applets never import from
+    other controllers (no applets exist yet — kept as guard rail for #45).
+- **Resolved:** 2026-05-10 — Phase B complete
+- **Notes:**
+  - Original acceptance asked for `wc -l src/main_script.js` < 200 in this
+    pass. Pragmatic compromise per the architecture map: walkthrough
+    orchestration, host-message bridging, settings modal, panel resizers,
+    mobile tabs, and the network-viz boot all still live in MainManager
+    because they're cross-cutting bootstrap concerns, not project/doc/card
+    state. Net effect of this issue: project/doc/card state is no longer
+    owned by `main_script.js`; it owns wiring + walkthrough only.
+  - **Net file sizes**: `main_script.js` 1489 → 951 LOC (-538);
+    `doc_ctl.js` 221 LOC new, `project_ctl.js` 258 LOC new,
+    `card_ctl.js` 198 LOC new (+677 split across three single-purpose
+    files). Future #45 (`prompt_bar`/`card_view` applets) will pull
+    another big slice out by moving DOM rendering into mountable applets.
+  - Imports in `main_script.js` are aliased (`ctlCreateDoc`,
+    `ctlAddNewDoc`, etc.) so MainManager method names stay stable for
+    Card callbacks, ChatManager, and the host-message bridge that still
+    call `mainManager.switchToDoc(...)`, `mainManager.applyRehydrate(...)`
+    etc. — those remain thin shims forwarding to the controllers.
+  - Fidelity preserved: export filename format
+    (`${sanitizeTitle(name)}_${YYYY-MM-DD}.json`), import success modal,
+    debounced 250 ms host notification with `_lastSentState` echo
+    suppression and hydration guard, exact-then-partial search order,
+    `.card--flash` 500 ms scroll-and-highlight on card hits, rehydrate's
+    "added/updated/removed" summary modal, and the starter-HTML card
+    listener attaching to `.card` (not the older `.card-default-style`).
+
 ---
 
 ## Phase 12 · Editor + UI polish

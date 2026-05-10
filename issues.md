@@ -450,21 +450,6 @@ issues are ordered by dependency. Each issue lists:
 > already shipped (capabilities matrix, map, event bus). Issues below cover
 > the remaining phases B → D. Each is one shippable PR.
 
-### #44 Phase B · Extract `card_ctl.js`, `doc_ctl.js`, `project_ctl.js`
-- **Scope**: Last controllers out of `main_script.js`. `card_ctl` owns
-  draft/freeze/regenerate (lands the #17 freeze ceremony, #18 distill flow,
-  #19 iteration cap inside one controller). `doc_ctl` owns add/remove/
-  reorder. `project_ctl` owns load/save/import. After this, `main_script.js`
-  is a ~150-line bootstrap.
-- **Acceptance**:
-  - `wc -l src/main_script.js` < 200.
-  - Each controller has a one-line responsibility statement at the top.
-  - Controllers never import from `applets/`; applets never import from
-    other applets.
-- **Blocks**: #45
-- **Files**: `src/controllers/{card,doc,project}_ctl.js` (new),
-  `src/main_script.js`
-
 ### #45 Phase C · Extract `prompt_bar/` and `card_view/` applets
 - **Scope**: First applet folders. Each is `mount(rootEl, props) →
   { update, destroy }`, subscribes to event bus, renders to its own root.
@@ -609,10 +594,11 @@ issues are ordered by dependency. Each issue lists:
 
 ## Tracking
 
-- **Open**: every issue above. **36 of 47 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **35 of 47 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
-  #43 chat_ctl — see [features.md](features.md)).
+  #43 chat_ctl + #44 doc/project/card controllers — see
+  [features.md](features.md)).
 - **Workflow**: when an issue ships, cut+paste its block into
   [features.md](features.md) and append a `**Resolved:** YYYY-MM-DD —
   <commit-or-PR>` line at the bottom of the block. Do **not** leave shipped

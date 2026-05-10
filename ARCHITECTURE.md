@@ -122,11 +122,13 @@ The full matrix lives in [src/capabilities.js](src/capabilities.js). Summary:
 
 | Concern | Today | Planned |
 |---|---|---|
-| App bootstrap, DOM wiring, dispatch | [src/main_script.js](src/main_script.js) (1489 LOC) | `src/main_script.js` shrinks to ~150-line bootstrap |
+| App bootstrap, DOM wiring, dispatch | [src/main_script.js](src/main_script.js) (951 LOC) | shrinks further as `prompt_bar`/`card_view` applets land in Phase C |
 | **Prompt assembly, send loop, bibliography, error classification** | [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js) ✓ (view bits in [src/ai_chat.js](src/ai_chat.js), 759 LOC) | + `src/applets/prompt_bar/` in Phase C |
 | AI provider clients (OpenAI, Gemini, Ollama) | [src/ai_utils.js](src/ai_utils.js) | stays as-is (already a clean adapter layer) |
 | **Compile dispatch** | [src/controllers/compile_ctl.js](src/controllers/compile_ctl.js) ✓ | + `src/compilers/index.js` registry in Phase D |
-| Card lifecycle (draft/freeze/regenerate) | inlined in cards + main_script | `src/controllers/card_ctl.js` |
+| **Doc lifecycle** (create/remove/switch, summary, title sanitization) | [src/controllers/doc_ctl.js](src/controllers/doc_ctl.js) ✓ | view-side summary modal moves into an applet in Phase C |
+| **Project lifecycle** (export/import, search, host notify) | [src/controllers/project_ctl.js](src/controllers/project_ctl.js) ✓ | + command palette applet in Phase C |
+| Card lifecycle (rehydrate today; draft/freeze/regenerate per #17/#18/#19) | [src/controllers/card_ctl.js](src/controllers/card_ctl.js) ✓ | freeze ceremony lands here in Phase B follow-ups |
 
 ### Applets (today: inlined; planned: extracted)
 
@@ -190,7 +192,7 @@ src/
 
 | File | LOC | Why it's a hotspot | Plan |
 |---|---|---|---|
-| [src/main_script.js](src/main_script.js) | 1462 | God object: state + DOM + dispatch + every event | Phase B: split into `controllers/` + `applets/` |
+| [src/main_script.js](src/main_script.js) | 951 | Bootstrap + walkthrough + host bridge + settings (project/doc/card state extracted in #44) | Phase C: `prompt_bar`/`card_view` applets pull more out |
 | [src/ai_chat.js](src/ai_chat.js) | 833 | Controller + view + factory + bibliography | Phase B: → `chat_ctl.js` + `prompt_bar/` applet |
 | [src/network_viz.js](src/network_viz.js) | 562 | D3 viz; not bad, but mixes data + render | Re-evaluate after Phase C |
 | [src/cards.js](src/cards.js) | 416 | Model + render template + DOM events | Phase C: split render into `applets/card_view/` |
@@ -210,12 +212,17 @@ imported from one place but not yet read anywhere.
 ### Phase B · Controllers (extract from `main_script.js`)
 1. ✓ `src/controllers/compile_ctl.js` — smallest, well-bounded, easy first win
 2. ✓ `src/controllers/chat_ctl.js` — pull non-UI parts out of `ai_chat.js`
-3. `src/controllers/card_ctl.js` — draft/freeze/regenerate (uses `event_bus`)
-4. `src/controllers/doc_ctl.js`, `project_ctl.js`
-5. `main_script.js` becomes a ~150-line bootstrap
+3. ✓ `src/controllers/card_ctl.js` — rehydrate today; draft/freeze/regenerate
+   (#17/#18/#19) follow-up will land here
+4. ✓ `src/controllers/doc_ctl.js`, `project_ctl.js`
+5. `main_script.js` continues to shrink as Phase C applets pick up DOM
+   work; today it owns bootstrap, walkthrough orchestration, host bridge,
+   panel resizers, mobile tabs, and settings UI.
 
-**Acceptance**: `main_script.js` < 200 LOC. Controllers are unit-testable
-without DOM.
+**Acceptance**: project/doc/card state lives in controllers, not in
+`main_script.js`. Controllers are unit-testable without DOM. The original
+`< 200 LOC` target moves to Phase C since the remaining concerns in
+`main_script.js` are bootstrap/UI shell, not state ownership.
 
 **Event bus contract so far**:
 - `compile:requested` { doc, project } → fired by main_script when the
