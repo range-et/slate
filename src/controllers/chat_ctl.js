@@ -333,11 +333,96 @@ export function applyHeaderAdditions(currentHeaderSrc, additions) {
     if (additionsList.length === 0) return currentHeaderSrc || '';
     const existing = (currentHeaderSrc || '').split('\n').map(l => l.trim());
     const existingSet = new Set(existing);
-    const fresh = additionsList.filter(l => !existingSet.has(l.trim()));
+    // Drop unsafe lines BEFORE the dedup pass so the model can't sneak
+    // forward-ref module-scope statements past us by varying the
+    // quoting (`OPS["+"]` vs `OPS['+']`). Each passed line is tested
+    // by isSafeHeaderAdditionLine — anything that isn't an import,
+    // type alias, or literal-only constant gets rejected with a console
+    // warning and a discard. This is the actual fix for the calc bug
+    // the user kept hitting where `OPS["+"] = add` would land at module
+    // top before `add` was defined.
+    const safe = additionsList.filter(line => {
+        if (isSafeHeaderAdditionLine(line)) return true;
+        if (typeof console !== 'undefined' && console.warn) {
+            console.warn(`[chat_ctl] dropping unsafe header addition: ${JSON.stringify(line)} — only imports, type aliases, and literal constants may live at module top`);
+        }
+        return false;
+    });
+    if (safe.length === 0) return currentHeaderSrc || '';
+    const fresh = safe.filter(l => !existingSet.has(l.trim()));
     if (fresh.length === 0) return currentHeaderSrc || '';
     const base = (currentHeaderSrc || '').replace(/\s+$/, '');
     const sep = base.length === 0 ? '' : '\n';
     return base + sep + fresh.join('\n') + '\n';
+}
+
+/**
+ * Whitelist test: is `line` safe to drop into the doc's header card at
+ * module top? Returns true ONLY for lines that cannot forward-reference
+ * a body symbol:
+ *
+ *   - blank lines + comments
+ *   - `import X` / `import X as Y` / `import X.Y`
+ *   - `from X import Y[, Z]` / `from X import (Y, Z)`
+ *   - `NAME: type = LITERAL` / `NAME = LITERAL` where LITERAL is a
+ *     number, string, bool, None, an empty container `[] / () / {}`,
+ *     or a typing-style call (`Final[int]`, `Dict[str, int]`, etc.)
+ *     that doesn't reference any unknown identifier.
+ *
+ * Anything else — function calls referencing names (`OPS["+"] = add`,
+ * `register_ops()`, `HANDLERS = [foo, bar]`) — is rejected. The
+ * reference might be to a body card defined LATER in the file, which
+ * would NameError at import time. Wire-up code like that belongs
+ * inside an init function the entry point calls explicitly.
+ *
+ * Pure / synchronous / no I/O so the test suite can hammer it.
+ */
+export function isSafeHeaderAdditionLine(line) {
+    const raw = (line == null) ? '' : String(line);
+    const trimmed = raw.trim();
+    if (trimmed === '') return true;
+    if (trimmed.startsWith('#')) return true;
+    if (/^import\s+[A-Za-z_][\w.]*(?:\s+as\s+[A-Za-z_]\w*)?\s*$/.test(trimmed)) return true;
+    // `from X import Y`, `from .pkg import Y`, `from . import Y`, `from ..a.b import Y`
+    if (/^from\s+(?:\.+|\.*[A-Za-z_][\w.]*)\s+import\s+[\w\s,()*]+$/.test(trimmed)) return true;
+
+    // NAME [: type] = RHS form. Only accept literal-shaped RHS.
+    const assignMatch = trimmed.match(/^([A-Za-z_]\w*)\s*(?::\s*[^=]+?)?\s*=\s*(.+)$/);
+    if (!assignMatch) return false;
+    const rhs = assignMatch[2].trim();
+    return _isLiteralOnlyRhs(rhs);
+}
+
+/** Subscript-assignments (`OPS["+"] = add`) and bare statements
+ * (`register_ops()`, `print(...)`) reach here and are correctly
+ * rejected — they don't match the leading-identifier pattern. */
+function _isLiteralOnlyRhs(rhs) {
+    if (rhs === '') return false;
+    // Strip any trailing comment.
+    const noComment = rhs.replace(/\s+#.*$/, '').trim();
+
+    // Cheap structural checks: literal forms.
+    if (noComment === 'None' || noComment === 'True' || noComment === 'False') return true;
+    if (/^-?\d+(\.\d+)?(e-?\d+)?$/.test(noComment)) return true;          // number
+    if (/^["'].*["']$/.test(noComment)) return true;                      // bare string
+    if (/^[fr]?["'].*["']$/i.test(noComment)) return true;                // f / r string
+    if (noComment === '[]' || noComment === '()' || noComment === '{}') return true;
+
+    // Typing-style RHS — only allow if every identifier inside is a
+    // typing-allowed name (Optional, List, Dict, Final, Callable, etc.)
+    // OR a builtin scalar type. Conservative — reject if anything else.
+    if (/^[A-Za-z_][\w.\[\],\s'":]*$/.test(noComment)) {
+        const TYPING_OK = new Set([
+            'Optional','List','Dict','Tuple','Set','FrozenSet','Iterable','Iterator',
+            'Sequence','Mapping','Callable','Final','Any','Type','Union','Literal',
+            'ClassVar','Annotated','TypeVar','Generic','Protocol','NoReturn',
+            'int','float','str','bool','bytes','None','object',
+        ]);
+        const idents = noComment.match(/[A-Za-z_]\w*/g) || [];
+        if (idents.every(id => TYPING_OK.has(id))) return true;
+    }
+
+    return false;
 }
 
 /**

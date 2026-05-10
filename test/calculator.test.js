@@ -28,6 +28,7 @@ import {
     buildBibliography,
     splitFunctionAndHeaderAdditions,
     applyHeaderAdditions,
+    isSafeHeaderAdditionLine,
 } from '../src/controllers/chat_ctl.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -204,14 +205,23 @@ describe('calculator sample · audit', () => {
         expect(findings).toEqual([]);
     });
 
-    it('the prompts-only variant flags every body card as unresolved', () => {
-        const findings = auditProject(loadProject('calculator.prompts_only.slate.json'))
-            .filter(f => f.kind === 'unresolved-card');
-        // 7 ops cards + 5 calc cards minus 2 headers = 10 body cards.
-        // Some may not have prompts (e.g. the first read_number example
-        // is pre-filled in the prompts-only file — treat as a soft
-        // baseline).
-        expect(findings.length).toBeGreaterThan(0);
+    it('audit flags every body card as unresolved when bodies are blanked in memory', () => {
+        // We DON'T trust the on-disk prompts-only file — the live VS
+        // Code session can re-save it with content. Instead, blank the
+        // bodies of the canonical project in memory and audit that.
+        // This isolates the audit logic from working-tree drift.
+        const p = loadProject('calculator.slate.json');
+        let bodyCount = 0;
+        for (const doc of p.getAllDocs()) {
+            for (const card of doc.getAllCards()) {
+                if (card.isHeader()) continue;
+                bodyCount += 1;
+                card.content = '';
+            }
+        }
+        const findings = auditProject(p).filter(f => f.kind === 'unresolved-card');
+        // Every body card with a non-empty prompt should now be flagged.
+        expect(findings.length).toBe(bodyCount);
     });
 
     it('audit catches a synthetically-injected header forward-ref', () => {
@@ -357,5 +367,70 @@ describe('chat_ctl · header-additions schema (#50)', () => {
         const before = '"""doc."""\nfrom math import pi\n# stable comment\nX = 1\n';
         const after = applyHeaderAdditions(before, ['from math import e']);
         expect(after.startsWith(before.trimEnd())).toBe(true);
+    });
+});
+
+/* ───────────── header-addition safety filter (the calc fix) ─────────────── */
+
+describe('chat_ctl · isSafeHeaderAdditionLine', () => {
+    it.each([
+        '',                                              // blank
+        '# a comment',
+        'import os',
+        'import os.path',
+        'import numpy as np',
+        'from typing import Callable, Dict',
+        'from typing import (Callable, Dict)',
+        'from . import utils',
+        'PI = 3.14',
+        'NAME: str = "slate"',
+        'COUNT: int = 0',
+        'EMPTY: list = []',
+        'OPS: Dict[str, Callable[[float, float], float]] = {}',
+        'TIMEOUT_SEC: Final[float] = 5.0',
+    ])('accepts safe line: %s', (line) => {
+        expect(isSafeHeaderAdditionLine(line)).toBe(true);
+    });
+
+    it.each([
+        'OPS["+"] = add',                                // THE bug
+        "OPS['-'] = subtract",
+        'HANDLERS = [foo, bar]',
+        'register_ops()',
+        'print("hello")',
+        'CONFIG = build_config()',
+        'X = some_helper(1, 2)',
+        'OPS.clear()',
+        'main()',
+        'a = b',                                         // RHS is unknown name
+    ])('rejects unsafe line: %s', (line) => {
+        expect(isSafeHeaderAdditionLine(line)).toBe(false);
+    });
+
+    it('apply: drops the OPS["+"] = add lines emitted by the model', () => {
+        const before = '"""doc."""\nfrom typing import Callable, Dict\nOPS: Dict[str, Callable] = {}\n';
+        const after = applyHeaderAdditions(before, [
+            'OPS["+"] = add',
+            'OPS["-"] = subtract',
+            'OPS["*"] = multiply',
+            'OPS["/"] = divide',
+        ]);
+        // Header is unchanged because every addition was unsafe.
+        expect(after).toBe(before);
+        expect(after).not.toMatch(/OPS\["\+"\]\s*=\s*add/);
+    });
+
+    it('apply: keeps safe additions and drops only the unsafe ones in a mixed batch', () => {
+        const before = '"""doc."""\n';
+        const after = applyHeaderAdditions(before, [
+            'from math import pi',           // safe — kept
+            'OPS["+"] = add',                // unsafe — dropped
+            'PI: float = 3.14159',           // safe — kept
+            'register_ops()',                // unsafe — dropped
+        ]);
+        expect(after).toMatch(/from math import pi/);
+        expect(after).toMatch(/PI: float = 3.14159/);
+        expect(after).not.toMatch(/OPS\["\+"\]/);
+        expect(after).not.toMatch(/register_ops/);
     });
 });
