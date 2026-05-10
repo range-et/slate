@@ -72,7 +72,7 @@ This isn't just a different interface - it's a fundamentally different way of th
 
 ## Try Slate
 
-**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
+**Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)
 
 - **[Readme](readme.md)** - Feature overview, usage guide, and getting started instructions
 - **[Deployment Guide](deployment.md)** - Instructions for deploying Slate as a static site
