@@ -182,6 +182,15 @@ export class ChatManager {
             document.querySelectorAll('.panel.mobile-active').forEach(el => el.classList.remove('mobile-active'));
             chatPanel.classList.add('mobile-active');
         }
+
+        // Camera follows the focus: pan/zoom the project graph so the
+        // card being edited is centered. Defer one tick so any pending
+        // graph updates (e.g. card creation that just landed) finish
+        // settling x/y before we read them. No-op if viz isn't ready.
+        const mm = window.mainManager;
+        if (mm && mm.viz && typeof mm.viz.zoomToNode === 'function') {
+            setTimeout(() => mm.viz.zoomToNode(card.id), 0);
+        }
     }
 
     /**

@@ -699,7 +699,31 @@ class MainManager {
 
     exportProject() { return ctlExportProject(); }
     importProject() { return ctlImportProject(); }
-    loadProjectFromJson(jsonData) { return ctlLoadProjectFromJson(jsonData); }
+    loadProjectFromJson(jsonData) {
+        const out = ctlLoadProjectFromJson(jsonData);
+        // After import, frame the freshly loaded project so the user
+        // can see the whole graph. Defer until the force simulation
+        // has had a chance to lay out node positions.
+        this._scheduleZoomToFit();
+        return out;
+    }
+
+    /**
+     * Defer a zoom-to-fit until the d3 force simulation has settled
+     * enough that node positions are meaningful. Called after first
+     * boot and after every project import / rehydrate. Idempotent —
+     * coalesces multiple calls fired in the same tick.
+     */
+    _scheduleZoomToFit() {
+        if (this._zoomToFitPending) return;
+        this._zoomToFitPending = true;
+        setTimeout(() => {
+            this._zoomToFitPending = false;
+            if (this.viz && typeof this.viz.zoomToFit === 'function') {
+                this.viz.zoomToFit();
+            }
+        }, 600); // ~one tick of force-sim cool-down
+    }
     searchAndNavigate() { return ctlSearchAndNavigate(); }
 
 
@@ -1006,6 +1030,11 @@ class MainManager {
             }, 100);
         };
         window.addEventListener("resize", this._resizeHandler);
+
+        // First-paint convenience: frame the entire project once the
+        // graph has had a moment to settle. Skips silently if the viz
+        // isn't ready yet.
+        this._scheduleZoomToFit();
     }
 
     /**

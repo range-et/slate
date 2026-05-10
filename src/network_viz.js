@@ -128,6 +128,27 @@ export class NetworkViz {
       );
   }
 
+  /**
+   * Center the viewport on a single node by id and zoom in. Used when
+   * the user opens a card for edit — the camera follows the focus.
+   * No-ops if the node hasn't been laid out yet (no x/y from the
+   * force simulation).
+   */
+  zoomToNode(nodeId, scale = 2, duration = 750) {
+    if (!this.zoomGroup || !this.data || !Array.isArray(this.data.nodes)) return;
+    const node = this.data.nodes.find(n => n.id === nodeId);
+    if (!node || typeof node.x !== 'number' || typeof node.y !== 'number') return;
+
+    const tx = this.width / 2 - scale * node.x;
+    const ty = this.height / 2 - scale * node.y;
+    this.svg.transition()
+      .duration(duration)
+      .call(
+        this.zoom.transform,
+        d3.zoomIdentity.translate(tx, ty).scale(scale)
+      );
+  }
+
   zoomToFit(padding = 100, duration = 750) {
     if (!this.zoomGroup) return;
     
