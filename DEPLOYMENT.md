@@ -5,7 +5,7 @@ Since Slate is a **static site** (client-side only), you don't need a Node.js se
 **Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)
 
 **Related Documentation**:  
-- [readme.md](readme.md) - Feature overview and usage guide  
+- [README.md](README.md) - Feature overview and usage guide  
 - [motivation.md](motivation.md) - Why Slate exists and its philosophy
 
 ### **Static Hosting Options**
@@ -54,10 +54,10 @@ If you need to configure anything:
 
 ## Additional Resources
 
-- **[readme.md](readme.md)** - Complete feature overview, usage guide, and architecture details
+- **[README.md](README.md)** - Complete feature overview, usage guide, and architecture details
 - **[motivation.md](motivation.md)** - Understanding why Slate was built and its core philosophy
 
 ---
 
-**Need help?** Check the [README](readme.md) for detailed usage instructions and troubleshooting tips.
+**Need help?** Check the [README](README.md) for detailed usage instructions and troubleshooting tips.
 

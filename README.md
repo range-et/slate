@@ -558,4 +558,4 @@ Built with:
 
 ---
 
-*Related: [motivation](motivation.md) · [slate-code-plan](slate-code-plan.md) · [deployment](deployment.md)*
+*Related: [motivation](motivation.md) · [slate-code-plan](slate-code-plan.md) · [deployment](DEPLOYMENT.md)*
