@@ -1,7 +1,8 @@
-import Card, { CARD_TYPE_CODE, CARD_TYPE_MARKDOWN, stripPythonFences, escapeHtml } from "./cards.js";
+import Card, { CARD_TYPE_CODE, CARD_TYPE_MARKDOWN } from "./cards.js";
 import generateRandomName from "./random_name_generator.js";
 import { getEditorText, setEditorText, clearEditor, insertAtCursor as cmInsertAtCursor, setupCodeMirrorEditor } from "./codemirror_setup.js";
-import { marked } from 'marked';
+import { initChatCtl, buildBibliography } from "./controllers/chat_ctl.js";
+import { on, emit } from "./event_bus.js";
 
 /**
  * Sanitize a title to follow naming conventions:
@@ -62,6 +63,66 @@ export class ChatManager {
                 
                 this.cardTitleInput.value = sanitized;
             }
+        });
+
+        // Wire chat_ctl with this view's slice of state, then subscribe to its
+        // emitted events. The controller drives the response editor + error
+        // modals via these handlers; askAI() below just translates the user
+        // intent into a chat:send-requested emit.
+        initChatCtl({
+            getDoc: () => this.currentDoc,
+            getProject: () => window.mainManager?.currentProject || null,
+            getAgent: (codeMode) => this.resolveAgentFor(codeMode),
+        });
+        this._setupChatEventListeners();
+    }
+
+    /**
+     * Subscribe this view to chat_ctl's lifecycle events. Streaming token
+     * deltas append to the response editor (mounting it lazily on the first
+     * token); completion replaces the editor contents with the cleaned
+     * final text; errors map to user-facing modals.
+     */
+    _setupChatEventListeners() {
+        if (this._chatListenersWired) return;
+        this._chatListenersWired = true;
+
+        let _streamingMounted = false;
+
+        on('chat:started', () => {
+            _streamingMounted = false;
+            this.disposeResponseEditor();
+            this.chatContent.innerHTML = '<div class="loading-text">Streaming response…</div>';
+        });
+
+        on('chat:streaming', ({ delta, codeMode }) => {
+            if (!_streamingMounted) {
+                this.renderResponseEditor('', { isCode: !!codeMode });
+                _streamingMounted = true;
+            }
+            if (!this.responseEditor) return;
+            const view = this.responseEditor;
+            const end = view.state.doc.length;
+            view.dispatch({ changes: { from: end, to: end, insert: delta } });
+        });
+
+        on('chat:complete', ({ text, codeMode }) => {
+            if (!_streamingMounted) {
+                // Non-streaming agents land here without ever having emitted
+                // chat:streaming — mount the editor with the final text.
+                this.renderResponseEditor(text, { isCode: !!codeMode });
+            } else if (codeMode) {
+                // Replace the streamed (possibly fenced) buffer with the
+                // fence-stripped final text so the saved card is clean Python.
+                const view = this.responseEditor;
+                if (view) {
+                    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+                }
+            }
+        });
+
+        on('chat:error', ({ kind, err, codeMode }) => {
+            this._handleChatError(kind, err, codeMode);
         });
     }
 
@@ -261,84 +322,19 @@ export class ChatManager {
     }
 
     /**
-     * Build a bibliography of referenced cards and docs.
-     * In code mode, code-card refs render as `# from <doc>: <title>\n<source>`
-     * comment blocks so the model sees them as Python it can call.
+     * Thin shim for callers that used to invoke this.buildBibliography(...).
+     * The real implementation now lives in
+     * [chat_ctl.js](./controllers/chat_ctl.js) as a pure function.
+     * Preserved here as an instance method so anything outside the class that
+     * referenced `chatManager.buildBibliography(...)` keeps working.
      */
-    buildBibliography(references, { codeMode = false } = {}) {
-        if (references.length === 0) {
-            return "";
-        }
-
-        const bibliography = [];
-        const header = codeMode
-            ? "\n\n# --- REFERENCED CODE ---\n"
-            : "\n\n--- CONTEXT (Referenced Content) ---\n";
-        bibliography.push(header);
-
-        references.forEach(ref => {
-            let foundCard = null;
-            let foundDoc = null;
-            let foundInDocTitle = null;
-
-            // First, check if it's a doc title
-            if (window.mainManager && window.mainManager.currentProject) {
-                const allDocs = window.mainManager.currentProject.getAllDocs();
-                foundDoc = allDocs.find(d => d.title === ref);
-
-                if (foundDoc) {
-                    if (codeMode) {
-                        bibliography.push(`\n# @${foundDoc.title} (document) — refer to its code cards by name.\n`);
-                        return;
-                    }
-                    if (foundDoc.summary) {
-                        bibliography.push(`\n@${foundDoc.title} (document summary):\n${foundDoc.summary}\n`);
-                        return;
-                    } else {
-                        bibliography.push(`\n@${ref} (document - summary not yet generated)\n`);
-                        return;
-                    }
-                }
-            }
-
-            if (this.currentDoc) {
-                foundCard = this.currentDoc.getAllCards().find(c => c.title === ref);
-                if (foundCard) foundInDocTitle = this.currentDoc.title;
-            }
-            if (!foundCard && window.mainManager && window.mainManager.currentProject) {
-                const allDocs = window.mainManager.currentProject.getAllDocs();
-                for (const doc of allDocs) {
-                    foundCard = doc.getAllCards().find(c => c.title === ref);
-                    if (foundCard) {
-                        foundInDocTitle = doc.title;
-                        break;
-                    }
-                }
-            }
-
-            if (foundCard) {
-                if (codeMode && foundCard.cardType === 'code') {
-                    const source = (typeof foundCard.getPythonSource === 'function')
-                        ? foundCard.getPythonSource()
-                        : foundCard.content;
-                    bibliography.push(`\n# from ${foundInDocTitle}: ${foundCard.title}\n${source || ''}\n`);
-                } else {
-                    const tempDiv = document.createElement('div');
-                    tempDiv.innerHTML = foundCard.content;
-                    const plainText = tempDiv.innerText || tempDiv.textContent;
-                    const linePrefix = codeMode ? '# ' : '';
-                    bibliography.push(`\n${linePrefix}@${foundCard.title} (card from doc: ${foundInDocTitle}):\n${plainText}\n`);
-                }
-            } else {
-                bibliography.push(codeMode
-                    ? `\n# @${ref}: [Reference not found]\n`
-                    : `\n@${ref}: [Reference not found]\n`);
-            }
-        });
-
-        bibliography.push(codeMode ? "\n# --- END REFERENCED CODE ---\n" : "\n--- END CONTEXT ---\n");
-
-        return bibliography.join("");
+    buildBibliography(references, opts = {}) {
+        return buildBibliography(
+            references,
+            this.currentDoc,
+            window.mainManager?.currentProject || null,
+            opts
+        );
     }
 
     /**
@@ -470,9 +466,10 @@ export class ChatManager {
     }
 
     /**
-     * Generate AI response based on user input.
-     * In code mode, the system prompt is swapped, the response is rendered as
-     * a syntax-highlighted Python block, and routing favors the local provider.
+     * Thin view-side handler. Validates UI inputs (prompt non-empty, title
+     * randomized if blank), then fires `chat:send-requested` for chat_ctl
+     * to handle. Streaming + completion + error UI all happen via the
+     * subscribers wired in `_setupChatEventListeners`.
      */
     async askAI() {
         const userInput = getEditorText(this.promptEditor);
@@ -484,22 +481,8 @@ export class ChatManager {
             return;
         }
 
-        // Preflight: make sure we have a usable agent before showing the loading state.
-        const preflightAgent = this.resolveAgentFor(codeMode);
-        if (!preflightAgent || (typeof preflightAgent.hasApiKey === 'function' && !preflightAgent.hasApiKey())) {
-            const which = codeMode ? "Local model" : "AI provider";
-            await this.modal.alert(
-                `${which} not configured. Click API KEY in the toolbar to add a key, ` +
-                `or switch the provider to Local (Ollama) for code cards.`
-            );
-            return;
-        }
-
-        const references = this.parseReferences(userInput);
-        console.log("Found references:", references);
-        const bibliography = this.buildBibliography(references, { codeMode });
-
-        // Pick the title now (random if empty), so we can pass it into the system prompt.
+        // Pick the title now (random if empty), so chat_ctl can pass it
+        // into the codegen system prompt.
         if (this.cardTitleInput.value.trim() === "") {
             let randomTitle = generateRandomName();
             if (this.currentDoc) {
@@ -511,128 +494,70 @@ export class ChatManager {
         } else {
             this.cardTitleInput.value = sanitizeTitle(this.cardTitleInput.value);
         }
-        const cardTitle = this.cardTitleInput.value;
-        const docTitle = this.currentDoc ? this.currentDoc.title : 'untitled';
 
-        const fullPrompt = userInput + bibliography;
-        console.log("Full prompt with bibliography:", fullPrompt);
-
-        // Resolve which agent to use. Code cards prefer the local agent if one is configured.
-        const agent = this.resolveAgentFor(codeMode);
-        // Heavy-handed on purpose — small local code models (Qwen, Llama,
-        // CodeGemma) routinely ignore soft "no markdown" instructions and
-        // wrap their answer in ```python … ``` plus prose. We strip fences
-        // defensively after the fact (stripPythonFences), but the cleaner
-        // the raw response, the cleaner the saved card.
-        const codeSystemPrompt = [
-            `You are writing one Python symbol named \`${cardTitle}\` for the file \`${docTitle}.py\`.`,
-            `Output ONLY raw Python source. The very first character of your reply must be a Python keyword (\`def\`, \`class\`, \`import\`, \`from\`, \`@\`, or \`#\`).`,
-            `Do NOT write any prose before, between, or after the code.`,
-            `Do NOT wrap the code in triple backticks (no \`\`\`python, no \`\`\`).`,
-            `Do NOT add usage examples or explanations.`,
-            `If you need to reference symbols mentioned as \`# from <doc>: <name>\` in the user message, treat them as already imported in scope.`,
-        ].join(' ');
-        const generateOptions = codeMode ? { systemPrompt: codeSystemPrompt } : {};
-
-        this.disposeResponseEditor();
-        this.chatContent.innerHTML = '<div class="loading-text">Streaming response…</div>';
-
-        // Mount the editor empty so we can append tokens live as they arrive.
-        // For code-mode we still strip fences, but only at the very end — during
-        // streaming we just append raw deltas so the user sees forward progress.
-        const useStreaming = typeof agent.generateResponseStream === 'function';
-        let editorMounted = false;
-        const ensureEditor = () => {
-            if (editorMounted) return;
-            this.renderResponseEditor('', { isCode: codeMode });
-            editorMounted = true;
-        };
-        const onToken = (delta) => {
-            ensureEditor();
-            if (!this.responseEditor) return;
-            // Append at the end of the doc.
-            const view = this.responseEditor;
-            const end = view.state.doc.length;
-            view.dispatch({ changes: { from: end, to: end, insert: delta } });
-        };
-
-        const generation = useStreaming
-            ? agent.generateResponseStream(fullPrompt, this.attachedImages, generateOptions, onToken)
-            : agent.generateResponse(fullPrompt, this.attachedImages, generateOptions);
-
-        generation.then((res) => {
-            const text = codeMode ? stripPythonFences(res || '').trim() : (res || '');
-            // For non-streaming agents this is the first time we see the text.
-            // For streaming code-mode, replace the editor contents with the
-            // fence-stripped final text so the saved card is clean Python.
-            if (!editorMounted) {
-                this.renderResponseEditor(text, { isCode: codeMode });
-            } else if (codeMode) {
-                const view = this.responseEditor;
-                if (view) {
-                    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
-                }
-            }
-        }).catch(async (err) => {
-            console.error("Error generating response:", err);
-
-            const errorMessage = err.message || "";
-            const errorStatus = err.status || err.response?.status || err.statusCode;
-            const errorCode = err.code || err.error?.code;
-
-            // Local model unreachable — most common when Ollama isn't running or CORS blocks the browser.
-            const looksLikeNetwork = errorMessage.includes("fetch") || errorMessage.includes("Failed to fetch")
-                || errorMessage.includes("NetworkError") || errorMessage.includes("ECONNREFUSED")
-                || err.cause?.code === 'ECONNREFUSED';
-            if (codeMode && looksLikeNetwork) {
-                await this.modal.alert(
-                    "Couldn't reach the local model. Make sure Ollama is running:\n\n" +
-                    "  OLLAMA_ORIGINS='*' ollama serve\n\n" +
-                    "and that the model in the API KEY modal matches an installed tag (e.g. `qwen2.5-coder:7b`)."
-                );
-                this.disposeResponseEditor();
-                this.chatContent.innerHTML = '<p style="color: var(--alert);">Local model unreachable. Start Ollama and try again.</p>';
-                return;
-            }
-
-            if (err.message === "API_KEY_MISSING" ||
-                errorMessage.includes("API key") ||
-                errorMessage.includes("Invalid API key") ||
-                errorStatus === 401 ||
-                errorCode === "invalid_api_key") {
-                // API key is missing or invalid
-                await this.modal.custom(
-                    `<div>
-                        <p style="margin-bottom: 15px; line-height: 1.6;">
-                            <strong>API Key Required</strong>
-                        </p>
-                        <p style="margin-bottom: 15px;">
-                            You need to set your OpenAI API key to use AI features.
-                        </p>
-                        <p style="margin-bottom: 0; font-size: x-small;">
-                            Click the <strong>API KEY</strong> button in the top bar to add your key.
-                        </p>
-                    </div>`,
-                    [
-                        {
-                            text: 'OK',
-                            className: 'info_btn',
-                            callback: () => null
-                        }
-                    ]
-                );
-                this.disposeResponseEditor();
-                this.chatContent.innerHTML = '<p style="color: var(--alert);">Please set your API key to continue.</p>';
-            } else if (err.message?.includes("rate limit") || err.status === 429) {
-                await this.modal.alert("Rate limit exceeded. Please wait a moment and try again.");
-                this.disposeResponseEditor();
-                this.chatContent.innerHTML = '<p style="color: var(--alert);">Rate limit exceeded. Please try again later.</p>';
-            } else {
-                await this.modal.alert(`Failed to generate response: ${err.message || "Unknown error"}. Please check your API key and try again.`);
-                this.disposeResponseEditor();
-                this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response. Please try again.</p>';
-            }
+        emit('chat:send-requested', {
+            userInput,
+            references: this.parseReferences(userInput),
+            codeMode,
+            cardTitle: this.cardTitleInput.value,
+            docTitle: this.currentDoc ? this.currentDoc.title : 'untitled',
+            attachedImages: this.attachedImages,
         });
+    }
+
+    /**
+     * Map a chat_ctl error kind to the right user-facing modal + chatContent
+     * fallback message. Keeps the wordy copy out of the controller.
+     */
+    async _handleChatError(kind, err, codeMode) {
+        if (kind === 'no_agent') {
+            const which = codeMode ? "Local model" : "AI provider";
+            await this.modal.alert(
+                `${which} not configured. Click API KEY in the toolbar to add a key, ` +
+                `or switch the provider to Local (Ollama) for code cards.`
+            );
+            return;
+        }
+        if (kind === 'local_unreachable') {
+            await this.modal.alert(
+                "Couldn't reach the local model. Make sure Ollama is running:\n\n" +
+                "  OLLAMA_ORIGINS='*' ollama serve\n\n" +
+                "and that the model in the API KEY modal matches an installed tag (e.g. `qwen2.5-coder:7b`)."
+            );
+            this.disposeResponseEditor();
+            this.chatContent.innerHTML = '<p style="color: var(--alert);">Local model unreachable. Start Ollama and try again.</p>';
+            return;
+        }
+        if (kind === 'api_key_missing') {
+            await this.modal.custom(
+                `<div>
+                    <p style="margin-bottom: 15px; line-height: 1.6;">
+                        <strong>API Key Required</strong>
+                    </p>
+                    <p style="margin-bottom: 15px;">
+                        You need to set your OpenAI API key to use AI features.
+                    </p>
+                    <p style="margin-bottom: 0; font-size: x-small;">
+                        Click the <strong>API KEY</strong> button in the top bar to add your key.
+                    </p>
+                </div>`,
+                [{ text: 'OK', className: 'info_btn', callback: () => null }]
+            );
+            this.disposeResponseEditor();
+            this.chatContent.innerHTML = '<p style="color: var(--alert);">Please set your API key to continue.</p>';
+            return;
+        }
+        if (kind === 'rate_limit') {
+            await this.modal.alert("Rate limit exceeded. Please wait a moment and try again.");
+            this.disposeResponseEditor();
+            this.chatContent.innerHTML = '<p style="color: var(--alert);">Rate limit exceeded. Please try again later.</p>';
+            return;
+        }
+        // 'other' — generic failure
+        const msg = (err && err.message) || "Unknown error";
+        await this.modal.alert(`Failed to generate response: ${msg}. Please check your API key and try again.`);
+        this.disposeResponseEditor();
+        this.chatContent.innerHTML = '<p style="color: var(--alert);">Error: Failed to generate response. Please try again.</p>';
     }
 
     /**

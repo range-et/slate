@@ -174,10 +174,122 @@ without churn.
 - **Files**: `.github/workflows/pages.yml` (new), `vite.config.js` (added
   `base` from env)
 - **Resolved:** 2026-05-09 — alongside the styling fixes
-- **Notes:** End-to-end verification is issue #39 (still open) — needs the
-  first push to `main` to trigger Actions and Pages settings to be flipped
-  to "Source: GitHub Actions" in the repo. The `submodules: recursive`
-  step in the workflow is required because `design-tokens/` is a submodule.
+- **Notes:** The `submodules: recursive` step in the workflow is required
+  because `design-tokens/` is a submodule.
+
+### #38 Domain retirement (`slate-notebook.com`)
+- **Scope**: Retire the `slate-notebook.com` domain in favor of GH Pages.
+- **Resolved:** 2026-05-10 — slate is now hosted on GitHub Pages only.
+- **Notes:** User confirmed the migration is done. A pass over the repo to
+  scrub residual `slate-notebook.com` references in docs (README,
+  motivation.md, spec) is still worth doing as a cleanup chore — file a
+  fresh issue if any hits remain after the next `rg slate-notebook.com`.
+
+### #39 Verify GH Pages deploy end-to-end
+- **Scope**: Confirm the workflow runs green and the GH Pages URL serves
+  the expected bundle.
+- **Resolved:** 2026-05-10 — site live on GitHub Pages, user confirmed.
+
+---
+
+## Phase 0 · Architecture & modularity
+
+### Phase A · Foundations (matrix + map + event bus)
+- **Scope**: Three small files, zero behavior change. Establishes the
+  vocabulary and seams for Phases B → D.
+  - [src/capabilities.js](src/capabilities.js) — single source of truth
+    for the feature × target matrix. Exports `CAPABILITIES`, `TARGET`,
+    `caps`, `can()`, `detectTarget()`, `__setTargetForTests()`. Both
+    target rows (`web`, `vscode`) frozen.
+  - [ARCHITECTURE.md](ARCHITECTURE.md) — the map AI agents read before
+    touching code. TL;DR up top, capability table, layer-by-layer
+    "where things live" with file links, hotspots ranked by LOC,
+    Phase A → D roadmap, glossary.
+  - [src/event_bus.js](src/event_bus.js) — ~80 LOC pub/sub. Exports
+    `on`, `once`, `off`, `emit`, `__resetForTests`. Per-handler
+    try/catch so one bad listener can't break a broadcast. Snapshot
+    iteration so a handler that unsubscribes mid-emit doesn't mutate
+    the live set.
+- **Acceptance**:
+  - All three files present and importable.
+  - `npm run build` succeeds (no runtime references yet — files are
+    available but unused).
+  - ARCHITECTURE.md links resolve to real files.
+- **Resolved:** 2026-05-10 — Phase A foundations
+- **Notes:** Bonus drop alongside Phase A: [start_dev.sh](start_dev.sh)
+  one-shot dev loop replacing the manual steps in `dev_notes.md`
+  (cd into `vscode-extension/` → `npm install` if needed → open VS Code
+  on the right folder so F5 binds → exec `npm run watch`).
+
+### #42 Phase B · Extract `compile_ctl.js` from `main_script.js`
+- **Scope**: First controller extraction. Move every code path that builds
+  a compile invocation (file naming, dispatch to `code_compile.js`, calling
+  `host_bridge.saveCompiled`) out of [src/main_script.js](src/main_script.js)
+  into [src/controllers/compile_ctl.js](src/controllers/compile_ctl.js).
+  Controller has zero DOM imports. Bootstrap wires it via the event bus
+  (`compile:requested` → `compile_ctl` → `compile:succeeded` /
+  `compile:failed`).
+- **Acceptance**:
+  - `main_script.js` no longer references `code_compile.js` or
+    `host_bridge.saveCompiled` directly. ✓ (`rg compileDocToPython|saveCompiled
+    src/main_script.js` → 0 hits)
+  - `compile_ctl.js` is unit-testable headless (no `document`/`window`). ✓
+    (only imports code_compile, host_bridge, event_bus)
+  - "Compile to .py" button still works in both web (download) and
+    vscode (workspace write) targets. ✓ (build green; manual smoke
+    recommended on next dev run)
+- **Resolved:** 2026-05-10 — Phase B canary
+- **Notes:** Two surfaces exposed: (a) direct `compileDoc(doc, project)` for
+  unit tests that don't want to deal with the bus, (b) `initCompileCtl()`
+  + event bus for production wiring. `sanitizeDocFilename` is still imported
+  from `code_compile.js` by `main_script.js` for the rehydrate path — that's
+  a pure helper, not orchestration, and stays put until Phase B issue #44
+  pulls rehydrate into a controller too. `MainManager.compileCurrentDoc()`
+  shrank from 18 lines (try/catch + dispatch + modal) to 8 lines (guard +
+  emit); modal text formatting moved to a single subscriber in
+  `setupCompileEventListeners()`. Net: `main_script.js` 1462 → 1489 LOC
+  (+27 from the new event listener method, more than offset by what'll
+  come out in #43/#44).
+
+### #43 Phase B · Extract `chat_ctl.js` from `ai_chat.js`
+- **Scope**: Pull non-UI parts of [src/ai_chat.js](src/ai_chat.js)
+  (bibliography assembly, system-prompt composition, error classification,
+  send loop, streaming token plumbing, provider routing) into
+  [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js). The view
+  bits stay in `ai_chat.js` for now (Phase C extracts them into
+  `applets/prompt_bar/`).
+- **Acceptance**:
+  - `chat_ctl.js` exports `send({ ...payload })` and emits `chat:started`,
+    `chat:streaming`, `chat:complete`, `chat:error`. ✓
+  - `ai_chat.js` becomes a thin view that subscribes to those events. ✓
+    `askAI()` shrunk from ~160 LOC (preflight + bibliography + system prompt
+    + streaming + 3 catch branches) to ~30 LOC (validate + emit). Editor
+    streaming is driven entirely by event subscribers in
+    `_setupChatEventListeners`.
+  - Token-budget check (#6 when it lands) plugs into `chat_ctl.js`. ✓
+    TODO marker placed in `send()` between `chat:send-requested` and
+    `chat:started`; will emit `chat:error { kind: 'over_budget' }` when
+    the estimate exceeds the active model's window.
+- **Resolved:** 2026-05-10 — Phase B continued
+- **Notes:**
+  - Two surfaces, same as #42: direct `send(payload)` for tests, plus
+    event-bus wiring via `chat:send-requested` for production.
+  - **Three pure helpers** exported for future tests: `buildBibliography`,
+    `composeCodeSystemPrompt`, `classifyError`. None depend on
+    `window.mainManager` — `chat_ctl` gets doc/project/agent through an
+    `initChatCtl(ctx)` injection.
+  - Errors are now classified into a small enum (`'no_agent' |
+    'local_unreachable' | 'api_key_missing' | 'rate_limit' | 'other'`)
+    and emitted; the wordy modal copy lives in `_handleChatError` on the
+    view side.
+  - **Net file sizes**: `ai_chat.js` 833 → 759 LOC (-74), `chat_ctl.js`
+    241 LOC new. Pure helpers + a new event-listener method offset the
+    150-line `askAI` shrink. Lifecycle event contract ready for the #45
+    prompt_bar applet to consume directly.
+  - `buildBibliography` kept as an instance shim on `ChatManager` so any
+    external caller (e.g. the Generate-All walkthrough) that called
+    `chatManager.buildBibliography(...)` keeps working — the shim just
+    delegates to the pure function.
 
 ---
 

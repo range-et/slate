@@ -439,34 +439,84 @@ issues are ordered by dependency. Each issue lists:
 
 ## Phase 11 · Web deployment + decoupling (new — added 2026-05-09)
 
-### #37 GitHub Pages deploy workflow ✓ shipped
-- See [features.md](features.md) — landed alongside the styling fixes.
+*All phase 11 issues shipped — see [features.md](features.md#phase-11--web-deployment--decoupling).*
 
-### #38 Domain retirement (`slate-notebook.com`)
-- **Scope**: Take down or 301-redirect the `slate-notebook.com` domain.
-  Wherever it's currently hosted (Vercel/Netlify/registrar), point it at
-  the new GH Pages URL or simply unconfigure it. Remove all
-  `slate-notebook.com` references from code, README, and example assets.
-- **Acceptance**:
-  - `rg slate-notebook.com` returns no hits in the repo.
-  - Domain either resolves to GH Pages (via 301) or NXDOMAINs cleanly.
-- **Blocks**: nothing
-- **Files**: out-of-repo (DNS / hosting); plus `README.md`, `motivation.md`,
-  `slate-code-v0.2-spec.md`
+---
 
-### #39 Verify GH Pages deploy end-to-end
-- **Scope**: After the first push to `main` with `pages.yml` in place,
-  confirm GH Actions runs cleanly, Pages is enabled in repo settings,
-  and the deployed bundle loads at the GH Pages URL.
+## Phase 0 · Architecture & modularity (new — added 2026-05-10)
+
+> Cross-cutting refactor work tracked against the roadmap in
+> [ARCHITECTURE.md](ARCHITECTURE.md#refactor-roadmap). Phase A foundations
+> already shipped (capabilities matrix, map, event bus). Issues below cover
+> the remaining phases B → D. Each is one shippable PR.
+
+### #44 Phase B · Extract `card_ctl.js`, `doc_ctl.js`, `project_ctl.js`
+- **Scope**: Last controllers out of `main_script.js`. `card_ctl` owns
+  draft/freeze/regenerate (lands the #17 freeze ceremony, #18 distill flow,
+  #19 iteration cap inside one controller). `doc_ctl` owns add/remove/
+  reorder. `project_ctl` owns load/save/import. After this, `main_script.js`
+  is a ~150-line bootstrap.
 - **Acceptance**:
-  - Workflow `Deploy slate (web) to GitHub Pages` exists in Actions tab
-    and runs green.
-  - Visiting the GH Pages URL shows slate identically to local
-    `npm run dev`, modulo no API key set.
-  - Browser console: no 404s on JS/CSS assets (= `BASE_URL` resolved
-    correctly).
-- **Blocks**: #38
-- **Files**: out-of-repo (GH settings)
+  - `wc -l src/main_script.js` < 200.
+  - Each controller has a one-line responsibility statement at the top.
+  - Controllers never import from `applets/`; applets never import from
+    other applets.
+- **Blocks**: #45
+- **Files**: `src/controllers/{card,doc,project}_ctl.js` (new),
+  `src/main_script.js`
+
+### #45 Phase C · Extract `prompt_bar/` and `card_view/` applets
+- **Scope**: First applet folders. Each is `mount(rootEl, props) →
+  { update, destroy }`, subscribes to event bus, renders to its own root.
+  `prompt_bar/` contains sub-applets for the model picker, language picker,
+  send button, stop button (`stop_button` declares `requires: ['streaming']`).
+  `card_view/` splits into `header_card.js`, `code_card.js`,
+  `markdown_card.js`, `class_card.js`.
+- **Acceptance**:
+  - `src/applets/prompt_bar/index.js` mounts the bar; no other file owns
+    its DOM.
+  - Adding a new card kind is one new file under `card_view/`, no edits
+    to existing applet files.
+- **Blocks**: #46
+- **Files**: `src/applets/prompt_bar/*` (new),
+  `src/applets/card_view/*` (new), `src/cards.js`, `src/ai_chat.js`
+
+### #46 Phase C · Capability-gated applets (`terminal_handoff`, `feedback_widget`, `landing_tour`)
+- **Scope**: Three applets, each gated by one row of `capabilities.js`.
+  `terminal_handoff` lands the #20 paste-block flow (vscode-only).
+  `feedback_widget` is a small "send feedback" button (web-only).
+  `landing_tour` is the first-run "try slate" overlay (web-only). Each is
+  ~one file plus styles; mount is unconditional but no-ops when its
+  capability is false.
+- **Acceptance**:
+  - Web build does not render the terminal-handoff button; vscode build
+    does.
+  - vscode build does not render the feedback widget; web build does.
+  - Adding a new capability-gated applet requires **only**: new applet
+    folder + new capability key in `capabilities.js` + one mount line in
+    bootstrap.
+- **Blocks**: #47
+- **Files**: `src/applets/terminal_handoff/*` (new),
+  `src/applets/feedback_widget/*` (new),
+  `src/applets/landing_tour/*` (new), `src/capabilities.js`
+
+### #47 Phase D · Preset schemas + compiler registry
+- **Scope**: Land the preset system from
+  [ARCHITECTURE.md § Phase D](ARCHITECTURE.md#phase-d--presets--compiler-registry).
+  `src/preset_schemas/{markdown,python}.js` bundle
+  `{ language, systemPrompt, cardSchema, compiler, bibliographyAssembler,
+  shortcuts, budget }`. `src/compilers/index.js` becomes the registry;
+  `code_compile.js` moves to `compilers/python.js`. `chat_ctl` and
+  `compile_ctl` look up the active preset by `card.language`.
+- **Acceptance**:
+  - Adding a placeholder C# preset is exactly: 1 file in
+    `preset_schemas/` + 1 file in `compilers/` + 1 line in
+    `caps.languages` for vscode.
+  - No controller or applet hard-codes a language name.
+- **Blocks**: nothing in v0.2; unblocks v0.3 multi-language work
+- **Files**: `src/preset_schemas/{markdown,python}.js` (new),
+  `src/compilers/index.js` (new), `src/compilers/python.js` (moved from
+  `src/code_compile.js`), `src/controllers/{chat,compile}_ctl.js`
 
 ---
 
@@ -559,9 +609,10 @@ issues are ordered by dependency. Each issue lists:
 
 ## Tracking
 
-- **Open**: every issue above. **36 of 41 open** (phase 1 shipped: #1–#4;
-  phase 11/12 partial: #37 + autocomplete/font polish — see
-  [features.md](features.md)).
+- **Open**: every issue above. **36 of 47 open** (phase 1 shipped: #1–#4;
+  phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
+  #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
+  #43 chat_ctl — see [features.md](features.md)).
 - **Workflow**: when an issue ships, cut+paste its block into
   [features.md](features.md) and append a `**Resolved:** YYYY-MM-DD —
   <commit-or-PR>` line at the bottom of the block. Do **not** leave shipped

@@ -1,7 +1,6 @@
 import { NetworkViz } from "./network_viz.js";
 import OpenAIAgent, { GeminiAgent, LocalAgent, DEFAULT_LOCAL_BASE_URL, DEFAULT_LOCAL_MODEL } from "./ai_utils.js";
-import { compileDocToPython } from "./code_compile.js";
-import { saveCompiled, isRunningInVsCode, requestRehydrate } from "./host_bridge.js";
+import { isRunningInVsCode, requestRehydrate } from "./host_bridge.js";
 import Doc, { sanitizeDestination } from "./doc.js";
 import Project from "./project.js";
 import Modal from "./modal.js";
@@ -10,7 +9,11 @@ import generateRandomName from "./random_name_generator.js";
 import { setupCodeMirrorEditor } from "./codemirror_setup.js";
 import { scanPythonSource } from "./python_parser.js";
 import Card, { CARD_TYPE_CODE } from "./cards.js";
+// sanitizeDocFilename is still imported here for rehydrate (the inverse of
+// compile). Compile orchestration itself moved to controllers/compile_ctl.js.
 import { sanitizeDocFilename } from "./code_compile.js";
+import { initCompileCtl } from "./controllers/compile_ctl.js";
+import { emit, on } from "./event_bus.js";
 import { v4 as uuidv4 } from 'uuid';
 import { marked } from 'marked';
 
@@ -820,24 +823,45 @@ class MainManager {
         }
     }
 
-    async compileCurrentDoc() {
+    /**
+     * Fires the `compile:requested` event; compile_ctl handles the rest and
+     * emits `compile:succeeded` / `compile:failed`, which we subscribe to in
+     * setupCompileEventListeners() to surface a modal.
+     */
+    compileCurrentDoc() {
         if (!this.currentDoc) {
-            await this.modal.alert("No document to compile.");
+            this.modal.alert("No document to compile.");
             return;
         }
-        try {
-            const { filename, source, destination, warnings } = compileDocToPython(this.currentDoc, this.currentProject);
-            const delivery = saveCompiled({ filename, source, destination });
+        emit('compile:requested', {
+            doc: this.currentDoc,
+            project: this.currentProject,
+        });
+    }
+
+    /**
+     * Subscribe once to compile_ctl's outcome events. The controller is the
+     * source of truth for whether the compile worked; we just translate the
+     * payload into a human-readable modal here.
+     */
+    setupCompileEventListeners() {
+        if (this._compileListenersWired) return;
+        this._compileListenersWired = true;
+
+        on('compile:succeeded', ({ filename, destination, warnings, delivery }) => {
             const relPath = destination ? `${destination}/${filename}` : filename;
-            const where = delivery.delivered === 'vscode'
+            const where = delivery === 'vscode'
                 ? `Wrote ${relPath} to the VS Code workspace.`
                 : `Downloaded ${filename}.`;
-            const warningTxt = warnings && warnings.length ? `\n\nWarnings:\n${warnings.join('\n')}` : '';
-            await this.modal.alert(`Compiled successfully. ${where}${warningTxt}`);
-        } catch (err) {
-            console.error('Compile failed:', err);
-            await this.modal.alert(`Compile failed:\n${err.message}`);
-        }
+            const warningTxt = warnings && warnings.length
+                ? `\n\nWarnings:\n${warnings.join('\n')}`
+                : '';
+            this.modal.alert(`Compiled successfully. ${where}${warningTxt}`);
+        });
+
+        on('compile:failed', ({ error }) => {
+            this.modal.alert(`Compile failed:\n${error}`);
+        });
     }
 
     getAgentForProvider(provider, openaiKey, geminiKey) {
@@ -1401,6 +1425,9 @@ class MainManager {
         
         // listen for inbound messages from a VS Code extension host (no-op in browser)
         this.setupHostMessageListener();
+        // wire the compile controller (Phase B per ARCHITECTURE.md)
+        initCompileCtl();
+        this.setupCompileEventListeners();
         // map all the buttons
         this.mapButtons();
         // attach listeners to existing static cards
