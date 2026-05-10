@@ -432,6 +432,49 @@ without churn.
   single chunk for now; per-target chunk splitting is a Phase D
   concern.
 
+### `summarize_header` applet — bring SUMMARY back as a header docstring
+- **Scope**: #51 dropped the standalone SUMMARY field on `Doc`, but the
+  capability was useful — losing it entirely was overkill. This restores
+  the action under the new "header IS the overview" model: hitting the
+  new SUM button on a header card asks the AI to produce a concise plain
+  prose summary of every non-header card in the doc, then writes it back
+  into the header card as a triple-quoted Python module docstring at the
+  top of the header content. Compilation stays valid (module docstrings
+  are legal Python); imports / constants below the docstring are
+  preserved verbatim.
+- **Files**:
+  - new: [src/applets/summarize_header/index.js](src/applets/summarize_header/index.js)
+    — owns the AI call + the `mergeDocstring()` helper + the in-place
+    re-render. Uses a single document-level delegated click listener on
+    `.card-summarize-btn` (no per-card binding, no event bus traffic).
+  - [src/doc.js](src/doc.js) — restored `Doc.getFlattenedContent()`
+    (header-excluded; the header is the destination, not an input).
+  - [src/applets/card_view/header_card.js](src/applets/card_view/header_card.js)
+    — header `renderActions()` now emits a `SUM` button alongside the
+    existing edit (`✎`) button.
+  - [src/main_script.js](src/main_script.js) — `mountSummarizeHeader()`
+    next to the other applet mounts; teardown in `destroy()`.
+- **Acceptance**:
+  - Clicking SUM on the header generates a summary, wraps it in
+    `"""..."""`, prepends it to the header content, and re-renders the
+    header in place. ✓
+  - Re-clicking SUM replaces the existing top-of-file docstring (no
+    stacking) while keeping the rest of the header verbatim. ✓
+  - Summary respects the active AI agent (whatever the user picked) and
+    surfaces `API_KEY_MISSING` through Slate's modal. ✓
+  - Empty doc (no body cards) → friendly modal, no API call. ✓
+  - Header card stays editable; the user can refine the docstring or any
+    code below it via the existing `✎` flow. ✓
+  - Build green.
+- **Resolved:** 2026-05-10 — restoration follow-up to #51
+- **Notes:** Intentionally NOT bringing back `Doc.summary` /
+  `summaryGenerating` / `summaryError`. There's exactly one source of
+  truth (the header card content) and the failure path is "modal +
+  rollback the button label" rather than "persist an error onto the
+  doc". The applet uses the same delegated-listener pattern that works
+  for the prompt bar — adding a second header action in the future is
+  one more handler in the same applet.
+
 ### #51 Drop SUMMARY UI; treat the header card as the doc overview
 - **Scope**: SUMMARY was a separate AI-generated description of a doc
   regenerated on every card add. With editable header cards, the header

@@ -19,8 +19,14 @@ register('header', {
     },
 
     renderActions() {
-        // Headers are pinned: no remove, no move. Edit only.
-        return `<button class="success_btn card-edit-btn" title="Edit module-scope setup">✎</button>`;
+        // Headers are pinned: no remove, no move. Edit + summarize.
+        // The SUM button is owned by `applets/summarize_header/`, which
+        // attaches a document-level delegated listener, so we just
+        // emit the markup here — no per-card binding needed.
+        return `
+            <button class="info_btn card-summarize-btn" title="Generate a doc-overview docstring from this doc's cards (replaces any existing top-of-file docstring)">SUM</button>
+            <button class="success_btn card-edit-btn" title="Edit module-scope setup">✎</button>
+        `;
     },
 
     renderKindPill() {

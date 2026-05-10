@@ -36,6 +36,7 @@ import { mount as mountPromptBar } from "./applets/prompt_bar/index.js";
 import { mount as mountFeedbackWidget } from "./applets/feedback_widget/index.js";
 import { mount as mountTerminalHandoff } from "./applets/terminal_handoff/index.js";
 import { mount as mountLandingTour } from "./applets/landing_tour/index.js";
+import { mount as mountSummarizeHeader } from "./applets/summarize_header/index.js";
 import { emit, on } from "./event_bus.js";
 
 // Select all the dom elements
@@ -877,6 +878,9 @@ class MainManager {
         this.feedbackWidget = mountFeedbackWidget({ buttons: this.buttons });
         this.terminalHandoff = mountTerminalHandoff({});
         this.landingTour = mountLandingTour({ modal: this.modal });
+        // Header SUMmarize button. Owns its own delegated click handler;
+        // header_card.js just emits the `.card-summarize-btn` markup.
+        this.summarizeHeader = mountSummarizeHeader({});
         // Expose the landing tour replay() handle for the console hint baked
         // into its modal copy.
         if (this.landingTour && typeof this.landingTour.replay === 'function') {
@@ -946,6 +950,10 @@ class MainManager {
         if (this.landingTour && typeof this.landingTour.destroy === "function") {
             this.landingTour.destroy();
             this.landingTour = null;
+        }
+        if (this.summarizeHeader && typeof this.summarizeHeader.destroy === "function") {
+            this.summarizeHeader.destroy();
+            this.summarizeHeader = null;
         }
         if (window.__slateLandingTour) {
             try { delete window.__slateLandingTour; } catch (_) { window.__slateLandingTour = undefined; }

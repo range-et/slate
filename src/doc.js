@@ -187,6 +187,28 @@ class Doc {
     }
 
     /**
+     * Flatten every non-header card's content into one plain-text blob,
+     * suitable as input for an AI summarizer. Header is excluded because
+     * it's the destination of the resulting summary
+     * (`summarize_header` applet writes back into the header card).
+     *
+     * Card content can be raw markdown OR rendered HTML depending on
+     * cardType, so we route everything through a throwaway div to strip
+     * tags. Returns '' if there are no body cards yet.
+     */
+    getFlattenedContent() {
+        const tmp = document.createElement('div');
+        return this.cards
+            .filter(card => !(card.isHeader && card.isHeader()))
+            .map(card => {
+                tmp.innerHTML = card.content || '';
+                const plain = (tmp.innerText || tmp.textContent || '').trim();
+                return `[${card.title}]\n${plain}`;
+            })
+            .join('\n\n');
+    }
+
+    /**
      * Update the document title
      * @param {string} newTitle - The new title
      */
