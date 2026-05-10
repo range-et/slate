@@ -607,6 +607,157 @@ issues are ordered by dependency. Each issue lists:
 *#53 (round-trip code edits from .py back into cards) shipped 2026-05-10
 — see [features.md](features.md#53-phase-e--round-trip-code-edits-from-py-back-into-cards).*
 
+### #55 Phase E · Stub-first workflow (prompt-only / "stub" cards as first-class)
+- **Scope**: Today every card has to materialize content the moment it's
+  added — there's no "I'll come back and fill this" state. The user's
+  natural workflow (and most pre-AI codebases) is the opposite: scaffold
+  empty function stubs with intent comments first, then come back and
+  fill them. The "AI gamble" loop ("type prompt → boom, code") skips
+  scaffolding entirely, which makes the resulting graph sprawling and
+  hard to reason about.
+- **Proposed surface**:
+  - **Stub cards**: a card with `content === ''` but a non-empty
+    `prompt` is already a first-class state in our data model
+    (it's what GENERATE ALL picks up). Promote it visually:
+    "stub" pill in the card UI, distinct chrome (dashed border?), and a
+    single-click "fill stub" button that runs the stub's prompt + any
+    @-refs through the active model.
+  - **Stub-from-signature**: support typing a Python signature into the
+    prompt (e.g. `def add(a: float, b: float) -> float`) and have Slate
+    create a stub card with the signature pre-filled in `content` and
+    the prompt body kept as the natural-language intent. Compile-time
+    placeholder body is `raise NotImplementedError(prompt)` so the
+    file imports cleanly and pytest fails loudly on "not yet filled".
+  - **One-shot scaffold**: from a doc header card, generate N stubs at
+    once based on a "design" prompt (e.g. "I need read_input,
+    apply_op, format_result, and main"). Each becomes a stub card the
+    user can review before running fill.
+  - **Issues-as-stubs convention**: every new TODO becomes a stub card
+    with the comment as the prompt — direct mapping from
+    [issues.md](issues.md) entry → card. Manual today; Slate could
+    surface a "create stub from selected text" action.
+- **Acceptance**:
+  - Empty-content cards render with a visible "stub" affordance + a
+    one-click "fill" button.
+  - "Add stub from signature" flow: paste a `def`/`class` line + intent;
+    creates a stub card whose content is the signature with a
+    `raise NotImplementedError(...)` body referencing the prompt.
+  - Compiled `.py` from a doc with stubs is importable; calling a stub
+    function raises `NotImplementedError`. pytest fails predictably.
+  - GENERATE ALL still finds and fills these stubs (already works since
+    the data model is identical).
+- **Blocks**: nothing immediately; pairs well with #56 (load codebase)
+  because imported functions whose body is empty / single-line / docstring-
+  only could be auto-classified as stubs.
+- **Files**: `src/applets/card_view/code_card.js` (stub chrome),
+  new `src/applets/stub_actions/` (signature parser + scaffold-N action),
+  `src/code_compile.js` (NotImplementedError placeholder body),
+  possibly `src/cards.js` (a derived `isStub()` helper).
+- **Notes**:
+  - User's framing: "the cycle of fill-up-stub is good cause it keeps
+    the codebase limited and all new issues become a new stub with a
+    comment attached to it that has to be done."
+  - This is the missing pre-AI half of the workflow. AI handles
+    "generate from intent"; stubs handle "remember to come back."
+
+### #56 Phase E · Load codebase: scan a folder of `.py` files into a Slate project
+- **Scope**: The user keeps switching back to plain VS Code first
+  because Slate can't ingest existing codebases — it's strictly a
+  "start a new project" tool. Goal: point Slate at a folder
+  (e.g. [/Users/r2d2/Desktop/gandiva](file:///Users/r2d2/Desktop/gandiva))
+  and get a Slate project where every Python file becomes a doc and every
+  top-level def/class becomes a card, with the AI auto-generating
+  prompt-style "explanation" text per imported function as a starting
+  point for the round-trip loop.
+- **Existing groundwork** (do not rebuild):
+  - [vscode-extension/src/python_scan.ts](vscode-extension/src/python_scan.ts)
+    already does workspace scanning + block extraction + import
+    extraction (~285 LOC) and is wired to `slate.scanWorkspace`.
+  - The round-trip work shipped under #53 already proves
+    file-on-disk ↔ slate-card mapping is bidirectional and
+    fixed-point.
+- **Proposed surface**:
+  - "Open folder as Slate project" command in the VS Code extension.
+  - Each `.py` → one doc; doc title = file stem; each top-level
+    `def`/`class` → one body card; module-level imports + constants →
+    header card.
+  - Optional second pass: AI-generated prompt per body card describing
+    what the function does (single-line summary + "args/returns" tail).
+    User can opt in / opt out.
+  - Cross-file imports become @-references on the destination card,
+    auto-linking the project graph (testing #15 / #52 at scale).
+- **Acceptance**:
+  - Pointing slate at a small real repo (gandiva, or one of the
+    examples in this repo's `examples/` dir treated as a "found"
+    folder) produces a project where:
+    - Every file is a doc; every top-level def is a card.
+    - Imports across files become @-refs in the project graph.
+    - Round-trip (compile every doc back out to `.py`) is
+      byte-identical for files that were already annotation-free
+      (legacy path); annotated on next compile.
+  - User-facing: a single "import folder" button in the VS Code
+    extension that triggers the scan and seeds the project.
+  - Headless: `npm run slate:import-folder -- <path>` produces a
+    `.slate.json` for any python folder, suitable for CI.
+- **Blocks**: nothing; unblocks "use Slate on real existing codebases"
+  which is the only path to user growth beyond "fresh project" demos.
+- **Files**: extend `vscode-extension/src/python_scan.ts`
+  (already substantial), new `scripts/slate_import_folder.js`,
+  reuse `src/code_compile.js` + `src/slate_annotations.js` from #53.
+- **Notes**:
+  - Pairs naturally with #55 — imported functions whose body is
+    `pass` / `...` / docstring-only become stubs automatically.
+  - Pairs naturally with #57 — once a project is loaded, the user
+    almost certainly wants to operate on a subgraph (just the auth
+    module, just the data layer), not the entire project.
+  - User context: "I keep switching from slate to code first... we
+    need to be able to load back in code and projects."
+
+### #57 Phase E · DAG-scoped subgraph operations (post-Cytoscape #52)
+- **Scope**: Today GENERATE ALL and COMPILE ALL operate on the full
+  project. On a real codebase (#56), that's almost never what the
+  user wants — they want to operate on the subgraph reachable from
+  one node (or a small handful of selected nodes). Once Cytoscape
+  ships (#52), Slate has the graph-algorithm primitives needed to
+  do this naturally.
+- **Proposed surface**:
+  - Click a node in the project graph → "operate on this subgraph"
+    options light up: GENERATE SUBGRAPH, COMPILE SUBGRAPH, AUDIT
+    SUBGRAPH.
+  - "Subgraph" = the set of cards reachable from the selected node
+    via @-references (transitive closure). Direction matters —
+    leaves first, root last (matches the existing #15 topological
+    order and the user's "from leaves to main()" mental model).
+  - Multi-select: shift-click multiple nodes → union of their
+    subgraphs. Useful for "generate the auth module + the data
+    layer but leave the UI alone."
+  - Visual feedback: dim cards outside the active subgraph in the
+    graph viz so the user sees exactly what's in scope.
+- **Acceptance**:
+  - From the network panel, selecting a card and clicking GENERATE
+    SUBGRAPH walks only the cards reachable through @-refs from the
+    selection, in #15 topological order (leaves first).
+  - Same for COMPILE SUBGRAPH (only writes the `.py` files for docs
+    in scope).
+  - Empty-content cards in the subgraph get filled; cards outside
+    the subgraph are left untouched.
+  - Multi-select works; out-of-scope cards are visually dimmed.
+- **Blocks**: depends on #15 (topo order) + #52 (Cytoscape) shipping
+  first. Doesn't block anything downstream.
+- **Files**: `src/network_viz.*` (selection + dimming),
+  `src/controllers/compile_ctl.js` (`compileProject` →
+  `compileSubgraph(rootIds)`), `src/main_script.js` (walkthrough
+  scope from "all" to "subgraph").
+- **Notes**:
+  - User context: "DAG logic the way I explained it is reversed —
+    we start at the leaves and work our way back to the main()
+    function" — confirmed; #15's existing
+    `topologicalOrder returns leaves before consumers` test already
+    locks in that direction.
+  - Most large-codebase workflows are subgraph-scoped — full-graph
+    operations only make sense on small projects (calculator,
+    tic-tac-toe).
+
 ### #54 Phase 0 · Migrate `src/` from JS to TypeScript
 - **Scope**: Slate's main `src/` tree is vanilla ES6+ JS (no types, no
   linter, no formatter — see [CLAUDE.md](CLAUDE.md)). The VS Code
@@ -677,7 +828,7 @@ issues are ordered by dependency. Each issue lists:
 
 ## Tracking
 
-- **Open**: every issue above. **34 of 54 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **37 of 57 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
   #43 chat_ctl + #44 doc/project/card controllers + #51 drop SUMMARY +
