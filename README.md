@@ -116,7 +116,7 @@ Slate is a hierarchical document management system that combines:
 - **[Deployment Guide](DEPLOYMENT.md)** - How to deploy Slate as a static site
 - **[Readme](README.md)** - This file (feature overview and usage guide)
 
-**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
+**Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)
 
 ## Quick Start
 
@@ -558,4 +558,4 @@ Built with:
 
 ---
 
-*Related: [motivation](motivation.md)*
+*Related: [motivation](motivation.md) · [slate-code-plan](slate-code-plan.md) · [deployment](deployment.md)*

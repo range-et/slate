@@ -2,7 +2,7 @@
 
 Since Slate is a **static site** (client-side only), you don't need a Node.js server running. The `dist/` folder contains everything you need - just static HTML, CSS, and JS files.
 
-**Live Demo**: [www.slate-notebook.com](https://www.slate-notebook.com)
+**Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)
 
 **Related Documentation**:  
 - [readme.md](readme.md) - Feature overview and usage guide  
