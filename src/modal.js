@@ -4,10 +4,17 @@ class Modal {
         this.modal = document.getElementById("modal");
         this.modalContent = document.getElementById("modal-content");
         this.modalActions = document.getElementById("modal-actions");
-        
+
+        // Headless mode (vitest, node) — no overlay element exists.
+        // Skip the click handler + initial hide(); show()/hide()/alert()
+        // already noop on missing elements (see this.overlay checks
+        // below). Lets Card / Doc construction proceed in tests without
+        // tripping over a Modal we never use anyway.
+        if (!this.overlay) return;
+
         // Hide modal by default
         this.hide();
-        
+
         // Close modal when clicking overlay
         this.overlay.addEventListener("click", (e) => {
             if (e.target === this.overlay) {
@@ -17,10 +24,12 @@ class Modal {
     }
 
     show() {
+        if (!this.overlay) return;
         this.overlay.style.display = "flex";
     }
 
     hide() {
+        if (!this.overlay) return;
         this.overlay.style.display = "none";
         this.modalContent.innerHTML = "";
         this.modalActions.innerHTML = "";

@@ -11,14 +11,18 @@
     "dev": "vite --open",
     "preview": "vite preview",
     "serve": "vite preview --host",
+    "test": "npm run ensure-config && vitest run",
+    "test:watch": "npm run ensure-config && vitest",
     "package-extension": "node scripts/package-extension.js"
   },
   "keywords": [],
   "author": "Indrajeet Haldar",
   "license": "MIT",
   "devDependencies": {
+    "jsdom": "^29.1.1",
     "rimraf": "^5.0.5",
-    "vite": "^7.1.3"
+    "vite": "^7.1.3",
+    "vitest": "^4.1.5"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.0",
