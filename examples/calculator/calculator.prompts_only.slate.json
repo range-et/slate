@@ -3,15 +3,18 @@
   "name": "calculator (prompts only)",
   "docs": [
     {
-      "id": "calc-doc-main-001",
-      "title": "calculator",
-      "summary": "# Tiny CLI Calculator Summary\n\n## Overview\nThis is a **simple command-line calculator** that reads two numbers and one operator, then outputs the result of the operation.\n\n## Key Features\n\n1. **Efficient Operation Lookup**\n   - Uses a **dictionary-based approach** for operation registration\n   - Operations are built once at import time\n   - Eliminates need for repetitive if/elif chains\n\n2. **Core Components**\n   - **`read_number()`** - Handles user input with error recovery\n   - **Operation functions** - Addition, subtraction, multiplication, division\n   - **`read_operator()`** - Gets the operation from user\n   - **`apply_operation()`** - Executes the selected operation\n\n3. **Design Approach**\n   - **Modular architecture** with separate functions for each responsibility\n   - **Type hints** for better code documentation\n   - **Error handling** for invalid number inputs\n\n## Implementation Notes\nThe calculator uses a **dictionary mapping** (`OPS`) to store operations, allowing for fast lookup and extensible design. The program follows a **clean separation of concerns** with dedicated functions for input handling, operations, and execution flow.\n\n**Note**: The actual implementation of the arithmetic functions and registration logic appears to be incomplete in the provided snippet.",
+      "id": "calc-doc-ops-001",
+      "title": "operations",
+      "summary": null,
       "destination": "",
+      "createdAt": "2026-05-10T12:00:00.000Z",
+      "updatedAt": "2026-05-10T12:00:00.000Z",
+      "cardCount": 7,
       "cards": [
         {
-          "id": "calc-main-000",
+          "id": "calc-ops-000",
           "title": "__header__",
-          "content": "\"\"\"Tiny CLI calculator — read two numbers + one op, print the result.\"\"\"\nfrom typing import Callable, Dict\n\n# Operations table is built once at import time so @apply_operation can\n# look up the chosen op without an if/elif chain in every call.\nOPS: Dict[str, Callable[[float, float], float]] = {}",
+          "content": "\"\"\"Pure-math operations + the OPS registry table.\n\nThe four arithmetic functions are deliberately leaf-level (no slate\ncross-doc dependencies) so the future DAG solver (#15) can prove it can\nwalk this doc bottom-up before touching the calculator doc.\n\"\"\"\nfrom typing import Callable, Dict\n\n# Operations table is built once at import time so @apply_operation can\n# look up the chosen op without an if/elif chain in every call.\nOPS: Dict[str, Callable[[float, float], float]] = {}",
           "prompt": "",
           "images": [],
           "links": [],
@@ -19,31 +22,9 @@
           "kind": "header"
         },
         {
-          "id": "calc-main-001",
-          "title": "read_number",
-          "content": "def read_number(prompt):\n    while True:\n        try:\n            return float(input(prompt))\n        except ValueError:\n            pass",
-          "prompt": "Prompt the user with the given string and re-prompt until they enter a parseable float. Returns the float.",
-          "images": [],
-          "links": [],
-          "cardType": "code",
-          "kind": "body"
-        },
-        {
-          "id": "calc-main-002",
-          "title": "read_two_numbers",
-          "content": "def read_two_numbers():\n    a = read_number(\"Enter the first number: \")\n    b = read_number(\"Enter the second number: \")\n    return (a, b)",
-          "prompt": "Use @read_number twice — once with prompt \"Enter the first number: \" and once with \"Enter the second number: \" — and return them as a tuple (a, b).",
-          "images": [],
-          "links": [
-            "read_number"
-          ],
-          "cardType": "code",
-          "kind": "body"
-        },
-        {
-          "id": "calc-main-003",
+          "id": "calc-ops-001",
           "title": "add",
-          "content": "def add(a, b):\n    return a + b",
+          "content": "",
           "prompt": "Return a + b. Pure, no side effects.",
           "images": [],
           "links": [],
@@ -51,9 +32,9 @@
           "kind": "body"
         },
         {
-          "id": "calc-main-004",
+          "id": "calc-ops-002",
           "title": "subtract",
-          "content": "def subtract(a, b):\n    return a - b",
+          "content": "",
           "prompt": "Return a - b. Pure, no side effects.",
           "images": [],
           "links": [],
@@ -61,9 +42,9 @@
           "kind": "body"
         },
         {
-          "id": "calc-main-005",
+          "id": "calc-ops-003",
           "title": "multiply",
-          "content": "def multiply(a, b):\n    return a * b",
+          "content": "",
           "prompt": "Return a * b. Pure, no side effects.",
           "images": [],
           "links": [],
@@ -71,9 +52,9 @@
           "kind": "body"
         },
         {
-          "id": "calc-main-006",
+          "id": "calc-ops-004",
           "title": "divide",
-          "content": "def divide(a, b):\n    if b == 0:\n        raise ZeroDivisionError(\"Cannot divide by zero\")\n    return a / b",
+          "content": "",
           "prompt": "Return a / b. If b is zero, raise ZeroDivisionError(\"Cannot divide by zero\") so the caller can handle it cleanly.",
           "images": [],
           "links": [],
@@ -81,10 +62,10 @@
           "kind": "body"
         },
         {
-          "id": "calc-main-007",
+          "id": "calc-ops-005",
           "title": "register_ops",
-          "content": "def register_ops():\n    global OPS\n    OPS = {}\n    OPS[\"+\"] = add\n    OPS[\"-\"] = subtract\n    OPS[\"*\"] = multiply\n    OPS[\"/\"] = divide",
-          "prompt": "Populate the global OPS dict with mappings from operator strings to the matching function: \"+\" → @add, \"-\" → @subtract, \"*\" → @multiply, \"/\" → @divide. Idempotent — clear OPS before populating so calling twice is safe.",
+          "content": "",
+          "prompt": "Populate the global OPS dict (defined in the header) with mappings from operator strings to the matching function: \"+\" → @add, \"-\" → @subtract, \"*\" → @multiply, \"/\" → @divide. Idempotent — clear OPS before populating so calling twice is safe.",
           "images": [],
           "links": [
             "add",
@@ -96,30 +77,73 @@
           "kind": "body"
         },
         {
-          "id": "calc-main-008",
-          "title": "read_operator",
-          "content": "def read_operator(OPS):\n    while True:\n        operator = input(f\"Enter operator ({', '.join(sorted(OPS.keys()))}): \")\n        if operator in OPS:\n            return operator\n        print(\"Invalid operator. Please try again.\")",
-          "prompt": "Prompt the user (showing the keys of OPS sorted) until they enter one of the registered operators. Return the operator string.",
-          "images": [],
-          "links": [],
-          "cardType": "code",
-          "kind": "body"
-        },
-        {
-          "id": "calc-main-009",
+          "id": "calc-ops-006",
           "title": "apply_operation",
-          "content": "def apply_operation(op, a, b):\n    if op not in OPS:\n        raise KeyError(f\"Operation '{op}' is not registered\")\n    return OPS[op](a, b)",
-          "prompt": "Look the op up in OPS and apply it to (a, b). Raise KeyError with a clear message if the op is not registered.",
+          "content": "",
+          "prompt": "Look the op up in OPS (defined in the header) and apply it to (a, b). Raise KeyError with a clear message if the op is not registered.",
+          "images": [],
+          "links": [],
+          "cardType": "code",
+          "kind": "body"
+        }
+      ]
+    },
+    {
+      "id": "calc-doc-main-001",
+      "title": "calculator",
+      "summary": null,
+      "destination": "",
+      "createdAt": "2026-05-10T12:00:00.000Z",
+      "updatedAt": "2026-05-10T12:00:00.000Z",
+      "cardCount": 5,
+      "cards": [
+        {
+          "id": "calc-main-000",
+          "title": "__header__",
+          "content": "\"\"\"Tiny CLI calculator — read two numbers + one op, print the result.\n\nImports its math kernel from the sibling `operations` doc, which the\nslate compiler emits as operations.py at the same destination. This\ndemonstrates the cross-doc compile pattern: each doc is its own .py file,\nand inter-doc deps are plain Python imports.\n\"\"\"\nfrom operations import OPS, register_ops, apply_operation",
+          "prompt": "",
+          "images": [],
+          "links": [],
+          "cardType": "markdown",
+          "kind": "header"
+        },
+        {
+          "id": "calc-main-001",
+          "title": "read_number",
+          "content": "",
+          "prompt": "Prompt the user with the given string and re-prompt until they enter a parseable float. Returns the float.",
           "images": [],
           "links": [],
           "cardType": "code",
           "kind": "body"
         },
         {
-          "id": "calc-main-010",
+          "id": "calc-main-002",
+          "title": "read_two_numbers",
+          "content": "",
+          "prompt": "Use @read_number twice — once with prompt \"Enter the first number: \" and once with \"Enter the second number: \" — and return them as a tuple (a, b).",
+          "images": [],
+          "links": [
+            "read_number"
+          ],
+          "cardType": "code",
+          "kind": "body"
+        },
+        {
+          "id": "calc-main-003",
+          "title": "read_operator",
+          "content": "",
+          "prompt": "Prompt the user (showing the keys of OPS sorted) until they enter one of the registered operators. Return the operator string. OPS is imported from the operations doc via the header.",
+          "images": [],
+          "links": [],
+          "cardType": "code",
+          "kind": "body"
+        },
+        {
+          "id": "calc-main-004",
           "title": "main",
-          "content": "def main():\n    register_ops()\n    try:\n        a, b = read_two_numbers()\n        op = read_operator(OPS)\n        result = apply_operation(op, a, b)\n        print(f\"Result: {result}\")\n    except ZeroDivisionError:\n        print(\"Error: Division by zero is not allowed.\")",
-          "prompt": "Entry point. Call @register_ops, then read inputs via @read_two_numbers and @read_operator, then call @apply_operation. Print the formatted result. Catch ZeroDivisionError and print an error message instead of crashing.",
+          "content": "",
+          "prompt": "Entry point. Call @register_ops (cross-doc — from operations), then read inputs via @read_two_numbers and @read_operator, then call @apply_operation (cross-doc — from operations). Print the formatted result. Catch ZeroDivisionError and print an error message instead of crashing. Include `if __name__ == \"__main__\": main()` at the bottom.",
           "images": [],
           "links": [
             "register_ops",
@@ -130,14 +154,11 @@
           "cardType": "code",
           "kind": "body"
         }
-      ],
-      "createdAt": "2026-05-09T22:30:00.000Z",
-      "updatedAt": "2026-05-09T23:51:18.729Z",
-      "cardCount": 11
+      ]
     }
   ],
-  "createdAt": "2026-05-09T22:30:00.000Z",
-  "updatedAt": "2026-05-09T22:30:00.000Z",
-  "docCount": 1,
-  "totalCards": 11
+  "createdAt": "2026-05-10T12:00:00.000Z",
+  "updatedAt": "2026-05-10T12:00:00.000Z",
+  "docCount": 2,
+  "totalCards": 12
 }

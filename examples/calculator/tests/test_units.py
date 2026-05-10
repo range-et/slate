@@ -1,72 +1,108 @@
-"""Unit tests for calculator.py — run with `pytest` from this folder.
+"""Unit tests for the calculator example — run with `pytest` from this folder.
 
-Compile the slate calculator doc first (it writes calculator.py at the
-example root), then `pytest examples/calculator/tests`.
+Compile both slate docs first (each compile writes its .py at the example
+root):
+    1. Open the calculator project in slate.
+    2. Switch to the `operations` doc → click COMPILE.
+    3. Switch to the `calculator` doc → click COMPILE.
+
+Then run `pytest examples/calculator/tests` from the repo root.
 """
 import importlib.util
 import os
+import sys
 import pytest
 
 HERE = os.path.dirname(__file__)
-COMPILED = os.path.abspath(os.path.join(HERE, '..', 'calculator.py'))
+EXAMPLE_ROOT = os.path.abspath(os.path.join(HERE, '..'))
+OPS_PY = os.path.join(EXAMPLE_ROOT, 'operations.py')
+CALC_PY = os.path.join(EXAMPLE_ROOT, 'calculator.py')
 
 
-def _load_module():
-    if not os.path.exists(COMPILED):
-        pytest.skip(f"{COMPILED} not yet compiled — run COMPILE on the calculator doc in slate")
-    spec = importlib.util.spec_from_file_location('calculator', COMPILED)
+def _load(name, path):
+    if not os.path.exists(path):
+        pytest.skip(f"{path} not yet compiled — run COMPILE on the matching slate doc")
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
-    module.register_ops()
     return module
+
+
+def _load_all():
+    # Make EXAMPLE_ROOT discoverable so calculator.py's
+    # `from operations import ...` works at exec time.
+    if EXAMPLE_ROOT not in sys.path:
+        sys.path.insert(0, EXAMPLE_ROOT)
+    ops = _load('operations', OPS_PY)
+    calc = _load('calculator', CALC_PY)
+    ops.register_ops()
+    return ops, calc
 
 
 def test_add():
     """add returns the arithmetic sum."""
-    m = _load_module()
-    assert m.add(2, 3) == 5
-    assert m.add(-1, 1) == 0
-    assert m.add(0.1, 0.2) == pytest.approx(0.3)
+    ops, _ = _load_all()
+    assert ops.add(2, 3) == 5
+    assert ops.add(-1, 1) == 0
+    assert ops.add(0.1, 0.2) == pytest.approx(0.3)
 
 
 def test_subtract():
     """subtract is non-commutative and signed."""
-    m = _load_module()
-    assert m.subtract(5, 3) == 2
-    assert m.subtract(3, 5) == -2
+    ops, _ = _load_all()
+    assert ops.subtract(5, 3) == 2
+    assert ops.subtract(3, 5) == -2
 
 
 def test_multiply():
     """multiply returns the product."""
-    m = _load_module()
-    assert m.multiply(4, 3) == 12
-    assert m.multiply(-2, 3) == -6
-    assert m.multiply(0, 99) == 0
+    ops, _ = _load_all()
+    assert ops.multiply(4, 3) == 12
+    assert ops.multiply(-2, 3) == -6
+    assert ops.multiply(0, 99) == 0
 
 
 def test_divide():
     """divide returns float quotient and raises on zero."""
-    m = _load_module()
-    assert m.divide(10, 4) == 2.5
+    ops, _ = _load_all()
+    assert ops.divide(10, 4) == 2.5
     with pytest.raises(ZeroDivisionError):
-        m.divide(1, 0)
+        ops.divide(1, 0)
 
 
 def test_apply_operation():
     """apply_operation routes via the OPS table; unknown op raises KeyError."""
-    m = _load_module()
-    assert m.apply_operation('+', 2, 3) == 5
-    assert m.apply_operation('-', 2, 3) == -1
-    assert m.apply_operation('*', 2, 3) == 6
-    assert m.apply_operation('/', 6, 3) == 2
+    ops, _ = _load_all()
+    assert ops.apply_operation('+', 2, 3) == 5
+    assert ops.apply_operation('-', 2, 3) == -1
+    assert ops.apply_operation('*', 2, 3) == 6
+    assert ops.apply_operation('/', 6, 3) == 2
     with pytest.raises(KeyError):
-        m.apply_operation('%', 1, 1)
+        ops.apply_operation('%', 1, 1)
 
 
 def test_register_ops_idempotent():
     """Calling register_ops twice gives the same OPS table — no duplicates, no growth."""
-    m = _load_module()
-    m.register_ops()
-    first = dict(m.OPS)
-    m.register_ops()
-    assert m.OPS == first
+    ops, _ = _load_all()
+    ops.register_ops()
+    first = dict(ops.OPS)
+    ops.register_ops()
+    assert ops.OPS == first
+
+
+def test_calc_imports_from_ops():
+    """calculator.py must successfully import from operations.py at exec time.
+
+    This is the cross-doc-compile smoke test — proves the slate compiler
+    emitted the `from operations import ...` line in calculator.py's
+    header AND that the OPS/register_ops/apply_operation symbols actually
+    live in operations.py.
+    """
+    _, calc = _load_all()
+    # Whatever `from operations import ...` resolved to should be the
+    # exact same objects the operations module exports.
+    ops, _ = _load_all()
+    assert calc.OPS is ops.OPS
+    assert calc.register_ops is ops.register_ops
+    assert calc.apply_operation is ops.apply_operation

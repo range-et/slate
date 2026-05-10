@@ -36,6 +36,7 @@ import {
     applyRehydrate as ctlApplyRehydrate,
     attachExistingCardListeners as ctlAttachExistingCardListeners,
 } from "./controllers/card_ctl.js";
+import { mount as mountPromptBar } from "./applets/prompt_bar/index.js";
 import { emit, on } from "./event_bus.js";
 
 // Select all the dom elements
@@ -214,17 +215,15 @@ class MainManager {
     setupDocDestinationInput() { return ctlSetupDocDestinationInput(); }
     setupDocTitleSanitization() { return ctlSetupDocTitleSanitization(); }
 
+    /**
+     * Thin shim — the prompt_bar applet owns CODE-toggle UI + the editor
+     * language flip. We keep this method on MainManager because the
+     * walkthrough calls it from outside the applet to force codeMode true
+     * before loadCardForEdit runs.
+     */
     toggleCodeMode() {
-        if (!this.chatManager) return;
-        this.chatManager.codeMode = !this.chatManager.codeMode;
-        const btn = this.buttons.code_toggle;
-        if (btn) {
-            btn.setAttribute('aria-pressed', String(this.chatManager.codeMode));
-            btn.classList.toggle('toggle-active', this.chatManager.codeMode);
-        }
-        if (this.promptEditor && typeof this.promptEditor.setLanguage === 'function') {
-            this.promptEditor.setLanguage(this.chatManager.codeMode ? 'python' : 'markdown');
-        }
+        if (!this.chatManager || !this.promptBar) return;
+        this.promptBar.setCodeMode(!this.chatManager.codeMode);
     }
 
     setupHostMessageListener() {
@@ -645,11 +644,9 @@ class MainManager {
         this.buttons.summary_btn.addEventListener("click", () => this.summary_btn());
         this.buttons.add_doc.addEventListener("click", () => this.addDocButton());
         this.buttons.remove_doc.addEventListener("click", () => this.removeDocButton());
-        this.buttons.add_to_doc.addEventListener("click", () => this.chatManager.addToDoc());
-        this.buttons.send_prompt.addEventListener("click", () => this.chatManager.askAI());
-        if (this.buttons.code_toggle) {
-            this.buttons.code_toggle.addEventListener("click", () => this.toggleCodeMode());
-        }
+        // SEND, ADD TO DOC, CODE, ATTACH IMAGE, EXIT EDIT, and the global
+        // ESC-to-cancel binding all live in the prompt_bar applet now;
+        // mountPromptBar() in init() owns those listeners.
         if (this.buttons.compile_btn) {
             this.buttons.compile_btn.addEventListener("click", () => this.compileCurrentDoc());
         }
@@ -659,17 +656,6 @@ class MainManager {
         if (this.buttons.generate_all_btn) {
             this.buttons.generate_all_btn.addEventListener("click", () => this.startGenerateWalkthrough());
         }
-        if (this.buttons.exit_edit) {
-            this.buttons.exit_edit.addEventListener("click", () => this.chatManager.cancelEdit());
-        }
-        // ESC anywhere also exits edit mode (unless focus is in a CodeMirror
-        // editor where ESC has its own meaning — we still hijack it because
-        // there's no other ESC binding worth preserving in slate today).
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && document.body.classList.contains('slate-editing-card')) {
-                this.chatManager.cancelEdit();
-            }
-        });
         this.buttons.api_key_btn.addEventListener("click", () => this.show_api_key_modal());
         this.buttons.about_btn.addEventListener("click", () => this.showAboutModal());
         this.buttons.feedback_btn.addEventListener("click", () => {
@@ -879,12 +865,15 @@ class MainManager {
             () => this.updateNetworkViz() // callback to update network viz
         );
         
-        // Setup image support for the chat manager
-        this.chatManager.setupImageSupport(
-            this.buttons.attach_image,
-            this.buttons.image_preview_container
-        );
-        
+        // Mount the prompt_bar applet. It owns the response_control_panel
+        // buttons, the CODE-toggle state, the global ESC-to-cancel binding,
+        // and (via ChatManager.setupImageSupport) the ATTACH IMAGE wiring.
+        this.promptBar = mountPromptBar({
+            buttons: this.buttons,
+            chatManager: this.chatManager,
+            promptEditor: this.promptEditor,
+        });
+
         // listen for inbound messages from a VS Code extension host (no-op in browser)
         this.setupHostMessageListener();
         // wire the compile controller (Phase B per ARCHITECTURE.md)
@@ -932,6 +921,10 @@ class MainManager {
         if (this._resizeHandler) {
             window.removeEventListener("resize", this._resizeHandler);
             this._resizeHandler = null;
+        }
+        if (this.promptBar && typeof this.promptBar.destroy === "function") {
+            this.promptBar.destroy();
+            this.promptBar = null;
         }
         if (this.chatManager && typeof this.chatManager.destroy === "function") {
             this.chatManager.destroy();
