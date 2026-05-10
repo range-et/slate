@@ -1,0 +1,31 @@
+{
+  "id": "345d963c-24c7-4964-83d9-33f59b0fd8c9",
+  "name": "blank_calculator",
+  "docs": [
+    {
+      "id": "3b7a883e-5b67-436f-8ac5-90e996280d08",
+      "title": "humble_lynx",
+      "summary": null,
+      "destination": "",
+      "cards": [
+        {
+          "id": "f44a7eed-61f8-4743-b83c-2e7de5759555",
+          "title": "__header__",
+          "content": "",
+          "prompt": "",
+          "images": [],
+          "links": [],
+          "cardType": "markdown",
+          "kind": "header"
+        }
+      ],
+      "createdAt": "2026-05-09T23:50:21.014Z",
+      "updatedAt": "2026-05-09T23:50:21.014Z",
+      "cardCount": 1
+    }
+  ],
+  "createdAt": "2026-05-09T23:50:20.939Z",
+  "updatedAt": "2026-05-09T23:50:21.014Z",
+  "docCount": 1,
+  "totalCards": 1
+}

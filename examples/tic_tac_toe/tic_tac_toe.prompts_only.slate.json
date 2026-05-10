@@ -1,6 +1,6 @@
 {
-  "id": "ttt-project-001",
-  "name": "tic_tac_toe",
+  "id": "ttt-project-001-prompts-only",
+  "name": "tic_tac_toe (prompts only)",
   "docs": [
     {
       "id": "ttt-doc-game-001",
@@ -24,7 +24,7 @@
         {
           "id": "ttt-game-001",
           "title": "make_board",
-          "content": "def make_board() -> List[str]:\n    \"\"\"Return an empty 3x3 board as a flat list of 9 single-space strings.\"\"\"\n    return [' '] * 9",
+          "content": "",
           "prompt": "A factory that returns an empty tic-tac-toe board as a flat list of 9 single-space strings. No arguments. Pure.",
           "images": [],
           "links": [],
@@ -34,7 +34,7 @@
         {
           "id": "ttt-game-002",
           "title": "render_board",
-          "content": "def render_board(board: List[str]) -> str:\n    \"\"\"Format `board` as a printable 3x3 grid with row separators.\"\"\"\n    rows = [' | '.join(board[i:i + 3]) for i in range(0, 9, 3)]\n    return '\\n---------\\n'.join(rows)",
+          "content": "",
           "prompt": "Format a board (list of 9 cells) as a printable 3-row grid with `|` between cells and `---------` between rows. Returns a string.",
           "images": [],
           "links": [],
@@ -44,7 +44,7 @@
         {
           "id": "ttt-game-003",
           "title": "is_winning_line",
-          "content": "def is_winning_line(board: List[str], line: Tuple[int, int, int]) -> Optional[str]:\n    \"\"\"Return 'X' or 'O' if all three cells in `line` are non-empty and match. Else None.\"\"\"\n    a, b, c = line\n    if board[a] != ' ' and board[a] == board[b] == board[c]:\n        return board[a]\n    return None",
+          "content": "",
           "prompt": "Given a board and a line (3 indices), return 'X' or 'O' if all three cells are non-empty and match; else None.",
           "images": [],
           "links": [],
@@ -54,7 +54,7 @@
         {
           "id": "ttt-game-004",
           "title": "check_winner",
-          "content": "def check_winner(board: List[str]) -> Optional[str]:\n    \"\"\"Return 'X', 'O', 'draw', or None given the current @board.\n\n    Walks every line in WINNING_LINES via @is_winning_line. If no winner and\n    no empty cells remain, the game is a draw. Otherwise still in progress.\n    \"\"\"\n    for line in WINNING_LINES:\n        winner = is_winning_line(board, line)\n        if winner is not None:\n            return winner\n    if ' ' not in board:\n        return 'draw'\n    return None",
+          "content": "",
           "prompt": "Determine the game state. Walk every line in WINNING_LINES via @is_winning_line. Return 'X', 'O', 'draw', or None (still in progress).",
           "images": [],
           "links": [
@@ -66,7 +66,7 @@
         {
           "id": "ttt-game-005",
           "title": "valid_moves",
-          "content": "def valid_moves(board: List[str]) -> List[int]:\n    \"\"\"Return cell indices (0-8) that are still empty on `board`.\"\"\"\n    return [i for i, cell in enumerate(board) if cell == ' ']",
+          "content": "",
           "prompt": "Return the cell indices (0-8) that are still empty on the board. Used by @apply_move callers and by @ai_player_random.",
           "images": [],
           "links": [],
@@ -76,7 +76,7 @@
         {
           "id": "ttt-game-006",
           "title": "apply_move",
-          "content": "def apply_move(board: List[str], index: int, player: str) -> List[str]:\n    \"\"\"Return a NEW board with `player` placed at `index`.\n\n    Pure: does not mutate the input. Raises ValueError on illegal move\n    (cell already occupied or index out of range).\n    \"\"\"\n    if not 0 <= index < 9:\n        raise ValueError(f\"Index {index} out of range (must be 0-8)\")\n    if board[index] != ' ':\n        raise ValueError(f\"Cell {index} already taken by {board[index]!r}\")\n    new_board = list(board)\n    new_board[index] = player\n    return new_board",
+          "content": "",
           "prompt": "Pure: return a NEW board with `player` placed at `index`. Raise ValueError if the cell is occupied or the index is out of range.",
           "images": [],
           "links": [],
@@ -86,7 +86,7 @@
         {
           "id": "ttt-game-007",
           "title": "current_player",
-          "content": "def current_player(board: List[str]) -> str:\n    \"\"\"X always plays first. Whoever has placed fewer marks plays next.\"\"\"\n    x_count = board.count('X')\n    o_count = board.count('O')\n    return 'X' if x_count <= o_count else 'O'",
+          "content": "",
           "prompt": "X always plays first; whoever has placed fewer marks plays next. Returns the mark string.",
           "images": [],
           "links": [],
@@ -96,7 +96,7 @@
         {
           "id": "ttt-game-008",
           "title": "ai_player_random",
-          "content": "def ai_player_random(board: List[str]) -> int:\n    \"\"\"Pick a uniformly-random move from @valid_moves on the given @board.\"\"\"\n    moves = valid_moves(board)\n    if not moves:\n        raise ValueError(\"No valid moves; game is over\")\n    return random.choice(moves)",
+          "content": "",
           "prompt": "Pick a uniformly-random move from @valid_moves on the given board. Raise ValueError if there are no valid moves.",
           "images": [],
           "links": [
@@ -108,7 +108,7 @@
         {
           "id": "ttt-game-009",
           "title": "human_player_input",
-          "content": "def human_player_input(board: List[str]) -> int:\n    \"\"\"Read a move (0-8) from stdin until the player provides a legal index.\n\n    Reprompts on non-integer input and on cells that aren't currently in\n    @valid_moves. Returns the chosen index.\n    \"\"\"\n    legal = set(valid_moves(board))\n    while True:\n        raw = input(f\"Your move (one of {sorted(legal)}): \")\n        try:\n            index = int(raw.strip())\n        except ValueError:\n            print(f\"  '{raw}' is not an integer — try again.\")\n            continue\n        if index not in legal:\n            print(f\"  Cell {index} is not available — try again.\")\n            continue\n        return index",
+          "content": "",
           "prompt": "Read a move (0-8) from stdin until the player provides a legal index from @valid_moves. Reprompt on non-integer input and on illegal cells.",
           "images": [],
           "links": [
@@ -120,7 +120,7 @@
         {
           "id": "ttt-game-010",
           "title": "play_one_game",
-          "content": "def play_one_game(human_plays: Optional[str] = None, verbose: bool = True) -> str:\n    \"\"\"Play a single game and return the result ('X', 'O', or 'draw').\n\n    `human_plays`:\n      - 'X' or 'O' → that side is controlled via @human_player_input\n      - None       → both sides are @ai_player_random (good for smoke tests)\n\n    Loop:\n      1. Print the @render_board (if verbose).\n      2. @check_winner — if decided, return.\n      3. @current_player picks who's up.\n      4. Their move comes from @human_player_input or @ai_player_random.\n      5. @apply_move produces the next board; goto 1.\n    \"\"\"\n    board = make_board()\n    while True:\n        if verbose:\n            print(render_board(board))\n            print()\n        outcome = check_winner(board)\n        if outcome is not None:\n            if verbose:\n                print(f\"Result: {outcome}\")\n            return outcome\n        player = current_player(board)\n        if player == human_plays:\n            move = human_player_input(board)\n        else:\n            move = ai_player_random(board)\n            if verbose:\n                print(f\"  {player} (random AI) plays {move}\")\n        board = apply_move(board, move, player)",
+          "content": "",
           "prompt": "Play one game and return the result ('X', 'O', or 'draw'). Loop: render via @render_board, check via @check_winner, ask @current_player, route to @human_player_input or @ai_player_random, then @apply_move. If `human_plays` is None, both sides are AI.",
           "images": [],
           "links": [
@@ -138,7 +138,7 @@
         {
           "id": "ttt-game-011",
           "title": "main",
-          "content": "def main() -> None:\n    \"\"\"Entry point. Default: AI vs AI smoke run, prints the result.\n\n    To play interactively, replace this with @play_one_game(human_plays='X').\n    \"\"\"\n    play_one_game(human_plays=None, verbose=True)\n\n\nif __name__ == '__main__':\n    main()",
+          "content": "",
           "prompt": "Entry point. Default: AI vs AI smoke run via @play_one_game with `human_plays=None`. To play interactively, swap to `human_plays=\"X\"`.",
           "images": [],
           "links": [

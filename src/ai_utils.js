@@ -49,30 +49,44 @@ class OpenAIAgent {
         if (!this.hasApiKey()) {
             throw new Error("API_KEY_MISSING");
         }
-        let userContent;
-        if (images.length > 0) {
-            userContent = [{ type: "text", text: prompt }];
-            images.forEach(img => {
-                userContent.push({
-                    type: "image_url",
-                    image_url: { url: img.data }
-                });
-            });
-        } else {
-            userContent = prompt;
-        }
         const response = await this.client.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
                 { role: "system", content: systemPrompt || CHAT_SYSTEM_PROMPT },
-                { role: "user", content: userContent }
+                { role: "user", content: buildOpenAIUserContent(prompt, images) }
             ],
             temperature: 0.7,
             max_tokens: 4096
         });
         return response.choices[0].message.content;
     }
-    
+
+    /**
+     * Streaming variant. Calls onToken(deltaText) as chunks arrive and resolves
+     * with the fully accumulated string when the stream completes.
+     */
+    async generateResponseStream(prompt, images = [], { systemPrompt } = {}, onToken = () => {}) {
+        if (!this.hasApiKey()) {
+            throw new Error("API_KEY_MISSING");
+        }
+        const stream = await this.client.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: systemPrompt || CHAT_SYSTEM_PROMPT },
+                { role: "user", content: buildOpenAIUserContent(prompt, images) }
+            ],
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true
+        });
+        let acc = "";
+        for await (const chunk of stream) {
+            const delta = chunk?.choices?.[0]?.delta?.content || "";
+            if (delta) { acc += delta; try { onToken(delta); } catch (_) {} }
+        }
+        return acc;
+    }
+
     /**
      * Update the API key and recreate the client
      * @param {string} apiKey - The new API key
@@ -84,6 +98,14 @@ class OpenAIAgent {
             dangerouslyAllowBrowser: true
         });
     }
+}
+
+// Build a chat-completions `user` content payload, optionally with images.
+function buildOpenAIUserContent(prompt, images = []) {
+    if (!images || images.length === 0) return prompt;
+    const parts = [{ type: "text", text: prompt }];
+    images.forEach(img => parts.push({ type: "image_url", image_url: { url: img.data } }));
+    return parts;
 }
 
 class GeminiAgent {
@@ -114,26 +136,32 @@ class GeminiAgent {
         if (!this.hasApiKey()) {
             throw new Error("API_KEY_MISSING");
         }
-        let contents;
-        if (images.length > 0) {
-            const parts = [{ text: prompt }];
-            for (const img of images) {
-                const match = (img.data || "").match(/^data:([^;]+);base64,(.+)$/);
-                const mimeType = match ? match[1] : (img.mimeType || "image/png");
-                const data = match ? match[2] : (img.data || "").replace(/^data:[^;]+;base64,/, "");
-                parts.push({ inlineData: { mimeType, data } });
-            }
-            contents = parts;
-        } else {
-            contents = prompt;
-        }
         const response = await this.client.models.generateContent({
             model: "gemini-2.5-flash",
             systemInstruction: systemPrompt || CHAT_SYSTEM_PROMPT,
             config: { temperature: 0.7, maxOutputTokens: 4096 },
-            contents
+            contents: buildGeminiContents(prompt, images)
         });
         return response.text ?? "";
+    }
+
+    async generateResponseStream(prompt, images = [], { systemPrompt } = {}, onToken = () => {}) {
+        if (!this.hasApiKey()) {
+            throw new Error("API_KEY_MISSING");
+        }
+        // generateContentStream returns an async iterable of GenerateContentResponse chunks.
+        const stream = await this.client.models.generateContentStream({
+            model: "gemini-2.5-flash",
+            systemInstruction: systemPrompt || CHAT_SYSTEM_PROMPT,
+            config: { temperature: 0.7, maxOutputTokens: 4096 },
+            contents: buildGeminiContents(prompt, images)
+        });
+        let acc = "";
+        for await (const chunk of stream) {
+            const delta = chunk?.text || "";
+            if (delta) { acc += delta; try { onToken(delta); } catch (_) {} }
+        }
+        return acc;
     }
 
     updateApiKey(apiKey) {
@@ -142,8 +170,23 @@ class GeminiAgent {
     }
 }
 
+function buildGeminiContents(prompt, images = []) {
+    if (!images || images.length === 0) return prompt;
+    const parts = [{ text: prompt }];
+    for (const img of images) {
+        const match = (img.data || "").match(/^data:([^;]+);base64,(.+)$/);
+        const mimeType = match ? match[1] : (img.mimeType || "image/png");
+        const data = match ? match[2] : (img.data || "").replace(/^data:[^;]+;base64,/, "");
+        parts.push({ inlineData: { mimeType, data } });
+    }
+    return parts;
+}
+
 const DEFAULT_LOCAL_BASE_URL = "http://localhost:11434/v1";
-const DEFAULT_LOCAL_MODEL = "qwen2.5-coder:30b";
+// Qwen3-Coder MoE (~30B total / 3B active) — fits comfortably on a 48 GB MBP and
+// is currently the strongest small Qwen tag for code. Pull with:
+//   ollama pull qwen3-coder:30b
+const DEFAULT_LOCAL_MODEL = "qwen3-coder:30b";
 
 class LocalAgent {
     constructor(baseURL, modelName) {
@@ -183,28 +226,35 @@ class LocalAgent {
     }
 
     async generateResponse(prompt, images = [], { systemPrompt } = {}) {
-        let userContent;
-        if (images.length > 0) {
-            userContent = [{ type: "text", text: prompt }];
-            images.forEach(img => {
-                userContent.push({
-                    type: "image_url",
-                    image_url: { url: img.data }
-                });
-            });
-        } else {
-            userContent = prompt;
-        }
         const response = await this.client.chat.completions.create({
             model: this.modelName,
             messages: [
                 { role: "system", content: systemPrompt || CHAT_SYSTEM_PROMPT },
-                { role: "user", content: userContent }
+                { role: "user", content: buildOpenAIUserContent(prompt, images) }
             ],
             temperature: 0.7,
             max_tokens: 4096
         });
         return response.choices[0].message.content;
+    }
+
+    async generateResponseStream(prompt, images = [], { systemPrompt } = {}, onToken = () => {}) {
+        const stream = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [
+                { role: "system", content: systemPrompt || CHAT_SYSTEM_PROMPT },
+                { role: "user", content: buildOpenAIUserContent(prompt, images) }
+            ],
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true
+        });
+        let acc = "";
+        for await (const chunk of stream) {
+            const delta = chunk?.choices?.[0]?.delta?.content || "";
+            if (delta) { acc += delta; try { onToken(delta); } catch (_) {} }
+        }
+        return acc;
     }
 
     updateApiKey(_apiKey) {

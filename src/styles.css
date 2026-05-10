@@ -497,6 +497,12 @@ input[type="text"]::placeholder {
   gap: 4px;
   padding-top: 8px;
   padding-bottom: 8px;
+  /* Lets us actually shrink below intrinsic content size, so the children's
+     `overflow-x: auto` actually engages. Without these the panel just pushes
+     wider as the action row grows. */
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .doc_heading_row {
@@ -570,9 +576,19 @@ input[type="text"]::placeholder {
 
 .doc_heading_actions {
   margin-top: 4px;
+  /* Allow wrapping into multiple rows when the doc panel is narrow — better
+     than hiding buttons off-screen behind an invisible scrollbar. The
+     row-gap matches the column gap so the wrapped layout still reads as
+     one toolbar group. */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
 .doc_heading_actions button {
   margin: 0;
+  flex: 0 0 auto;       /* don't shrink labels — wrap rows instead */
+  white-space: nowrap;
 }
 
 /* CHAT PANEL */

@@ -47,6 +47,7 @@ const code_toggle = document.getElementById("code_toggle");
 const compile_btn = document.getElementById("compile_btn");
 const rehydrate_btn = document.getElementById("rehydrate_btn");
 const exit_edit = document.getElementById("exit_edit");
+const generate_all_btn = document.getElementById("generate_all_btn");
 
 const buttons = {
     resetZoom: resetZoom,
@@ -74,7 +75,8 @@ const buttons = {
     code_toggle: code_toggle,
     compile_btn: compile_btn,
     rehydrate_btn: rehydrate_btn,
-    exit_edit: exit_edit
+    exit_edit: exit_edit,
+    generate_all_btn: generate_all_btn
 };
 
 // main manager
@@ -475,6 +477,19 @@ class MainManager {
                     break;
                 case 'load-state':
                     if (typeof msg.state === 'string' && msg.state.length > 0) {
+                        // Suppress echoes of our own commits. The custom editor
+                        // re-broadcasts `load-state` after every save, which would
+                        // otherwise tear down the chat editor (clearAll) and rebuild
+                        // every Card DOM mid-walkthrough.
+                        if (this._lastSentState && msg.state === this._lastSentState) {
+                            break;
+                        }
+                        // Defensive: while a Generate-All walkthrough is in flight,
+                        // never let a host-driven rehydrate clobber editor state.
+                        if (this.walkthroughActive) {
+                            this._pendingLoadState = msg.state;
+                            break;
+                        }
                         try {
                             const data = JSON.parse(msg.state);
                             this.loadProjectFromJson(data);
@@ -641,6 +656,170 @@ class MainManager {
         await this.modal.alert(`Rehydrated "${target.title}" — ${summary}.${removedTxt}`);
     }
 
+    /**
+     * Human-in-the-loop GENERATE ALL. Walks the current doc top-to-bottom and
+     * for each unresolved card (no content, has prompt, not a header) it:
+     *
+     *   1. Loads the card into the editor (prompt + title populated).
+     *   2. Auto-fires SEND so the response streams into the response pane.
+     *   3. Waits — the user reviews/edits, then clicks ADD TO DOC to approve
+     *      (= "yes, freeze this") or EXIT EDIT to abort the whole walk.
+     *   4. On approval, advances to the next unresolved card.
+     *
+     * The advance happens via `advanceWalkthrough()`, called from
+     * ChatManager.addToDoc on a successful commit.
+     */
+    async startGenerateWalkthrough() {
+        if (!this.currentDoc) {
+            await this.modal.alert("No document selected.");
+            return;
+        }
+        const initial = this._collectUnresolvedCards();
+        if (initial.length === 0) {
+            await this.modal.alert("Nothing to generate — every card with a prompt already has content.");
+            return;
+        }
+
+        const agent = this.chatManager.resolveAgentFor(true);
+        if (!agent || (typeof agent.hasApiKey === 'function' && !agent.hasApiKey())) {
+            await this.modal.alert("Local model not configured. Click API KEY to set provider/model.");
+            return;
+        }
+
+        this.walkthroughActive = true;
+        // We DO NOT cache the card list — the VS Code custom editor auto-saves
+        // every commit, which can echo a `load-state` back and rebuild
+        // currentDoc with fresh Card objects. Any cached queue would then
+        // hold stale refs that don't match anything in the live doc. Instead
+        // we re-scan the current doc each iteration and pick the next
+        // eligible card by identity in the live doc.
+        this.walkthroughTotal = initial.length;
+        this.walkthroughDocId = this.currentDoc.id;
+        document.body.classList.add('slate-walkthrough-active');
+        console.log(`[walkthrough] start — ${initial.length} card(s) eligible`);
+        this.loadNextWalkthroughCard();
+    }
+
+    /**
+     * Re-scan the CURRENT doc (not a cached snapshot) for cards eligible for
+     * walkthrough generation: not header, has non-empty prompt, has empty
+     * content. Fresh on every call → survives load-state rebuilds.
+     */
+    _collectUnresolvedCards() {
+        if (!this.currentDoc) return [];
+        return this.currentDoc.getAllCards().filter(c =>
+            c.kind !== 'header'
+            && (c.prompt && c.prompt.trim().length > 0)
+            && (!c.content || !c.content.trim().length)
+        );
+    }
+
+    /**
+     * Re-scan and pick the next eligible card, hydrate the editor, fire SEND.
+     * Closes out the walkthrough if no eligible cards remain or if the user
+     * navigated away from the doc we started in.
+     */
+    loadNextWalkthroughCard() {
+        if (!this.walkthroughActive) return;
+
+        // Bail if the user navigated to a different doc mid-walkthrough.
+        if (!this.currentDoc || this.currentDoc.id !== this.walkthroughDocId) {
+            console.warn('[walkthrough] doc changed mid-walkthrough — aborting');
+            this.endWalkthrough({ aborted: true });
+            return;
+        }
+
+        const remaining = this._collectUnresolvedCards();
+        if (remaining.length === 0) {
+            this.endWalkthrough({ completed: true });
+            return;
+        }
+        const card = remaining[0];
+        const completed = this.walkthroughTotal - remaining.length;
+        const positionLabel = `${completed + 1}/${this.walkthroughTotal}`;
+        console.log(`[walkthrough] loading ${positionLabel}: "${card.title}" (${remaining.length} remaining); prompt.len=${(card.prompt || '').length}`);
+
+        // Force cardType=code before loadCardForEdit so its isCode check
+        // matches the codeMode we're about to set, instead of toggling
+        // codeMode OFF on us (and silently switching to markdown system
+        // prompt). All synchronous — no dynamic import — to avoid any
+        // microtask race where state-changed echoes could shuffle things
+        // between hydration and SEND.
+        try {
+            card.cardType = CARD_TYPE_CODE;
+            if (!this.chatManager.codeMode) this.toggleCodeMode();
+            this.chatManager.loadCardForEdit(card);
+        } catch (err) {
+            console.error('[walkthrough] loadCardForEdit threw:', err);
+            this.endWalkthrough({ aborted: true });
+            return;
+        }
+
+        // Sanity check: after loadCardForEdit the prompt editor MUST contain
+        // card.prompt — otherwise askAI will pop the "Type a prompt before
+        // clicking SEND" alert and the walkthrough will appear to hang.
+        const editorText = this.chatManager.promptEditor
+            ? this.chatManager.promptEditor.state.doc.toString()
+            : '';
+        if (!editorText.trim()) {
+            console.error(`[walkthrough] prompt editor is empty after loadCardForEdit for "${card.title}" (card.prompt.len=${(card.prompt || '').length}). Aborting walkthrough to avoid hang.`);
+            this.endWalkthrough({ aborted: true });
+            return;
+        }
+
+        const status = document.getElementById('status-bar-project');
+        if (status) status.textContent = `Walkthrough ${positionLabel}: ${card.title} — review & approve.`;
+
+        this.chatManager.askAI();
+    }
+
+    /**
+     * Called from ChatManager.addToDoc on a successful commit. Returns true if
+     * we consumed the event (advanced to next or completed), false otherwise.
+     */
+    advanceWalkthrough() {
+        if (!this.walkthroughActive) return false;
+        // Tiny defer so the previous card's commit settles before we re-mount
+        // the editor for the next card.
+        setTimeout(() => this.loadNextWalkthroughCard(), 0);
+        return true;
+    }
+
+    /**
+     * Tear down walkthrough state. Called on completion, on abort via
+     * cancelEdit/EXIT EDIT, and defensively on doc switch.
+     */
+    endWalkthrough({ completed = false, aborted = false } = {}) {
+        const wasActive = this.walkthroughActive;
+        const total = this.walkthroughTotal || 0;
+        this.walkthroughActive = false;
+        this.walkthroughDocId = null;
+        document.body.classList.remove('slate-walkthrough-active');
+        const status = document.getElementById('status-bar-project');
+        if (status) {
+            if (completed) status.textContent = `Walkthrough complete (${total} cards).`;
+            else if (aborted) status.textContent = `Walkthrough aborted.`;
+        }
+        console.log(`[walkthrough] end — completed=${completed}, aborted=${aborted}, total=${total}`);
+        // Drain any deferred host rehydrate. If it's just an echo of what we
+        // last sent, drop it; otherwise reapply so we stay in sync with disk.
+        if (this._pendingLoadState) {
+            const pending = this._pendingLoadState;
+            this._pendingLoadState = null;
+            if (!this._lastSentState || pending !== this._lastSentState) {
+                try {
+                    this.loadProjectFromJson(JSON.parse(pending));
+                } catch (err) {
+                    console.warn('endWalkthrough: deferred load-state invalid:', err);
+                }
+            }
+        }
+        if (wasActive && completed) {
+            // Don't await — alert just notifies; user already saw cards land.
+            this.modal.alert(`Walkthrough complete — generated ${total} cards.`);
+        }
+    }
+
     async compileCurrentDoc() {
         if (!this.currentDoc) {
             await this.modal.alert("No document to compile.");
@@ -705,7 +884,7 @@ class MainManager {
                    style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2); margin-bottom: 12px;"
                    value="${currentLocalBaseURL}">
             <label style="display: block; margin-bottom: 4px; font-size: small;">Local model name</label>
-            <input type="text" id="local_model_name_input" placeholder="qwen2.5-coder:30b"
+            <input type="text" id="local_model_name_input" placeholder="qwen3-coder:30b"
                    style="width: 100%; padding: 8px; font-family: 'Courier New', monospace; font-size: small; background: var(--background); color: var(--primary-text); border: 1px solid var(--information-2);"
                    value="${currentLocalModel}">
             <p style="margin-top: 10px; font-size: x-small;">Keys are stored locally in your browser. For local models via Ollama, run <code>OLLAMA_ORIGINS='*' ollama serve</code> so the browser can reach it.</p>
@@ -901,6 +1080,9 @@ class MainManager {
             if (!this.currentProject) return;
             try {
                 const json = JSON.stringify(this.currentProject.toJSON(), null, 2);
+                // Remember exactly what we shipped so the load-state echo that
+                // the custom editor will fire right back can be suppressed.
+                this._lastSentState = json;
                 window.__slateVscode.postMessage({ type: 'state-changed', state: json });
             } catch (err) {
                 console.warn('Failed to serialize project for host:', err);
@@ -990,6 +1172,17 @@ class MainManager {
 
 
     mapButtons() {
+        // Hide browser-only chrome when slate is hosted inside VS Code. The
+        // *.slate.json file IS the project on the VS Code surface — IMPORT,
+        // EXPORT, ABOUT, and FEEDBACK only make sense for the standalone
+        // web/GitHub-Pages surface where there's no host filesystem.
+        if (isRunningInVsCode()) {
+            for (const id of ['import_btn', 'export_btn', 'about_btn', 'feedback_btn']) {
+                const el = this.buttons[id];
+                if (el) el.style.display = 'none';
+            }
+        }
+
         this.buttons.resetZoom.addEventListener("click", () => this.resetZoom());
         this.buttons.summary_btn.addEventListener("click", () => this.summary_btn());
         this.buttons.add_doc.addEventListener("click", () => this.addDocButton());
@@ -1004,6 +1197,9 @@ class MainManager {
         }
         if (this.buttons.rehydrate_btn) {
             this.buttons.rehydrate_btn.addEventListener("click", () => this.rehydrateCurrentDoc());
+        }
+        if (this.buttons.generate_all_btn) {
+            this.buttons.generate_all_btn.addEventListener("click", () => this.startGenerateWalkthrough());
         }
         if (this.buttons.exit_edit) {
             this.buttons.exit_edit.addEventListener("click", () => this.chatManager.cancelEdit());

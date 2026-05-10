@@ -31,10 +31,34 @@ export function isValidCardKind(kind) {
 
 export function stripPythonFences(text) {
     if (!text) return "";
-    // Match ```python ... ``` or ``` ... ``` and return inner content if present.
-    const fenced = text.match(/```(?:python|py)?\s*\n?([\s\S]*?)```/i);
-    if (fenced) return fenced[1].trimEnd();
-    return text;
+    // Local code models (Qwen, Llama, etc.) often ignore "no fences" in the
+    // system prompt and return:
+    //   <prose intro>
+    //   ```python
+    //   <the actual code we want>
+    //   ```
+    //   <prose explanation, bullet points, more fenced examples>
+    //
+    // Strategy: collect ALL fenced blocks. If any are explicitly tagged
+    // python/py, prefer those (concatenated in order). Otherwise fall back
+    // to all fenced blocks. If there are no fences at all, the response is
+    // already raw — return it untouched. This is much more aggressive than
+    // the old "first fenced block" extractor, which silently kept the
+    // surrounding prose any time the model added an outer header line.
+    const fenceRe = /```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)```/g;
+    const blocks = [];
+    let m;
+    while ((m = fenceRe.exec(text)) !== null) {
+        blocks.push({ lang: (m[1] || '').toLowerCase(), body: m[2] });
+    }
+    if (blocks.length === 0) return text;
+    // Prefer the FIRST python-tagged block (that's the answer); usage /
+    // example blocks come after. If nothing is tagged python, take the first
+    // block. Multi-block selection caused us to glue example code onto the
+    // real function body — see #fence-stripping bug from the walkthrough.
+    const firstPy = blocks.find(b => b.lang === 'python' || b.lang === 'py');
+    const chosen = firstPy || blocks[0];
+    return chosen.body.trimEnd();
 }
 
 export function escapeHtml(text) {

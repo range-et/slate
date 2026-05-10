@@ -129,6 +129,10 @@ export class ChatManager {
      */
     cancelEdit() {
         if (!this.editingCard) return;
+        // EXIT EDIT also bails out of an in-progress GENERATE ALL walkthrough.
+        if (window.mainManager && window.mainManager.walkthroughActive) {
+            window.mainManager.endWalkthrough({ aborted: true });
+        }
         this.clearAll();
     }
 
@@ -515,15 +519,60 @@ export class ChatManager {
 
         // Resolve which agent to use. Code cards prefer the local agent if one is configured.
         const agent = this.resolveAgentFor(codeMode);
-        const codeSystemPrompt = `Output only valid Python source for one symbol named \`${cardTitle}\`. No prose, no markdown fences, no triple backticks, no commentary. The output will be saved as the body of \`${cardTitle}\` in \`${docTitle}.py\`. Reference any \`# from <doc>: <name>\` blocks above as if they were already importable.`;
+        // Heavy-handed on purpose — small local code models (Qwen, Llama,
+        // CodeGemma) routinely ignore soft "no markdown" instructions and
+        // wrap their answer in ```python … ``` plus prose. We strip fences
+        // defensively after the fact (stripPythonFences), but the cleaner
+        // the raw response, the cleaner the saved card.
+        const codeSystemPrompt = [
+            `You are writing one Python symbol named \`${cardTitle}\` for the file \`${docTitle}.py\`.`,
+            `Output ONLY raw Python source. The very first character of your reply must be a Python keyword (\`def\`, \`class\`, \`import\`, \`from\`, \`@\`, or \`#\`).`,
+            `Do NOT write any prose before, between, or after the code.`,
+            `Do NOT wrap the code in triple backticks (no \`\`\`python, no \`\`\`).`,
+            `Do NOT add usage examples or explanations.`,
+            `If you need to reference symbols mentioned as \`# from <doc>: <name>\` in the user message, treat them as already imported in scope.`,
+        ].join(' ');
         const generateOptions = codeMode ? { systemPrompt: codeSystemPrompt } : {};
 
         this.disposeResponseEditor();
-        this.chatContent.innerHTML = '<div class="loading-text">Waiting for response...</div>';
+        this.chatContent.innerHTML = '<div class="loading-text">Streaming response…</div>';
 
-        agent.generateResponse(fullPrompt, this.attachedImages, generateOptions).then((res) => {
-            const text = codeMode ? stripPythonFences(res).trim() : (res || '');
-            this.renderResponseEditor(text, { isCode: codeMode });
+        // Mount the editor empty so we can append tokens live as they arrive.
+        // For code-mode we still strip fences, but only at the very end — during
+        // streaming we just append raw deltas so the user sees forward progress.
+        const useStreaming = typeof agent.generateResponseStream === 'function';
+        let editorMounted = false;
+        const ensureEditor = () => {
+            if (editorMounted) return;
+            this.renderResponseEditor('', { isCode: codeMode });
+            editorMounted = true;
+        };
+        const onToken = (delta) => {
+            ensureEditor();
+            if (!this.responseEditor) return;
+            // Append at the end of the doc.
+            const view = this.responseEditor;
+            const end = view.state.doc.length;
+            view.dispatch({ changes: { from: end, to: end, insert: delta } });
+        };
+
+        const generation = useStreaming
+            ? agent.generateResponseStream(fullPrompt, this.attachedImages, generateOptions, onToken)
+            : agent.generateResponse(fullPrompt, this.attachedImages, generateOptions);
+
+        generation.then((res) => {
+            const text = codeMode ? stripPythonFences(res || '').trim() : (res || '');
+            // For non-streaming agents this is the first time we see the text.
+            // For streaming code-mode, replace the editor contents with the
+            // fence-stripped final text so the saved card is clean Python.
+            if (!editorMounted) {
+                this.renderResponseEditor(text, { isCode: codeMode });
+            } else if (codeMode) {
+                const view = this.responseEditor;
+                if (view) {
+                    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+                }
+            }
         }).catch(async (err) => {
             console.error("Error generating response:", err);
 
@@ -591,6 +640,14 @@ export class ChatManager {
      */
     async generateDocSummary() {
         if (!this.currentDoc || this.currentDoc.getCardCount() === 0) {
+            return;
+        }
+        // Skip while GENERATE ALL is running. The summary kicks off a SECOND
+        // long-lived AI request after every ADD TO DOC commit, hogs the local
+        // model, and contends with the next walkthrough card's generation —
+        // sometimes failing in ways that interrupt the walkthrough state. The
+        // user can re-run SUMMARY manually once the walkthrough finishes.
+        if (window.mainManager && window.mainManager.walkthroughActive) {
             return;
         }
 
@@ -702,6 +759,10 @@ export class ChatManager {
                 this.generateDocSummary();
                 this.clearAll();
                 console.log("Card updated in place:", card.id);
+                // GENERATE ALL walkthrough: advance to the next unresolved card.
+                if (window.mainManager && typeof window.mainManager.advanceWalkthrough === 'function') {
+                    window.mainManager.advanceWalkthrough();
+                }
                 return;
             }
 
