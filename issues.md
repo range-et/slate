@@ -659,6 +659,24 @@ issues are ordered by dependency. Each issue lists:
     comment attached to it that has to be done."
   - This is the missing pre-AI half of the workflow. AI handles
     "generate from intent"; stubs handle "remember to come back."
+  - **Open design tension** (user, 2026-05-10): AI is *great* at
+    generating stubs from a one-liner ("I want a CLI calculator"),
+    and the **one-shot scaffold** sub-feature above leans on that.
+    But there's a real argument that letting the AI scaffold defeats
+    Slate's central thesis — the user wrote: "removing that is
+    probably truer to the tool that we are building." If the AI
+    scaffolds for you, you're back in "AI gamble" mode at the
+    planning level, just one rung up from "AI gamble" at the
+    implementation level. The architecture-first / scaffold-then-fill
+    discipline is exactly what Slate is supposed to enforce.
+  - **Recommended resolution** (refine in PR): keep AI scaffolding
+    available but **off the default path**. Stub creation is a
+    first-class human action (typing a signature, paste-from-issues,
+    one-click "add stub"). AI scaffolding lives behind an explicit
+    "scaffold from prompt" command — opt-in, not the surface the
+    user falls into by default. That way Slate's default workflow
+    rewards the discipline; AI scaffold is the escape hatch when
+    you genuinely just want a sketch.
 
 ### #56 Phase E · Load codebase: scan a folder of `.py` files into a Slate project
 - **Scope**: The user keeps switching back to plain VS Code first
