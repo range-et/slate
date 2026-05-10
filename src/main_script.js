@@ -6,7 +6,7 @@ import ChatManager from "./ai_chat.js";
 import generateRandomName from "./random_name_generator.js";
 import { setupCodeMirrorEditor } from "./codemirror_setup.js";
 import { CARD_TYPE_CODE } from "./cards.js";
-import { initCompileCtl } from "./controllers/compile_ctl.js";
+import { initCompileCtl, compileProject as ctlCompileProject } from "./controllers/compile_ctl.js";
 import {
     initDocCtl,
     createDoc as ctlCreateDoc,
@@ -119,8 +119,14 @@ class MainManager {
     }
 
     resetZoom() {
-        this.viz.resetZoom();
-        // Don't call zoomToFit - keeps graph naturally centered
+        // Frame the entire project so the user can see the full graph.
+        // Falls back to a hard reset if the SVG bounds can't be measured
+        // (e.g. before first paint).
+        if (this.viz && typeof this.viz.zoomToFit === 'function') {
+            this.viz.zoomToFit();
+        } else if (this.viz) {
+            this.viz.resetZoom();
+        }
     }
 
     /* ─── thin shims for controller delegation ─────────────────────────── */
@@ -296,13 +302,13 @@ class MainManager {
      * ChatManager.addToDoc on a successful commit.
      */
     async startGenerateWalkthrough() {
-        if (!this.currentDoc) {
-            await this.modal.alert("No document selected.");
+        if (!this.currentProject) {
+            await this.modal.alert("No project loaded.");
             return;
         }
-        const initial = this._collectUnresolvedCards();
+        const initial = this._collectUnresolvedCardsProjectWide();
         if (initial.length === 0) {
-            await this.modal.alert("Nothing to generate — every card with a prompt already has content.");
+            await this.modal.alert("Nothing to generate — every card with a prompt already has content across the entire project.");
             return;
         }
 
@@ -313,16 +319,20 @@ class MainManager {
         }
 
         this.walkthroughActive = true;
-        // We DO NOT cache the card list — the VS Code custom editor auto-saves
-        // every commit, which can echo a `load-state` back and rebuild
-        // currentDoc with fresh Card objects. Any cached queue would then
-        // hold stale refs that don't match anything in the live doc. Instead
-        // we re-scan the current doc each iteration and pick the next
-        // eligible card by identity in the live doc.
+        // Project-wide walkthrough: we re-scan EVERY doc each iteration
+        // (the VS Code custom editor auto-saves on each commit and may
+        // echo `load-state` back, rebuilding card objects with fresh
+        // identities). Caching ids across docs would go stale fast.
         this.walkthroughTotal = initial.length;
-        this.walkthroughDocId = this.currentDoc.id;
+        // walkthroughDocId is now used as a "doc we are currently
+        // processing" pointer, not a "lock to one doc" sentinel. Cleared
+        // per-iteration in loadNextWalkthroughCard via the expected-doc
+        // gate. This lets the walkthrough programmatically switch docs
+        // without tripping the abort check.
+        this.walkthroughDocId = null;
+        this._walkthroughExpectedDocId = null;
         document.body.classList.add('slate-walkthrough-active');
-        console.log(`[walkthrough] start — ${initial.length} card(s) eligible`);
+        console.log(`[walkthrough] start (project-wide) — ${initial.length} card(s) eligible across all docs`);
         this.loadNextWalkthroughCard();
     }
 
@@ -341,26 +351,67 @@ class MainManager {
     }
 
     /**
+     * Project-wide variant: walk every doc in document order and collect
+     * every card that's eligible for walkthrough generation. Returns a
+     * flat array of `{ doc, card }` pairs so the caller can switch the
+     * active doc as it advances. Order is `getAllDocs()` order × in-doc
+     * card order — matches what the user sees in the graph view.
+     */
+    _collectUnresolvedCardsProjectWide() {
+        if (!this.currentProject) return [];
+        const out = [];
+        for (const doc of this.currentProject.getAllDocs()) {
+            for (const card of doc.getAllCards()) {
+                if (card.kind === 'header') continue;
+                if (!card.prompt || !card.prompt.trim().length) continue;
+                if (card.content && card.content.trim().length) continue;
+                out.push({ doc, card });
+            }
+        }
+        return out;
+    }
+
+    /**
      * Re-scan and pick the next eligible card, hydrate the editor, fire SEND.
-     * Closes out the walkthrough if no eligible cards remain or if the user
-     * navigated away from the doc we started in.
+     * Closes out the walkthrough if no eligible cards remain. Cross-doc:
+     * if the next eligible card lives in a different doc than the
+     * currently-active one, this method will programmatically switch
+     * docs (suppressing the user-doc-change abort) before loading it.
      */
     loadNextWalkthroughCard() {
         if (!this.walkthroughActive) return;
 
-        // Bail if the user navigated to a different doc mid-walkthrough.
-        if (!this.currentDoc || this.currentDoc.id !== this.walkthroughDocId) {
-            console.warn('[walkthrough] doc changed mid-walkthrough — aborting');
+        // If we're inside an iteration (an expected doc was set last
+        // round), confirm the user didn't navigate away mid-flight.
+        if (this._walkthroughExpectedDocId
+            && this.currentDoc
+            && this.currentDoc.id !== this._walkthroughExpectedDocId) {
+            console.warn('[walkthrough] doc changed mid-walkthrough by user — aborting');
             this.endWalkthrough({ aborted: true });
             return;
         }
 
-        const remaining = this._collectUnresolvedCards();
+        const remaining = this._collectUnresolvedCardsProjectWide();
         if (remaining.length === 0) {
             this.endWalkthrough({ completed: true });
             return;
         }
-        const card = remaining[0];
+        const { doc: targetDoc, card } = remaining[0];
+
+        // Cross-doc hop: if the next eligible card lives in another doc,
+        // switch the active doc programmatically. switchToDoc() rebuilds
+        // the editor + chat state; record the new expected id BEFORE the
+        // switch so the abort check above accepts it on next iteration.
+        if (!this.currentDoc || this.currentDoc.id !== targetDoc.id) {
+            console.log(`[walkthrough] switching doc → "${targetDoc.title}" for next card "${card.title}"`);
+            this._walkthroughExpectedDocId = targetDoc.id;
+            this.walkthroughDocId = targetDoc.id;
+            this.switchToDoc(targetDoc);
+        } else {
+            // Already on the right doc — just record the expectation.
+            this._walkthroughExpectedDocId = targetDoc.id;
+            this.walkthroughDocId = targetDoc.id;
+        }
         const completed = this.walkthroughTotal - remaining.length;
         const positionLabel = `${completed + 1}/${this.walkthroughTotal}`;
         console.log(`[walkthrough] loading ${positionLabel}: "${card.title}" (${remaining.length} remaining); prompt.len=${(card.prompt || '').length}`);
@@ -420,6 +471,7 @@ class MainManager {
         const total = this.walkthroughTotal || 0;
         this.walkthroughActive = false;
         this.walkthroughDocId = null;
+        this._walkthroughExpectedDocId = null;
         document.body.classList.remove('slate-walkthrough-active');
         const status = document.getElementById('status-bar-project');
         if (status) {
@@ -460,6 +512,33 @@ class MainManager {
             doc: this.currentDoc,
             project: this.currentProject,
         });
+    }
+
+    /**
+     * Project-wide compile. Walks every doc in the current project via
+     * compile_ctl.compileProject() and surfaces a single aggregated modal
+     * with per-doc results. The COMPILE ALL button (over the network
+     * panel) calls this. Per-doc compile is still available via the host
+     * bridge `compile-current` message.
+     */
+    compileProject() {
+        if (!this.currentProject) {
+            this.modal.alert("No project to compile.");
+            return;
+        }
+        const result = ctlCompileProject(this.currentProject);
+        const lines = result.results.map(r => {
+            if (r.ok) {
+                const dest = r.destination ? `${r.destination}/${r.filename}` : r.filename;
+                const where = r.delivery === 'vscode' ? 'workspace' : 'download';
+                return `✓ ${r.docTitle} → ${dest} (${where})`;
+            }
+            return `✗ ${r.docTitle}: ${r.error}`;
+        });
+        const head = result.ok
+            ? `Compiled ${result.succeeded}/${result.results.length} doc(s) successfully.`
+            : `Compile finished: ${result.succeeded} ok, ${result.failed} failed.`;
+        this.modal.alert(`${head}\n\n${lines.join('\n')}`);
     }
 
     /**
@@ -645,7 +724,9 @@ class MainManager {
         // ESC-to-cancel binding all live in the prompt_bar applet now;
         // mountPromptBar() in init() owns those listeners.
         if (this.buttons.compile_btn) {
-            this.buttons.compile_btn.addEventListener("click", () => this.compileCurrentDoc());
+            // COMPILE ALL — project-wide. Per-doc compile is still
+            // available via the host bridge `compile-current` message.
+            this.buttons.compile_btn.addEventListener("click", () => this.compileProject());
         }
         if (this.buttons.rehydrate_btn) {
             this.buttons.rehydrate_btn.addEventListener("click", () => this.rehydrateCurrentDoc());

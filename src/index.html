@@ -86,8 +86,6 @@
                         <span class="doc_path_ext">.py</span>
                     </div>
                     <div class="doc_heading_row doc_heading_actions">
-                        <button class="info_btn" id="generate_all_btn" title="Walk the doc top-to-bottom: auto-load each empty card's prompt, generate, you approve with ADD TO DOC, repeat">GENERATE ALL</button>
-                        <button class="info_btn" id="compile_btn" title="Compile this doc's code cards into a .py file">COMPILE</button>
                         <button class="info_btn" id="rehydrate_btn" title="Re-read the compiled .py file from disk and update this doc's code cards">REHYDRATE</button>
                     </div>
                 </div>
@@ -101,7 +99,9 @@
                 <div class="panel-header network_heading">
                     <h4>Project</h4>
                     <input type="text" id="project_title_input" placeholder="untitled project" maxlength="100">
-                    <button class="info_btn" id="resetZoom">RESET ZOOM</button>
+                    <button class="info_btn" id="generate_all_btn" title="Walk every doc in the project top-to-bottom: auto-load each empty card's prompt, generate, you approve with ADD TO DOC, repeat. Switches docs as needed.">GENERATE ALL</button>
+                    <button class="info_btn" id="compile_btn" title="Compile every doc in the project into its .py file">COMPILE ALL</button>
+                    <button class="info_btn" id="resetZoom" title="Frame the entire project graph">FIT</button>
                 </div>
                 <!-- SVG appended here by NetworkViz -->
             </div>

@@ -278,7 +278,8 @@ export function composeCodeSystemPrompt(cardTitle, docTitle) {
         `Do NOT add usage examples or explanations.`,
         `If you need to reference symbols mentioned as \`# from <doc>: <name>\` in the user message, treat them as already imported in scope.`,
         // (#50) Two-section schema. Optional second section.
-        `If — and ONLY if — your function needs new module-scope additions (a new import, a new typing alias, a new module-level constant) that the doc header does not already contain, append a single separator line \`# @slate:header-additions\` after your function/class body, then list ONLY those additions on the lines below it (one per line, no comments other than the marker itself, no blank lines).`,
+        `If — and ONLY if — your function needs new module-scope additions (a new import, a new typing alias, a new module-level constant literal) that the doc header does not already contain, append a single separator line \`# @slate:header-additions\` after your function/class body, then list ONLY those additions on the lines below it (one per line, no comments other than the marker itself, no blank lines).`,
+        `Header additions MUST be self-contained: imports, type aliases, or literal-value constants only. NEVER emit a header addition that references another function or value defined elsewhere in this file (e.g. \`OPS["+"] = add\` or \`HANDLERS = [foo, bar]\`) — those run at module import time, BEFORE the body symbols exist, and will crash the file. Wire-up code like that belongs inside an init function (often \`register_*()\`) that the entry point calls explicitly.`,
         `If you do not need any new module-scope additions, OMIT the marker entirely and emit only the function body.`,
         `Never repeat lines that already appear in the auto-included doc header — only emit additions that are genuinely new.`,
     ].join(' ');

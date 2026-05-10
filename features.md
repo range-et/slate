@@ -432,6 +432,67 @@ without churn.
   single chunk for now; per-target chunk splitting is a Phase D
   concern.
 
+### Project-wide GENERATE ALL & COMPILE ALL + zoom-to-fit + hardened header-additions
+- **Scope**: Three project-scope improvements bundled together because
+  they all live behind the network panel and reframe what "all" means
+  in Slate's compile/generate verbs. Plus a model-behavior fix for the
+  bug the user hit on the calculator example: `operations.py` had
+  `OPS["+"] = add` at module top, before `add` was defined, because
+  #50's header-additions schema let the model emit forward-referencing
+  module-scope statements.
+- **Files**:
+  - [src/index.html](src/index.html) — `GENERATE ALL` and the renamed
+    `COMPILE ALL` (was `COMPILE`) live on the network/project panel
+    header now, alongside `FIT` (renamed from `RESET ZOOM`). `REHYDRATE`
+    stays on the doc heading because it's still a per-doc disk read.
+  - [src/main_script.js](src/main_script.js):
+    - `resetZoom()` now calls `viz.zoomToFit()` instead of just
+      re-centering — clicking `FIT` frames the entire project graph.
+    - New `compileProject()` walks every doc in the current project via
+      `compileProject(project)` and surfaces a single aggregated modal
+      (per-doc `✓ docTitle → path (workspace|download)` lines, or `✗`
+      lines on failure).
+    - `startGenerateWalkthrough()` is project-wide. New
+      `_collectUnresolvedCardsProjectWide()` returns `[{doc, card}, …]`
+      pairs across every doc in `getAllDocs()` order. The walkthrough
+      now hops docs by calling `switchToDoc(targetDoc)` between cards;
+      a new `_walkthroughExpectedDocId` gate distinguishes our own
+      programmatic switches from a user-initiated nav (which still
+      aborts).
+    - `compileCurrentDoc()` is preserved for the host-bridge
+      `compile-current` message; the toolbar button no longer calls it.
+  - [src/controllers/compile_ctl.js](src/controllers/compile_ctl.js) —
+    new `compileProject(project)` returning
+    `{ ok, succeeded, failed, results }`. Walks every doc, runs
+    `compileDoc()` per doc, never throws, returns aggregate.
+  - [src/controllers/chat_ctl.js](src/controllers/chat_ctl.js) —
+    `composeCodeSystemPrompt()` now explicitly forbids forward-ref
+    module-scope statements in the header-additions section. The model
+    is told to put wire-up code (`OPS["+"] = add`, `HANDLERS = [a, b]`)
+    inside an init function the entry point calls, NOT at module top.
+- **Acceptance**:
+  - `FIT` button frames the entire project; works after pan/zoom into
+    any node. ✓
+  - `COMPILE ALL` writes/downloads every doc's `.py` and shows one
+    aggregated modal listing each result. ✓
+  - `GENERATE ALL` walks every empty-prompted card across every doc,
+    switching docs as it advances. User-initiated doc navigation
+    mid-walkthrough still aborts cleanly (the expected-doc gate
+    distinguishes our own switches from a user-driven one). ✓
+  - Model is steered away from forward-ref module-scope additions; the
+    next regen of `operations.py` from a clean header should not
+    re-emit `OPS["+"] = add` at top of file. ✓ (Best-effort — model
+    behavior, not a hard guarantee.)
+  - Build green.
+- **Resolved:** 2026-05-10 — bundled
+- **Notes:** Calculator's `operations.py` artifact in the repo is
+  intentionally left at its current state; user regenerates it by
+  editing the header to drop the bad additions and hitting COMPILE
+  ALL. Per-doc COMPILE removed from the doc heading on purpose — the
+  user explicitly wanted the verb-of-scope to live with the project
+  view. If a per-doc compile button is needed later, it can be added
+  back as an applet without re-tangling `compile_ctl`.
+
 ### `summarize_header` applet — bring SUMMARY back as a header docstring
 - **Scope**: #51 dropped the standalone SUMMARY field on `Doc`, but the
   capability was useful — losing it entirely was overkill. This restores

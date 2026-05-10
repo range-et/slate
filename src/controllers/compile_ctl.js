@@ -62,6 +62,46 @@ export function compileDoc(doc, project) {
 }
 
 /**
+ * Compile every doc in a project. Walks `project.getAllDocs()` and
+ * runs `compileDoc()` once per doc, ignoring docs that have no compile
+ * target (filename-less, or zero-cards) but reporting the rest.
+ *
+ * @param {object} project — must expose getAllDocs()
+ * @returns {{
+ *   ok: boolean,                  // true iff EVERY doc compiled cleanly
+ *   results: Array<{
+ *     docTitle: string,
+ *     ok: boolean,
+ *     filename?: string,
+ *     destination?: string,
+ *     warnings?: string[],
+ *     delivery?: string,
+ *     error?: string,
+ *   }>,
+ *   succeeded: number,
+ *   failed: number,
+ * }}
+ */
+export function compileProject(project) {
+    const out = { ok: true, results: [], succeeded: 0, failed: 0 };
+    if (!project || typeof project.getAllDocs !== 'function') {
+        return { ...out, ok: false, results: [{ docTitle: '(none)', ok: false, error: 'No project to compile.' }], failed: 1 };
+    }
+    const docs = project.getAllDocs() || [];
+    if (docs.length === 0) {
+        return { ...out, ok: false, results: [{ docTitle: '(empty)', ok: false, error: 'Project has no documents.' }], failed: 1 };
+    }
+    for (const doc of docs) {
+        const r = compileDoc(doc, project);
+        const entry = { docTitle: doc.title, ...r };
+        out.results.push(entry);
+        if (r.ok) out.succeeded += 1;
+        else { out.failed += 1; out.ok = false; }
+    }
+    return out;
+}
+
+/**
  * Wire `compile:requested` → compile → `compile:succeeded` / `compile:failed`.
  * Idempotent: safe to call from any bootstrap that happens to run twice.
  */
