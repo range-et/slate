@@ -13,6 +13,7 @@
     "serve": "vite preview --host",
     "test": "npm run ensure-config && vitest run",
     "test:watch": "npm run ensure-config && vitest",
+    "slate:roundtrip": "node scripts/slate_roundtrip.js",
     "package-extension": "node scripts/package-extension.js"
   },
   "keywords": [],

@@ -1,9 +1,13 @@
 class Modal {
     constructor() {
-        this.overlay = document.getElementById("overlay");
-        this.modal = document.getElementById("modal");
-        this.modalContent = document.getElementById("modal-content");
-        this.modalActions = document.getElementById("modal-actions");
+        // Pure-node CLI / scripts may not have a `document` global at all
+        // (only jsdom + browser do). Treat that the same as "headless,
+        // no overlay" — every public method already noops on missing DOM.
+        const doc = (typeof document !== 'undefined') ? document : null;
+        this.overlay = doc ? doc.getElementById("overlay") : null;
+        this.modal = doc ? doc.getElementById("modal") : null;
+        this.modalContent = doc ? doc.getElementById("modal-content") : null;
+        this.modalActions = doc ? doc.getElementById("modal-actions") : null;
 
         // Headless mode (vitest, node) — no overlay element exists.
         // Skip the click handler + initial hide(); show()/hide()/alert()

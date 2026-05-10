@@ -43,13 +43,20 @@
       }
     ],
     "commands": [
-      { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
-      { "command": "slate.newProject", "title": "Slate: New Project…" },
-      { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
-      { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
-      { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
+    { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
+    { "command": "slate.newProject", "title": "Slate: New Project…" },
+    { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
+    { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
+    { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
+    ],
+    "grammars": [
+    {
+    "scopeName": "slate.python.annotations.injection",
+    "path": "./syntaxes/slate-annotations.injection.json",
+    "injectTo": ["source.python"]
+    }
     ]
-  },
+    },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./ && node -e \"require('fs').copyFileSync('src/state-bridge.js','out/state-bridge.js')\"",

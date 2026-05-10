@@ -1,18 +1,5 @@
 import { CARD_TYPE_CODE, CARD_KIND_HEADER } from './cards.js';
-
-/**
- * Format a card's prompt as Python comment lines so the compiled file is
- * self-documenting. Empty / missing prompt → returns an empty string (no
- * trailing newline so the caller controls spacing).
- */
-function formatPromptAsComment(prompt) {
-    if (!prompt || !String(prompt).trim()) return '';
-    const lines = String(prompt).replace(/\r\n/g, '\n').split('\n');
-    return [
-        '# ─── prompt ───',
-        ...lines.map(l => l.length ? `# ${l}` : '#'),
-    ].join('\n');
-}
+import { emitAnnotation } from './slate_annotations.js';
 
 const PY_KEYWORDS = new Set([
     'False','None','True','and','as','assert','async','await','break','class','continue',
@@ -235,7 +222,7 @@ export function compileDocToPython(doc, project) {
                 inlineImportOrder.push(imp);
             }
         }
-        cleanedBodies.push({ body: cleaned, prompt: card.prompt || '', title: card.title });
+        cleanedBodies.push({ body: cleaned, card });
     });
 
     // Build the file.
@@ -264,18 +251,22 @@ export function compileDocToPython(doc, project) {
 
     // 3) Header card prelude (constants, type aliases, module docstring) —
     //    everything left after import-hoisting goes here, before any function.
-    if (headerBody && headerBody.trim().length > 0) {
-        lines.push(headerBody);
+    //    Annotated with `## @slate ...` so the rehydrate path (issue #53)
+    //    can recover the header card by id even after edits.
+    if (headerCard && (headerBody.trim().length > 0 || (headerCard.prompt || '').trim().length > 0)) {
+        lines.push(emitAnnotation(headerCard, doc));
+        if (headerBody.trim().length > 0) {
+            lines.push(headerBody);
+        }
         lines.push('');
     }
 
-    // 4) Card bodies, each prefixed by its prompt as comments.
-    cleanedBodies.forEach(({ body, prompt }, idx) => {
+    // 4) Card bodies, each preceded by its `## @slate ...` annotation block
+    //    so compile → rehydrate → compile is a fixed point and edits made
+    //    in `.py` (e.g. to `## prompt:`) round-trip back into the card.
+    cleanedBodies.forEach(({ body, card }, idx) => {
         if (idx > 0) lines.push('');  // blank line between symbols (one extra → two blank lines total)
-        const promptComment = formatPromptAsComment(prompt);
-        if (promptComment) {
-            lines.push(promptComment);
-        }
+        lines.push(emitAnnotation(card, doc));
         if (body.length > 0) lines.push(body);
     });
 

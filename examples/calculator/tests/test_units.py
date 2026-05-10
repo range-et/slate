@@ -22,6 +22,16 @@ CALC_PY = os.path.join(EXAMPLE_ROOT, 'calculator.py')
 def _load(name, path):
     if not os.path.exists(path):
         pytest.skip(f"{path} not yet compiled — run COMPILE on the matching slate doc")
+    # Honor the sys.modules cache so calling _load_all() multiple times
+    # (e.g. once per test, or twice inside one test) returns the SAME
+    # module object. Without this, each call exec_module()s a fresh
+    # `operations` module with its own brand-new OPS dict, and any
+    # reference to a previously-loaded `calculator.OPS` ends up pointing
+    # at a stale operations instance — exactly what made
+    # test_calc_imports_from_ops flake.
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -99,10 +109,11 @@ def test_calc_imports_from_ops():
     header AND that the OPS/register_ops/apply_operation symbols actually
     live in operations.py.
     """
-    _, calc = _load_all()
+    # One _load_all() — both modules from the same load cycle so
+    # `calc.OPS` and `ops.OPS` are guaranteed to be the same object.
+    ops, calc = _load_all()
     # Whatever `from operations import ...` resolved to should be the
     # exact same objects the operations module exports.
-    ops, _ = _load_all()
     assert calc.OPS is ops.OPS
     assert calc.register_ops is ops.register_ops
     assert calc.apply_operation is ops.apply_operation

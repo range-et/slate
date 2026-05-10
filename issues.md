@@ -108,31 +108,23 @@ issues are ordered by dependency. Each issue lists:
 - **Blocks**: #11, #12, #13
 - **Files**: `src/cards.js`, `src/migrations.js`
 
-### #11 Compiler emits `# @slate:` annotations
-- **Scope**: Python compiler (still `code_compile.js` at this point)
-  emits per-card header block: `# @slate: card=<title> doc=<title> frozen=<bool>`,
-  `# @slate-meta: model=... generated_at=... iterations=N`, and
-  `# @slate-prompt: |` + indented prompt lines. Reserve `# @slate*` namespace:
-  collisions in card source escaped to `# (was-@slate)`.
-- **Acceptance**:
-  - Compile a doc with one frozen + one unfrozen code card: output has the
-    annotation block above each function.
-  - A card whose source contains `# @slate: foo` produces output with
-    `# (was-@slate): foo`.
-- **Blocks**: #12 (header card prepend), v0.3 `.py` import
-- **Files**: `src/code_compile.js`
-
-### #12 Compiler prepends header card source
-- **Scope**: After the file banner, before extracted imports, emit the
-  header card's source verbatim (with a `# === slate header ===` separator
-  comment). Header card is not part of the topological body card list.
-- **Acceptance**:
-  - Doc with header `import numpy as np` and one body card using `np.array`
-    compiles to a file where `import numpy as np` appears above the
-    function.
-  - `python -m py_compile <output>` succeeds.
-- **Blocks**: nothing critical
-- **Files**: `src/code_compile.js`
+### #11 + #12 — superseded by #53 (round-trip annotations)
+- **Status**: **Superseded** on 2026-05-10. The annotation work originally
+  planned here landed under issue #53 (round-trip code edits). See
+  [features.md → #53](features.md#53-phase-e--round-trip-code-edits-from-py-back-into-cards)
+  for the shipped surface (`## @slate id=… kind=… title=… doc=…` +
+  `## prompt:` blocks emitted by the compiler, header card prepended via
+  the same path, parser in [src/slate_annotations.js](src/slate_annotations.js)).
+- The original `# @slate-meta:` `model=… generated_at=… iterations=N` fields
+  from #11 were not implemented because they belong to the freeze loop
+  (#16–#19), which hasn't shipped. When freeze lands, extend
+  `emitAnnotation` in [src/slate_annotations.js](src/slate_annotations.js)
+  to include those fields — the format already tolerates unknown extra
+  `key=value` pairs (verified by
+  [test/slate_annotations.test.js](test/slate_annotations.test.js)).
+- The `# (was-@slate)` collision-escaping rule from #11 is **not** needed
+  for the chosen `## @slate` (double-hash) prefix, which doesn't collide
+  with anything users normally write.
 
 ---
 
@@ -612,65 +604,24 @@ issues are ordered by dependency. Each issue lists:
   [features.md](features.md#viz-zoom-to-fit-by-default--camera-follow-on-card-edit).
   Cytoscape was the recommended target for long-term graph-algo work.
 
-### #53 Phase E · Round-trip code edits from .py back into cards
-- **Scope**: Editing the compiled .py file on disk and hitting
-  REHYDRATE today only round-trips `def`/`class` bodies (and silently
-  squashes ALL imports onto card 0). The user explicitly called this
-  the main point of friction: "the card to code to code edits back to
-  card needs to be discussed". The proposal is a VS-Studio-style
-  annotation block above each compiled section that carries the
-  card's id + title + prompt as machine-readable metadata, so
-  REHYDRATE can map every edited byte back to the originating card
-  without relying on title-matching (which breaks on rename) and
-  without losing the header card or prompt edits.
-- **Proposed annotation format** (subject to refinement during impl):
-  ```python
-  ## @slate id=card-uuid kind=body title=add doc=operations
-  ## prompt: Return a + b. Pure, no side effects.
-  def add(a: float, b: float) -> float:
-      ...
-  ```
-  - `## @slate ...` is a single-line tag the parser recognizes; rest
-    of the comment block is human-readable and round-trips into the
-    `prompt` field.
-  - For the header card: `## @slate kind=header doc=operations` over
-    the prelude block.
-  - Existing `# ─── prompt ───` separator deprecated in favor of the
-    structured block.
-- **Acceptance**:
-  - Compile emits annotation blocks above every card section
-    (header + body cards).
-  - REHYDRATE parses by id first (rename-safe), then falls back to
-    title for files compiled by older slate versions.
-  - Prompt edits made in the .py file (in the `## prompt:` block)
-    round-trip into the card's `prompt` field.
-  - Header card edits round-trip into the header card's content.
-  - Re-compile of a freshly rehydrated doc produces byte-identical
-    output to the file it was rehydrated from (idempotency check).
-  - Headless test in [test/calculator.test.js](test/calculator.test.js)
-    asserts compile→edit→rehydrate→compile is a fixed point.
-- **Blocks**: nothing immediately; unblocks "edit code in your real
-  editor of choice and never lose context" UX (the original Slate
-  pitch from `motivation.md`).
-- **Files**: `src/code_compile.js`, `src/controllers/card_ctl.js`
-  (rehydrate path), test fixtures, possibly a small `slate_annotations.js`
-  parser/emitter helper to keep both sides honest.
-- **Notes**: This issue is the missing half of #11 (rehydrate). The
-  current rehydrate is ~70% there; this finishes it.
+*#53 (round-trip code edits from .py back into cards) shipped 2026-05-10
+— see [features.md](features.md#53-phase-e--round-trip-code-edits-from-py-back-into-cards).*
 
 ---
 
 ## Tracking
 
-- **Open**: every issue above. **36 of 53 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **33 of 53 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
   #43 chat_ctl + #44 doc/project/card controllers + #51 drop SUMMARY +
   #49 auto-header-context + #50 two-part response schema + #45 Phase C-a
   prompt_bar applet + Phase C-b card_view applets + #46 Phase C-c
   capability-gated applets (feedback_widget / terminal_handoff /
-  landing_tour) — see [features.md](features.md); #48 still open —
-  compile-overwrite modal in slate, not native macOS dialog).
+  landing_tour); phase E shipped: #53 round-trip code edits + the
+  companion VS Code annotation-grammar highlighter (supersedes #11 +
+  #12) — see [features.md](features.md); #48 still open — compile-
+  overwrite modal in slate, not native macOS dialog).
 - **Workflow**: when an issue ships, cut+paste its block into
   [features.md](features.md) and append a `**Resolved:** YYYY-MM-DD —
   <commit-or-PR>` line at the bottom of the block. Do **not** leave shipped

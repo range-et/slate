@@ -97,10 +97,17 @@ class Card {
      */
     getPythonSource() {
         if (this.cardType !== CARD_TYPE_CODE) return null;
+        const raw = this.content || "";
         // Prefer plaintext if content was stored as HTML (innerText path).
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = this.content || "";
-        const plain = tempDiv.innerText || tempDiv.textContent || this.content || "";
+        // Pure-node CLI / scripts (e.g. scripts/slate_roundtrip.js) won't
+        // have a `document` global; in that case `content` is already
+        // plain text from the JSON, so skip the HTML-strip step.
+        let plain = raw;
+        if (typeof document !== 'undefined') {
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = raw;
+            plain = tempDiv.innerText || tempDiv.textContent || raw;
+        }
         return stripPythonFences(plain).trim();
     }
 

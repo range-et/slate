@@ -701,6 +701,121 @@ without churn.
 
 ---
 
+## Phase E · Round-trip + load-codebase
+
+### #53 Phase E · Round-trip code edits from .py back into cards
+- **Scope**: Editing the compiled .py file on disk and hitting REHYDRATE
+  used to only round-trip `def`/`class` bodies (and silently squashed ALL
+  imports onto card 0). The user called this out as the main point of
+  friction: "the card to code to code edits back to card needs to be
+  discussed". This issue lands a VS-Studio-style annotation block above
+  every compiled section that carries the card's id + title + prompt as
+  machine-readable metadata, so REHYDRATE can map every edited byte back
+  to the originating card without relying on title-matching (which breaks
+  on rename) and without losing the header card or prompt edits.
+- **Annotation format** (final, locked):
+  ```python
+  ## @slate id=card-uuid kind=body title=add doc=operations
+  ## prompt: Return a + b. Pure, no side effects.
+  def add(a: float, b: float) -> float:
+      ...
+  ```
+  - `## @slate ...` is a single-line tag the parser recognizes.
+  - `## prompt: ...` lines (one per prompt line) round-trip into the
+    `prompt` field.
+  - Header card uses `kind=header` over the prelude block.
+  - Double-hash `##` chosen to stay out of the way of #50's `# @slate:header-additions`
+    single-hash tag and to be trivial to syntax-highlight in the VS Code
+    extension (see annotation grammar below).
+  - Tag tolerates unknown extra `key=value` pairs → forward-compat with
+    future fields (e.g. `model=`, `frozen=`, `iterations=` from #16–#19
+    when the freeze loop ships).
+- **Acceptance**:
+  - Compile emits annotation blocks above every card section (header +
+    body cards). ✓
+  - REHYDRATE parses by id first (rename-safe), falls back to title for
+    files compiled by older Slate versions; legacy `def`/`class` block
+    scanner still kicks in if no annotations are present at all. ✓
+  - Prompt edits made in the .py file (in the `## prompt:` block)
+    round-trip into the card's `prompt` field. ✓
+  - Header card edits round-trip into the header card's content. Inline
+    imports the user typed by hand survive verbatim. ✓
+  - Re-compile of a freshly rehydrated doc produces **byte-identical**
+    output to the file it was rehydrated from (idempotency check). ✓
+  - Headless tests in [test/slate_annotations.test.js](test/slate_annotations.test.js)
+    (15 unit tests for emitter/parser) and [test/roundtrip.test.js](test/roundtrip.test.js)
+    (compile→rehydrate→compile fixed point on calculator + tic-tac-toe).
+    `npm test` → 62/62 ✓
+  - New CLI: `npm run slate:roundtrip -- <project.slate.json>` proves the
+    fixed point outside the browser/VS Code, suitable for CI on any
+    `.slate.json` project. ✓
+- **Files**:
+  - new [src/slate_annotations.js](src/slate_annotations.js) —
+    `emitAnnotation(card, doc)` + `parseAnnotations(source)`. Pure /
+    synchronous / no DOM. Returns ordered sections with leading
+    `prelude` for the file banner + hoisted imports + cross-doc imports.
+  - new [src/rehydrate.js](src/rehydrate.js) —
+    `autoRefImportLines(targetDoc, project)` + `preludeForHeader(prelude, autoImports)`.
+    Shared between the live UI rehydrate and the CLI so a fixed-point
+    proven by `npm run slate:roundtrip` also holds in the browser /
+    VS Code build.
+  - new [scripts/slate_roundtrip.js](scripts/slate_roundtrip.js) —
+    headless CLI; exits non-zero on any per-doc mismatch.
+  - new [test/slate_annotations.test.js](test/slate_annotations.test.js)
+  - new [test/roundtrip.test.js](test/roundtrip.test.js)
+  - [src/code_compile.js](src/code_compile.js) — emits annotation blocks
+    via `emitAnnotation`; replaces the old `# ─── prompt ───` separator.
+  - [src/controllers/card_ctl.js](src/controllers/card_ctl.js) —
+    `applyAnnotatedRehydrate` (new) + `applyLegacyRehydrate` (preserved
+    for backward compat); folds prelude (minus auto banner + minus
+    auto-emitted ref imports) back into the header card so user-typed
+    inline imports survive the round-trip.
+  - [src/modal.js](src/modal.js) + [src/cards.js](src/cards.js) —
+    headless tolerance for pure-node CLI (`document` may be undefined).
+- **Resolved:** 2026-05-10 — supersedes original #11 + #12.
+- **Notes:**
+  - The byte-identical fixed point depends on `autoRefImportLines`
+    correctly identifying which prelude lines the next compile will
+    auto-emit. If the model later @-references a card by name and that
+    name happens to match a sibling-doc card title, the round-trip
+    will treat it as an auto-import even if the user typed it manually
+    — that's by design (auto wins).
+  - The format is intentionally future-proof: extra `key=value` pairs
+    on the tag line are silently ignored by the parser, so freeze-loop
+    fields (#16–#19) can land later without a parser bump.
+  - Live UI rehydrate also benefits — the existing REHYDRATE button on
+    the doc heading now uses the annotated path automatically; legacy
+    `.py` files (no annotations) still work via the fallback scanner.
+
+### Annotation syntax highlighting in the VS Code extension
+- **Scope**: Tiny TextMate injection grammar contributed by the
+  Slate Code extension that paints `## @slate ...` and `## prompt: ...`
+  lines distinctly inside any open Python file. Makes round-trip
+  annotations visually unmissable when the user opens a compiled
+  `.py` in VS Code.
+- **Files**:
+  - new [vscode-extension/syntaxes/slate-annotations.injection.json](vscode-extension/syntaxes/slate-annotations.injection.json)
+    — grammar rules for the `## @slate id=… kind=… title=… doc=…` tag
+    (key/value pairs) and the `## prompt: …` line.
+  - [vscode-extension/package.json](vscode-extension/package.json) —
+    `contributes.grammars` entry with `injectTo: ["source.python"]` so
+    the grammar lights up in every Python file, no language-mode
+    switch required.
+- **Acceptance**:
+  - Open a Slate-compiled Python file in VS Code (with the extension
+    installed): `## @slate ...` lines are colored as a control keyword
+    + key/value pairs; `## prompt: ...` lines are colored as a
+    docstring-style block. Regular `# ...` Python comments are
+    unaffected.
+  - JSON valid; extension package installs cleanly.
+- **Resolved:** 2026-05-10 — easy-win companion to #53.
+- **Notes:** TextMate injection is the cheapest path; future polish
+  could add hover providers (e.g. "card: add — open in Slate") via a
+  proper LSP-style integration, but that's out of scope until the
+  webview ↔ host bridge for "open card by id" lands (#56-style work).
+
+---
+
 ## Pre-v0.2 (already shipped, for context)
 
 The v0.1 work from [slate-code-plan.md](slate-code-plan.md) is the baseline
@@ -709,7 +824,8 @@ of v0.2 spec start:
 
 - Local Ollama agent (`LocalAgent` in `src/ai_utils.js`)
 - Code card type (`cardType: 'code'`) — to be migrated to `language` (#9)
-- Python compile path (`src/code_compile.js`) — to be moved + extended (#11, #21)
+- Python compile path (`src/code_compile.js`) — round-trip annotations
+  shipped under #53; remaining moves under #21 (target/language registry)
 - VS Code extension shell (`vscode-extension/`) — to be expanded (#20, #22)
 - Doc destination field — to be folded into target system (#21)
 

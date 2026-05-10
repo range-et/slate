@@ -1,0 +1,36 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "scopeName": "slate.python.annotations.injection",
+    "injectionSelector": "L:source.python -comment.block.documentation",
+    "patterns": [
+        { "include": "#slate-tag" },
+        { "include": "#slate-prompt" }
+    ],
+    "repository": {
+        "slate-tag": {
+            "match": "^\\s*(##\\s*@slate)([^\\n]*)$",
+            "captures": {
+                "1": { "name": "keyword.control.slate.annotation.python" },
+                "2": {
+                    "patterns": [
+                        {
+                            "match": "(\\b\\w+)(=)([^\\s]+)",
+                            "captures": {
+                                "1": { "name": "entity.other.attribute-name.slate.python" },
+                                "2": { "name": "punctuation.separator.key-value.slate.python" },
+                                "3": { "name": "string.unquoted.slate.python" }
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        "slate-prompt": {
+            "match": "^\\s*(##\\s*prompt:)(.*)$",
+            "captures": {
+                "1": { "name": "keyword.control.slate.prompt.python" },
+                "2": { "name": "string.quoted.docstring.slate.python" }
+            }
+        }
+    }
+}
