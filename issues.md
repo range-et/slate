@@ -607,11 +607,77 @@ issues are ordered by dependency. Each issue lists:
 *#53 (round-trip code edits from .py back into cards) shipped 2026-05-10
 — see [features.md](features.md#53-phase-e--round-trip-code-edits-from-py-back-into-cards).*
 
+### #54 Phase 0 · Migrate `src/` from JS to TypeScript
+- **Scope**: Slate's main `src/` tree is vanilla ES6+ JS (no types, no
+  linter, no formatter — see [CLAUDE.md](CLAUDE.md)). The VS Code
+  extension at [vscode-extension/](vscode-extension/) is already TS.
+  Slate has reached the size where the lack of type checks is starting
+  to cost real time:
+  - Round-trip work (#53) involved 6+ files coordinating on the same
+    `Card` / `Doc` / `Project` shape and on a fragile `section` object
+    contract from [src/slate_annotations.js](src/slate_annotations.js);
+    a typo in any of those would silently propagate.
+  - Card kind / cardType / language fields drift across files
+    (header / body / class · code / markdown · python / markdown).
+  - The applets registry contract (`mount(deps) → { destroy }`) is
+    enforced by convention, not by the compiler.
+  - Future #47 preset registry will introduce a 4-field schema
+    (`{ language, systemPrompt, cardSchema, compiler, ... }`) that's
+    asking to be a TS type.
+  - "Slate develops slate" requires the AI to make surgical changes.
+    A type system is the single biggest map-quality boost we could
+    give the agent.
+- **Approach (sketch — refine in PR)**:
+  - Add `tsconfig.json` at repo root with `allowJs: true`,
+    `checkJs: false`, `noEmit: true`. Vite already supports TS in
+    `src/` — no bundler change needed.
+  - Phase migrate, leaf-first (low-coupling files), one or two PRs at a
+    time. Suggested order:
+    1. **Pure data + helpers** (no DOM): `slate_annotations.ts`,
+       `rehydrate.ts`, `code_compile.ts`, `python_parser.ts`,
+       `token_budget.ts`, `capabilities.ts`, `event_bus.ts`,
+       `host_bridge.ts`. ~10 files.
+    2. **Models**: `cards.ts`, `doc.ts`, `project.ts`. Define the
+       canonical `CardKind`, `CardType`, `Language` union types here.
+    3. **Controllers**: `controllers/*.ts`. Define `Ctx` interfaces
+       per controller's `init...Ctl(ctx)` injection.
+    4. **Applets**: `applets/**/*.ts`. Lock the
+       `mount(deps) → { destroy }` contract via a shared `Applet<T>`
+       interface.
+    5. **Last**: `main_script.ts`, `ai_chat.ts`, the view layer.
+  - Each PR keeps the build + tests green; nothing is renamed in mass.
+  - Pull `eslint` + `@typescript-eslint` in once the leaf files are
+    typed so we get type-aware lint without a Day-1 megabang.
+- **Acceptance**:
+  - `npm run typecheck` (new script wrapping `tsc --noEmit`) is green.
+  - `npm test` keeps passing throughout migration.
+  - Vite production build size doesn't regress (TS is erased; the
+    output JS should be the same byte count modulo helpers).
+  - At least the leaf files (annotations, rehydrate, compile, parser,
+    capabilities, event bus, host bridge) compile under
+    `strict: true`.
+  - VS Code extension's TypeScript pulls types from `src/` instead of
+    string-typed message payloads where practical.
+- **Blocks**: nothing immediately; unblocks safer #47 preset registry,
+  cleaner #21 target/language registry, and gives the AI a real map
+  for "slate develops slate" iteration.
+- **Files**: new `tsconfig.json`, every `src/**/*.js` (rename + type
+  annotation), `package.json` (add `typescript`, `npm run typecheck`),
+  `ARCHITECTURE.md` (note the language).
+- **Notes**:
+  - The user's stated rationale: "I think something like Slate
+    benefits from having type checks and stuff" — JS got us to MVP,
+    TS gets us to v1.
+  - Single-file migrations are the easiest to review; resist the urge
+    to do a megacommit.
+  - The pure helpers we just shipped (annotations, rehydrate) are the
+    natural starting wedge — small, headless, well-tested, no DOM.
+
 ---
 
 ## Tracking
 
-- **Open**: every issue above. **33 of 53 open** (phase 1 shipped: #1–#4;
+- **Open**: every issue above. **34 of 54 open** (phase 1 shipped: #1–#4;
   phase 11 shipped: #37–#39; phase 12 partial: autocomplete/font polish +
   #40 phase A; phase 0 shipped so far: A foundations + #42 compile_ctl +
   #43 chat_ctl + #44 doc/project/card controllers + #51 drop SUMMARY +
