@@ -1,11 +1,16 @@
 ---
-tags: [project, slate, slate-code, features, v0.2]
+tags: [project, slate, harness, features, legacy]
 status: living
 ---
 
-# slate-code — shipped features
+# Slate — shipped features
 
-This file is the **append-only log of resolved issues**. When an issue ships:
+This file is the **append-only historical log of resolved work**. It describes
+the implementation that exists, not necessarily the architecture that will
+survive the Python harness port. Active work now lives in [issues.md](issues.md),
+governed by [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md).
+
+When a new harness task ships:
 
 1. Cut the issue's full block from [issues.md](issues.md).
 2. Paste it under the matching phase heading below.
@@ -14,8 +19,32 @@ This file is the **append-only log of resolved issues**. When an issue ships:
 4. Add a one-line `**Notes:**` if anything diverged from the original
    acceptance criteria (deferred sub-scope, follow-up issues filed, etc.).
 
-Phase headings are pre-seeded so resolved issues land in the right place
-without churn.
+The v0.2 headings below are retained as factual migration and regression
+history. Unshipped v0.2 proposals are superseded; they should not be copied
+back into the active backlog.
+
+## Current migration baseline
+
+These capabilities exist today and must remain tested until their source-first
+replacement covers the same invariant:
+
+- Project → Documents → Cards JSON import/export and VS Code custom-editor
+  persistence.
+- Python code cards, header cards, project-wide Generate All, and Compile All.
+- Local Ollama generation with explicit card/header/reference context.
+- Annotated `## @slate` compile → rehydrate → compile fixed-point tests.
+- Python workspace scanning into documents/cards.
+- D3 project graph with node → card navigation.
+- Calculator and tic-tac-toe fixtures used as build regressions.
+
+The baseline does **not** yet provide AST-grade parsing, dirty-buffer watching,
+safe structural patches, source ranges, bidirectional graph/editor navigation,
+strict typing validation, proposal conflicts, XYFlow, or a resumable validated
+generation queue. Those are active harness tasks rather than shipped features.
+
+---
+
+## Legacy v0.2 implementation record
 
 ---
 
