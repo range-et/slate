@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { scanWorkspace } from './python_scan';
+import { HarnessPanel } from './harness_panel';
 import { PythonWorker } from './python_worker';
 
 const STATE_KEY = 'slate.persistedState';
@@ -28,6 +29,9 @@ export function activate(context: vscode.ExtensionContext) {
         engineOutput,
         pythonWorker,
         vscode.commands.registerCommand('slate.openPanel', () => SlatePanel.createOrShow(context)),
+        vscode.commands.registerCommand('slate.openHarness', () => {
+            if (pythonWorker) HarnessPanel.createOrShow(context, pythonWorker);
+        }),
         vscode.commands.registerCommand('slate.setupPythonEngine', async () => {
             try {
                 engineOutput.show(true);
@@ -87,6 +91,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
     SlatePanel.current?.dispose();
+    HarnessPanel.current?.dispose();
     pythonWorker?.dispose();
     pythonWorker = undefined;
 }

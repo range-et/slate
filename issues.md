@@ -10,18 +10,10 @@ The governing plan and manual gates are in
 work. The previous v0.2 backlog was superseded by the source-first Python port;
 its shipped results remain recorded in [features.md](features.md).
 
-Do not begin these tasks until the port is explicitly approved. Complete tasks
-in dependency order. Every task must leave all earlier automated gates green.
+The port was approved on 2026-09-10. Complete tasks in dependency order. Every
+task must leave all earlier automated gates green.
 
 ## Breakpoint 0 — baseline
-
-### H-001 Capture and gate the legacy baseline
-- **Scope:** Run and document current Vitest, Vite, extension TypeScript, Python
-  compile, round-trip, and calculator checks. Add missing CI commands without
-  changing runtime behavior.
-- **Acceptance:** One command runs every baseline check; calculator and
-  tic-tac-toe invariants are represented; failures block the build.
-- **Blocks:** all later tasks.
 
 ### H-002 Freeze versioned contracts
 - **Scope:** Define v2 project JSON, annotation, source-position, worker RPC,

@@ -42,6 +42,20 @@ safe structural patches, source ranges, bidirectional graph/editor navigation,
 strict typing validation, proposal conflicts, XYFlow, or a resumable validated
 generation queue. Those are active harness tasks rather than shipped features.
 
+## Python harness port
+
+### H-001 Capture and gate the legacy baseline
+- **Scope:** Run and document current Vitest, Vite, extension TypeScript, Python
+  compile, round-trip, and calculator checks. Add missing CI commands without
+  changing runtime behavior.
+- **Acceptance:** One command runs every baseline check; calculator and
+  tic-tac-toe invariants are represented; failures block the build.
+- **Blocks:** all later tasks.
+- **Resolved:** 2026-09-10 — [`70fc4d1`](https://github.com/range-et/slate/commit/70fc4d1)
+- **Notes:** `npm run verify:baseline` now gates Vitest, the LibCST engine tests,
+  the production build, extension compilation, both round-trip fixtures, and
+  calculator/tic-tac-toe Python tests.
+
 ---
 
 ## Legacy v0.2 implementation record

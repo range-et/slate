@@ -50,6 +50,18 @@ export interface ParseModuleResult {
     }>;
 }
 
+export interface HarnessDocument extends ParseModuleResult {
+    id: string;
+    version: number | null;
+    stale: boolean;
+}
+
+export interface HarnessSnapshot {
+    revision: number;
+    projectName: string;
+    documents: HarnessDocument[];
+}
+
 export interface SourceProposal {
     baseSourceHash: `sha256:${string}`;
     proposedSourceHash: `sha256:${string}`;

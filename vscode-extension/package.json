@@ -44,6 +44,7 @@
     ],
     "commands": [
     { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
+    { "command": "slate.openHarness", "title": "Slate: Open Python Harness" },
     { "command": "slate.newProject", "title": "Slate: New Project…" },
     { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
     { "command": "slate.setupPythonEngine", "title": "Slate: Setup Python Engine" },
