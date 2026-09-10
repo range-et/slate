@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slate.local/contracts/project-v2.schema.json",
+  "title": "Slate Python Harness Project v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "root", "documents", "layout", "queue"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "id": { "$ref": "#/$defs/id" },
+    "name": { "type": "string", "minLength": 1 },
+    "root": { "type": "string", "description": "Path relative to the project JSON directory" },
+    "documents": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/document" }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/point" }
+    },
+    "queue": { "$ref": "#/$defs/queue" }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1 },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "cards"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.py$"
+        },
+        "cards": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/card" },
+          "description": "Identity/cache records; executable source is never authoritative here"
+        }
+      }
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": {
+          "enum": ["class", "nested_class", "function", "method", "nested_function", "note"]
+        }
+      }
+    },
+    "queueEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cardId", "status"],
+      "properties": {
+        "cardId": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["pending", "active", "blocked", "skipped"] }
+      }
+    },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "entries"],
+      "properties": {
+        "scope": { "enum": ["project", "selection", "subgraph"] },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/queueEntry" } }
+      }
+    }
+  }
+}

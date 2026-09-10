@@ -2,8 +2,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { scanWorkspace } from './python_scan';
+import { PythonWorker } from './python_worker';
 
 const STATE_KEY = 'slate.persistedState';
+let pythonWorker: PythonWorker | undefined;
 
 interface PersistedState {
     [k: string]: string;
@@ -20,8 +22,39 @@ const STARTER_PROJECT = (name: string) => ({
 });
 
 export function activate(context: vscode.ExtensionContext) {
+    const engineOutput = vscode.window.createOutputChannel('Slate Python Engine');
+    pythonWorker = new PythonWorker(context, engineOutput);
     context.subscriptions.push(
+        engineOutput,
+        pythonWorker,
         vscode.commands.registerCommand('slate.openPanel', () => SlatePanel.createOrShow(context)),
+        vscode.commands.registerCommand('slate.setupPythonEngine', async () => {
+            try {
+                engineOutput.show(true);
+                await pythonWorker?.setup();
+                vscode.window.showInformationMessage('Slate Python engine is ready.');
+            } catch (error) {
+                vscode.window.showErrorMessage(
+                    `Slate Python engine setup failed: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
+        }),
+        vscode.commands.registerCommand('slate.checkPythonEngine', async () => {
+            try {
+                const health = await pythonWorker?.health();
+                vscode.window.showInformationMessage(
+                    `Slate Python engine is ${health?.status ?? 'unavailable'} (protocol ${health?.protocolVersion ?? '?'}).`
+                );
+            } catch (error) {
+                const action = await vscode.window.showErrorMessage(
+                    `Slate Python engine unavailable: ${error instanceof Error ? error.message : String(error)}`,
+                    'Show setup'
+                );
+                if (action === 'Show setup') {
+                    vscode.commands.executeCommand('slate.setupPythonEngine');
+                }
+            }
+        }),
         vscode.commands.registerCommand('slate.compile', () => {
             const panel = SlatePanel.current;
             if (!panel) {
@@ -54,6 +87,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
     SlatePanel.current?.dispose();
+    pythonWorker?.dispose();
+    pythonWorker = undefined;
 }
 
 /**

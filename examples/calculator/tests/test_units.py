@@ -14,7 +14,10 @@ import sys
 import pytest
 
 HERE = os.path.dirname(__file__)
-EXAMPLE_ROOT = os.path.abspath(os.path.join(HERE, '..'))
+EXAMPLE_ROOT = os.environ.get(
+    'SLATE_CALCULATOR_DIR',
+    os.path.abspath(os.path.join(HERE, '..')),
+)
 OPS_PY = os.path.join(EXAMPLE_ROOT, 'operations.py')
 CALC_PY = os.path.join(EXAMPLE_ROOT, 'calculator.py')
 

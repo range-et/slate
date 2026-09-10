@@ -8,7 +8,10 @@ import os
 import pytest
 
 HERE = os.path.dirname(__file__)
-COMPILED = os.path.abspath(os.path.join(HERE, '..', 'tic_tac_toe.py'))
+COMPILED = os.environ.get(
+    'SLATE_TIC_TAC_TOE_FILE',
+    os.path.abspath(os.path.join(HERE, '..', 'tic_tac_toe.py')),
+)
 
 
 def _load_module():

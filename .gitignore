@@ -20,6 +20,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -127,6 +128,7 @@ slate-textured-*.png
 # VS Code extension build artifacts
 vscode-extension/out/
 vscode-extension/dist/
+vscode-extension/python-engine/
 vscode-extension/*.vsix
 
 # But ship the extension's launch/tasks config so F5 works for anyone
@@ -136,4 +138,3 @@ vscode-extension/*.vsix
 
 # Backup created by scripts/package-extension.js while stubbing keys
 .config.js.backup
-

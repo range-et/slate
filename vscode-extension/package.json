@@ -46,6 +46,8 @@
     { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
     { "command": "slate.newProject", "title": "Slate: New Project…" },
     { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
+    { "command": "slate.setupPythonEngine", "title": "Slate: Setup Python Engine" },
+    { "command": "slate.checkPythonEngine", "title": "Slate: Check Python Engine" },
     { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
     { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
     ],
@@ -55,11 +57,26 @@
     "path": "./syntaxes/slate-annotations.injection.json",
     "injectTo": ["source.python"]
     }
-    ]
-    },
+    ],
+    "configuration": {
+      "title": "Slate Python Engine",
+      "properties": {
+        "slate.pythonEngine.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python executable containing slate-python-engine. Leave empty to use Slate's managed environment or a workspace .venv."
+        },
+        "slate.pythonEngine.bootstrapPython": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python executable used by Slate: Setup Python Engine to create its managed environment."
+        }
+      }
+    }
+  },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && node -e \"require('fs').copyFileSync('src/state-bridge.js','out/state-bridge.js')\"",
+    "compile": "tsc -p ./ && node -e \"require('fs').copyFileSync('src/state-bridge.js','out/state-bridge.js')\" && node scripts/sync-python-engine.js",
     "watch": "tsc -watch -p ./",
     "sync-dist": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.cpSync('../dist','dist',{recursive:true})\""
   },
