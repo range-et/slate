@@ -53,4 +53,5 @@ export interface HarnessGraphEdge {
 
 export type HostMessage =
     | { type: 'snapshot'; snapshot: HarnessSnapshot }
-    | { type: 'selectUnit'; unitId: string | null };
+    | { type: 'selectUnit'; unitId: string | null }
+    | { type: 'commandResult'; ok: boolean; message: string };

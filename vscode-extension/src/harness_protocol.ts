@@ -85,6 +85,7 @@ export type WorkerMethod =
     | 'updateAnnotation'
     | 'insertStub'
     | 'replaceUnit'
+    | 'moveUnit'
     | 'shutdown';
 
 export interface WorkerRequest {

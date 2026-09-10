@@ -4,6 +4,7 @@ src/**
 out/**/*.map
 **/*.ts
 node_modules/**
+*.slate.json
 .gitignore
 tsconfig.json
 !media/**

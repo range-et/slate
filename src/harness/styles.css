@@ -27,11 +27,20 @@ button, input { font: inherit; }
 
 .slate-node {
     width: 260px; min-height: 72px; padding: 10px 12px;
-    border: 1px solid var(--strata-border, #343a40); border-left: 3px solid var(--strata-success, #55d187);
+    border: 1px solid var(--strata-border, #343a40); border-left: 3px solid var(--slate-group, var(--strata-success, #55d187));
     background: var(--strata-layer-01, #191d21); box-shadow: 0 8px 22px rgba(0,0,0,.22);
 }
-.slate-node--document { border-left-color: var(--strata-info, #62d9ff); }
-.slate-node--class, .slate-node--nested_class { border-left-color: var(--strata-warning, #f6c453); }
+.slate-node--container {
+    width: 100%; height: 100%; min-height: 0; padding: 16px;
+    border: 1px solid color-mix(in srgb, var(--slate-group) 62%, transparent);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--slate-group) 8%, var(--strata-layer-01, #191d21));
+    box-shadow: inset 0 0 40px color-mix(in srgb, var(--slate-group) 6%, transparent);
+}
+.slate-node--class.slate-node--container, .slate-node--nested_class.slate-node--container {
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--slate-group) 13%, var(--strata-layer-01, #191d21));
+}
 .slate-node.is-selected { outline: 2px solid var(--strata-interactive, #8aa7ff); outline-offset: 2px; }
 .slate-node.is-invalid { border-left-color: var(--strata-error, #ff6b6b); }
 .slate-node.is-stale { border-style: dashed; }
@@ -73,7 +82,7 @@ button, input { font: inherit; }
     border: 1px solid var(--strata-info, #62d9ff); background: var(--strata-layer-01, #191d21);
     box-shadow: 0 12px 34px rgba(0,0,0,.4);
 }
-.harness-commandline__result { padding: 7px 12px 0; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; }
+.harness-commandline__result { padding: 7px 12px 0; overflow-wrap: anywhere; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; }
 .harness-commandline__completions { padding: 5px 12px 0; color: var(--strata-info, #62d9ff); font-size: 10px; }
 .harness-command { display: flex; align-items: center; padding: 0 12px; }
 .harness-command span { color: var(--strata-info, #62d9ff); font-size: 10px; letter-spacing: .08em; }

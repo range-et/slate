@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { commandCompletions, parseCommand, resolveTargets } from '../src/harness/commands';
+import { commandCompletions, commandHelp, parseCommand, resolveTargets } from '../src/harness/commands';
 
 const targets = [
     { id: 'id-add', label: 'add', detail: 'def add(a: int) -> int', qualifiedName: 'Math.add' },
@@ -20,7 +20,12 @@ describe('harness CAD commands', () => {
     });
 
     it('completes only the command token', () => {
-        expect(commandCompletions('re')).toEqual(['REVEAL']);
+        expect(commandCompletions('re')).toEqual(['REVEAL', 'REASSIGN', 'RECOMPILE']);
         expect(commandCompletions('select ')).toEqual([]);
+    });
+
+    it('lists every command and gives exact syntax for mutation commands', () => {
+        expect(commandHelp()).toContain('REASSIGN');
+        expect(commandHelp('stub')).toBe('STUB file.py|Class :: def name(arg: Type) -> Type :: intent');
     });
 });

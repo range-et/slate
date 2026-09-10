@@ -15,7 +15,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { commandCompletions, parseCommand, resolveTargets } from './commands';
+import { commandCompletions, commandHelp, parseCommand, resolveTargets } from './commands';
 import { demoSnapshot } from './demo';
 import { buildGraph, SlateNodeData } from './graph';
 import type { HarnessDocument, HarnessSnapshot, HarnessUnit, HostMessage } from './types';
@@ -36,9 +36,13 @@ const vscode = typeof window.acquireVsCodeApi === 'function'
     : null;
 
 function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
+    const colorStyle = { '--slate-group': data.groupColor } as React.CSSProperties;
     return (
-        <div className={`slate-node slate-node--${data.kind} ${selected ? 'is-selected' : ''} ${data.invalid ? 'is-invalid' : ''} ${data.stale ? 'is-stale' : ''}`}>
-            <Handle type="target" position={Position.Left} className="slate-node__handle" />
+        <div
+            className={`slate-node slate-node--${data.kind} ${data.container ? 'slate-node--container' : ''} ${selected ? 'is-selected' : ''} ${data.invalid ? 'is-invalid' : ''} ${data.stale ? 'is-stale' : ''}`}
+            style={colorStyle}
+        >
+            {!data.container && <Handle type="target" position={Position.Left} className="slate-node__handle" />}
             <div className="slate-node__kind">
                 <span>{data.kind.replace('_', ' ')}</span>
                 <span>
@@ -47,8 +51,8 @@ function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
                 </span>
             </div>
             <strong>{data.label}</strong>
-            <code>{data.detail}</code>
-            <Handle type="source" position={Position.Right} className="slate-node__handle" />
+            {!data.container && <code>{data.detail}</code>}
+            {!data.container && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
         </div>
     );
 }
@@ -79,7 +83,7 @@ function Inspector({ node, document }: { node: Node<SlateNodeData>; document?: H
                         {dependencies.length > 0 && <><dt>Context</dt><dd>{dependencies.join(', ')}</dd></>}
                     </dl>
                     <button onClick={() => vscode?.postMessage({ type: 'reveal', path: node.data.path, range: unit.ranges.name })}>
-                        Reveal in code
+                        Edit in code
                     </button>
                 </>
             )}
@@ -124,6 +128,7 @@ function HarnessApp() {
                     selected: node.id === event.data.unitId,
                 })));
             }
+            if (event.data.type === 'commandResult') setCommandResult(event.data.message);
         };
         window.addEventListener('message', onMessage);
         vscode?.postMessage({ type: 'ready' });
@@ -179,19 +184,26 @@ function HarnessApp() {
             setCommandResult(matches.length > 0 ? `SELECT: ${matches.length} object${matches.length === 1 ? '' : 's'}` : 'SELECT: no match');
             const match = matches[0] && nodes.find(node => node.id === matches[0].id);
             if (match) flow.current?.setCenter(match.position.x + 130, match.position.y + 36, { zoom: 1.2, duration: 300 });
-        } else if (command.name === 'REVEAL') {
+        } else if (command.name === 'REVEAL' || command.name === 'EDIT') {
             const matches = argument
                 ? resolveTargets(targets, argument)
                 : selectedNodes;
             const match = matches.length === 1 ? nodes.find(node => node.id === matches[0].id) : undefined;
             if (match?.data.unit) {
                 vscode?.postMessage({ type: 'reveal', path: match.data.path, range: match.data.unit.ranges.name });
-                setCommandResult(`REVEAL: ${match.data.unit.qualifiedName}`);
+                setCommandResult(`${command.name}: ${match.data.unit.qualifiedName}`);
             } else {
-                setCommandResult(matches.length > 1 ? 'REVEAL: selection is ambiguous' : 'REVEAL: select one code unit');
+                setCommandResult(matches.length > 1 ? `${command.name}: selection is ambiguous` : `${command.name}: select one code unit`);
             }
         } else if (command.name === 'HELP') {
-            setCommandResult('SELECT [ALL|NONE|name] · REVEAL [name] · FIT · CLEAR · HELP');
+            setCommandResult(commandHelp(command.args[0]));
+        } else if (['STUB', 'INTENT', 'CONTRACT', 'CONTEXT', 'UNCONTEXT', 'LOCK', 'REASSIGN', 'COMPILE', 'RECOMPILE', 'SAVE'].includes(command.name)) {
+            if (vscode) {
+                vscode.postMessage({ type: 'command', command: command.name, args: command.args, revision: snapshot.revision });
+                setCommandResult(`${command.name}: working…`);
+            } else {
+                setCommandResult(`${command.name}: requires the VS Code extension`);
+            }
         } else {
             setCommandResult(`UNKNOWN COMMAND: ${command.name}`);
         }

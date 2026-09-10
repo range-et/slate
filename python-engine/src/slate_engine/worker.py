@@ -10,6 +10,7 @@ from .parser import parse_module
 from .patcher import (
     propose_adopt_unit,
     propose_insert_stub,
+    propose_move_unit,
     propose_replace_unit,
     propose_update_annotation,
 )
@@ -32,6 +33,21 @@ def _dispatch(method: str, params: dict[str, Any]) -> tuple[Any, bool]:
         if unknown:
             raise ProtocolError(f"unknown parseModule params: {', '.join(sorted(unknown))}")
         return parse_module(source, path), False
+    if method == "moveUnit":
+        _reject_unknown(params, {
+            "source", "sourcePath", "expectedSourceHash", "targetSource", "targetPath",
+            "expectedTargetHash", "unitId", "annotation",
+        }, method)
+        return propose_move_unit(
+            require_string(params, "source"),
+            require_string(params, "sourcePath"),
+            require_string(params, "expectedSourceHash"),
+            require_string(params, "targetSource"),
+            require_string(params, "targetPath"),
+            require_string(params, "expectedTargetHash"),
+            require_string(params, "unitId"),
+            require_object(params, "annotation"),
+        ), False
     if method in {"adoptUnit", "updateAnnotation", "insertStub", "replaceUnit"}:
         source = require_string(params, "source")
         path = require_string(params, "path", "<memory>")

@@ -297,3 +297,58 @@ def propose_replace_unit(
     lines = replacement.rstrip("\n").splitlines()
     new_text = lines[0] + "\n" + "\n".join(indent + line for line in lines[1:])
     return _proposal(source, source_range, new_text, path)
+
+
+def propose_move_unit(
+    source: str,
+    source_path: str,
+    expected_source_hash: str,
+    target_source: str,
+    target_path: str,
+    expected_target_hash: str,
+    unit_id: str,
+    adoption_annotation: dict[str, Any],
+) -> dict[str, Any]:
+    """Move one top-level declaration between modules as two checked proposals."""
+
+    _require_fresh(source, expected_source_hash)
+    _require_fresh(target_source, expected_target_hash)
+    if source_path == target_path:
+        raise ProtocolError("source and target modules must be different")
+    parsed = parse_module(source, source_path)
+    target_parsed = parse_module(target_source, target_path)
+    if not parsed["valid"] or not target_parsed["valid"]:
+        raise ProtocolError("cannot move a unit while either module is invalid")
+    target = _unit(parsed, unit_id)
+    if target["parentId"] is not None:
+        raise ProtocolError("only top-level functions and classes can move between files")
+    if target["annotation"] and target["annotation"].get("locked"):
+        raise ProtocolError("locked units cannot be moved")
+    if any(item["name"] == target["name"] for item in target_parsed["units"] if item["parentId"] is None):
+        raise ProtocolError(f"target module already defines {target['name']!r}")
+
+    source_range = target["ranges"]["full"]
+    start = _offset(source, source_range["start"])
+    end = _offset(source, source_range["end"])
+    declaration = source[start:end]
+    if target["annotation"] is None:
+        declaration = _annotation_lines(adoption_annotation) + declaration
+    separator = "" if not target_source else ("\n" if target_source.endswith("\n\n") else "\n\n")
+    if target_source.endswith("\n"):
+        insertion_position = {"line": target_source.count("\n"), "character": 0}
+    else:
+        final_line = target_source.rsplit("\n", 1)[-1]
+        insertion_position = {
+            "line": target_source.count("\n"),
+            "character": len(final_line.encode("utf-16-le")) // 2,
+        }
+    insertion_range = {"start": insertion_position, "end": insertion_position}
+    source_proposal = _proposal(source, source_range, "", source_path)
+    target_proposal = _proposal(
+        target_source,
+        insertion_range,
+        separator + declaration.rstrip("\n") + "\n",
+        target_path,
+    )
+    moved = next(item for item in target_proposal["parsed"]["units"] if item["name"] == target["name"])
+    return {"unitId": moved["id"], "source": source_proposal, "target": target_proposal}

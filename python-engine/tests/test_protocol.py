@@ -4,6 +4,7 @@ import io
 import json
 from uuid import uuid4
 
+from slate_engine import parse_module
 from slate_engine.patcher import source_hash
 from slate_engine.worker import serve
 
@@ -78,3 +79,31 @@ def test_insert_stub_round_trips_through_worker_protocol() -> None:
     response = run_worker(json.dumps(request))[0]
     assert response["ok"] is True
     assert response["result"]["parsed"]["units"][0]["name"] == "calculate"
+
+
+def test_move_unit_round_trips_through_worker_protocol() -> None:
+    source = "def work(value: int) -> int:\n    return value\n"
+    unit_id = parse_module(source, "source.py")["units"][0]["id"]
+    request = {
+        "id": "move",
+        "protocolVersion": 1,
+        "method": "moveUnit",
+        "params": {
+            "source": source,
+            "sourcePath": "source.py",
+            "expectedSourceHash": source_hash(source),
+            "targetSource": "",
+            "targetPath": "target.py",
+            "expectedTargetHash": source_hash(""),
+            "unitId": unit_id,
+            "annotation": {
+                "id": str(uuid4()), "intent": "Move.", "contract": "",
+                "dependencies": [], "examples": [], "locked": False,
+            },
+        },
+    }
+
+    response = run_worker(json.dumps(request))[0]
+    assert response["ok"] is True
+    assert response["result"]["source"]["parsed"]["units"] == []
+    assert response["result"]["target"]["parsed"]["units"][0]["name"] == "work"

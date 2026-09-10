@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 
 import {
     ParseModuleResult,
+    SourceProposal,
     WORKER_PROTOCOL_VERSION,
     WorkerMethod,
     WorkerRequest,
@@ -81,6 +82,26 @@ export class PythonWorker implements vscode.Disposable {
 
     async parseModule(source: string, documentPath: string): Promise<ParseModuleResult> {
         return this.request('parseModule', { source, path: documentPath }, 30_000);
+    }
+
+    async adoptUnit(params: Record<string, unknown>): Promise<SourceProposal> {
+        return this.request('adoptUnit', params, 30_000);
+    }
+
+    async updateAnnotation(params: Record<string, unknown>): Promise<SourceProposal> {
+        return this.request('updateAnnotation', params, 30_000);
+    }
+
+    async insertStub(params: Record<string, unknown>): Promise<SourceProposal> {
+        return this.request('insertStub', params, 30_000);
+    }
+
+    async moveUnit(params: Record<string, unknown>): Promise<{
+        unitId: string;
+        source: SourceProposal;
+        target: SourceProposal;
+    }> {
+        return this.request('moveUnit', params, 30_000);
     }
 
     private engineRoot(): string | undefined {

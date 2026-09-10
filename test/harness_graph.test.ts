@@ -4,7 +4,7 @@ import { demoSnapshot } from '../src/harness/demo';
 import { buildGraph } from '../src/harness/graph';
 
 describe('Python harness graph', () => {
-    it('creates one node per file and declaration with correct containment edges', () => {
+    it('creates one node per file and declaration using nested group containment', () => {
         const graph = buildGraph(demoSnapshot);
 
         expect(graph.nodes.map(node => node.id)).toEqual([
@@ -16,15 +16,16 @@ describe('Python harness graph', () => {
             'durable-add',
             'provisional-divide',
         ]);
-        expect(graph.edges.filter(edge => edge.id.startsWith('contains:')).map(edge => [edge.source, edge.target])).toEqual([
-            ['document:calculator.py', 'durable-run'],
-            ['document:calculator.py', 'provisional-main'],
-            ['document:operations.py', 'durable-operations'],
-            ['durable-operations', 'durable-add'],
-            ['durable-operations', 'provisional-divide'],
-        ]);
-        expect(graph.nodes.find(node => node.id === 'durable-add')?.position.x)
-            .toBeGreaterThan(graph.nodes.find(node => node.id === 'durable-operations')?.position.x ?? 0);
+        expect(graph.edges.filter(edge => edge.id.startsWith('contains:'))).toEqual([]);
+        expect(graph.nodes.find(node => node.id === 'durable-run')).toMatchObject({
+            parentId: 'document:calculator.py',
+            extent: 'parent',
+        });
+        expect(graph.nodes.find(node => node.id === 'durable-add')).toMatchObject({
+            parentId: 'durable-operations',
+            extent: 'parent',
+        });
+        expect(graph.nodes.find(node => node.id === 'durable-operations')?.data.container).toBe(true);
     });
 
     it('keeps generation context distinct from structural containment', () => {
@@ -37,6 +38,7 @@ describe('Python harness graph', () => {
             animated: true,
             className: 'slate-edge slate-edge--context',
         });
+        expect(edge?.markerEnd).toBeUndefined();
     });
 
     it('preserves stale and invalid states on the corresponding nodes', () => {

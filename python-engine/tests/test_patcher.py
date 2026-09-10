@@ -8,6 +8,7 @@ from slate_engine import parse_module
 from slate_engine.patcher import (
     propose_adopt_unit,
     propose_insert_stub,
+    propose_move_unit,
     propose_replace_unit,
     propose_update_annotation,
     source_hash,
@@ -198,4 +199,36 @@ def test_duplicate_durable_ids_are_diagnostic_and_ambiguous_for_writes() -> None
             parsed["sourceHash"],
             unit_id,
             "def first() -> None:\n    return None",
+        )
+
+
+def test_move_top_level_unit_between_modules_preserves_code_and_adopts_identity() -> None:
+    source = "KEEP = 1\n\ndef work(value: int) -> int:\n    return value + KEEP\n"
+    target = "TARGET = True\n"
+    parsed = parse_module(source, "source.py")
+    proposal = propose_move_unit(
+        source, "source.py", source_hash(source),
+        target, "target.py", source_hash(target),
+        find(parsed, "work")["id"], annotation(),
+    )
+
+    assert proposal["source"]["proposedSource"] == "KEEP = 1\n\n\n"
+    assert "## @slate v=2" in proposal["target"]["proposedSource"]
+    assert "def work(value: int) -> int:\n    return value + KEEP" in proposal["target"]["proposedSource"]
+    assert proposal["unitId"] == proposal["target"]["parsed"]["units"][0]["id"]
+
+
+def test_move_rejects_nested_units_and_target_name_collisions() -> None:
+    source = "class Service:\n    def work(self) -> None:\n        pass\n"
+    parsed = parse_module(source, "source.py")
+    with pytest.raises(ProtocolError, match="top-level"):
+        propose_move_unit(
+            source, "source.py", source_hash(source), "", "target.py", source_hash(""),
+            find(parsed, "Service.work")["id"], annotation(),
+        )
+    top = "def work() -> None:\n    pass\n"
+    with pytest.raises(ProtocolError, match="already defines"):
+        propose_move_unit(
+            top, "source.py", source_hash(top), top, "target.py", source_hash(top),
+            find(parse_module(top, "source.py"), "work")["id"], annotation(),
         )

@@ -1,4 +1,7 @@
-export const COMMAND_NAMES = ['SELECT', 'REVEAL', 'FIT', 'CLEAR', 'HELP'] as const;
+export const COMMAND_NAMES = [
+    'SELECT', 'REVEAL', 'EDIT', 'FIT', 'CLEAR', 'STUB', 'INTENT', 'CONTRACT',
+    'CONTEXT', 'UNCONTEXT', 'LOCK', 'REASSIGN', 'COMPILE', 'RECOMPILE', 'SAVE', 'HELP',
+] as const;
 
 export type HarnessCommand = {
     name: string;
@@ -38,4 +41,27 @@ export function commandCompletions(input: string): string[] {
     const normalized = input.trimStart().toUpperCase();
     if (normalized.includes(' ')) return [];
     return COMMAND_NAMES.filter(command => command.startsWith(normalized));
+}
+
+const HELP: Record<string, string> = {
+    SELECT: 'SELECT name|id|ALL|NONE',
+    REVEAL: 'REVEAL unit — open its source',
+    EDIT: 'EDIT unit — open its source for editing',
+    STUB: 'STUB file.py|Class :: def name(arg: Type) -> Type :: intent',
+    INTENT: 'INTENT unit :: text',
+    CONTRACT: 'CONTRACT unit :: text',
+    CONTEXT: 'CONTEXT consumer :: dependency',
+    UNCONTEXT: 'UNCONTEXT consumer :: dependency',
+    LOCK: 'LOCK unit ON|OFF',
+    REASSIGN: 'REASSIGN top_level_unit :: target.py',
+    COMPILE: 'COMPILE — re-index and parse-check source',
+    RECOMPILE: 'RECOMPILE — alias for COMPILE',
+    SAVE: 'SAVE — save dirty workspace files',
+    FIT: 'FIT — fit all groups to the canvas',
+    CLEAR: 'CLEAR — clear selection',
+};
+
+export function commandHelp(command?: string): string {
+    if (!command) return COMMAND_NAMES.join(' · ');
+    return HELP[command.toUpperCase()] ?? `HELP: unknown command ${command.toUpperCase()}`;
 }

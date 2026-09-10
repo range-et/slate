@@ -9,6 +9,7 @@
     { "$ref": "#/$defs/updateAnnotation" },
     { "$ref": "#/$defs/insertStub" },
     { "$ref": "#/$defs/replaceUnit" },
+    { "$ref": "#/$defs/moveUnit" },
     { "$ref": "#/$defs/shutdown" }
   ],
   "$defs": {
@@ -150,6 +151,31 @@
             "expectedHash": { "type": "string", "pattern": "^sha256:" },
             "unitId": { "type": "string" },
             "replacement": { "type": "string" }
+          }
+        }
+      }
+    },
+    "moveUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "method", "params"],
+      "properties": {
+        "id": { "type": ["string", "integer"] },
+        "protocolVersion": { "const": 1 },
+        "method": { "const": "moveUnit" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "sourcePath", "expectedSourceHash", "targetSource", "targetPath", "expectedTargetHash", "unitId", "annotation"],
+          "properties": {
+            "source": { "type": "string" },
+            "sourcePath": { "type": "string" },
+            "expectedSourceHash": { "type": "string", "pattern": "^sha256:" },
+            "targetSource": { "type": "string" },
+            "targetPath": { "type": "string" },
+            "expectedTargetHash": { "type": "string", "pattern": "^sha256:" },
+            "unitId": { "type": "string" },
+            "annotation": { "$ref": "#/$defs/annotation" }
           }
         }
       }
