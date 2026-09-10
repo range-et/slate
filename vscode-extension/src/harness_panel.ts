@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { HarnessDocument, HarnessSnapshot, ParseModuleResult, SourceRange } from './harness_protocol';
+import { legacyContextEdges, readProjectBinding, readProjectLayout, writeProjectLayout } from './legacy_project';
 import { PythonWorker } from './python_worker';
 
 const PYTHON_EXCLUDE = '**/{.git,.venv,venv,node_modules,__pycache__,dist,build}/**';
@@ -92,10 +93,29 @@ export class HarnessPanel implements vscode.Disposable {
         return HarnessPanel.current;
     }
 
+    static attachToProject(
+        context: vscode.ExtensionContext,
+        worker: PythonWorker,
+        panel: vscode.WebviewPanel,
+        projectDocument: vscode.TextDocument,
+    ): HarnessPanel {
+        HarnessPanel.current?.dispose();
+        const projectDirectory = path.dirname(projectDocument.uri.fsPath);
+        const binding = readProjectBinding(projectDocument.getText());
+        const rootUri = vscode.Uri.file(path.resolve(projectDirectory, binding.root));
+        HarnessPanel.current = new HarnessPanel(context, worker, panel, {
+            uri: rootUri,
+            name: binding.name ?? path.basename(rootUri.fsPath),
+        }, projectDocument);
+        return HarnessPanel.current;
+    }
+
     private constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly worker: PythonWorker,
         private readonly panel: vscode.WebviewPanel,
+        private readonly projectRoot?: { uri: vscode.Uri; name: string },
+        private readonly projectDocument?: vscode.TextDocument,
     ) {
         panel.webview.html = buildHtml(context, panel.webview);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
@@ -103,7 +123,7 @@ export class HarnessPanel implements vscode.Disposable {
 
         const root = this.workspaceRoot();
         const watcher = vscode.workspace.createFileSystemWatcher(
-            root ? new vscode.RelativePattern(root, '**/*.py') : '**/*.py'
+            root ? new vscode.RelativePattern(root.uri.fsPath, '**/*.py') : '**/*.py'
         );
         watcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
         watcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
@@ -111,7 +131,10 @@ export class HarnessPanel implements vscode.Disposable {
         this.disposables.push(
             watcher,
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (event.document.languageId === 'python') this.scheduleRefresh();
+                if (event.document.languageId === 'python'
+                    || event.document.uri.toString() === this.projectDocument?.uri.toString()) {
+                    this.scheduleRefresh();
+                }
             }),
             vscode.window.onDidChangeTextEditorSelection(event => this.selectFromEditor(event.textEditor)),
             vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -120,8 +143,8 @@ export class HarnessPanel implements vscode.Disposable {
         );
     }
 
-    private workspaceRoot(): vscode.WorkspaceFolder | undefined {
-        return vscode.workspace.workspaceFolders?.[0];
+    private workspaceRoot(): { uri: vscode.Uri; name: string } | undefined {
+        return this.projectRoot ?? vscode.workspace.workspaceFolders?.[0];
     }
 
     private scheduleRefresh(delay = 250): void {
@@ -142,7 +165,7 @@ export class HarnessPanel implements vscode.Disposable {
         const generation = ++this.refreshGeneration;
         try {
             const uris = await vscode.workspace.findFiles(
-                new vscode.RelativePattern(root, '**/*.py'),
+                new vscode.RelativePattern(root.uri.fsPath, '**/*.py'),
                 PYTHON_EXCLUDE,
                 5000,
             );
@@ -177,6 +200,12 @@ export class HarnessPanel implements vscode.Disposable {
                 revision: ++this.revision,
                 projectName: root.name,
                 documents,
+                contextEdges: this.projectDocument
+                    ? legacyContextEdges(this.projectDocument.getText(), documents)
+                    : [],
+                layout: this.projectDocument
+                    ? readProjectLayout(this.projectDocument.getText())
+                    : this.context.workspaceState.get(this.layoutKey(root), {}),
             };
             await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
             const active = vscode.window.activeTextEditor;
@@ -196,6 +225,10 @@ export class HarnessPanel implements vscode.Disposable {
             this.scheduleRefresh(0);
             return;
         }
+        if (value.type === 'layout') {
+            await this.updateLayout(value);
+            return;
+        }
         if (value.type !== 'reveal' || typeof value.path !== 'string' || !isRange(value.range)) return;
         const root = this.workspaceRoot();
         if (!root) return;
@@ -212,6 +245,52 @@ export class HarnessPanel implements vscode.Disposable {
         );
         editor.selection = new vscode.Selection(range.start, range.end);
         editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
+
+    private layoutKey(root: { uri: vscode.Uri }): string {
+        return `slate.harness.layout:${root.uri.toString()}`;
+    }
+
+    private async updateLayout(message: Record<string, unknown>): Promise<void> {
+        const root = this.workspaceRoot();
+        if (!root || !this.snapshot || message.revision !== this.snapshot.revision
+            || !message.positions || typeof message.positions !== 'object') return;
+        const validIds = new Set(this.snapshot.documents.flatMap(document => [
+            document.id,
+            ...document.units.map(unit => unit.id),
+        ]));
+        const positions: Record<string, { x: number; y: number }> = {};
+        for (const [id, point] of Object.entries(message.positions)) {
+            if (!validIds.has(id) || !point || typeof point !== 'object') continue;
+            const { x, y } = point as { x?: unknown; y?: unknown };
+            if (Number.isFinite(x) && Number.isFinite(y)) {
+                positions[id] = { x: x as number, y: y as number };
+            }
+        }
+        if (Object.keys(positions).length === 0) return;
+
+        if (!this.projectDocument) {
+            const current = this.context.workspaceState.get<Record<string, { x: number; y: number }>>(
+                this.layoutKey(root),
+                {},
+            );
+            await this.context.workspaceState.update(this.layoutKey(root), { ...current, ...positions });
+            return;
+        }
+
+        const replacement = writeProjectLayout(this.projectDocument.getText(), positions);
+        if (replacement === null || replacement === this.projectDocument.getText()) return;
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(
+            this.projectDocument.uri,
+            new vscode.Range(
+                this.projectDocument.positionAt(0),
+                this.projectDocument.positionAt(this.projectDocument.getText().length),
+            ),
+            replacement,
+        );
+        const applied = await vscode.workspace.applyEdit(edit);
+        if (applied) await this.projectDocument.save();
     }
 
     private selectFromEditor(editor: vscode.TextEditor): void {

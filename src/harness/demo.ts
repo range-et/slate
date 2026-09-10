@@ -36,7 +36,10 @@ export const demoSnapshot: HarnessSnapshot = {
             sourceHash: 'sha256:demo', version: 1, diagnostics: [],
             units: [
                 unit('durable-run', 'function', 'run', 'run', 12),
-                unit('provisional-main', 'function', 'main', 'main', 28),
+                {
+                    ...unit('provisional-main', 'function', 'main', 'main', 28),
+                    annotation: { dependencies: ['durable-run'] },
+                },
             ],
         },
         {

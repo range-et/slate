@@ -21,7 +21,8 @@ button, input { font: inherit; }
 .harness-topbar span { color: var(--strata-text-secondary, #9da5ad); font-size: 12px; }
 .status-warning { color: var(--strata-warning, #f6c453) !important; }
 .status-error { color: var(--strata-error, #ff6b6b) !important; }
-.harness-canvas { position: absolute; inset: 44px 0 0; }
+.status-context { color: var(--strata-info, #62d9ff) !important; }
+.harness-canvas { position: absolute; inset: 44px 0 92px; }
 .harness-empty { position: absolute; z-index: 5; inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--strata-text-secondary, #9da5ad); }
 
 .slate-node {
@@ -43,6 +44,10 @@ button, input { font: inherit; }
     stroke-width: 1.5;
 }
 .slate-edge .react-flow__edge-text { fill: var(--strata-text-secondary, #8a949e); }
+.slate-edge--context .react-flow__edge-path {
+    stroke: var(--strata-info, #3ecff5);
+    stroke-dasharray: 7 5;
+}
 
 .harness-inspector {
     position: absolute; z-index: 15; top: 58px; right: 14px; width: min(340px, calc(100vw - 28px));
@@ -62,13 +67,16 @@ button, input { font: inherit; }
 }
 .harness-inspector__diagnostic { margin-top: 16px; color: var(--strata-error, #ff6b6b); font-size: 11px; }
 
-.harness-command {
+.harness-commandline {
     position: absolute; z-index: 20; left: 50%; bottom: 18px; transform: translateX(-50%);
-    display: flex; align-items: center; width: min(620px, calc(100vw - 32px)); padding: 0 12px;
+    width: min(720px, calc(100vw - 32px));
     border: 1px solid var(--strata-info, #62d9ff); background: var(--strata-layer-01, #191d21);
     box-shadow: 0 12px 34px rgba(0,0,0,.4);
 }
-.harness-command span { color: var(--strata-info, #62d9ff); }
+.harness-commandline__result { padding: 7px 12px 0; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; }
+.harness-commandline__completions { padding: 5px 12px 0; color: var(--strata-info, #62d9ff); font-size: 10px; }
+.harness-command { display: flex; align-items: center; padding: 0 12px; }
+.harness-command span { color: var(--strata-info, #62d9ff); font-size: 10px; letter-spacing: .08em; }
 .harness-command input { flex: 1; height: 38px; padding: 0 10px; color: inherit; border: 0; outline: 0; background: transparent; font-size: 12px; }
 
 .react-flow__controls { border: 1px solid var(--strata-border, #343a40); border-radius: 0; background: var(--strata-layer-01, #191d21); }

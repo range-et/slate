@@ -1,6 +1,6 @@
 # Slate Python Harness Port
 
-Status: proposed — implementation waits for explicit approval.
+Status: active — implementation approved 2026-09-10.
 
 ## Product contract
 

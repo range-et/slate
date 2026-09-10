@@ -80,6 +80,14 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider('slate.launcher', new SlateLauncherView(context)),
         vscode.window.registerCustomEditorProvider(
             'slate.editor',
+            new HarnessEditorProvider(context, pythonWorker),
+            {
+                webviewOptions: { retainContextWhenHidden: true },
+                supportsMultipleEditorsPerDocument: false
+            }
+        ),
+        vscode.window.registerCustomEditorProvider(
+            'slate.legacyEditor',
             new SlateEditorProvider(context),
             {
                 webviewOptions: { retainContextWhenHidden: true },
@@ -440,7 +448,7 @@ class SlateLauncherView implements vscode.WebviewViewProvider {
         view.webview.html = this.renderHtml(view.webview);
         view.webview.onDidReceiveMessage(msg => {
             if (!msg) return;
-            if (msg.type === 'open') vscode.commands.executeCommand('slate.openPanel');
+            if (msg.type === 'open') vscode.commands.executeCommand('slate.openHarness');
             else if (msg.type === 'new-project') vscode.commands.executeCommand('slate.newProject');
             else if (msg.type === 'scan') vscode.commands.executeCommand('slate.scanWorkspace');
         });
@@ -475,11 +483,11 @@ class SlateLauncherView implements vscode.WebviewViewProvider {
 </head>
 <body>
   <h3>Slate</h3>
-  <p>Architect a Python app as a graph of cards. Compile to <code>.py</code>; run in VS Code.</p>
+  <p>Plan and navigate typed Python units in one source-linked graph.</p>
+  <button id="open">Open Python Harness</button>
   <button id="new">New Slate Project…</button>
   <button id="scan">Scan Python Workspace</button>
-  <button id="open" class="secondary">Open Empty Panel</button>
-  <small>Existing <code>*.slate.json</code> files open in the slate editor automatically.</small>
+  <small>Existing <code>*.slate.json</code> files open directly in the graph. The old notebook is available only through <strong>Open With…</strong>.</small>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     document.getElementById('new').addEventListener('click', () => vscode.postMessage({ type: 'new-project' }));
@@ -488,6 +496,18 @@ class SlateLauncherView implements vscode.WebviewViewProvider {
   </script>
 </body>
 </html>`;
+    }
+}
+
+/** The default .slate.json editor is the source-linked XYFlow harness. */
+class HarnessEditorProvider implements vscode.CustomTextEditorProvider {
+    constructor(
+        private readonly context: vscode.ExtensionContext,
+        private readonly worker: PythonWorker,
+    ) {}
+
+    resolveCustomTextEditor(document: vscode.TextDocument, panel: vscode.WebviewPanel) {
+        HarnessPanel.attachToProject(this.context, this.worker, panel, document);
     }
 }
 

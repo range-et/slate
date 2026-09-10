@@ -60,6 +60,14 @@ export interface HarnessSnapshot {
     revision: number;
     projectName: string;
     documents: HarnessDocument[];
+    contextEdges?: HarnessGraphEdge[];
+    layout?: Record<string, { x: number; y: number }>;
+}
+
+export interface HarnessGraphEdge {
+    sourceId: string;
+    targetId: string;
+    kind: 'context' | 'inferred';
 }
 
 export interface SourceProposal {

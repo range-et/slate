@@ -23,7 +23,7 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
         nodes.push({
             id: documentId,
             type: 'slate',
-            position: { x: 80, y: documentY },
+            position: snapshot.layout?.[documentId] ?? { x: 80, y: documentY },
             data: {
                 label: document.path.split('/').pop() ?? document.path,
                 detail: document.path,
@@ -38,7 +38,7 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
             nodes.push({
                 id: unit.id,
                 type: 'slate',
-                position: { x: 400 + depth * 320, y: documentY + unitIndex * 116 },
+                position: snapshot.layout?.[unit.id] ?? { x: 400 + depth * 320, y: documentY + unitIndex * 116 },
                 data: {
                     label: unit.name,
                     detail: unit.signature ?? unit.qualifiedName,
@@ -60,5 +60,34 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
         });
         documentY += Math.max(220, document.units.length * 116 + 80);
     });
+    const nodeIds = new Set(nodes.map(node => node.id));
+    const contextEdges = new Map<string, { sourceId: string; targetId: string }>();
+    for (const document of snapshot.documents) {
+        for (const unit of document.units) {
+            const dependencies = unit.annotation?.dependencies;
+            if (!Array.isArray(dependencies)) continue;
+            for (const dependency of dependencies) {
+                if (typeof dependency !== 'string') continue;
+                contextEdges.set(`${dependency}:${unit.id}`, { sourceId: dependency, targetId: unit.id });
+            }
+        }
+    }
+    for (const edge of snapshot.contextEdges ?? []) {
+        if (edge.kind === 'context') {
+            contextEdges.set(`${edge.sourceId}:${edge.targetId}`, edge);
+        }
+    }
+    for (const [id, edge] of contextEdges) {
+        if (!nodeIds.has(edge.sourceId) || !nodeIds.has(edge.targetId)) continue;
+        edges.push({
+            id: `context:${id}`,
+            source: edge.sourceId,
+            target: edge.targetId,
+            type: 'smoothstep',
+            animated: true,
+            markerEnd: { type: MarkerType.ArrowClosed },
+            className: 'slate-edge slate-edge--context',
+        });
+    }
     return { nodes, edges };
 }

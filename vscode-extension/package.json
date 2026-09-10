@@ -1,7 +1,7 @@
 {
   "name": "slate-code",
   "displayName": "Slate Code",
-  "description": "Architect code in slate, run it in VS Code. Hosts the slate notebook in a webview and writes compiled .py files to the workspace.",
+  "description": "A source-linked XYFlow harness for planning, navigating, and generating typed Python units with local LLMs.",
   "version": "0.1.0",
   "publisher": "indrajeet-haldar",
   "engines": {
@@ -11,7 +11,9 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:slate.launcher",
-    "onCustomEditor:slate.editor"
+    "onCustomEditor:slate.editor",
+    "onCustomEditor:slate.legacyEditor",
+    "onCommand:slate.openHarness"
   ],
   "contributes": {
     "viewsContainers": {
@@ -35,15 +37,23 @@
     "customEditors": [
       {
         "viewType": "slate.editor",
-        "displayName": "Slate Notebook",
+        "displayName": "Slate Python Harness",
         "selector": [
           { "filenamePattern": "*.slate.json" }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "slate.legacyEditor",
+        "displayName": "Slate Notebook (Legacy)",
+        "selector": [
+          { "filenamePattern": "*.slate.json" }
+        ],
+        "priority": "option"
       }
     ],
     "commands": [
-    { "command": "slate.openPanel", "title": "Slate: Open Empty Panel" },
+    { "command": "slate.openPanel", "title": "Slate: Open Legacy Panel" },
     { "command": "slate.openHarness", "title": "Slate: Open Python Harness" },
     { "command": "slate.newProject", "title": "Slate: New Project…" },
     { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
