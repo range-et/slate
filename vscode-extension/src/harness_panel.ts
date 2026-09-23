@@ -4,8 +4,11 @@ import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
 import { HarnessDocument, HarnessSnapshot, ParsedUnit, ParseModuleResult, SourceProposal, SourceRange } from './harness_protocol';
-import { legacyContextEdges, readProjectBinding, readProjectLayout, writeProjectLayout } from './legacy_project';
-import { PythonWorker } from './python_worker';
+import { buildGenerationPacket, GenerationPacket, stripModelEnvelope } from './generation';
+import { streamLlamaCompletion } from './llama_transport';
+import { PythonAdapter } from './python_adapter';
+import { loadProject, serializeProject } from './project_v2';
+import { searchUnits } from './search';
 
 const PYTHON_EXCLUDE = '**/{.git,.venv,venv,node_modules,__pycache__,dist,build}/**';
 
@@ -16,19 +19,6 @@ function nonce(): string {
         value += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return value;
-}
-
-function isPosition(value: unknown): value is { line: number; character: number } {
-    if (!value || typeof value !== 'object') return false;
-    const position = value as Record<string, unknown>;
-    return Number.isInteger(position.line) && (position.line as number) >= 0
-        && Number.isInteger(position.character) && (position.character as number) >= 0;
-}
-
-function isRange(value: unknown): value is SourceRange {
-    if (!value || typeof value !== 'object') return false;
-    const range = value as Record<string, unknown>;
-    return isPosition(range.start) && isPosition(range.end);
 }
 
 function contains(range: SourceRange, position: vscode.Position): boolean {
@@ -69,12 +59,23 @@ export class HarnessPanel implements vscode.Disposable {
 
     private readonly disposables: vscode.Disposable[] = [];
     private readonly lastGood = new Map<string, ParseModuleResult>();
+    private sources = new Map<string, string>();
     private snapshot: HarnessSnapshot | undefined;
     private refreshTimer: NodeJS.Timeout | undefined;
     private refreshGeneration = 0;
     private revision = 0;
+    private projectWarningsShown = false;
+    private generation: AbortController | undefined;
+    private pendingProposal: {
+        id: string;
+        packet: GenerationPacket;
+        proposal: SourceProposal;
+        candidate: string;
+        path: string;
+    } | undefined;
+    private lastAcceptedUnitId: string | undefined;
 
-    static createOrShow(context: vscode.ExtensionContext, worker: PythonWorker): HarnessPanel {
+    static createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): HarnessPanel {
         if (HarnessPanel.current) {
             HarnessPanel.current.panel.reveal();
             HarnessPanel.current.scheduleRefresh(0);
@@ -90,30 +91,41 @@ export class HarnessPanel implements vscode.Disposable {
                 localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
             },
         );
-        HarnessPanel.current = new HarnessPanel(context, worker, panel);
+        HarnessPanel.current = new HarnessPanel(context, adapter, panel);
         return HarnessPanel.current;
     }
 
     static attachToProject(
         context: vscode.ExtensionContext,
-        worker: PythonWorker,
+        adapter: PythonAdapter,
         panel: vscode.WebviewPanel,
         projectDocument: vscode.TextDocument,
     ): HarnessPanel {
         HarnessPanel.current?.dispose();
         const projectDirectory = path.dirname(projectDocument.uri.fsPath);
-        const binding = readProjectBinding(projectDocument.getText());
-        const rootUri = vscode.Uri.file(path.resolve(projectDirectory, binding.root));
-        HarnessPanel.current = new HarnessPanel(context, worker, panel, {
+        let projectName = path.basename(projectDocument.uri.fsPath, '.slate.json');
+        try {
+            projectName = loadProject(projectDocument.getText()).project.name;
+        } catch {
+            // The panel reports the complete validation error during refresh.
+        }
+        let projectRoot = '.';
+        try {
+            projectRoot = loadProject(projectDocument.getText()).project.root;
+        } catch {
+            // Refresh reports malformed metadata.
+        }
+        const rootUri = vscode.Uri.file(path.resolve(projectDirectory, projectRoot));
+        HarnessPanel.current = new HarnessPanel(context, adapter, panel, {
             uri: rootUri,
-            name: binding.name ?? path.basename(rootUri.fsPath),
+            name: projectName,
         }, projectDocument);
         return HarnessPanel.current;
     }
 
     private constructor(
         private readonly context: vscode.ExtensionContext,
-        private readonly worker: PythonWorker,
+        private readonly adapter: PythonAdapter,
         private readonly panel: vscode.WebviewPanel,
         private readonly projectRoot?: { uri: vscode.Uri; name: string },
         private readonly projectDocument?: vscode.TextDocument,
@@ -142,6 +154,7 @@ export class HarnessPanel implements vscode.Disposable {
                 if (editor) this.selectFromEditor(editor);
             }),
         );
+        this.scheduleRefresh(0);
     }
 
     private workspaceRoot(): { uri: vscode.Uri; name: string } | undefined {
@@ -165,25 +178,49 @@ export class HarnessPanel implements vscode.Disposable {
         }
         const generation = ++this.refreshGeneration;
         try {
-            const uris = await vscode.workspace.findFiles(
-                new vscode.RelativePattern(root.uri.fsPath, '**/*.py'),
-                PYTHON_EXCLUDE,
-                5000,
-            );
+            const project = this.projectDocument ? loadProject(this.projectDocument.getText()) : undefined;
+            const uris = project
+                ? project.project.documents.map(document => vscode.Uri.joinPath(root.uri, ...document.path.split('/')))
+                : await vscode.workspace.findFiles(
+                    new vscode.RelativePattern(root.uri.fsPath, '**/*.py'),
+                    PYTHON_EXCLUDE,
+                    5000,
+                );
             const openDocuments = new Map(
                 vscode.workspace.textDocuments
                     .filter(document => document.languageId === 'python')
                     .map(document => [document.uri.toString(), document]),
             );
             const documents: HarnessDocument[] = [];
+            const sources = new Map<string, string>();
             for (const uri of uris) {
                 if (generation !== this.refreshGeneration) return;
                 const relativePath = path.relative(root.uri.fsPath, uri.fsPath).replace(/\\/g, '/');
                 const open = openDocuments.get(uri.toString());
-                const source = open
-                    ? open.getText()
-                    : new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-                const parsed = await this.worker.parseModule(source, relativePath);
+                let source: string;
+                try {
+                    source = open
+                        ? open.getText()
+                        : new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+                } catch {
+                    const empty = await this.adapter.parseModule('', relativePath);
+                    documents.push({
+                        ...empty,
+                        id: `document:${relativePath}`,
+                        path: relativePath,
+                        version: null,
+                        valid: false,
+                        stale: false,
+                        diagnostics: [{
+                            code: 'missing-document',
+                            message: `Tracked Python document ${relativePath} does not exist.`,
+                            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+                        }],
+                    });
+                    continue;
+                }
+                sources.set(relativePath, source);
+                const parsed = await this.adapter.parseModule(source, relativePath);
                 const previous = this.lastGood.get(relativePath);
                 if (parsed.valid) this.lastGood.set(relativePath, parsed);
                 const visible = parsed.valid || !previous ? parsed : { ...parsed, units: previous.units };
@@ -196,19 +233,39 @@ export class HarnessPanel implements vscode.Disposable {
                 });
             }
             if (generation !== this.refreshGeneration) return;
+            const durableIds = new Map<string, Array<{ document: HarnessDocument; unit: ParsedUnit }>>();
+            for (const document of documents) {
+                for (const unit of document.units.filter(candidate => candidate.identity === 'durable')) {
+                    durableIds.set(unit.id, [...(durableIds.get(unit.id) ?? []), { document, unit }]);
+                }
+            }
+            for (const [id, matches] of durableIds) {
+                if (matches.length < 2) continue;
+                for (const match of matches) {
+                    match.document.valid = false;
+                    match.document.diagnostics.push({
+                        code: 'duplicate-project-slate-id',
+                        message: `Slate id ${id} is duplicated across ${matches.length} project declarations.`,
+                        range: match.unit.ranges.annotation ?? match.unit.ranges.name,
+                    });
+                }
+            }
             documents.sort((left, right) => left.path.localeCompare(right.path));
+            this.sources = sources;
             this.snapshot = {
                 revision: ++this.revision,
                 projectName: root.name,
                 documents,
-                contextEdges: this.projectDocument
-                    ? legacyContextEdges(this.projectDocument.getText(), documents)
-                    : [],
-                layout: this.projectDocument
-                    ? readProjectLayout(this.projectDocument.getText())
+                contextEdges: [],
+                layout: project
+                    ? project.project.layout
                     : this.context.workspaceState.get(this.layoutKey(root), {}),
             };
             await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
+            if (project && project.warnings.length > 0 && !this.projectWarningsShown) {
+                this.projectWarningsShown = true;
+                this.postCommandResult(false, project.warnings.join(' '));
+            }
             const active = vscode.window.activeTextEditor;
             if (active) this.selectFromEditor(active);
         } catch (error) {
@@ -230,26 +287,46 @@ export class HarnessPanel implements vscode.Disposable {
             await this.updateLayout(value);
             return;
         }
-        if (value.type === 'command') {
-            await this.handleCommand(value);
+        if (value.type === 'search' && typeof value.query === 'string') {
+            if (!this.snapshot || value.revision !== this.snapshot.revision) {
+                await this.panel.webview.postMessage({ type: 'searchResults', query: value.query, results: [], stale: true });
+                return;
+            }
+            await this.panel.webview.postMessage({
+                type: 'searchResults',
+                query: value.query,
+                results: searchUnits(this.snapshot.documents, this.sources, value.query),
+                stale: false,
+            });
             return;
         }
-        if (value.type !== 'reveal' || typeof value.path !== 'string' || !isRange(value.range)) return;
-        const root = this.workspaceRoot();
-        if (!root) return;
-        const target = vscode.Uri.joinPath(root.uri, ...value.path.split('/'));
-        const relative = path.relative(root.uri.fsPath, target.fsPath);
-        if (relative.startsWith('..') || path.isAbsolute(relative)) return;
-        const document = await vscode.workspace.openTextDocument(target);
-        const editor = await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Beside });
-        const range = new vscode.Range(
-            value.range.start.line,
-            value.range.start.character,
-            value.range.end.line,
-            value.range.end.character,
-        );
-        editor.selection = new vscode.Selection(range.start, range.end);
-        editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        if (value.type === 'packetPreview' && typeof value.unitId === 'string') {
+            this.postPacketPreview(value.unitId);
+            return;
+        }
+        if (value.type === 'generate' && typeof value.unitId === 'string') {
+            await this.generate(value.unitId);
+            return;
+        }
+        if (value.type === 'cancelGeneration') {
+            this.generation?.abort();
+            return;
+        }
+        if (value.type === 'acceptProposal' && typeof value.proposalId === 'string') {
+            await this.acceptProposal(value.proposalId);
+            return;
+        }
+        if (value.type === 'undoAccepted') {
+            await this.undoAccepted();
+            return;
+        }
+        if (value.type === 'action' && value.action && typeof value.action === 'object') {
+            await this.handleAction(value.action as Record<string, unknown>, value.revision);
+            return;
+        }
+        if (value.type === 'reveal' && typeof value.unitId === 'string') {
+            await this.revealUnit(value.unitId, value.focus === true);
+        }
     }
 
     private layoutKey(root: { uri: vscode.Uri }): string {
@@ -283,8 +360,15 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
 
-        const replacement = writeProjectLayout(this.projectDocument.getText(), positions);
-        if (replacement === null || replacement === this.projectDocument.getText()) return;
+        const loaded = loadProject(this.projectDocument.getText());
+        if (loaded.readOnly) {
+            this.postCommandResult(false, loaded.warnings.join(' '));
+            return;
+        }
+        const project = loaded.project;
+        project.layout = { ...project.layout, ...positions };
+        const replacement = serializeProject(project);
+        if (replacement === this.projectDocument.getText()) return;
         const edit = new vscode.WorkspaceEdit();
         edit.replace(
             this.projectDocument.uri,
@@ -300,6 +384,168 @@ export class HarnessPanel implements vscode.Disposable {
 
     private postCommandResult(ok: boolean, message: string): void {
         void this.panel.webview.postMessage({ type: 'commandResult', ok, message });
+    }
+
+    private generationSettings(): {
+        endpoint: string;
+        model: string;
+        contextWindowTokens: number;
+        outputTokens: number;
+        timeoutMs: number;
+    } {
+        const config = vscode.workspace.getConfiguration('slate.llama');
+        return {
+            endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
+            model: config.get('model', 'local'),
+            contextWindowTokens: config.get('contextWindow', 4096),
+            outputTokens: config.get('outputTokens', 768),
+            timeoutMs: config.get('timeoutSeconds', 120) * 1000,
+        };
+    }
+
+    private packet(unitId: string): GenerationPacket {
+        if (!this.snapshot) throw new Error('The graph is not indexed yet.');
+        const settings = this.generationSettings();
+        return buildGenerationPacket(
+            this.snapshot,
+            this.sources,
+            unitId,
+            settings.contextWindowTokens,
+            settings.outputTokens,
+        );
+    }
+
+    private postPacketPreview(unitId: string): void {
+        try {
+            const packet = this.packet(unitId);
+            void this.panel.webview.postMessage({
+                type: 'packetPreview',
+                unitId,
+                packet: {
+                    items: packet.items.map(({ source, ...item }) => ({ ...item, characters: source.length })),
+                    estimatedInputTokens: packet.estimatedInputTokens,
+                    inputBudgetTokens: packet.inputBudgetTokens,
+                    outputBudgetTokens: packet.outputBudgetTokens,
+                },
+            });
+        } catch (error) {
+            void this.panel.webview.postMessage({
+                type: 'packetPreview', unitId, error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    private async generate(unitId: string): Promise<void> {
+        if (this.generation) {
+            this.postCommandResult(false, 'A llama.cpp generation is already running.');
+            return;
+        }
+        try {
+            const packet = this.packet(unitId);
+            const target = this.resolveUnit(unitId);
+            const settings = this.generationSettings();
+            const controller = new AbortController();
+            this.generation = controller;
+            this.pendingProposal = undefined;
+            await this.panel.webview.postMessage({
+                type: 'generationStarted', unitId,
+                message: `Sent ${packet.items.length} exact source unit${packet.items.length === 1 ? '' : 's'} (${packet.estimatedInputTokens}/${packet.inputBudgetTokens} estimated input tokens) to ${settings.endpoint}.`,
+            });
+            let received = 0;
+            const raw = await streamLlamaCompletion(packet.prompt, settings, controller.signal, token => {
+                received += token.length;
+                void this.panel.webview.postMessage({ type: 'generationProgress', unitId, receivedCharacters: received });
+            });
+            const candidate = stripModelEnvelope(raw);
+            const document = await this.sourceDocument(target.document.path);
+            const proposal = await this.adapter.replaceUnit({
+                source: document.getText(),
+                path: target.document.path,
+                expectedHash: packet.items[0].sourceHash,
+                unitId,
+                replacement: candidate,
+            });
+            const id = randomUUID();
+            this.pendingProposal = { id, packet, proposal, candidate, path: target.document.path };
+            await this.panel.webview.postMessage({
+                type: 'proposalReady',
+                proposal: {
+                    id, unitId, path: target.document.path, candidate,
+                    checks: ['Valid Python', 'Exactly one function', 'Name and signature preserved', 'Edit confined to owned function'],
+                },
+            });
+        } catch (error) {
+            await this.panel.webview.postMessage({
+                type: 'generationFailed', unitId,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        } finally {
+            this.generation = undefined;
+        }
+    }
+
+    private async acceptProposal(proposalId: string): Promise<void> {
+        const pending = this.pendingProposal;
+        if (!pending || pending.id !== proposalId) {
+            this.postCommandResult(false, 'That proposal is no longer active.');
+            return;
+        }
+        try {
+            for (const item of pending.packet.items) {
+                const document = await this.sourceDocument(item.path);
+                const parsed = await this.adapter.parseModule(document.getText(), item.path);
+                if (parsed.sourceHash !== item.sourceHash) {
+                    throw new Error(`${item.qualifiedName} changed after generation. The draft was preserved; regenerate against current source.`);
+                }
+            }
+            const document = await this.sourceDocument(pending.path);
+            const edit = new vscode.WorkspaceEdit();
+            this.addProposal(edit, document, pending.proposal);
+            if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the proposal edit.');
+            this.lastAcceptedUnitId = pending.packet.targetId;
+            this.pendingProposal = undefined;
+            await this.panel.webview.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
+            this.postCommandResult(true, 'Proposal accepted as one WorkspaceEdit. Use Undo to revert it.');
+        } catch (error) {
+            await this.panel.webview.postMessage({
+                type: 'proposalStale', proposalId,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    private async undoAccepted(): Promise<void> {
+        if (!this.lastAcceptedUnitId) {
+            this.postCommandResult(false, 'There is no accepted Slate proposal to undo.');
+            return;
+        }
+        await this.revealUnit(this.lastAcceptedUnitId, true);
+        await vscode.commands.executeCommand('undo');
+        this.lastAcceptedUnitId = undefined;
+        this.postCommandResult(true, 'UNDO: reverted the last accepted WorkspaceEdit');
+        this.scheduleRefresh(0);
+    }
+
+    private async handleAction(action: Record<string, unknown>, revision: unknown): Promise<void> {
+        const invoke = (command: string, args: string[]) => this.handleCommand({ command, args, revision });
+        if (action.kind === 'refreshIndex') return invoke('COMPILE', []);
+        if (action.kind === 'saveWorkspace') return invoke('SAVE', []);
+        if (action.kind === 'createStub'
+            && typeof action.target === 'string' && typeof action.signature === 'string' && typeof action.intent === 'string') {
+            return invoke('STUB', [action.target, '::', action.signature, '::', action.intent]);
+        }
+        if (action.kind === 'setAnnotationField' && typeof action.target === 'string'
+            && typeof action.text === 'string' && (action.field === 'intent' || action.field === 'contract')) {
+            return invoke(action.field.toUpperCase(), [action.target, '::', action.text]);
+        }
+        if (action.kind === 'setContext' && typeof action.consumer === 'string'
+            && typeof action.dependency === 'string' && typeof action.enabled === 'boolean') {
+            return invoke(action.enabled ? 'CONTEXT' : 'UNCONTEXT', [action.consumer, '::', action.dependency]);
+        }
+        if (action.kind === 'setLock' && typeof action.target === 'string' && typeof action.locked === 'boolean') {
+            return invoke('LOCK', [action.target, action.locked ? 'ON' : 'OFF']);
+        }
+        this.postCommandResult(false, 'The webview sent an invalid typed action.');
     }
 
     private resolveUnit(query: string): { document: HarnessDocument; unit: ParsedUnit } {
@@ -329,6 +575,45 @@ export class HarnessPanel implements vscode.Disposable {
         const root = this.workspaceRoot();
         if (!root) throw new Error('Open a project first.');
         return vscode.workspace.openTextDocument(vscode.Uri.joinPath(root.uri, ...documentPath.split('/')));
+    }
+
+    async revealUnit(unitId: string, focus = false): Promise<void> {
+        if (!this.snapshot) throw new Error('The graph is not indexed yet.');
+        const matches = this.snapshot.documents.flatMap(document => document.units
+            .filter(unit => unit.id === unitId)
+            .map(unit => ({ document, unit })));
+        if (matches.length !== 1) throw new Error(`Unit id ${unitId} resolved to ${matches.length} declarations.`);
+
+        const sourceDocument = await this.sourceDocument(matches[0].document.path);
+        const current = await this.adapter.parseModule(sourceDocument.getText(), matches[0].document.path);
+        const currentUnits = current.units.filter(unit => unit.id === unitId);
+        if (currentUnits.length !== 1) {
+            throw new Error(`Unit ${matches[0].unit.qualifiedName} changed before it could be revealed.`);
+        }
+        const unit = currentUnits[0];
+        const editor = await vscode.window.showTextDocument(sourceDocument, {
+            preview: false,
+            preserveFocus: !focus,
+            viewColumn: vscode.ViewColumn.Beside,
+        });
+        const selection = new vscode.Range(
+            unit.ranges.name.start.line,
+            unit.ranges.name.start.character,
+            unit.ranges.name.end.line,
+            unit.ranges.name.end.character,
+        );
+        const declaration = new vscode.Range(
+            unit.ranges.declaration.start.line,
+            unit.ranges.declaration.start.character,
+            unit.ranges.declaration.end.line,
+            unit.ranges.declaration.end.character,
+        );
+        editor.selection = new vscode.Selection(selection.start, selection.end);
+        editor.revealRange(declaration, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
+
+    snapshotForTest(): HarnessSnapshot | undefined {
+        return this.snapshot;
     }
 
     private annotation(unit: ParsedUnit, overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -366,6 +651,11 @@ export class HarnessPanel implements vscode.Disposable {
         const rawArgs = (message.args as string[]).join(' ');
         const parts = rawArgs.split('::').map(part => part.trim());
         try {
+            const sourceMutations = new Set(['STUB', 'INTENT', 'CONTRACT', 'CONTEXT', 'UNCONTEXT', 'LOCK']);
+            if (this.projectDocument && sourceMutations.has(command)
+                && loadProject(this.projectDocument.getText()).readOnly) {
+                throw new Error('This project uses a newer schema and is read-only.');
+            }
             if (command === 'COMPILE' || command === 'RECOMPILE') {
                 await this.refresh();
                 const invalid = this.snapshot?.documents.filter(document => !document.valid).length ?? 0;
@@ -397,7 +687,7 @@ export class HarnessPanel implements vscode.Disposable {
                 }
                 const document = await this.sourceDocument(target.path);
                 const unitId = randomUUID();
-                const proposal = await this.worker.insertStub({
+                const proposal = await this.adapter.insertStub({
                     source: document.getText(), path: target.path, expectedHash: target.sourceHash,
                     signature: parts[1], annotation: {
                         id: unitId, intent: parts.slice(2).join(' :: '), contract: '',
@@ -422,8 +712,8 @@ export class HarnessPanel implements vscode.Disposable {
                     expectedHash: target.document.sourceHash, unitId: target.unit.id, annotation,
                 };
                 const proposal = target.unit.annotation
-                    ? await this.worker.updateAnnotation(params)
-                    : await this.worker.adoptUnit(params);
+                    ? await this.adapter.updateAnnotation(params)
+                    : await this.adapter.adoptUnit(params);
                 const edit = new vscode.WorkspaceEdit();
                 this.addProposal(edit, document, proposal);
                 if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
@@ -453,8 +743,8 @@ export class HarnessPanel implements vscode.Disposable {
                     expectedHash: consumer.document.sourceHash, unitId: consumer.unit.id, annotation,
                 };
                 const proposal = consumer.unit.annotation
-                    ? await this.worker.updateAnnotation(params)
-                    : await this.worker.adoptUnit(params);
+                    ? await this.adapter.updateAnnotation(params)
+                    : await this.adapter.adoptUnit(params);
                 const edit = new vscode.WorkspaceEdit();
                 this.addProposal(edit, document, proposal);
                 if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
@@ -474,33 +764,12 @@ export class HarnessPanel implements vscode.Disposable {
                     expectedHash: target.document.sourceHash, unitId: target.unit.id, annotation,
                 };
                 const proposal = target.unit.annotation
-                    ? await this.worker.updateAnnotation(params)
-                    : await this.worker.adoptUnit(params);
+                    ? await this.adapter.updateAnnotation(params)
+                    : await this.adapter.adoptUnit(params);
                 const edit = new vscode.WorkspaceEdit();
                 this.addProposal(edit, document, proposal);
                 if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
                 this.postCommandResult(true, `LOCK: ${target.unit.qualifiedName} ${args[1].toUpperCase()}`);
-                return;
-            }
-            if (command === 'REASSIGN') {
-                const args = parts.length > 1 ? parts : rawArgs.trim().split(/\s+/);
-                if (args.length !== 2) throw new Error('Usage: REASSIGN unit :: target.py');
-                const source = this.resolveUnit(args[0]);
-                const target = this.resolveDocument(args[1]);
-                const sourceDocument = await this.sourceDocument(source.document.path);
-                const targetDocument = await this.sourceDocument(target.path);
-                const proposal = await this.worker.moveUnit({
-                    source: sourceDocument.getText(), sourcePath: source.document.path,
-                    expectedSourceHash: source.document.sourceHash,
-                    targetSource: targetDocument.getText(), targetPath: target.path,
-                    expectedTargetHash: target.sourceHash, unitId: source.unit.id,
-                    annotation: this.annotation(source.unit),
-                });
-                const edit = new vscode.WorkspaceEdit();
-                this.addProposal(edit, sourceDocument, proposal.source);
-                this.addProposal(edit, targetDocument, proposal.target);
-                if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
-                this.postCommandResult(true, `REASSIGN: moved ${source.unit.qualifiedName} to ${target.path}`);
                 return;
             }
         } catch (error) {
@@ -525,6 +794,7 @@ export class HarnessPanel implements vscode.Disposable {
         HarnessPanel.current = undefined;
         this.panel.dispose();
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
+        this.generation?.abort();
         this.refreshGeneration++;
         while (this.disposables.length) this.disposables.pop()?.dispose();
     }

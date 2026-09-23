@@ -1,224 +1,155 @@
 ---
-tags: [project, slate, harness, issues, python, xyflow]
+tags: [project, slate, harness, issues]
 status: open
 ---
 
-# Slate Python harness — implementation tasks
+# Slate harness — active implementation backlog
 
-The governing plan and manual gates are in
-[SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md). This file contains only active
-work. The previous v0.2 backlog was superseded by the source-first Python port;
-its shipped results remain recorded in [features.md](features.md).
+Tasks are ordered by dependency. The governing behavior and acceptance journeys
+are in [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md). H-022 through H-025 were
+implemented on 2026-09-23 and moved to [features.md](features.md). This backlog
+now starts at the first unfinished slice.
 
-The port was approved on 2026-09-10. Complete tasks in dependency order. Every
-task must leave all earlier automated gates green.
+## Slice 3 — context workbench
 
-## Breakpoint 0 — baseline
+### H-026 Unify context, annotation editing, and proposal review
 
-### H-002 Freeze versioned contracts
-- **Scope:** Define v2 project JSON, annotation, source-position, worker RPC,
-  and webview↔host message schemas. Include migration fixtures for current JSON
-  and `## @slate` files.
-- **Acceptance:** Schemas have strict TypeScript/Python validation and fixtures;
-  unknown annotation fields survive; unsupported versions block writes.
-- **Blocks:** H-003, H-006, H-009.
+**Current status:** the unified workbench, named durable chips, add/remove
+picker, packet manifest, stale generation rejection, and native-undo apply are
+implemented. Shared `@`/context-menu entry, provisional adoption review, and a
+review lifecycle for annotation mutations remain.
 
-## Breakpoint 1 — Python engine
+- **Scope:** Replace the read-only inspector with one contextual workbench.
+  `@`, **Add context…**, slash actions, and node context menus use the H-025
+  picker with a pinned consumer. Show named context chips and an exact packet
+  preview. Put intent, contract, stub, lock, and context mutations through one
+  host-owned proposal/review/apply lifecycle.
+- **Acceptance:**
+  - Annotation, chip, graph edge, persisted project, and packet manifest agree.
+  - The UI explains that context does not imply an import or call dependency.
+  - Provisional dependencies offer an explicit adoption diff.
+  - Editing source while a proposal is open makes acceptance fail stale while
+    preserving the draft.
+  - Acceptance rechecks document versions/hashes and applies one native-undo
+    `WorkspaceEdit`.
+  - Unsafe cross-file `REASSIGN` is removed from the primary surface.
+- **Depends:** H-024, H-025.
+- **Blocks:** H-027, H-030.
 
-### H-003 Create the supervised LibCST worker
-- **Scope:** Add a Python package exposing newline-delimited JSON RPC over
-  stdio. Implement health, parse-module, and shutdown operations. The worker
-  accepts source snapshots and never accesses workspace files directly.
-- **Acceptance:** Extension starts, monitors, restarts, and stops the worker;
-  malformed requests cannot crash the extension; clean-install setup is
-  documented and tested.
-- **Depends:** H-002.
-- **Blocks:** H-004, H-005, H-010.
+**Milestone:** after H-026, dogfood Slate daily for search, exact navigation,
+and context planning without model generation.
 
-### H-004 Build lossless Python indexing
-- **Scope:** Extract modules, classes, functions, methods, nested declarations,
-  decorators, async state, signatures, annotations, IDs, intent blocks, and
-  precise ranges using LibCST metadata.
-- **Acceptance:** No-op processing changes zero bytes across golden fixtures;
-  Unicode, tabs, CRLF, multiline signatures/strings, empty modules, scripts,
-  and malformed snapshots have explicit tests.
-- **Depends:** H-003.
-- **Blocks:** H-007, H-011.
+## Slice 4 — safe single-function loop
 
-### H-005 Build minimal structural patching
-- **Scope:** Add operations for adopting a unit ID, changing intent/contract,
-  inserting a typed stub, and replacing one function/method body. Reparse the
-  candidate module and prove edits stay inside permitted regions.
-- **Acceptance:** Property/golden tests show unrelated text and locked units are
-  byte-identical; stale hashes, ambiguous ownership, duplicate IDs, invalid
-  syntax, and out-of-range edits are rejected.
-- **Depends:** H-003, H-004.
-- **Blocks:** H-011, H-012, H-017.
+### H-027 Generate and review one function with a deterministic fake model
 
-### H-006 Establish Python validation tooling
-- **Scope:** Add isolated worker dependencies and project-aware adapters for
-  Ruff, Basedpyright strict mode, pytest, and Python syntax checking.
-- **Acceptance:** Candidate snapshots can be validated without first writing
-  them over user source; diagnostics map to document/node IDs; project configs
-  are honored rather than rewritten.
-- **Depends:** H-002.
-- **Blocks:** H-012, H-017.
+**Current status:** bounded packets, honest streaming activity, cancellation,
+structural confinement, proposal review, freshness checks, accept, and undo are
+implemented and fake-transport tested. Inline candidate editing, regenerate,
+and Extension Host coverage of the complete fake-model accept journey remain.
 
-## Breakpoint 2 — one XYFlow source browser
+- **Scope:** Define eligibility for supported typed functions/methods, build a
+  bounded packet with output headroom, stream honest activity events from the
+  fake server, confine candidate edits to the owned unit body, and expose diff,
+  diagnostics, accept, edit, regenerate, and cancel in the workbench.
+- **Acceptance:**
+  - Extra declarations, module statements, signature/decorator changes, locked
+    descendants, and edits outside the owned region are rejected.
+  - Required context is never silently truncated; omissions and budget use are
+    visible before send.
+  - Target or dependency changes invalidate acceptance and preserve the draft.
+  - Accept and undo pass through the real Extension Host fixture.
+  - Cancellation and malformed streams never mutate source.
+- **Depends:** H-022, H-023, H-026.
+- **Blocks:** H-028, H-030.
 
-### H-007 Create the React + TypeScript webview
-- **Scope:** Add a new Vite React entry using `@xyflow/react`, plain typed domain
-  records, design tokens, and one canvas. Do not mount it through the legacy
-  `MainManager`.
-- **Acceptance:** Files/classes/functions/methods render with containment,
-  explicit-context, and inferred-reference edges; pan/zoom/fit, stable layout,
-  class collapse, and multi-select are covered by component tests.
-- **Depends:** H-004.
-- **Blocks:** H-008, H-013, H-019.
+## Slice 5 — llama.cpp and validation
 
-### H-008 Add inspector, command bar, and status surfaces
-- **Scope:** Contextual node inspector plus compact deterministic commands:
-  `find`, `reveal`, `stub`, `intent`, `generate`, `queue`, `accept`, `skip`,
-  `lock`, `cancel`, and `fit`. Show dirty, stale, parse, validation, and conflict
-  states without adding separate card/document screens.
-- **Acceptance:** All commands target IDs rather than labels; keyboard and
-  accessible controls work; no language or model picker appears.
-- **Depends:** H-007.
-- **Blocks:** H-013, H-018.
+### H-028 Connect the proven loop to llama.cpp
 
-### H-009 Replace whole-state custom-editor synchronization
-- **Scope:** Make the extension host the sole mutation coordinator. Track exact
-  project roots, open document versions, source hashes, dirty buffers, file
-  creates/deletes, and external edits. Replace boolean echo suppression with
-  revision comparison.
-- **Acceptance:** Dirty buffers beat disk; async stale parse results are
-  discarded; invalid source retains a visibly stale last-good graph; indexing
-  never writes source.
-- **Depends:** H-002, H-003.
-- **Blocks:** H-010, H-011, H-014.
+**Current status:** endpoint/model/budget/timeout settings, streaming,
+cancellation, transport failure coverage, and a real 0.5B server smoke test are
+implemented. Health UI, bounded revision feedback, trusted-workspace Ruff,
+Basedpyright, and targeted pytest validation remain.
 
-### H-010 Implement bidirectional editor navigation
-- **Scope:** Graph selection reveals and selects the current exact source range;
-  editor selection highlights the deepest containing graph node.
-- **Acceptance:** Works for top-level functions, decorated methods, classes,
-  Unicode, dirty buffers, and moved ranges without focus-stealing loops.
-- **Depends:** H-004, H-007, H-009.
+- **Scope:** Add extension-host transport for a workspace-configured llama.cpp
+  server: endpoint, model, context window, output budget, timeout, health,
+  streaming, and cancellation. Add staged candidate validation and bounded
+  revision feedback.
+- **Acceptance:**
+  - Fake transport tests cover chunking, malformed payloads, disconnects,
+    timeout, cancellation, unavailable server, and context overflow.
+  - A tagged real-server smoke test generates one fixture leaf function.
+  - No model picker or silent cloud fallback appears.
+  - Syntax and structural checks always run; configured Ruff, Basedpyright, and
+    targeted pytest commands run only in trusted workspaces against candidate
+    snapshots.
+  - Activity says what the harness included and checked, never what the model
+    allegedly browsed or thought.
+- **Depends:** H-027.
+- **Blocks:** H-029, H-030.
 
-## Breakpoint 3 — typed stub round trip
+### H-029 Pilot the harness on one human Python project
 
-### H-011 Implement graph↔source typed stubs
-- **Scope:** From XYFlow, create functions and methods with typed signatures,
-  intent, contract, input/output examples, dependencies, locks, and
-  `NotImplementedError` bodies. Source edits must update those graph fields.
-- **Acceptance:** Top-level, async, decorated, and method stubs import cleanly;
-  calls fail loudly; graph edits preview exact patches and use WorkspaceEdit;
-  VS Code undo restores graph state.
-- **Depends:** H-005, H-008, H-009.
-- **Blocks:** H-012, H-015.
+- **Scope:** Select one non-sensitive, maintained 10–30-module Python project.
+  Run staged read-only, planning, deterministic-proposal, and real llama.cpp
+  trials on a branch. Capture failures as fixtures before fixing them.
+- **Acceptance:**
+  - At least one week of read-only search/navigation usage is recorded.
+  - Three real upcoming functions have human-reviewed context packets.
+  - Five low-risk leaf functions are attempted with llama.cpp and independent
+    tests.
+  - Report first-proposal acceptance, repair rounds, packet sizes, omitted
+    required context, validation failures, navigation/indexing errors, and
+    human review time versus ordinary prompting.
+  - Queue work continues only if single-unit review is trusted.
+- **Depends:** H-026 for read-only/planning stages; H-028 for generation stage.
 
-### H-012 Enforce strict stub contracts
-- **Scope:** Surface missing parameter/return annotations, incompatible
-  dependency types, example mismatches, Ruff findings, Basedpyright findings,
-  and targeted pytest results on nodes.
-- **Acceptance:** Plausible wrong signatures fail tests; failure blocks default
-  acceptance but preserves editable work; project-specific validation commands
-  can be configured in JSON/settings.
-- **Depends:** H-006, H-011.
+## Slice 6 — queue the proven loop
 
-### H-013 Migrate current projects and annotations
-- **Scope:** Read current Project→Documents→Cards JSON and v1 annotation blocks,
-  preserving IDs/prompts where correspondence is unambiguous. Never overwrite
-  source during migration.
-- **Acceptance:** Calculator and tic-tac-toe open in the new graph; ambiguous or
-  missing mappings produce repair tasks rather than title-based destructive
-  guesses.
-- **Depends:** H-002, H-007, H-011.
+### H-030 Implement explicit scheduling and a resumable review queue
 
-## Breakpoint 4 — one-card local generation
+- **Scope:** Define scheduling prerequisites separately from context inclusion.
+  Compute eligible units and deterministic ordering for project, selection, or
+  selected dependency subgraph. Pause for every proposal and persist intent,
+  not stale trusted ranges.
+- **Acceptance:**
+  - Tests cover disconnected graphs, diamonds, cycles, methods, blocked and
+    oversized units, accepted versus locked state, and source-order tie breaks.
+  - Skip, regenerate, cancel, failure, close/reopen, and resume preserve work.
+  - Every resumed item rechecks source and dependency revisions.
+  - Upstream edits stale downstream proposals without erasing drafts.
+  - Calculator and tic-tac-toe pass end to end through the fake model.
+- **Depends:** H-024, H-026, H-027; begin only after H-029's decision gate.
 
-### H-014 Move Ollama transport into the extension
-- **Scope:** Configure endpoint, model, context budget, timeout, and validation
-  commands through VS Code settings. Add health diagnostics, streaming, and
-  cancellation. Remove primary-flow provider/model selection and silent cloud
-  fallback.
-- **Acceptance:** Deterministic fake transport tests and real Ollama smoke test
-  pass; unavailable/cancelled/timed-out requests do not mutate source.
-- **Depends:** H-009.
-- **Blocks:** H-016.
+## Slice 7 — retirement and release
 
-### H-015 Build bounded context packets
-- **Scope:** Include only unit contract/signature, necessary enclosing context,
-  direct explicit dependencies, relevant test contracts, and bounded revision
-  feedback. Expose a manifest and per-part size before generation.
-- **Acceptance:** Token and 100–200-source-line ceilings are enforced; oversized
-  units suggest decomposition; hidden whole-repository context is impossible.
-- **Depends:** H-011.
-- **Blocks:** H-016.
+### H-031 Retire the legacy runtime and harden packaging
 
-### H-016 Generate and review one proposal
-- **Scope:** Stream candidate code, validate it, display the complete diff and
-  diagnostics, then support accept/edit/regenerate/cancel. Preserve signatures
-  and decorators by default.
-- **Acceptance:** Model output cannot select paths/ranges; stale source or
-  dependency revisions invalidate acceptance; valid acceptance is one undoable
-  WorkspaceEdit affecting only reviewed hunks.
-- **Depends:** H-005, H-006, H-008, H-014, H-015.
-- **Blocks:** H-018.
+**Current status:** the production extension and VSIX are harness-only; legacy
+commands/editor/assets, browser model transport, state bridge, and Python
+worker are absent. The static-site replacement and clean installed-VSIX
+restart/update journey remain gated by the pilot and queue decision.
 
-## Breakpoint 5 — Generate All and subgraph queue
-
-### H-017 Implement dependency and eligibility engine
-- **Scope:** Model separate containment, explicit context, and inferred
-  reference edges. Compute eligible stubs and deterministic leaves-first order.
-- **Acceptance:** Unit tests cover disconnected graphs, diamonds, cycles,
-  locked/accepted/blocked/oversized nodes, methods, and source-order tie breaks.
-- **Depends:** H-005, H-006, H-011.
-- **Blocks:** H-018.
-
-### H-018 Preserve and harden Generate All
-- **Scope:** Queue eligible stubs for the whole project, selection, or selected
-  dependency subgraph. Pause per proposal for accept/edit/regenerate/skip/lock/
-  cancel. Persist and resume queue state.
-- **Acceptance:** One failure does not erase the queue; accepted/locked cards are
-  never regenerated implicitly; upstream edits stale dependent proposals;
-  calculator and tic-tac-toe complete through a deterministic fake model and
-  pass strict validation/tests.
-- **Depends:** H-008, H-016, H-017.
-
-## Breakpoint 6 — retirement and release
-
-### H-019 Retire the legacy application
-- **Scope:** Once H-018 passes its gate, make the React XYFlow application the
-  only extension UI. Remove D3, the three-panel HTML, cards/chat applets,
-  compile/rehydrate reconstruction, and cloud-provider UI except code required
-  for explicit migration.
-- **Acceptance:** No legacy runtime route ships; no replacement invariant loses
-  its existing test; extension bundle contains one graph application.
-- **Depends:** H-007, H-013, H-018.
-
-### H-020 Replace GitHub Pages with a static product site
-- **Scope:** Build a static feature page containing product explanation,
-  workflow, extension installation, local-model requirements, and inspected
-  screenshots. It does not open projects, edit source, or call models.
-- **Acceptance:** Fast static build deploys under the current Pages workflow;
-  no editor code or API-key surface ships in the site bundle.
-- **Depends:** H-019 for final screenshots; page shell may start earlier.
-
-### H-021 Package and release-candidate hardening
-- **Scope:** Clean-profile VSIX installation, Python worker provisioning,
-  restart recovery, telemetry-free diagnostics, migration stress tests, and
-  full CI across supported Python/VS Code versions.
-- **Acceptance:** Every breakpoint's automated and manual gate passes; a user
-  can complete folder→stub→Generate All→accept→strict checks after restart.
-- **Depends:** H-018, H-019, H-020.
+- **Scope:** Remove the old D3/card/chat authoring UI after replacement
+  invariants are covered. Package one XYFlow harness, replace GitHub Pages with
+  a static product page, and test clean install/update/restart.
+- **Acceptance:**
+  - Production extension contains no legacy runtime, browser model transport,
+    Python worker bootstrap, or old provider/model UI.
+  - Clean-profile VSIX completes search → context → generate → review → accept
+    → undo after restart.
+  - Static site contains current inspected screenshots and installation/local
+    llama.cpp instructions, but no authoring or API-key surface.
+  - All unit, browser, Extension Host, Electron, fake-model, migration, and
+    fixture suites pass in CI.
+- **Depends:** H-029, H-030.
 
 ## Deferred
 
-- Markdown transformation nodes and summary convergence.
-- Other programming languages.
-- Autonomous shell/tool execution.
-- Browser folder editing or browser Ollama support.
-- Automatic stale-proposal rebasing and arbitrary cross-file refactors.
-
-When a task ships, move its block to [features.md](features.md) with a resolved
-date and commit link. Do not leave completed work in this file.
+- Autonomous model tools or shell execution.
+- Complete static call graphs and arbitrary cross-file moves.
+- Additional languages and generic adapter plugins.
+- Markdown transformation graphs.
+- Browser folder editing or browser llama.cpp access.
+- Automatic stale-proposal rebasing.

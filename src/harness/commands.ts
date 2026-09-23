@@ -1,12 +1,48 @@
 export const COMMAND_NAMES = [
-    'SELECT', 'REVEAL', 'EDIT', 'FIT', 'CLEAR', 'STUB', 'INTENT', 'CONTRACT',
-    'CONTEXT', 'UNCONTEXT', 'LOCK', 'REASSIGN', 'COMPILE', 'RECOMPILE', 'SAVE', 'HELP',
+    'SEARCH', 'SELECT', 'REVEAL', 'EDIT', 'FIT', 'CLEAR', 'STUB', 'INTENT', 'CONTRACT',
+    'CONTEXT', 'UNCONTEXT', 'LOCK', 'COMPILE', 'RECOMPILE', 'SAVE', 'HELP',
 ] as const;
 
 export type HarnessCommand = {
     name: string;
     args: string[];
 };
+
+export type HarnessAction =
+    | { kind: 'refreshIndex' }
+    | { kind: 'saveWorkspace' }
+    | { kind: 'createStub'; target: string; signature: string; intent: string }
+    | { kind: 'setAnnotationField'; target: string; field: 'intent' | 'contract'; text: string }
+    | { kind: 'setContext'; consumer: string; dependency: string; enabled: boolean }
+    | { kind: 'setLock'; target: string; locked: boolean };
+
+export function commandToAction(command: HarnessCommand): HarnessAction | null {
+    const raw = command.args.join(' ');
+    const parts = raw.split('::').map(part => part.trim());
+    if (command.name === 'COMPILE' || command.name === 'RECOMPILE') return { kind: 'refreshIndex' };
+    if (command.name === 'SAVE') return { kind: 'saveWorkspace' };
+    if (command.name === 'STUB' && parts.length >= 3 && parts[0] && parts[1] && parts[2]) {
+        return { kind: 'createStub', target: parts[0], signature: parts[1], intent: parts.slice(2).join(' :: ') };
+    }
+    if ((command.name === 'INTENT' || command.name === 'CONTRACT') && parts.length >= 2 && parts[0] && parts[1]) {
+        return {
+            kind: 'setAnnotationField',
+            target: parts[0],
+            field: command.name === 'INTENT' ? 'intent' : 'contract',
+            text: parts.slice(1).join(' :: '),
+        };
+    }
+    if ((command.name === 'CONTEXT' || command.name === 'UNCONTEXT') && parts.length === 2 && parts[0] && parts[1]) {
+        return { kind: 'setContext', consumer: parts[0], dependency: parts[1], enabled: command.name === 'CONTEXT' };
+    }
+    if (command.name === 'LOCK') {
+        const lockParts = raw.trim().split(/\s+/);
+        if (lockParts.length === 2 && ['ON', 'OFF'].includes(lockParts[1].toUpperCase())) {
+            return { kind: 'setLock', target: lockParts[0], locked: lockParts[1].toUpperCase() === 'ON' };
+        }
+    }
+    return null;
+}
 
 export type CommandTarget = {
     id: string;
@@ -44,6 +80,7 @@ export function commandCompletions(input: string): string[] {
 }
 
 const HELP: Record<string, string> = {
+    SEARCH: 'SEARCH query or /search — search names, signatures, annotations, and source',
     SELECT: 'SELECT name|id|ALL|NONE',
     REVEAL: 'REVEAL unit — open its source',
     EDIT: 'EDIT unit — open its source for editing',
@@ -53,7 +90,6 @@ const HELP: Record<string, string> = {
     CONTEXT: 'CONTEXT consumer :: dependency',
     UNCONTEXT: 'UNCONTEXT consumer :: dependency',
     LOCK: 'LOCK unit ON|OFF',
-    REASSIGN: 'REASSIGN top_level_unit :: target.py',
     COMPILE: 'COMPILE — re-index and parse-check source',
     RECOMPILE: 'RECOMPILE — alias for COMPILE',
     SAVE: 'SAVE — save dirty workspace files',

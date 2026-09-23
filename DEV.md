@@ -69,19 +69,15 @@ Watches `vscode-extension/src/`, rebuilds `vscode-extension/out/`. Required
 when changing `extension.ts` (the host bridge, command handlers, terminal
 hand-off, etc.).
 
-### Terminal C — Ollama (for local code generation)
+### Terminal C — llama.cpp (for local code generation)
 
 ```bash
-# allow webview origin to talk to Ollama
-OLLAMA_ORIGINS=* ollama serve
-
-# in another shell (or just leave it loaded)
-ollama pull qwen2.5-coder:7b              # smaller, faster for dev
-# (production target is qwen2.5-coder:30b — switch in slate settings)
+npm run demo:llama
 ```
 
-Skip this terminal if you're working on UI / schema / compile pieces that
-don't need the model.
+The extension host—not the webview—calls llama.cpp's OpenAI-compatible
+`/v1/chat/completions` endpoint. The first run downloads the small default
+coding GGUF. See [DEMO.md](DEMO.md) for the complete flow.
 
 ### VS Code — Extension Development Host
 
@@ -134,10 +130,9 @@ will be hidden once issue **#31** lands (the `isCodeHost()` gate).
 | Extension host code | `vscode-extension/src/extension.ts` | TS, tsc-built |
 | Extension built JS | `vscode-extension/out/` | tsc output |
 | Extension webview src | `vscode-extension/dist/` → `../dist` | symlink |
-| State bridge (localStorage ↔ globalState) | `vscode-extension/src/state-bridge.js` | injected into webview |
 | Tic-tac-toe scaffold | `examples/tic_tac_toe/` | CI gate per issue #28-#30 |
-| Spec | `slate-code-v0.2-spec.md` | source of truth |
-| Open work | `issues.md` | 36 issues across 10 phases |
+| Spec | `SLATE_HARNESS_PLAN.md` | source of truth |
+| Open work | `issues.md` | active ordered slices |
 | Shipped work | `features.md` | append-only resolved log |
 
 ---
@@ -145,17 +140,11 @@ will be hidden once issue **#31** lands (the `isCodeHost()` gate).
 ## Common snags
 
 - **"Webview blank / fonts missing"** → CSP issue. Check `dist/index.html`
-  has no `<link>` to external CDNs (Google Fonts etc.); they should be
-  bundled. v0.1 already scrubs them; if it regresses, see
-  `slate-code-plan.md` risk #2.
-- **"Settings don't persist across reload"** → state-bridge mismatch.
-  Check `state-bridge.js` is being injected and `globalState` writes are
-  flushing.
-- **"Local model returns markdown fences anyway"** → expected; the
-  defensive strip in `Card.getPythonSource()` (and post-#5, the
-  `python.system.txt` system prompt + parser) handles this.
-- **"Terminal hand-off does nothing"** → that lands in issue **#20**;
-  not implemented yet.
+  has no `<link>` to external CDNs; extension assets should be bundled.
+- **"llama.cpp is unreachable"** → run `npm run demo:llama`, then verify
+  `slate.llama.endpoint` is `http://127.0.0.1:8080`.
+- **"The candidate was rejected"** → Slate only accepts one parseable function
+  with the existing name and signature. The draft stays visible for review.
 
 ---
 
@@ -173,4 +162,4 @@ will be hidden once issue **#31** lands (the `isCodeHost()` gate).
 ---
 
 *Related: [issues.md](issues.md) · [features.md](features.md) ·
-[slate-code-v0.2-spec.md](slate-code-v0.2-spec.md)*
+[SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)*

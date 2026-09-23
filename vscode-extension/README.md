@@ -1,66 +1,42 @@
-# Slate Code (VS Code extension)
+# Slate Code
 
-Hosts the slate notebook UI in a VS Code webview, and writes compiled `.py` files into your workspace.
+Slate Code is a source-linked Python harness for VS Code. It indexes typed
+functions into a graph, navigates by durable identity, makes required context
+explicit, and asks a local llama.cpp server to implement one confined function
+at a time.
 
-> Architect the code in slate. Run it in VS Code.
-
-## What you get
-
-- **`*.slate.json` files open in slate.** Double-click any `.slate.json` in your workspace and VS Code routes it to the slate custom editor instead of the JSON viewer. Edits round-trip through VS Code's standard dirty/save flow.
-- A **Slate icon in the activity bar**. The sidebar offers two buttons: **New Slate Project…** (prompts for a name and creates `<name>.slate.json` in the workspace) and **Open Empty Panel** (an unbound, ephemeral slate panel).
-- **Compile alongside the source.** Compile from a `.slate.json`-backed editor and the `<doc>.py` lands next to the source file. Compile from the empty panel and it lands at the workspace root.
-- **Commands**: `Slate: New Project…`, `Slate: Open Empty Panel`, `Slate: Compile Current Doc`, `Slate: Toggle Code Card`.
-
-`localStorage` (API keys, provider choice, local model name, base URL) is shimmed onto VS Code `globalState`, so your settings persist across restarts.
-
-## Develop
-
-From the slate repo root:
+## Build and install
 
 ```bash
+# repository root
 npm install
-npm run build              # builds dist/
-
-cd vscode-extension
-npm install
-npm run sync-dist          # wipes & syncs ../dist into ./dist (avoids nesting on re-run)
-npm run compile            # compiles extension TS
+npm --prefix vscode-extension install
+npm run package-extension -- --install
 ```
 
-Then press **F5** with `vscode-extension/` open in VS Code. An Extension Development Host launches; double-click any `*.slate.json` in your workspace, or use the Slate icon in the activity bar.
+Reload VS Code after installation. Open a Python workspace and run
+**Slate: Scan Python Workspace**, or open an existing `*.slate.json` project.
 
-**Iteration loop**: after editing slate source, run `npm run build` (slate root) + `npm run sync-dist` (extension), then **Cmd+R** the dev host webview.
-
-## Permanent install (build once, install as a real extension)
-
-From the slate repo root:
+## Local generation
 
 ```bash
-npm run package-extension -- --install   # build, package, install via `code` CLI
-npm run package-extension                # build + package only; prints the install command
+# repository root; first run downloads the 491 MB default GGUF
+npm run demo:llama
 ```
 
-This script stubs `src/config.js` (so your local OpenAI/Gemini keys never get baked into the bundle), runs the full build + sync + `vsce package`, and restores your config — even if anything fails partway. The `.vsix` lands at `vscode-extension/slate-code-<version>.vsix`.
+Select a typed, annotated function. The right workbench shows its intent,
+contract, named context, and exact packet budget. **Generate with llama.cpp**
+streams through the extension host. Slate validates that the response is one
+Python function with the same name and signature before offering a
+WorkspaceEdit. Source or context changes make acceptance stale and preserve the
+draft.
 
-After installing, run **Developer: Reload Window** in VS Code to pick up the new build.
+Settings:
 
-A symlink also works instead of `sync-dist`:
+- `slate.llama.endpoint` (default `http://127.0.0.1:8080`)
+- `slate.llama.model` (request label; no model picker or cloud fallback)
+- `slate.llama.contextWindow`
+- `slate.llama.outputTokens`
+- `slate.llama.timeoutSeconds`
 
-```bash
-ln -s ../dist vscode-extension/dist   # one-time, then `npm run build` is enough
-```
-
-## Smoke flow
-
-1. With Ollama running locally (`OLLAMA_ORIGINS='*' ollama serve`), open Slate and pick **Local (Ollama)** in the API key modal. Default tag: `qwen2.5-coder:30b`.
-2. Click **CODE** to flip into code-card mode.
-3. Type a prompt that references other cards via `@name`, hit **SEND**.
-4. **ADD TO DOC** to commit the result as a code card.
-5. **COMPILE** to write `<doc_title>.py` into your workspace.
-6. Open the file in VS Code and run it with the existing Python tooling.
-
-## Notes
-
-- Slate runs entirely client-side. The extension only writes files; it doesn't proxy LLM calls.
-- The webview's CSP allows Google Fonts (used by the design system) and connections to `localhost:*` (Ollama), `api.openai.com`, and `generativelanguage.googleapis.com`.
-- If `dist/` is missing inside the extension, opening the panel will surface a helpful error explaining how to populate it.
+See `DEMO.md` at the repository root for the included playable project.

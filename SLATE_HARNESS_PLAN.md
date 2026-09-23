@@ -1,261 +1,303 @@
-# Slate Python Harness Port
+# Slate Harness Plan
 
-Status: active — implementation approved 2026-09-10.
+Status: active — revised 2026-09-23.
+
+This is the only active product and architecture specification. The earlier
+drafts were synthesized here and removed. Completed work is summarized in
+[features.md](features.md); executable work is tracked in [issues.md](issues.md).
+
+## Product thesis
+
+Slate maintains an annotation-derived map of code so a developer—or a small
+local model—can work on one precisely scoped function without rediscovering
+its path, context, or safe edit boundaries.
+
+The graph is not the product by itself. The product is deterministic search,
+navigation, context assembly, proposal confinement, validation, and review.
+The model only proposes code for a unit the harness has already selected.
 
 ## Product contract
 
-Slate is a Python-first, local-LLM development harness presented as one XYFlow
-graph. A project JSON binds Slate to a folder and stores project identity,
-tracked files, stable node identities, explicit context edges, locks, queue
-state, and graph layout. Python files and dirty VS Code buffers remain the
-authority for executable source.
+1. Python files and dirty VS Code buffers are authoritative executable source.
+2. `## @slate` annotations own durable unit IDs, intent, contract, explicit
+   generation context, examples, and locks.
+3. A validated `.slate.json` owns project binding, tracked paths, layout, and
+   resumable work state. It never owns executable source or trusted ranges.
+4. The extension host owns filesystem access, current document revisions,
+   search, llama.cpp transport, validation orchestration, proposals, and final
+   `WorkspaceEdit` application.
+5. The webview displays the graph and workbench and sends typed user intent. It
+   never authorizes a source edit with a path or range of its own.
+6. The local model receives one bounded packet and returns one candidate unit.
+   It cannot search, choose files, select ranges, invoke tools, or write source.
+7. Every mutation is previewable, revision-bound, and undoable in VS Code.
 
-The primary loop is:
+## Primary workflow
 
-1. Open a folder-associated `.slate.json` project or create one from a Python
-   folder.
-2. Browse files, classes, functions, methods, and planning notes in XYFlow.
-3. Create a typed stub by defining its signature, intent, expected inputs and
-   outputs, dependencies, and optional tests.
-4. Slate inserts valid annotated Python containing `raise NotImplementedError`.
-5. Generate one stub or queue all eligible stubs, leaves first.
-6. For every stub, a local model returns a bounded proposal. Slate formats,
-   parses, type-checks, and runs targeted tests before showing the diff.
-7. Accept, regenerate, edit, skip, or lock the proposal. Acceptance is a VS
-   Code source edit with native undo.
-8. Any source edit is reparsed into the graph. Graph and code navigation work
-   in both directions.
+```diagram
+┌──────────────┐   ┌────────────────┐   ┌──────────────────┐
+│ Find/select  │──▶│ Add context    │──▶│ Inspect packet   │
+│ one unit     │   │ deliberately   │   │ and budget       │
+└──────────────┘   └────────────────┘   └────────┬─────────┘
+                                                ▼
+┌──────────────┐   ┌────────────────┐   ┌──────────────────┐
+│ Apply with   │◀──│ Review diff +  │◀──│ llama.cpp returns│
+│ native undo  │   │ diagnostics    │   │ one candidate    │
+└──────────────┘   └────────────────┘   └──────────────────┘
+```
 
-There is no model picker in this loop. Provider, endpoint, model, context limit,
-and validation commands are workspace settings.
-
-## Runtime boundaries
+The central command bar is a guided action surface, not an LLM chat prompt.
+For example:
 
 ```text
-React + TypeScript webview
-  XYFlow canvas | node inspector | proposal diff | command bar | queue
-                         |
-                  typed messages
-                         |
-VS Code TypeScript extension
-  project binding | document versions | watchers | navigation | WorkspaceEdit
-              |                              |
-           stdio                           HTTP
-              |                              |
-Python worker (LibCST)                    Ollama
-  parse | annotate | stub | patch          proposals only
-              |
-   ruff + basedpyright + pytest
+/search
+  → What do you want to find?
+  → normalize record
+  → deterministic results with file, symbol, snippet, and match reason
+  → Reveal | Select | Add as context
 ```
 
-The extension is the only component allowed to read current dirty buffers or
-write workspace files. The Python worker receives snapshots and returns parsed
-units or proposed edits; it never watches or writes files. Ollama never chooses
-a path, source range, node ID, or tool invocation.
+Buttons, context menus, shortcuts, slash commands, and graph gestures dispatch
+the same typed actions. There must not be separate implementations for `@`,
+context menus, and command-line context creation.
 
-## Data ownership
+## Interaction model
 
-| Data | Authority |
-|---|---|
-| Python text, signatures, decorators, ordering | Dirty editor buffer, then `.py` |
-| Unit ID, intent, contract, dependencies, lock | Versioned `## @slate` comment block |
-| Project/folder identity, tracked paths, layout, queue | `.slate.json` |
-| Names, kinds, parent relationships, ranges, diagnostics | Derived from source |
-| Generated code | Proposal until explicitly accepted |
+### Graph and editor
 
-`Project → Documents → Cards` remains the serialized logical shape. A Document
-maps to an exact relative Python path. A Card maps to a function, method, class
-container, or explicit note. Persisted source/ranges are caches only and must
-never authorize an overwrite.
+- Single-click selects a node and reveals its current definition in the native
+  editor without stealing keyboard focus.
+- Enter or **Edit in code** focuses the editor.
+- Editor movement highlights the deepest containing graph node without causing
+  a reciprocal navigation loop.
+- Navigation crosses the webview boundary by durable unit ID. The host resolves
+  the current path and range from its revisioned index.
+- Multi-selection uses normal modified-click behavior and never opens a file
+  per selected node.
 
-Graph containment, explicit generation context, and inferred code references
-are separate edge types. A context edge does not create an import.
+### Search
 
-## Typed stub and annotation contract
+The first search implementation covers names, qualified names, signatures,
+annotations, and dirty-buffer source text. Results are stable, explain why they
+matched, disambiguate repeated names, and remain bound to a source revision.
+Static call-graph inference and embeddings are not prerequisites.
 
-```python
-## @slate v=2 id=90ab6379-0438-4d6d-bc83-bd355513f28f
-## intent: Normalize incoming records.
-## contract: Preserve ordering and reject missing identifiers.
-## depends-on: f071f017-fc8a-47c9-8bd2-aa5146dfbd55
-## example: [{"id": "a"}] => [{"id": "a", "valid": true}]
-## locked: false
-## @slate-end
-def normalize(records: list[dict[str, str]]) -> list[dict[str, object]]:
-    raise NotImplementedError("Slate stub: normalize")
+### Context
+
+With consumer A selected, **Add context…**, `@`, and the node context menu open
+the same search picker while keeping A visibly pinned. Selecting B writes B's
+durable ID into A's annotation and displays a named `@B` chip.
+
+The UI must explain: “Included when generating A. Does not create an import or
+prove that A calls B.” Context inclusion and generation ordering are separate
+concepts. A missing durable ID triggers an adoption proposal, never a hidden
+title-based guess.
+
+### Workbench
+
+One contextual side panel replaces disconnected inspectors and modal flows:
+
+- **Inspect:** signature, intent, context, source state, diagnostics.
+- **Search:** query and actionable results.
+- **Prepare:** annotation/stub edit and exact source preview.
+- **Generate:** packet manifest, budget, cancellation, and activity.
+- **Review:** candidate diff, checks, accept, edit, regenerate, or cancel.
+
+### Honest agent-like activity
+
+Visible traversal is useful as provenance, not simulated agency. The host emits
+events only for work it actually performed:
+
+```text
+Resolved target
+Included explicit context: normalize, Record
+Built packet: 1,842 input tokens; omitted 0 required items
+Requested llama.cpp
+Received candidate
+Checked structural confinement
+Ran configured validation
+Ready for review
 ```
 
-Python has no multiline-comment syntax. Delimited comments avoid changing
-runtime behavior or `__doc__`. LibCST associates the comment block with the
-following declaration, before decorators, and preserves unknown fields.
+Events may highlight included nodes and show their excerpts. They must not add
+artificial delays, claim the model read unprovided files, or move the user's
+editor repeatedly. “Follow activity” is optional.
 
-A stub is eligible for generation when it is unlocked, has a complete typed
-signature and intent, still has a recognized stub body, and all required
-upstream nodes are accepted or locked. Classes are containers; methods are
-generation units. Nested functions are navigable but not independently
-generated in the first release.
+## Runtime architecture
 
-## Generate queue
+```diagram
+┌────────────────────────────────────────────────────────────┐
+│ React + TypeScript webview                                 │
+│ graph │ command workflows │ workbench │ diff │ activity    │
+└───────────────────────────┬────────────────────────────────┘
+                            │ typed actions/events
+┌───────────────────────────▼────────────────────────────────┐
+│ VS Code TypeScript extension                              │
+│ revisioned index │ search │ proposals │ validation │ queue │
+└──────────────┬───────────────────────────────┬─────────────┘
+               │ pure calls                    │ HTTP/SSE
+┌──────────────▼────────────────┐  ┌───────────▼─────────────┐
+│ TypeScript Python adapter     │  │ llama.cpp server        │
+│ parse │ ranges │ annotations  │  │ bounded completion only │
+│ constrained source patches   │  └─────────────────────────┘
+└───────────────────────────────┘
+```
 
-The existing Generate All behavior remains, with explicit state and safer
-semantics:
+The shipped extension must not bootstrap a Python environment or LibCST.
+The TypeScript adapter may use Lezer for syntax structure, but must preserve
+original text and create edits by slicing exact ranges rather than regenerating
+modules. Lezer error recovery is not proof that a module is valid; parse errors
+must be surfaced explicitly.
 
-- Scope is all eligible cards in the active project, selected nodes, or the
-  selected dependency subgraph.
-- Ordering is leaves first, with deterministic file/source order as a tie-break.
-- The queue pauses on each proposal for `accept`, `edit`, `regenerate`, `skip`,
-  `lock`, or `cancel queue`.
-- Accepted and locked cards are never regenerated implicitly.
-- Queue state persists in project JSON so a session can resume.
-- A stale source or dependency revision invalidates the proposal and preserves
-  its draft for regeneration.
-- One failure does not discard the queue; the card is marked blocked and the
-  user decides whether to continue.
+Project validation tools such as Ruff, Basedpyright, and pytest are optional,
+workspace-trusted commands run against candidate snapshots. They are not part
+of installing Slate and are not a security sandbox.
 
-Each generation packet contains only the unit annotation/signature, enclosing
-class and necessary module context, direct explicit dependencies, relevant test
-contracts, and a bounded recent revision prompt. Enforce both token and source
-line limits; 100–200 lines is a ceiling signal, not a function-size target.
+llama.cpp endpoint, model, context window, output budget, timeout, and validation
+commands are workspace settings. There is no primary-flow model picker and no
+silent cloud fallback.
 
-## Validation policy
+## Proposal safety
 
-Validation is staged so cheap failures arrive first:
+Every source-changing action follows one proposal protocol:
 
-1. Parse the candidate module with LibCST/Python.
-2. Verify the edit stayed inside approved ranges and preserved identity,
-   signature, decorators, and locked descendants unless explicitly permitted.
-3. Run Ruff formatting/checks on the candidate snapshot.
-4. Run Basedpyright in strict mode for affected files.
-5. Run targeted pytest tests, followed by the project test command at user
-   checkpoints.
+1. Capture source text, document version/hash, unit identity, dependency
+   revisions, and permitted edit regions.
+2. Prepare an immutable host-owned proposal and show its exact diff.
+3. Validate structural confinement and configured checks without replacing the
+   user's source.
+4. On acceptance, recheck every precondition.
+5. Apply the reviewed edit set as one `WorkspaceEdit`; retain the proposal when
+   stale or rejected.
 
-Diagnostics are attached to graph nodes. Failed validation blocks one-click
-acceptance by default but leaves the proposal editable. Project-specific
-commands may be configured; Slate does not rewrite the repository's own Ruff,
-Pyright, or pytest configuration.
+The first generation implementation replaces only a supported function or
+method body. It rejects extra declarations, module statements, signature or
+decorator changes, and targets containing unsupported locked descendants.
 
-## Test architecture
+Cross-file `REASSIGN` is not a primary action until imports and consumers can be
+updated safely.
 
-- **Python unit tests:** annotation ownership, extraction, ranges, stub creation,
-  minimal patching, decorators, classes/methods, async functions, Unicode, CRLF,
-  malformed files, duplicate IDs, and no-op byte preservation.
-- **Python property/golden tests:** parse → project → no-op render changes zero
-  bytes; a unit replacement changes only its permitted region.
-- **TypeScript unit tests:** project migration, queue ordering/resume, context
-  budgets, stale proposal rejection, typed host messages, and graph adapters.
-- **React component tests:** selection, queue controls, inspector drafts,
-  parse-error/stale states, and diff acceptance intent.
-- **VS Code integration tests:** dirty-buffer authority, external file changes,
-  graph↔editor navigation, WorkspaceEdit/undo, and stale version conflicts.
-- **End-to-end fixtures:** calculator and tic-tac-toe must scan, stub, generate
-  with a deterministic fake model, validate, accept, reopen, and pass their
-  Python tests. Existing Vitest and round-trip tests remain required until an
-  equivalent source-first test replaces each invariant.
+## Test platform
 
-## Delivery breakpoints and manual gates
+Slate must be testable by an agent without relying on manual computer use.
+The test platform is a product requirement, not final release polish.
 
-### Breakpoint 0 — frozen baseline
+### Layers
 
-Automated gate: current `npm test`, web build, extension TypeScript build, and
-calculator Python tests pass.
+1. **Pure adapter tests:** golden and property tests for UTF-16 positions,
+   annotations, decorators, multiline signatures, nested units, CRLF, Unicode,
+   invalid source, duplicate IDs, no-op byte preservation, and confined edits.
+2. **Webview tests:** Vitest for reducers/actions plus Playwright against
+   `harness.html` with a typed fake host. Cover keyboard workflows, menus,
+   search results, context chips, packet manifests, progress, and diff review.
+3. **Extension Host tests:** `@vscode/test-electron` launches a pinned local VS
+   Code build with fixture workspaces. Tests exercise dirty-buffer authority,
+   external edits, exact reveal, editor→graph selection, `WorkspaceEdit`, undo,
+   trust checks, persistence, and restart recovery through VS Code APIs.
+4. **Electron journey tests:** a small Playwright/CDP suite drives the actual VS
+   Code workbench and webview for representative cross-boundary journeys. Keep
+   selectors/test hooks explicit and the suite small because workbench DOM is
+   more fragile than Extension Host APIs.
+5. **Model transport tests:** a local fake llama.cpp-compatible HTTP server
+   streams deterministic chunks and exercises cancellation, timeout, malformed
+   output, context overflow, and server failure. A separately tagged smoke test
+   targets a real configured llama.cpp server.
+6. **Artifacts:** failing journeys retain screenshots, webview action traces,
+   host event logs, proposal diffs, and the fixture workspace.
 
-Manual gate:
-- Open both calculator project variants.
-- Run current Generate All and Compile All once.
-- Confirm existing annotated Python rehydrates.
+### Required acceptance journeys
 
-This is a regression reference only; no new architecture ships here.
+- `/search` → disambiguated result → exact dirty-buffer source reveal.
+- Select A → add `@B` → annotation, graph edge, chip, and packet agree → undo.
+- Create typed stub → preview → apply → undo → restart and re-index.
+- Generate with fake server → inspect real activity events → review diff →
+  accept → undo.
+- Edit target or dependency during generation → acceptance is rejected as
+  stale and the draft survives.
+- Cancel a stream; malformed or out-of-scope output never mutates source.
+- Temporarily break Python syntax; last-good graph is visibly stale and recovers.
+- Close and reopen during a queued run; resumed entries recheck all revisions.
 
-### Breakpoint 1 — Python engine, read-only
+## Delivery plan
 
-Automated gate: lossless LibCST fixtures and worker protocol tests pass.
+### Slice 0 — executable test platform
 
-Manual gate:
-- Scan a small typed repository containing files, classes, methods, decorators,
-  async functions, empty files, and a temporarily invalid file.
-- Compare every displayed node and source range with VS Code.
-- Confirm scanning changes no workspace byte.
+Add the fake host, fixture workspaces, `@vscode/test-electron`, fake llama.cpp
+server, artifact capture, and one browser plus one Extension Host smoke journey.
+No feature is considered shipped without the appropriate layer here.
 
-### Breakpoint 2 — XYFlow source browser
+### Slice 1 — installable source map
 
-Automated gate: React, graph adapter, host protocol, and navigation integration
-tests pass.
+Replace the Python worker with the pure TypeScript adapter. Wire a validated v2
+project loader, tracked paths, project-wide identity checks, revisioned indexing,
+and a clean-profile VSIX test. Remove Python bootstrap commands and packaging.
 
-Manual gate:
-- Open a `.slate.json`; confirm there is one graph view rather than card/doc/
-  graph panels.
-- Pan, zoom, fit, collapse classes, select multiple nodes, and restart VS Code;
-  layout and selection scope should behave predictably.
-- Jump graph→code and code→graph repeatedly without focus loops.
-- Edit an open dirty Python buffer and externally edit an unopened file; both
-  update the graph. Invalid syntax visibly retains the last-good graph.
+### Slice 2 — unified search and navigation
 
-### Breakpoint 3 — typed stub round trip
+Introduce typed actions and guided `/search`; make click/keyboard navigation
+exact in both directions. Results search dirty source and annotations and can be
+reused by later workflows.
 
-Automated gate: stub/annotation/patch tests, strict type checks, WorkspaceEdit,
-undo, conflict, and migration tests pass.
+### Slice 3 — context workbench
 
-Manual gate:
-- Create top-level, async, decorated, and method stubs from the graph.
-- Enter concrete input/output examples and confirm generated Python imports and
-  executes while raising `NotImplementedError` only when called.
-- Edit signature/intent in source and see the graph update.
-- Edit the same fields in the graph and inspect the exact source diff.
-- Undo in VS Code and verify the graph returns to the prior state.
-- Create a stale edit and duplicate ID; confirm Slate refuses to write and loses
-  no draft.
+Ship the shared context picker, named chips, annotation adoption, packet preview,
+intent editing, and the common proposal/review/apply lifecycle.
 
-### Breakpoint 4 — one-card local generation
+**This is the first daily-usable milestone:** find code, navigate exactly,
+declare context, and inspect what a model would receive without invoking one.
 
-Automated gate: deterministic fake-model tests cover context construction,
-limits, validation failures, cancellation, and stale dependency rejection.
+### Slice 4 — safe single-function loop
 
-Manual gate:
-- Generate leaf functions using an actual configured Ollama model.
-- Inspect the full context manifest and diff.
-- Exercise malformed output, unavailable Ollama, timeout, cancellation, type
-  failure, style failure, and test failure.
-- Accept a valid proposal, undo it, edit manually, and regenerate.
-- Confirm no model picker and no silent cloud fallback exist.
+Using a deterministic fake model, create a typed stub, build a bounded packet,
+stream real activity, review a confined proposal, accept it, and undo it. Close
+freshness gaps before any real-model integration.
 
-### Breakpoint 5 — Generate All / subgraph queue
+### Slice 5 — llama.cpp generation and validation
 
-Automated gate: leaves-first ordering, cycles, locks, skip/resume/cancel, blocked
-cards, persistence, and per-card revision tests pass. Calculator and tic-tac-toe
-pass end to end through the deterministic fake model.
+Connect the same loop to configured llama.cpp, enforce real input/output budgets,
+support cancellation and retries, and stage syntax, structure, format/type, and
+targeted-test diagnostics. No silent writes or fallback providers.
 
-Manual gate:
-- Queue a mixed project containing accepted, locked, stubbed, failing, cyclic,
-  and oversized units.
-- Confirm only eligible units enter the queue and proposals stop for review.
-- Close/reopen midway and resume.
-- Modify an upstream function midway; dependent proposals must become stale.
-- Complete calculator using Ollama and run its full pytest/typecheck commands.
+### Slice 6 — proven queue
 
-This is the first release candidate for daily use.
+Queue eligible selected units or a dependency subgraph, pause on each proposal,
+persist/resume, preserve blocked work, and stale downstream proposals when an
+upstream revision changes. Queueing reuses the single-function loop unchanged.
 
-### Breakpoint 6 — legacy retirement and static site
+### Slice 7 — retirement and release
 
-Automated gate: production extension package, clean-install worker bootstrap,
-migration suite, all unit/integration/E2E tests, and static-site build pass.
+Remove the legacy notebook runtime after its remaining invariants have source-
+first replacements. Package one extension UI and replace the web application
+with a static product page and inspected screenshots.
 
-Manual gate:
-- Install the VSIX into a clean VS Code profile and open both a legacy Slate
-  project and an ordinary Python folder.
-- Complete one stub→queue→accept→test workflow after restart.
-- Verify the GitHub Pages site is only a fast static feature page with current
-  screenshots and extension installation instructions.
-- Confirm no old D3/card/chat UI route remains in the extension bundle.
+## Human-project adoption
 
-After this gate, delete legacy code that no longer supports migration or a
-still-running invariant. Do not delete it earlier merely to make the tree look
-new.
+Do not wait for Generate All before using Slate on real work. Select one
+non-sensitive, actively maintained Python project with roughly 10–30 modules,
+tests, repeated names, classes, and at least one dirty/partially typed area.
+The owner keeps Git as the rollback boundary.
 
-## Deferred until after the Python release
+1. **After Slice 2 — read-only pilot:** index the project for one week; use
+   search and navigation during normal work. Record wrong/missing units,
+   navigation failures, latency, and commands the user expected.
+2. **After Slice 3 — planning pilot:** annotate three upcoming functions and
+   declare context. Compare packet contents with what the human would have given
+   an agent. No generated code is applied.
+3. **After Slice 4 — deterministic rehearsal:** run fake proposals against a
+   disposable branch to prove diff, staleness, undo, and artifact capture.
+4. **After Slice 5 — real model pilot:** choose five low-risk leaf functions
+   with independent tests. Measure first-proposal acceptance, repair rounds,
+   packet size, omitted required context, validation failures, and human review
+   time. Compare with the same llama.cpp model given an ordinary prompt.
+5. **Before Slice 6 — decision gate:** queue work proceeds only if single-unit
+   review is trusted and the measured failures are retrieval/context problems
+   the harness can improve—not reasoning tasks beyond the selected model.
 
-- Markdown split/merge/summarize transformation graph.
-- Autonomous model tool loops or shell execution.
-- Additional programming languages.
+## Deferred
+
+- Autonomous model search, shell, or tool loops.
+- Complete static call-graph inference and arbitrary cross-file refactors.
+- Additional programming languages or a generic adapter plugin framework.
+- Markdown transformation graphs.
+- Browser folder authoring or browser-to-llama.cpp access.
 - Automatic stale-proposal rebasing.
-- Cross-file symbol moves and complete static call-graph inference.
-- Browser-based folder authoring or browser-to-Ollama access.

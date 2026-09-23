@@ -7,12 +7,14 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other", "Notebooks"],
+  "categories": [
+    "Other",
+    "Notebooks"
+  ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:slate.launcher",
     "onCustomEditor:slate.editor",
-    "onCustomEditor:slate.legacyEditor",
     "onCommand:slate.openHarness"
   ],
   "contributes": {
@@ -39,61 +41,86 @@
         "viewType": "slate.editor",
         "displayName": "Slate Python Harness",
         "selector": [
-          { "filenamePattern": "*.slate.json" }
+          {
+            "filenamePattern": "*.slate.json"
+          }
         ],
         "priority": "default"
-      },
-      {
-        "viewType": "slate.legacyEditor",
-        "displayName": "Slate Notebook (Legacy)",
-        "selector": [
-          { "filenamePattern": "*.slate.json" }
-        ],
-        "priority": "option"
       }
     ],
     "commands": [
-    { "command": "slate.openPanel", "title": "Slate: Open Legacy Panel" },
-    { "command": "slate.openHarness", "title": "Slate: Open Python Harness" },
-    { "command": "slate.newProject", "title": "Slate: New Project…" },
-    { "command": "slate.scanWorkspace", "title": "Slate: Scan Python Workspace" },
-    { "command": "slate.setupPythonEngine", "title": "Slate: Setup Python Engine" },
-    { "command": "slate.checkPythonEngine", "title": "Slate: Check Python Engine" },
-    { "command": "slate.compile", "title": "Slate: Compile Current Doc" },
-    { "command": "slate.toggleCodeCard", "title": "Slate: Toggle Code Card" }
-    ],
-    "grammars": [
-    {
-    "scopeName": "slate.python.annotations.injection",
-    "path": "./syntaxes/slate-annotations.injection.json",
-    "injectTo": ["source.python"]
-    }
+      {
+        "command": "slate.openHarness",
+        "title": "Slate: Open Python Harness"
+      },
+      {
+        "command": "slate.newProject",
+        "title": "Slate: New Project…"
+      },
+      {
+        "command": "slate.scanWorkspace",
+        "title": "Slate: Scan Python Workspace"
+      }
     ],
     "configuration": {
-      "title": "Slate Python Engine",
+      "title": "Slate local generation",
       "properties": {
-        "slate.pythonEngine.pythonPath": {
+        "slate.llama.endpoint": {
           "type": "string",
-          "default": "",
-          "description": "Python executable containing slate-python-engine. Leave empty to use Slate's managed environment or a workspace .venv."
+          "default": "http://127.0.0.1:8080",
+          "description": "llama.cpp server base URL. Slate calls its OpenAI-compatible /v1/chat/completions endpoint."
         },
-        "slate.pythonEngine.bootstrapPython": {
+        "slate.llama.model": {
           "type": "string",
-          "default": "python3",
-          "description": "Python executable used by Slate: Setup Python Engine to create its managed environment."
+          "default": "local",
+          "description": "Model name sent to llama.cpp. A model picker and cloud fallback are intentionally not provided."
+        },
+        "slate.llama.contextWindow": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1024
+        },
+        "slate.llama.outputTokens": {
+          "type": "integer",
+          "default": 768,
+          "minimum": 64
+        },
+        "slate.llama.timeoutSeconds": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 5
         }
       }
-    }
+    },
+    "grammars": [
+      {
+        "scopeName": "slate.python.annotations.injection",
+        "path": "./syntaxes/slate-annotations.injection.json",
+        "injectTo": [
+          "source.python"
+        ]
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && node -e \"require('fs').copyFileSync('src/state-bridge.js','out/state-bridge.js')\" && node scripts/sync-python-engine.js",
+    "compile": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\" && tsc -p ./ && node scripts/build-extension.js",
     "watch": "tsc -watch -p ./",
-    "sync-dist": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.cpSync('../dist','dist',{recursive:true})\""
+    "sync-dist": "node -e \"const fs=require('fs');try{if(fs.lstatSync('dist').isSymbolicLink())process.exit(0)}catch{}fs.rmSync('dist',{recursive:true,force:true});fs.cpSync('../dist','dist',{recursive:true})\"",
+    "test:integration": "node ./out/test/runTest.js",
+    "test:workbench": "node ./scripts/test-workbench.js"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.1.0",
+    "esbuild": "^0.28.2",
+    "mocha": "^12.0.2",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@lezer/common": "^1.5.2",
+    "@lezer/python": "^1.1.19"
   }
 }

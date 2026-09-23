@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "id": "fixture-project",
+  "name": "electron-fixture",
+  "root": ".",
+  "documents": [
+    {
+      "id": "fixture-document",
+      "path": "sample.py",
+      "cards": [
+        {
+          "id": "greet-unit",
+          "kind": "function"
+        }
+      ]
+    }
+  ],
+  "layout": {},
+  "queue": { "scope": "project", "entries": [] }
+}

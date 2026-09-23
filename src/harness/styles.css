@@ -7,7 +7,7 @@
 
 * { box-sizing: border-box; }
 html, body, #harness-root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-button, input { font: inherit; }
+button, input, textarea, select { font: inherit; }
 
 .harness-shell { position: relative; width: 100%; height: 100%; background: var(--strata-bg, #101214); }
 .harness-topbar {
@@ -59,8 +59,8 @@ button, input { font: inherit; }
 }
 
 .harness-inspector {
-    position: absolute; z-index: 15; top: 58px; right: 14px; width: min(340px, calc(100vw - 28px));
-    max-height: calc(100vh - 130px); overflow: auto; padding: 16px;
+    position: absolute; z-index: 21; top: 58px; right: 14px; bottom: 108px; width: min(360px, calc(100vw - 28px));
+    overflow: auto; padding: 16px;
     border: 1px solid var(--strata-border, #343a40); background: color-mix(in srgb, var(--strata-layer-01, #191d21) 96%, transparent);
     box-shadow: 0 16px 40px rgba(0,0,0,.35);
 }
@@ -74,7 +74,45 @@ button, input { font: inherit; }
     width: 100%; padding: 8px 10px; color: var(--strata-bg, #101214); border: 0;
     background: var(--strata-info, #62d9ff); cursor: pointer;
 }
+.harness-inspector button:disabled { cursor: not-allowed; opacity: .45; }
+.harness-inspector button.secondary { color: var(--strata-text-primary, #f3f4f6); border: 1px solid var(--strata-border, #343a40); background: transparent; }
+.harness-inspector textarea, .harness-inspector select { width: 100%; padding: 6px; color: inherit; border: 1px solid var(--strata-border, #343a40); background: var(--strata-bg, #101214); font-size: 10px; }
+.harness-inspector textarea { min-height: 54px; resize: vertical; }
+.harness-inspector__actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.context-workbench, .packet-preview, .proposal-review { margin: 14px 0; padding-top: 12px; border-top: 1px solid var(--strata-border, #343a40); }
+.context-workbench h3, .packet-preview h3, .proposal-review h3 { margin: 0 0 7px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.context-workbench p, .packet-preview p, .generation-activity { color: var(--strata-text-secondary, #9da5ad); font-size: 10px; line-height: 1.45; }
+.context-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+.context-chips button { width: auto; padding: 5px 7px; color: var(--strata-info, #62d9ff); border: 1px solid color-mix(in srgb, var(--strata-info, #62d9ff) 40%, transparent); background: transparent; font-size: 9px; }
+.context-chips span { color: var(--strata-text-secondary, #9da5ad); font-size: 10px; }
+.context-picker { display: grid; grid-template-columns: 1fr 62px; gap: 6px; }
+.packet-preview ul, .proposal-review ul { margin: 8px 0; padding: 0; list-style: none; font-size: 9px; }
+.packet-preview li { margin: 5px 0; }
+.packet-preview li strong { display: inline; color: var(--strata-info, #62d9ff); font-size: 8px; }
+.packet-preview li small { display: block; color: var(--strata-text-secondary, #9da5ad); }
+.generation-activity { margin: 10px 0; padding: 9px; border: 1px solid var(--strata-info, #62d9ff); }
+.generation-activity button { margin-top: 7px; }
+.proposal-review pre { max-height: 240px; overflow: auto; padding: 9px; color: #f3f4f6; border: 1px solid var(--strata-border, #343a40); background: #0b0d0f; font-size: 9px; line-height: 1.5; white-space: pre-wrap; }
+.proposal-review li { color: var(--strata-success, #55d187); }
+.error { color: var(--strata-error, #ff6b6b) !important; }
 .harness-inspector__diagnostic { margin-top: 16px; color: var(--strata-error, #ff6b6b); font-size: 11px; }
+
+.harness-search-results {
+    position: absolute; z-index: 18; left: 50%; bottom: 104px; transform: translateX(-50%);
+    width: min(760px, calc(100vw - 32px)); max-height: min(440px, calc(100vh - 170px));
+    overflow: hidden; border: 1px solid var(--strata-border, #343a40);
+    background: color-mix(in srgb, var(--strata-layer-01, #191d21) 98%, transparent);
+    box-shadow: 0 18px 48px rgba(0,0,0,.45);
+}
+.harness-search-results > header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--strata-border, #343a40); font-size: 11px; }
+.harness-search-results > header button { color: var(--strata-text-secondary, #9da5ad); border: 0; background: transparent; cursor: pointer; font-size: 18px; }
+.harness-search-results__list { max-height: 370px; overflow: auto; }
+.harness-search-results__empty { margin: 0; padding: 18px 12px; color: var(--strata-text-secondary, #9da5ad); font-size: 11px; }
+.harness-search-result { display: block; width: 100%; padding: 10px 12px; color: inherit; text-align: left; border: 0; border-bottom: 1px solid var(--strata-border, #30353a); background: transparent; cursor: pointer; }
+.harness-search-result:hover, .harness-search-result:focus-visible { outline: 0; background: color-mix(in srgb, var(--strata-info, #62d9ff) 10%, transparent); }
+.harness-search-result span { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.harness-search-result small { color: var(--strata-info, #62d9ff); font-size: 9px; text-transform: uppercase; }
+.harness-search-result code, .harness-search-result em { display: block; margin-top: 4px; overflow: hidden; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
 
 .harness-commandline {
     position: absolute; z-index: 20; left: 50%; bottom: 18px; transform: translateX(-50%);

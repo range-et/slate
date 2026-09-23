@@ -80,7 +80,7 @@ try {
     for (const f of fs.readdirSync(extensionDir)) {
         if (f.endsWith('.vsix')) fs.unlinkSync(path.join(extensionDir, f));
     }
-    run('npx --yes @vscode/vsce package --allow-missing-repository --skip-license', { cwd: extensionDir });
+    run('npx --yes @vscode/vsce package --allow-missing-repository --skip-license --follow-symlinks', { cwd: extensionDir });
 
     const vsix = fs.readdirSync(extensionDir).find(f => f.endsWith('.vsix'));
     if (!vsix) throw new Error('vsce did not produce a .vsix');

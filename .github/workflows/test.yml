@@ -21,5 +21,33 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
+      - run: npm ci --prefix vscode-extension
       - run: npm run setup:python-engine
       - run: npm run verify:baseline
+
+  harness-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm ci --prefix vscode-extension
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - run: npm run test:webview
+      - run: xvfb-run -a npm run test:electron
+      - run: xvfb-run -a npm run test:workbench
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-browser-failures
+          path: |
+            test-results
+            playwright-report
+          if-no-files-found: ignore

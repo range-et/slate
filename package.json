@@ -13,16 +13,22 @@
     "serve": "vite preview --host",
     "test": "npm run ensure-config && vitest run",
     "test:watch": "npm run ensure-config && vitest",
+    "test:webview": "playwright test",
+    "test:electron": "npm run build && npm --prefix vscode-extension run sync-dist && npm --prefix vscode-extension run compile && npm --prefix vscode-extension run test:integration",
+    "test:workbench": "npm run build && npm --prefix vscode-extension run compile && npm --prefix vscode-extension run test:workbench",
+    "test:harness": "npm test && npm run test:webview && npm run test:electron && npm run test:workbench",
     "setup:python-engine": "python3 -m venv .venv && .venv/bin/python -m pip install -e 'python-engine[dev]'",
     "test:python-engine": ".venv/bin/python -m pytest python-engine/tests",
     "verify:baseline": "bash scripts/verify-baseline.sh",
     "slate:roundtrip": "node scripts/slate_roundtrip.js",
-    "package-extension": "node scripts/package-extension.js"
+    "package-extension": "node scripts/package-extension.js",
+    "demo:llama": "bash scripts/start-llama-demo.sh"
   },
   "keywords": [],
   "author": "Indrajeet Haldar",
   "license": "MIT",
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "jsdom": "^29.1.1",

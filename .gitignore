@@ -5,6 +5,7 @@ npm-debug.log.*
 yarn-debug.log*
 yarn-error.log*
 package-lock.json
+!vscode-extension/package-lock.json
 yarn.lock
 .pnpm-debug.log
 
@@ -119,6 +120,8 @@ scratch/scatch_notes.txt
 
 # AI / agent session artifacts
 .playwright-mcp/
+playwright-report/
+test-results/
 .assemblage.toml
 .claude/
 slate-after-*.png
