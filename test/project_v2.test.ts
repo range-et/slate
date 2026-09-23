@@ -5,10 +5,18 @@ import { createProjectV2, loadProject, parseProjectV2, ProjectFormatError } from
 describe('project-v2 authority', () => {
     it('accepts strict project-v2 metadata', () => {
         const project = createProjectV2('Harness', [{ id: 'doc', path: 'src/main.py', cards: [] }]);
+        project.notes.push({ id: 'note-1', title: 'Question', body: 'Why is this cached?', attachedTo: 'unit-1' });
         const result = loadProject(JSON.stringify(project));
 
         expect(result.migrated).toBe(false);
         expect(result.project.documents[0].path).toBe('src/main.py');
+        expect(result.project.notes).toEqual(project.notes);
+    });
+
+    it('loads older v2 projects without notes and serializes an empty board', () => {
+        const project = createProjectV2('Harness');
+        const { notes: _notes, ...olderV2 } = project;
+        expect(loadProject(JSON.stringify(olderV2)).project.notes).toEqual([]);
     });
 
     it('rejects escaping, absolute, non-Python, duplicate, and unknown document metadata', () => {
@@ -27,6 +35,13 @@ describe('project-v2 authority', () => {
             ],
         })).toThrow('duplicate document path');
         expect(() => parseProjectV2({ ...base, contextEdges: [] })).toThrow('unsupported fields');
+        expect(() => parseProjectV2({
+            ...base,
+            notes: [
+                { id: 'same', title: 'One', body: '', attachedTo: null },
+                { id: 'same', title: 'Two', body: '', attachedTo: null },
+            ],
+        })).toThrow('note ids must be unique');
     });
 
     it('migrates legacy document destinations without making legacy links authoritative', () => {

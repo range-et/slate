@@ -41,6 +41,12 @@ button, input, textarea, select { font: inherit; }
     border-radius: 14px;
     background: color-mix(in srgb, var(--slate-group) 13%, var(--strata-layer-01, #191d21));
 }
+.slate-node--note {
+    width: 280px; min-height: 112px;
+    border-color: var(--strata-warning); border-left-width: 4px;
+    background: var(--strata-warning-bg);
+}
+.slate-node--note code { max-height: 52px; white-space: normal; }
 .slate-node.is-selected { outline: 2px solid var(--strata-interactive, #8aa7ff); outline-offset: 2px; }
 .slate-node.is-invalid { border-left-color: var(--strata-error, #ff6b6b); }
 .slate-node.is-stale { border-style: dashed; }
@@ -57,11 +63,16 @@ button, input, textarea, select { font: inherit; }
     stroke: var(--strata-info, #3ecff5);
     stroke-dasharray: 7 5;
 }
+.slate-edge--note .react-flow__edge-path {
+    stroke: var(--strata-warning);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 5;
+}
 
 .harness-inspector {
     position: absolute; z-index: 21; top: 58px; right: 14px; bottom: 108px; width: min(360px, calc(100vw - 28px));
     overflow: auto; padding: 16px;
-    border: 1px solid var(--strata-border, #343a40); background: color-mix(in srgb, var(--strata-layer-01, #191d21) 96%, transparent);
+    border: 1px solid var(--strata-border, #343a40); background: var(--strata-layer-01, #191d21);
     box-shadow: 0 16px 40px rgba(0,0,0,.35);
 }
 .harness-inspector__eyebrow { color: var(--strata-info, #62d9ff); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
@@ -76,6 +87,7 @@ button, input, textarea, select { font: inherit; }
 }
 .harness-inspector button:disabled { cursor: not-allowed; opacity: .45; }
 .harness-inspector button.secondary { color: var(--strata-text-primary, #f3f4f6); border: 1px solid var(--strata-border, #343a40); background: transparent; }
+.harness-inspector button.danger, .board-context-menu button.danger { color: var(--strata-error); border-color: var(--strata-error); background: transparent; }
 .harness-inspector textarea, .harness-inspector select { width: 100%; padding: 6px; color: inherit; border: 1px solid var(--strata-border, #343a40); background: var(--strata-bg, #101214); font-size: 10px; }
 .harness-inspector textarea { min-height: 54px; resize: vertical; }
 .harness-inspector__actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
@@ -96,6 +108,26 @@ button, input, textarea, select { font: inherit; }
 .proposal-review li { color: var(--strata-success, #55d187); }
 .error { color: var(--strata-error, #ff6b6b) !important; }
 .harness-inspector__diagnostic { margin-top: 16px; color: var(--strata-error, #ff6b6b); font-size: 11px; }
+.board-note-explainer { margin: 14px 0; color: var(--strata-warning); font-size: 10px; }
+.board-note-field { display: grid; gap: 5px; margin: 12px 0; color: var(--strata-text-secondary); font-size: 10px; }
+.board-note-field input { width: 100%; padding: 7px; color: var(--strata-text-primary); border: 1px solid var(--strata-border); background: var(--strata-bg); }
+.board-note-field textarea { min-height: 160px; }
+
+.board-context-menu {
+    position: fixed; z-index: 50; width: 230px; padding: 5px;
+    border: 1px solid var(--strata-border); background: var(--strata-layer-02);
+    box-shadow: 0 12px 30px var(--strata-overlay);
+}
+.board-context-menu button {
+    display: block; width: 100%; padding: 8px 9px; color: var(--strata-text-primary);
+    text-align: left; border: 0; background: transparent; cursor: pointer;
+}
+.board-context-menu button:hover, .board-context-menu button:focus-visible { outline: 0; background: var(--strata-layer-03); }
+.board-context-menu__label {
+    padding: 6px 9px; overflow: hidden; color: var(--strata-text-secondary);
+    border-bottom: 1px solid var(--strata-border-subtle); font-size: 9px;
+    letter-spacing: .08em; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase;
+}
 
 .harness-search-results {
     position: absolute; z-index: 18; left: 50%; bottom: 104px; transform: translateX(-50%);

@@ -139,6 +139,17 @@ for the approved pure-TypeScript adapter, not the shipping runtime.
   resolves the current name/declaration range instead of trusting webview paths.
 - Implemented 2026-09-23 in the current worktree.
 
+### Persistent planning board
+
+- Freeform board notes persist in project metadata without modifying source.
+- Notes can optionally attach to durable function identities and render a
+  distinct dotted relationship edge.
+- Right-click menus expose relevant actions for empty canvas, functions, and
+  notes; note creation and editing stay in the contextual workbench.
+- Two-finger trackpad scrolling pans freely, pinch gestures zoom, and ordinary
+  node dragging remains available.
+- Implemented 2026-09-23 in the current worktree.
+
 ### Playable confined llama.cpp loop
 
 - The contextual workbench edits intent/contract, shows named context chips,
@@ -173,8 +184,8 @@ for the approved pure-TypeScript adapter, not the shipping runtime.
 
 The following are not shipped features:
 
-- `@` insertion and node context menus do not yet open the shared context
-  picker; provisional context adoption still uses command actions.
+- `@` insertion and function context menus do not yet open the shared source
+  context picker; provisional context adoption still uses command actions.
 - Annotation/context mutations apply directly instead of entering the same
   review lifecycle as generated proposals.
 - Proposal editing, regenerate/revision feedback, Ruff, Basedpyright, and

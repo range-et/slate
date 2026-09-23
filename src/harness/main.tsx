@@ -72,6 +72,7 @@ function Inspector({
     accepted: boolean;
 }) {
     const unit = node.data.unit;
+    const note = node.data.note;
     const intent = typeof unit?.annotation?.intent === 'string' ? unit.annotation.intent : '';
     const contract = typeof unit?.annotation?.contract === 'string' ? unit.annotation.contract : '';
     const dependencies = Array.isArray(unit?.annotation?.dependencies)
@@ -80,7 +81,15 @@ function Inspector({
     const [intentDraft, setIntentDraft] = useState(intent);
     const [contractDraft, setContractDraft] = useState(contract);
     const [contextChoice, setContextChoice] = useState('');
+    const [noteTitle, setNoteTitle] = useState(note?.title ?? '');
+    const [noteBody, setNoteBody] = useState(note?.body ?? '');
+    const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
     useEffect(() => { setIntentDraft(intent); setContractDraft(contract); }, [unit?.id, intent, contract]);
+    useEffect(() => {
+        setNoteTitle(note?.title ?? '');
+        setNoteBody(note?.body ?? '');
+        setNoteAttachment(note?.attachedTo ?? '');
+    }, [note?.id, note?.title, note?.body, note?.attachedTo]);
     const availableContext = snapshot.documents.flatMap(item => item.units)
         .filter(candidate => candidate.identity === 'durable' && candidate.id !== unit?.id && !dependencies.includes(candidate.id));
     const namedDependency = (id: string) => snapshot.documents.flatMap(item => item.units).find(candidate => candidate.id === id);
@@ -90,6 +99,30 @@ function Inspector({
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
             <h2>{node.data.label}</h2>
             <code className="harness-inspector__path">{node.data.path}</code>
+            {note && <>
+                <p className="board-note-explainer">Board notes stay in Slate project metadata and never modify Python source.</p>
+                <label className="board-note-field">Title
+                    <input aria-label="Note title" value={noteTitle} onChange={event => setNoteTitle(event.target.value)} />
+                </label>
+                <label className="board-note-field">Note
+                    <textarea aria-label="Note body" value={noteBody} onChange={event => setNoteBody(event.target.value)} />
+                </label>
+                <label className="board-note-field">Attached function
+                    <select aria-label="Attach note to function" value={noteAttachment} onChange={event => setNoteAttachment(event.target.value)}>
+                        <option value="">Unattached board note</option>
+                        {snapshot.documents.flatMap(item => item.units).map(candidate => (
+                            <option key={candidate.id} value={candidate.id}>{candidate.qualifiedName} · {candidate.signature ?? candidate.kind}</option>
+                        ))}
+                    </select>
+                </label>
+                <button onClick={() => vscode?.postMessage({
+                    type: 'noteUpdate', revision: snapshot.revision, noteId: note.id,
+                    title: noteTitle, body: noteBody, attachedTo: noteAttachment || null,
+                })}>Save board note</button>
+                <button className="danger" onClick={() => vscode?.postMessage({
+                    type: 'noteDelete', revision: snapshot.revision, noteId: note.id,
+                })}>Delete board note</button>
+            </>}
             {unit && (
                 <>
                     <dl>
@@ -157,6 +190,67 @@ function Inspector({
     );
 }
 
+type BoardMenuState = {
+    screenX: number;
+    screenY: number;
+    flowX: number;
+    flowY: number;
+    node: Node<SlateNodeData> | null;
+};
+
+function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
+    menu: BoardMenuState;
+    snapshot: HarnessSnapshot;
+    onClose(): void;
+    onFit(): void;
+    onSelect(id: string): void;
+}) {
+    const unit = menu.node?.data.unit;
+    const note = menu.node?.data.note;
+    const createNote = (attachedTo: string | null) => {
+        vscode?.postMessage({
+            type: 'noteCreate', revision: snapshot.revision,
+            x: menu.flowX, y: menu.flowY, attachedTo,
+        });
+        onClose();
+    };
+    return <div
+        className="board-context-menu"
+        role="menu"
+        aria-label={menu.node ? `${menu.node.data.kind} actions` : 'Board actions'}
+        style={{ left: menu.screenX, top: menu.screenY }}
+    >
+        {!menu.node && <>
+            <button role="menuitem" onClick={() => createNote(null)}>New board note</button>
+            <button role="menuitem" onClick={() => { onFit(); onClose(); }}>Fit project to view</button>
+            <button role="menuitem" onClick={() => {
+                vscode?.postMessage({ type: 'action', action: { kind: 'refreshIndex' }, revision: snapshot.revision });
+                onClose();
+            }}>Refresh source index</button>
+        </>}
+        {unit && <>
+            <div className="board-context-menu__label">{unit.qualifiedName}</div>
+            <button role="menuitem" onClick={() => createNote(unit.id)}>Add note attached here</button>
+            <button role="menuitem" onClick={() => {
+                vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true });
+                onClose();
+            }}>Edit function in code</button>
+            {['function', 'method'].includes(unit.kind) && <button role="menuitem" onClick={() => {
+                vscode?.postMessage({ type: 'generate', unitId: unit.id });
+                onClose();
+            }}>Generate implementation</button>}
+        </>}
+        {note && <>
+            <div className="board-context-menu__label">{note.title}</div>
+            <button role="menuitem" onClick={() => { onSelect(note.id); onClose(); }}>Edit board note</button>
+            <button role="menuitem" className="danger" onClick={() => {
+                vscode?.postMessage({ type: 'noteDelete', revision: snapshot.revision, noteId: note.id });
+                onClose();
+            }}>Delete board note</button>
+        </>}
+    </div>;
+}
+
 function HarnessApp() {
     const search = new URLSearchParams(window.location.search);
     const showDemo = import.meta.env.DEV && search.has('demo');
@@ -174,6 +268,7 @@ function HarnessApp() {
     const [generation, setGeneration] = useState<{ unitId: string; message: string } | null>(null);
     const [proposal, setProposal] = useState<HarnessProposal | null>(null);
     const [acceptedUnitId, setAcceptedUnitId] = useState<string | null>(null);
+    const [boardMenu, setBoardMenu] = useState<BoardMenuState | null>(null);
     const flow = useRef<ReactFlowInstance<Node<SlateNodeData>, Edge> | null>(null);
     const commandInput = useRef<HTMLInputElement | null>(null);
     const graph = useMemo(() => buildGraph(snapshot), [snapshot]);
@@ -186,9 +281,11 @@ function HarnessApp() {
     const invalidCount = snapshot.documents.filter(document => !document.valid).length;
     const staleCount = snapshot.documents.filter(document => document.stale).length;
     const contextCount = graph.edges.filter(edge => edge.id.startsWith('context:')).length;
+    const noteCount = snapshot.notes?.length ?? 0;
 
     useEffect(() => {
         const onMessage = (event: MessageEvent<HostMessage>) => {
+            if (!event.data || typeof event.data !== 'object') return;
             if (event.data.type === 'snapshot') setSnapshot(event.data.snapshot);
             if (event.data.type === 'selectUnit') {
                 setNodes(current => current.map(node => ({
@@ -272,6 +369,26 @@ function HarnessApp() {
         window.addEventListener('keydown', focusSelectedUnit);
         return () => window.removeEventListener('keydown', focusSelectedUnit);
     }, [selected?.data.unit]);
+
+    useEffect(() => {
+        if (!boardMenu) return;
+        const close = () => setBoardMenu(null);
+        const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+        window.addEventListener('click', close);
+        window.addEventListener('keydown', escape);
+        return () => { window.removeEventListener('click', close); window.removeEventListener('keydown', escape); };
+    }, [boardMenu]);
+
+    const selectNode = (id: string) => setNodes(current => current.map(node => ({ ...node, selected: node.id === id })));
+
+    const openBoardMenu = (event: React.MouseEvent, node: Node<SlateNodeData> | null) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const point = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+            ?? { x: event.clientX, y: event.clientY };
+        if (node) selectNode(node.id);
+        setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: point.x, flowY: point.y, node });
+    };
 
     const runCommand = () => {
         const raw = query.trim();
@@ -365,7 +482,8 @@ function HarnessApp() {
                 <div><strong>SLATE</strong><span>{snapshot.projectName}</span></div>
                 <div className="harness-status">
                     <span>{snapshot.documents.length} files</span>
-                    <span>{graph.nodes.length - snapshot.documents.length} units</span>
+                    <span>{graph.nodes.length - snapshot.documents.length - noteCount} units</span>
+                    {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
                     {contextCount > 0 && <span className="status-context">{contextCount} context</span>}
                     {staleCount > 0 && <span className="status-warning">{staleCount} stale</span>}
@@ -386,6 +504,9 @@ function HarnessApp() {
                     onNodeDoubleClick={(_, node) => {
                         if (node.data.unit) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: true });
                     }}
+                    onNodeContextMenu={(event, node) => openBoardMenu(event, node)}
+                    onPaneContextMenu={event => openBoardMenu(event, null)}
+                    onPaneClick={() => setBoardMenu(null)}
                     onNodeDragStop={(_, node) => vscode?.postMessage({
                         type: 'layout',
                         revision: snapshot.revision,
@@ -394,6 +515,11 @@ function HarnessApp() {
                     fitView
                     minZoom={0.1}
                     maxZoom={2.5}
+                    panOnScroll
+                    panOnScrollMode="free"
+                    zoomOnScroll={false}
+                    zoomOnPinch
+                    panOnDrag={[0, 1]}
                     nodesDraggable
                     nodesConnectable={false}
                     elementsSelectable
@@ -436,9 +562,16 @@ function HarnessApp() {
                 snapshot={snapshot}
                 packet={selected.data.unit ? packets[selected.data.unit.id]?.packet : undefined}
                 packetError={selected.data.unit ? packets[selected.data.unit.id]?.error : undefined}
-                generation={generation?.unitId === selected.data.unit?.id ? generation.message : null}
+                generation={generation && generation.unitId === selected.data.unit?.id ? generation.message : null}
                 proposal={proposal}
                 accepted={acceptedUnitId === selected.data.unit?.id}
+            />}
+            {boardMenu && <BoardContextMenu
+                menu={boardMenu}
+                snapshot={snapshot}
+                onClose={() => setBoardMenu(null)}
+                onFit={() => flow.current?.fitView({ padding: 0.2, duration: 300 })}
+                onSelect={selectNode}
             />}
             <div className="harness-commandline">
                 <div className="harness-commandline__result">{commandResult}</div>

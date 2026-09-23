@@ -3,7 +3,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { HarnessDocument, HarnessSnapshot, ParsedUnit, ParseModuleResult, SourceProposal, SourceRange } from './harness_protocol';
+import { BoardNote, HarnessDocument, HarnessSnapshot, ParsedUnit, ParseModuleResult, SourceProposal, SourceRange } from './harness_protocol';
 import { buildGenerationPacket, GenerationPacket, stripModelEnvelope } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { PythonAdapter } from './python_adapter';
@@ -254,8 +254,11 @@ export class HarnessPanel implements vscode.Disposable {
             this.sources = sources;
             this.snapshot = {
                 revision: ++this.revision,
-                projectName: root.name,
+                projectName: project?.project.name ?? root.name,
                 documents,
+                notes: project
+                    ? project.project.notes
+                    : this.context.workspaceState.get(this.notesKey(root), []),
                 contextEdges: [],
                 layout: project
                     ? project.project.layout
@@ -285,6 +288,18 @@ export class HarnessPanel implements vscode.Disposable {
         }
         if (value.type === 'layout') {
             await this.updateLayout(value);
+            return;
+        }
+        if (value.type === 'noteCreate') {
+            await this.createNote(value);
+            return;
+        }
+        if (value.type === 'noteUpdate') {
+            await this.updateNote(value);
+            return;
+        }
+        if (value.type === 'noteDelete') {
+            await this.deleteNote(value);
             return;
         }
         if (value.type === 'search' && typeof value.query === 'string') {
@@ -329,8 +344,142 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
+    async postMessageForTest(message: unknown): Promise<void> {
+        await this.handleMessage(message);
+    }
+
     private layoutKey(root: { uri: vscode.Uri }): string {
         return `slate.harness.layout:${root.uri.toString()}`;
+    }
+
+    private notesKey(root: { uri: vscode.Uri }): string {
+        return `slate.harness.notes:${root.uri.toString()}`;
+    }
+
+    private validUnitId(id: string): boolean {
+        return this.snapshot?.documents.some(document => document.units.some(unit => unit.id === id)) ?? false;
+    }
+
+    private async writeProject(project: ReturnType<typeof loadProject>['project']): Promise<void> {
+        if (!this.projectDocument) throw new Error('No bound project document.');
+        const replacement = serializeProject(project);
+        if (replacement === this.projectDocument.getText()) return;
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(
+            this.projectDocument.uri,
+            new vscode.Range(
+                this.projectDocument.positionAt(0),
+                this.projectDocument.positionAt(this.projectDocument.getText().length),
+            ),
+            replacement,
+        );
+        if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the board update.');
+        await this.projectDocument.save();
+    }
+
+    private async createNote(message: Record<string, unknown>): Promise<void> {
+        const root = this.workspaceRoot();
+        if (!root || !this.snapshot || message.revision !== this.snapshot.revision) {
+            this.postCommandResult(false, 'ADD NOTE: board changed; try again');
+            return;
+        }
+        const x = message.x;
+        const y = message.y;
+        const attachedTo = message.attachedTo === null || message.attachedTo === undefined
+            ? null
+            : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo)
+                ? message.attachedTo
+                : undefined;
+        if (!Number.isFinite(x) || !Number.isFinite(y) || attachedTo === undefined) {
+            this.postCommandResult(false, 'ADD NOTE: invalid board position or attachment');
+            return;
+        }
+        const note: BoardNote = { id: randomUUID(), title: 'New note', body: '', attachedTo };
+        try {
+            if (this.projectDocument) {
+                const loaded = loadProject(this.projectDocument.getText());
+                if (loaded.readOnly) throw new Error(loaded.warnings.join(' '));
+                loaded.project.notes.push(note);
+                loaded.project.layout[note.id] = { x: x as number, y: y as number };
+                await this.writeProject(loaded.project);
+            } else {
+                const notes = this.context.workspaceState.get<BoardNote[]>(this.notesKey(root), []);
+                const layout = this.context.workspaceState.get<Record<string, { x: number; y: number }>>(this.layoutKey(root), {});
+                await this.context.workspaceState.update(this.notesKey(root), [...notes, note]);
+                await this.context.workspaceState.update(this.layoutKey(root), { ...layout, [note.id]: { x: x as number, y: y as number } });
+            }
+            await this.refresh();
+            await this.panel.webview.postMessage({ type: 'selectUnit', unitId: note.id });
+            this.postCommandResult(true, attachedTo ? 'NOTE: attached to source unit' : 'NOTE: added to board');
+        } catch (error) {
+            this.postCommandResult(false, `ADD NOTE: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private async updateNote(message: Record<string, unknown>): Promise<void> {
+        const root = this.workspaceRoot();
+        if (!root || !this.snapshot || message.revision !== this.snapshot.revision
+            || typeof message.noteId !== 'string' || typeof message.title !== 'string'
+            || typeof message.body !== 'string' || !message.title.trim()) {
+            this.postCommandResult(false, 'SAVE NOTE: invalid or stale note');
+            return;
+        }
+        const replacement: BoardNote = {
+            id: message.noteId,
+            title: message.title.trim(),
+            body: message.body,
+            attachedTo: message.attachedTo === null || message.attachedTo === undefined
+                ? null
+                : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo)
+                    ? message.attachedTo
+                    : null,
+        };
+        try {
+            if (this.projectDocument) {
+                const loaded = loadProject(this.projectDocument.getText());
+                if (loaded.readOnly) throw new Error(loaded.warnings.join(' '));
+                const index = loaded.project.notes.findIndex(note => note.id === replacement.id);
+                if (index < 0) throw new Error('note no longer exists');
+                loaded.project.notes[index] = replacement;
+                await this.writeProject(loaded.project);
+            } else {
+                const notes = this.context.workspaceState.get<BoardNote[]>(this.notesKey(root), []);
+                if (!notes.some(note => note.id === replacement.id)) throw new Error('note no longer exists');
+                await this.context.workspaceState.update(this.notesKey(root), notes.map(note => note.id === replacement.id ? replacement : note));
+            }
+            await this.refresh();
+            await this.panel.webview.postMessage({ type: 'selectUnit', unitId: replacement.id });
+            this.postCommandResult(true, 'NOTE: saved to board metadata; source was not changed');
+        } catch (error) {
+            this.postCommandResult(false, `SAVE NOTE: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private async deleteNote(message: Record<string, unknown>): Promise<void> {
+        const root = this.workspaceRoot();
+        if (!root || !this.snapshot || message.revision !== this.snapshot.revision || typeof message.noteId !== 'string') {
+            this.postCommandResult(false, 'DELETE NOTE: invalid or stale note');
+            return;
+        }
+        try {
+            if (this.projectDocument) {
+                const loaded = loadProject(this.projectDocument.getText());
+                if (loaded.readOnly) throw new Error(loaded.warnings.join(' '));
+                loaded.project.notes = loaded.project.notes.filter(note => note.id !== message.noteId);
+                delete loaded.project.layout[message.noteId];
+                await this.writeProject(loaded.project);
+            } else {
+                const notes = this.context.workspaceState.get<BoardNote[]>(this.notesKey(root), []);
+                const layout = this.context.workspaceState.get<Record<string, { x: number; y: number }>>(this.layoutKey(root), {});
+                delete layout[message.noteId];
+                await this.context.workspaceState.update(this.notesKey(root), notes.filter(note => note.id !== message.noteId));
+                await this.context.workspaceState.update(this.layoutKey(root), layout);
+            }
+            await this.refresh();
+            this.postCommandResult(true, 'NOTE: removed from board; source was not changed');
+        } catch (error) {
+            this.postCommandResult(false, `DELETE NOTE: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 
     private async updateLayout(message: Record<string, unknown>): Promise<void> {
@@ -340,7 +489,7 @@ export class HarnessPanel implements vscode.Disposable {
         const validIds = new Set(this.snapshot.documents.flatMap(document => [
             document.id,
             ...document.units.map(unit => unit.id),
-        ]));
+        ]).concat((this.snapshot.notes ?? []).map(note => note.id)));
         const positions: Record<string, { x: number; y: number }> = {};
         for (const [id, point] of Object.entries(message.positions)) {
             if (!validIds.has(id) || !point || typeof point !== 'object') continue;
@@ -367,19 +516,7 @@ export class HarnessPanel implements vscode.Disposable {
         }
         const project = loaded.project;
         project.layout = { ...project.layout, ...positions };
-        const replacement = serializeProject(project);
-        if (replacement === this.projectDocument.getText()) return;
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(
-            this.projectDocument.uri,
-            new vscode.Range(
-                this.projectDocument.positionAt(0),
-                this.projectDocument.positionAt(this.projectDocument.getText().length),
-            ),
-            replacement,
-        );
-        const applied = await vscode.workspace.applyEdit(edit);
-        if (applied) await this.projectDocument.save();
+        await this.writeProject(project);
     }
 
     private postCommandResult(ok: boolean, message: string): void {

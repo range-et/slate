@@ -15,6 +15,7 @@ describe('Python harness graph', () => {
             'durable-operations',
             'durable-add',
             'provisional-divide',
+            'board-note-review',
         ]);
         expect(graph.edges.filter(edge => edge.id.startsWith('contains:'))).toEqual([]);
         expect(graph.nodes.find(node => node.id === 'durable-run')).toMatchObject({
@@ -26,6 +27,12 @@ describe('Python harness graph', () => {
             extent: 'parent',
         });
         expect(graph.nodes.find(node => node.id === 'durable-operations')?.data.container).toBe(true);
+        expect(graph.edges.find(edge => edge.id.startsWith('note:'))).toMatchObject({
+            source: 'board-note-review',
+            target: 'durable-run',
+            selectable: false,
+            className: 'slate-edge slate-edge--note',
+        });
     });
 
     it('keeps generation context distinct from structural containment', () => {

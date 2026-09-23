@@ -11,12 +11,20 @@ export type ProjectDocument = {
     cards: ProjectCardRef[];
 };
 
+export type ProjectNote = {
+    id: string;
+    title: string;
+    body: string;
+    attachedTo: string | null;
+};
+
 export type ProjectV2 = {
     schemaVersion: 2;
     id: string;
     name: string;
     root: string;
     documents: ProjectDocument[];
+    notes: ProjectNote[];
     layout: Record<string, { x: number; y: number }>;
     queue: {
         scope: 'project' | 'selection' | 'subgraph';
@@ -105,6 +113,7 @@ export function createProjectV2(name: string, documents: ProjectDocument[] = [])
         name,
         root: '.',
         documents,
+        notes: [],
         layout: {},
         queue: { scope: 'project', entries: [] },
     };
@@ -112,7 +121,7 @@ export function createProjectV2(name: string, documents: ProjectDocument[] = [])
 
 export function parseProjectV2(value: unknown): ProjectV2 {
     const project = record(value, 'project');
-    assertKeys(project, ['schemaVersion', 'id', 'name', 'root', 'documents', 'layout', 'queue'], 'project');
+    assertKeys(project, ['schemaVersion', 'id', 'name', 'root', 'documents', 'notes', 'layout', 'queue'], 'project');
     if (project.schemaVersion !== 2) throw new ProjectFormatError(`unsupported project schema version ${String(project.schemaVersion)}`);
     const documents = array(project.documents, 'documents').map((entry, documentIndex): ProjectDocument => {
         const document = record(entry, `documents[${documentIndex}]`);
@@ -137,6 +146,19 @@ export function parseProjectV2(value: unknown): ProjectV2 {
         if (paths.has(document.path)) throw new ProjectFormatError(`duplicate document path ${document.path}`);
         paths.add(document.path);
     }
+    const notes = (project.notes === undefined ? [] : array(project.notes, 'notes')).map((noteValue, index): ProjectNote => {
+        const note = record(noteValue, `notes[${index}]`);
+        assertKeys(note, ['id', 'title', 'body', 'attachedTo'], `notes[${index}]`);
+        return {
+            id: nonEmptyString(note.id, `notes[${index}].id`),
+            title: nonEmptyString(note.title, `notes[${index}].title`),
+            body: string(note.body, `notes[${index}].body`),
+            attachedTo: note.attachedTo === null ? null : nonEmptyString(note.attachedTo, `notes[${index}].attachedTo`),
+        };
+    });
+    if (new Set(notes.map(note => note.id)).size !== notes.length) {
+        throw new ProjectFormatError('note ids must be unique');
+    }
     const queue = record(project.queue, 'queue');
     assertKeys(queue, ['scope', 'entries'], 'queue');
     const scope = string(queue.scope, 'queue.scope');
@@ -159,6 +181,7 @@ export function parseProjectV2(value: unknown): ProjectV2 {
         name: nonEmptyString(project.name, 'project.name'),
         root: project.root === '.' ? '.' : relativePath(project.root, 'project.root'),
         documents,
+        notes,
         layout: parseLayout(project.layout),
         queue: { scope: scope as ProjectV2['queue']['scope'], entries },
     };

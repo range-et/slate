@@ -41,8 +41,16 @@ export interface HarnessSnapshot {
     revision: number;
     projectName: string;
     documents: HarnessDocument[];
+    notes?: BoardNote[];
     contextEdges?: HarnessGraphEdge[];
     layout?: Record<string, { x: number; y: number }>;
+}
+
+export interface BoardNote {
+    id: string;
+    title: string;
+    body: string;
+    attachedTo: string | null;
 }
 
 export interface HarnessGraphEdge {

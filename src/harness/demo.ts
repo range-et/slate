@@ -30,6 +30,13 @@ function unit(
 export const demoSnapshot: HarnessSnapshot = {
     revision: 1,
     projectName: 'calculator',
+    notes: [{
+        id: 'board-note-review',
+        title: 'Review overflow behavior',
+        body: 'Should run clamp values before calling Operations.add?',
+        attachedTo: 'durable-run',
+    }],
+    layout: { 'board-note-review': { x: 1160, y: 120 } },
     documents: [
         {
             id: 'document:calculator.py', path: 'calculator.py', valid: true, stale: false,

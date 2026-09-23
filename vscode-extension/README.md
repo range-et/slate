@@ -16,6 +16,10 @@ npm run package-extension -- --install
 
 Reload VS Code after installation. Open a Python workspace and run
 **Slate: Scan Python Workspace**, or open an existing `*.slate.json` project.
+The resulting board supports two-finger trackpad panning and pinch zoom. Use
+the right-click menu on empty space to add a free board note, or on a function
+to attach a note to that source identity. Board notes and layout are stored in
+Slate metadata and never written into Python files.
 
 ## Local generation
 

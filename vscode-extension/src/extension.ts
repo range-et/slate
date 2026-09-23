@@ -27,6 +27,7 @@ export function activate(context: vscode.ExtensionContext): void {
         subscriptions.push(
             vscode.commands.registerCommand('slate.test.getSnapshot', () => HarnessPanel.current?.snapshotForTest()),
             vscode.commands.registerCommand('slate.test.revealUnit', (unitId: string) => HarnessPanel.current?.revealUnit(unitId, true)),
+            vscode.commands.registerCommand('slate.test.postMessage', (message: unknown) => HarnessPanel.current?.postMessageForTest(message)),
         );
     }
     context.subscriptions.push(...subscriptions);

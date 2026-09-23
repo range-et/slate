@@ -20,7 +20,7 @@ implemented. Shared `@`/context-menu entry, provisional adoption review, and a
 review lifecycle for annotation mutations remain.
 
 - **Scope:** Replace the read-only inspector with one contextual workbench.
-  `@`, **Add context…**, slash actions, and node context menus use the H-025
+  `@`, **Add context…**, slash actions, and function context menus use the H-025
   picker with a pinned consumer. Show named context chips and an exact packet
   preview. Put intent, contract, stub, lock, and context mutations through one
   host-owned proposal/review/apply lifecycle.

@@ -4,6 +4,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 type Snapshot = {
+    revision: number;
+    notes?: Array<{ id: string; title: string; body: string; attachedTo: string | null }>;
     documents: Array<{
         path: string;
         units: Array<{ id: string; name: string }>;
@@ -58,5 +60,47 @@ suite('Slate Extension Host', () => {
         assert.ok(current.getText().includes('return name.lower()'));
         await vscode.commands.executeCommand('undo');
         assert.ok(current.getText().includes('return name.upper()'));
+    });
+
+    test('persists board notes in project metadata without changing Python', async () => {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        assert.ok(root, 'fixture workspace is open');
+        const sourceUri = vscode.Uri.joinPath(root, 'sample.py');
+        const projectUri = vscode.Uri.joinPath(root, 'fixture.slate.json');
+        const sourceBefore = new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri));
+        const projectBefore = await vscode.workspace.fs.readFile(projectUri);
+
+        try {
+            await vscode.commands.executeCommand('vscode.openWith', projectUri, 'slate.editor');
+            const initial = await waitForSnapshot(snapshot => snapshot.documents.length > 0);
+            const attachedTo = initial.documents.flatMap(document => document.units)[0]?.id;
+            assert.ok(attachedTo, 'fixture contains an attachable source unit');
+            await vscode.commands.executeCommand('slate.test.postMessage', {
+                type: 'noteCreate', revision: initial.revision, x: 321, y: 123, attachedTo,
+            });
+            const created = await waitForSnapshot(snapshot => snapshot.notes?.length === 1);
+            const note = created.notes![0];
+            await vscode.commands.executeCommand('slate.test.postMessage', {
+                type: 'noteUpdate', revision: created.revision, noteId: note.id,
+                title: 'Review behavior', body: 'Keep this on the board.', attachedTo,
+            });
+            const updated = await waitForSnapshot(snapshot => snapshot.notes?.[0]?.title === 'Review behavior');
+
+            const project = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(projectUri)));
+            assert.deepEqual(project.notes, [{ id: note.id, title: 'Review behavior', body: 'Keep this on the board.', attachedTo }]);
+            assert.deepEqual(project.layout[note.id], { x: 321, y: 123 });
+            assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri)), sourceBefore);
+
+            await vscode.commands.executeCommand('slate.test.postMessage', {
+                type: 'noteDelete', revision: updated.revision, noteId: note.id,
+            });
+            await waitForSnapshot(snapshot => snapshot.notes?.length === 0);
+            const afterDelete = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(projectUri)));
+            assert.deepEqual(afterDelete.notes, []);
+            assert.equal(afterDelete.layout[note.id], undefined);
+            assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri)), sourceBefore);
+        } finally {
+            await vscode.workspace.fs.writeFile(projectUri, projectBefore);
+        }
     });
 });

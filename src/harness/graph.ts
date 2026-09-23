@@ -1,13 +1,13 @@
 import type { Edge, Node } from '@xyflow/react';
 
-import type { HarnessSnapshot, HarnessUnit } from './types';
+import type { BoardNote, HarnessSnapshot, HarnessUnit } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
 export type SlateNodeData = {
     label: string;
     detail: string;
-    kind: 'document' | HarnessUnit['kind'];
+    kind: 'document' | 'note' | HarnessUnit['kind'];
     identity?: HarnessUnit['identity'];
     invalid?: boolean;
     stale?: boolean;
@@ -15,6 +15,7 @@ export type SlateNodeData = {
     groupColor?: string;
     path: string;
     unit?: HarnessUnit;
+    note?: BoardNote;
 };
 
 function directChildren(units: HarnessUnit[], parentId: string): HarnessUnit[] {
@@ -114,6 +115,22 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
         documentY += documentHeight + 60;
     });
 
+    for (const [index, note] of (snapshot.notes ?? []).entries()) {
+        nodes.push({
+            id: note.id,
+            type: 'slate',
+            position: snapshot.layout?.[note.id] ?? { x: 1180, y: 60 + index * 150 },
+            data: {
+                label: note.title,
+                detail: note.body || 'Board-only note',
+                kind: 'note',
+                groupColor: 'var(--strata-warning)',
+                path: 'Board note — not written to source',
+                note,
+            },
+        });
+    }
+
     const nodeIds = new Set(nodes.map(node => node.id));
     const contextEdges = new Map<string, { sourceId: string; targetId: string }>();
     for (const document of snapshot.documents) {
@@ -138,6 +155,19 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
             type: 'smoothstep',
             animated: true,
             className: 'slate-edge slate-edge--context',
+        });
+    }
+    for (const note of snapshot.notes ?? []) {
+        if (!note.attachedTo || !nodeIds.has(note.attachedTo)) continue;
+        edges.push({
+            id: `note:${note.id}:${note.attachedTo}`,
+            source: note.id,
+            target: note.attachedTo,
+            type: 'smoothstep',
+            selectable: false,
+            focusable: false,
+            interactionWidth: 0,
+            className: 'slate-edge slate-edge--note',
         });
     }
     return { nodes, edges };
