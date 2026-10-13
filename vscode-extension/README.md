@@ -1,9 +1,9 @@
 # Slate Code
 
-Slate Code is a source-linked Python harness for VS Code. It indexes typed
-functions into a graph, navigates by durable identity, makes required context
-explicit, and asks a local llama.cpp server to implement one confined function
-at a time.
+Slate Code is a node canvas for composing Python with a local LLM. A project
+is a `slate/` folder of JSON: one file per node (code + intent, contract,
+context, examples), plus `layout.json` for the canvas. A local llama.cpp
+server can implement one node at a time.
 
 ## Build and install
 
@@ -14,12 +14,15 @@ npm --prefix vscode-extension install
 npm run package-extension -- --install
 ```
 
-Reload VS Code after installation. Open a Python workspace and run
-**Slate: Scan Python Workspace**, or open an existing `*.slate.json` project.
-The resulting board supports two-finger trackpad panning and pinch zoom. Use
-the right-click menu on empty space to add a free board note, or on a function
-to attach a note to that source identity. Board notes and layout are stored in
-Slate metadata and never written into Python files.
+Reload VS Code after installation. Run **Slate: New Project** in a folder (or
+open an existing `slate/slate.json`). Right-click empty canvas for **New
+node…** or a board note. Click selects; double-click opens the node JSON. The
+workbench edits intent, contract, context, and code. Layout and notes live in
+`slate/layout.json` and never touch node files.
+
+The older source-map mode (**Slate: Scan Python Workspace**, `*.slate.json`
+projects that index existing Python in place) still works until the Phase 2
+importer replaces it.
 
 ## Local generation
 
@@ -28,12 +31,11 @@ Slate metadata and never written into Python files.
 npm run demo:llama
 ```
 
-Select a typed, annotated function. The right workbench shows its intent,
-contract, named context, and exact packet budget. **Generate with llama.cpp**
-streams through the extension host. Slate validates that the response is one
-Python function with the same name and signature before offering a
-WorkspaceEdit. Source or context changes make acceptance stale and preserve the
-draft.
+Select a typed node with an intent. The workbench shows its intent, contract,
+named context, and exact packet budget. **Generate with llama.cpp** streams
+through the extension host. Slate validates that the response is one Python
+function with the same name and signature before offering to write it into the
+node. Node or context changes make acceptance stale and preserve the draft.
 
 Settings:
 

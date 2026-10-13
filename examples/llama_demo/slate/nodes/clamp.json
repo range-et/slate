@@ -1,0 +1,18 @@
+{
+  "slate": 3,
+  "name": "clamp",
+  "intent": "Clamp an integer to the inclusive lower and upper bounds",
+  "contract": "Raise ValueError when lower is greater than upper",
+  "examples": [
+    "clamp(5, 0, 3) == 3",
+    "clamp(-2, 0, 3) == 0"
+  ],
+  "describedBy": "human",
+  "locked": true,
+  "code": [
+    "def clamp(value: int, lower: int, upper: int) -> int:",
+    "    if lower > upper:",
+    "        raise ValueError(\"lower must not exceed upper\")",
+    "    return max(lower, min(value, upper))"
+  ]
+}

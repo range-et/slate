@@ -160,3 +160,11 @@ button, input, textarea, select { font: inherit; }
 
 .react-flow__controls { border: 1px solid var(--strata-border, #343a40); border-radius: 0; background: var(--strata-layer-01, #191d21); }
 .react-flow__controls-button { color: var(--strata-text-primary, #f3f4f6); border-color: var(--strata-border, #343a40); background: var(--strata-layer-01, #191d21); }
+
+/* Folder mode (slate/ node JSON) */
+.slate-node__intent { margin: 6px 0 0; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; line-height: 1.35; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.slate-node__problem { color: var(--strata-error, #ff6b6b); font-weight: 700; }
+.harness-inspector--wide { width: min(460px, calc(100vw - 28px)); }
+.node-code { margin: 14px 0; padding-top: 12px; border-top: 1px solid var(--strata-border, #343a40); }
+.node-code h3 { margin: 0 0 7px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.node-code-editor { margin-bottom: 8px; border: 1px solid var(--strata-border, #343a40); max-height: 320px; overflow: auto; }

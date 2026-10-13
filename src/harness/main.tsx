@@ -14,10 +14,14 @@ import {
     useNodesState,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import { basicSetup, EditorView } from 'codemirror';
+import { python } from '@codemirror/lang-python';
+import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 
 import { commandCompletions, commandHelp, commandToAction, parseCommand, resolveTargets } from './commands';
-import { demoSnapshot } from './demo';
-import { buildGraph, SlateNodeData } from './graph';
+import { demoSnapshot, folderDemoSnapshot } from './demo';
+import { buildGraph, nodeIdOf, SlateNodeData } from './graph';
 import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HostMessage, PacketPreview } from './types';
 import './styles.css';
 
@@ -46,18 +50,57 @@ function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
             <div className="slate-node__kind">
                 <span>{data.kind.replace('_', ' ')}</span>
                 <span>
+                    {data.problem && <span className="slate-node__problem" title={data.problem}>!&nbsp;</span>}
                     {data.unit?.annotation?.locked === true && <span title="Generation is locked">LOCKED&nbsp;</span>}
                     {data.identity === 'provisional' && <span title="Not yet anchored with a Slate ID">◇</span>}
                 </span>
             </div>
             <strong>{data.label}</strong>
             {!data.container && <code>{data.detail}</code>}
+            {data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
             {!data.container && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
         </div>
     );
 }
 
 const nodeTypes = { slate: SlateNode };
+
+const editorTheme = EditorView.theme({
+    '&': { fontSize: '11px', backgroundColor: 'var(--strata-bg, #101214)', color: 'var(--strata-text-primary, #f3f4f6)' },
+    '.cm-gutters': { backgroundColor: 'var(--strata-layer-01, #191d21)', color: 'var(--strata-text-secondary, #9da5ad)', border: 'none' },
+    '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'rgba(98, 217, 255, 0.06)' },
+    '&.cm-focused': { outline: '1px solid var(--strata-info, #62d9ff)' },
+    '.cm-content': { caretColor: 'var(--strata-info, #62d9ff)' },
+}, { dark: true });
+
+const editorHighlight = syntaxHighlighting(HighlightStyle.define([
+    { tag: [tags.keyword, tags.controlKeyword, tags.definitionKeyword], color: '#c792ea' },
+    { tag: [tags.function(tags.variableName), tags.function(tags.definition(tags.variableName))], color: '#62d9ff' },
+    { tag: [tags.definition(tags.variableName), tags.variableName], color: '#e6edf3' },
+    { tag: [tags.typeName, tags.className], color: '#f6c453' },
+    { tag: [tags.string], color: '#a5e075' },
+    { tag: [tags.number, tags.bool, tags.null], color: '#f78c6c' },
+    { tag: [tags.comment], color: '#7f8a96', fontStyle: 'italic' },
+    { tag: [tags.operator, tags.punctuation], color: '#9da5ad' },
+]));
+
+function CodeEditor({ initial, onChange }: { initial: string; onChange(value: string): void }) {
+    const host = useRef<HTMLDivElement | null>(null);
+    const change = useRef(onChange);
+    change.current = onChange;
+    useEffect(() => {
+        const view = new EditorView({
+            doc: initial,
+            parent: host.current!,
+            extensions: [
+                basicSetup, python(), editorTheme, editorHighlight,
+                EditorView.updateListener.of(update => { if (update.docChanged) change.current(update.state.doc.toString()); }),
+            ],
+        });
+        return () => view.destroy();
+    }, [initial]);
+    return <div className="node-code-editor" ref={host} aria-label="Node code" />;
+}
 
 function Inspector({
     node, document, snapshot, packet, packetError, generation, proposal, accepted,
@@ -84,6 +127,10 @@ function Inspector({
     const [noteTitle, setNoteTitle] = useState(note?.title ?? '');
     const [noteBody, setNoteBody] = useState(note?.body ?? '');
     const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
+    const folderMode = snapshot.mode === 'folder';
+    const nodeCode = folderMode && unit?.parentId === null ? document?.source ?? '' : null;
+    const [codeDraft, setCodeDraft] = useState(nodeCode ?? '');
+    useEffect(() => { setCodeDraft(nodeCode ?? ''); }, [unit?.id, document?.sourceHash]);
     useEffect(() => { setIntentDraft(intent); setContractDraft(contract); }, [unit?.id, intent, contract]);
     useEffect(() => {
         setNoteTitle(note?.title ?? '');
@@ -95,7 +142,7 @@ function Inspector({
     const namedDependency = (id: string) => snapshot.documents.flatMap(item => item.units).find(candidate => candidate.id === id);
     const action = (value: unknown) => vscode?.postMessage({ type: 'action', action: value, revision: snapshot.revision });
     return (
-        <aside className="harness-inspector" aria-label="Selected node details">
+        <aside className={`harness-inspector ${folderMode ? 'harness-inspector--wide' : ''}`} aria-label="Selected node details">
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
             <h2>{node.data.label}</h2>
             <code className="harness-inspector__path">{node.data.path}</code>
@@ -137,6 +184,21 @@ function Inspector({
                         <button className="secondary" onClick={() => action({ kind: 'setAnnotationField', target: unit.id, field: 'intent', text: intentDraft })}>Save intent</button>
                         <button className="secondary" onClick={() => action({ kind: 'setAnnotationField', target: unit.id, field: 'contract', text: contractDraft })}>Save contract</button>
                     </div>
+                    {document && document.diagnostics.length > 0 && <div className="harness-inspector__diagnostic">
+                        {document.diagnostics.map(item => <p key={`${item.code}:${item.message}`}>{item.message}</p>)}
+                    </div>}
+                    {nodeCode !== null && <section className="node-code">
+                        <h3>Code</h3>
+                        <CodeEditor key={`${unit.id}:${document?.sourceHash}`} initial={nodeCode} onChange={setCodeDraft} />
+                        <div className="harness-inspector__actions">
+                            <button disabled={codeDraft === nodeCode} onClick={() => action({
+                                kind: 'setNodeCode', target: unit.id, code: codeDraft, baseHash: document?.sourceHash,
+                            })}>Save code</button>
+                            <button className="secondary" onClick={() => action({
+                                kind: 'setLock', target: unit.id, locked: unit.annotation?.locked !== true,
+                            })}>{unit.annotation?.locked === true ? 'Unlock' : 'Lock'}</button>
+                        </div>
+                    </section>}
                     <section className="context-workbench">
                         <h3>Required context</h3>
                         <p>Reference material only; this does not imply an import or call dependency.</p>
@@ -176,8 +238,8 @@ function Inspector({
                     </section>}
                     {!generation && (!proposal || proposal.unitId !== unit.id) && <button disabled={!packet} onClick={() => vscode?.postMessage({ type: 'generate', unitId: unit.id })}>Generate with llama.cpp</button>}
                     {accepted && <button className="secondary" onClick={() => vscode?.postMessage({ type: 'undoAccepted' })}>Undo accepted edit</button>}
-                    <button onClick={() => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true })}>
-                        Edit in code
+                    <button className="secondary" onClick={() => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true })}>
+                        {folderMode ? 'Open node file' : 'Edit in code'}
                     </button>
                 </>
             )}
@@ -218,9 +280,13 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
         className="board-context-menu"
         role="menu"
         aria-label={menu.node ? `${menu.node.data.kind} actions` : 'Board actions'}
-        style={{ left: menu.screenX, top: menu.screenY }}
+        style={{ left: Math.min(menu.screenX, window.innerWidth - 240), top: Math.min(menu.screenY, window.innerHeight - 200) }}
     >
         {!menu.node && <>
+            {snapshot.mode === 'folder' && <button role="menuitem" onClick={() => {
+                vscode?.postMessage({ type: 'action', action: { kind: 'createNode', x: menu.flowX, y: menu.flowY }, revision: snapshot.revision });
+                onClose();
+            }}>New node…</button>}
             <button role="menuitem" onClick={() => createNote(null)}>New board note</button>
             <button role="menuitem" onClick={() => { onFit(); onClose(); }}>Fit project to view</button>
             <button role="menuitem" onClick={() => {
@@ -234,7 +300,7 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
             <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true });
                 onClose();
-            }}>Edit function in code</button>
+            }}>{snapshot.mode === 'folder' ? 'Open node file' : 'Edit function in code'}</button>
             {['function', 'method'].includes(unit.kind) && <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'generate', unitId: unit.id });
                 onClose();
@@ -255,7 +321,7 @@ function HarnessApp() {
     const search = new URLSearchParams(window.location.search);
     const showDemo = import.meta.env.DEV && search.has('demo');
     const [snapshot, setSnapshot] = useState<HarnessSnapshot>(showDemo
-        ? demoSnapshot
+        ? search.get('demo') === 'folder' ? folderDemoSnapshot : demoSnapshot
         : { revision: 0, projectName: 'Slate', documents: [] });
     const [query, setQuery] = useState(showDemo ? search.get('command') ?? '' : '');
     const [commandResult, setCommandResult] = useState('READY');
@@ -276,7 +342,7 @@ function HarnessApp() {
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
     const selectedDocument = selected
-        ? snapshot.documents.find(document => document.path === selected.data.path)
+        ? snapshot.documents.find(document => (snapshot.mode === 'folder' ? nodeIdOf(document.path) : document.path) === selected.data.path)
         : undefined;
     const invalidCount = snapshot.documents.filter(document => !document.valid).length;
     const staleCount = snapshot.documents.filter(document => document.stale).length;
@@ -348,11 +414,11 @@ function HarnessApp() {
     useEffect(() => {
         const focusCommandLine = (event: KeyboardEvent) => {
             const target = event.target as HTMLElement | null;
-            if (target?.matches('input, textarea, [contenteditable="true"]')) return;
-            if (event.key.length !== 1 || event.metaKey || event.ctrlKey || event.altKey) return;
+            if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
+            if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
             event.preventDefault();
             commandInput.current?.focus();
-            setQuery(current => current + event.key);
+            setQuery('/');
         };
         window.addEventListener('keydown', focusCommandLine);
         return () => window.removeEventListener('keydown', focusCommandLine);
@@ -361,7 +427,7 @@ function HarnessApp() {
     useEffect(() => {
         const focusSelectedUnit = (event: KeyboardEvent) => {
             const target = event.target as HTMLElement | null;
-            if (event.key !== 'Enter' || target?.matches('input, textarea, button, [contenteditable="true"]')) return;
+            if (event.key !== 'Enter' || target?.matches('input, textarea, button, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
             if (!selected?.data.unit) return;
             event.preventDefault();
             vscode?.postMessage({ type: 'reveal', unitId: selected.data.unit.id, focus: true });
@@ -481,8 +547,10 @@ function HarnessApp() {
             <header className="harness-topbar">
                 <div><strong>SLATE</strong><span>{snapshot.projectName}</span></div>
                 <div className="harness-status">
-                    <span>{snapshot.documents.length} files</span>
-                    <span>{graph.nodes.length - snapshot.documents.length - noteCount} units</span>
+                    {snapshot.mode !== 'folder' && <span>{snapshot.documents.length} files</span>}
+                    <span>{snapshot.mode === 'folder'
+                        ? `${snapshot.documents.length} nodes`
+                        : `${graph.nodes.length - snapshot.documents.length - noteCount} units`}</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
                     {contextCount > 0 && <span className="status-context">{contextCount} context</span>}
@@ -491,16 +559,15 @@ function HarnessApp() {
                 </div>
             </header>
             <section className="harness-canvas" aria-label="Python project graph">
-                {graph.nodes.length === 0 && <div className="harness-empty">Open a Python workspace to build its graph.</div>}
+                {graph.nodes.length === 0 && <div className="harness-empty">{snapshot.mode === 'folder'
+                    ? 'Right-click the canvas → New node… to start.'
+                    : 'Open a Python workspace to build its graph.'}</div>}
                 <ReactFlow
                     nodes={nodes}
                     edges={graph.edges}
                     nodeTypes={nodeTypes}
                     onNodesChange={onNodesChange}
                     onInit={instance => { flow.current = instance; instance.fitView({ padding: 0.2 }); }}
-                    onNodeClick={(_, node) => {
-                        if (node.data.unit) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: false });
-                    }}
                     onNodeDoubleClick={(_, node) => {
                         if (node.data.unit) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: true });
                     }}
@@ -522,6 +589,7 @@ function HarnessApp() {
                     panOnDrag={[0, 1]}
                     nodesDraggable
                     nodesConnectable={false}
+                    deleteKeyCode={null}
                     elementsSelectable
                 >
                     <Background variant={BackgroundVariant.Dots} gap={24} size={1} />

@@ -52,11 +52,15 @@ export interface HarnessDocument extends ParseModuleResult {
     id: string;
     version: number | null;
     stale: boolean;
+    /** Folder mode: the node's code text (unit ranges are relative to it). */
+    source?: string;
 }
 
 export interface HarnessSnapshot {
     revision: number;
     projectName: string;
+    /** 'folder' = decoupled slate/ node JSON; absent = legacy project-v2 source map. */
+    mode?: 'folder';
     documents: HarnessDocument[];
     notes?: BoardNote[];
     contextEdges?: HarnessGraphEdge[];

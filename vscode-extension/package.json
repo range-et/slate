@@ -43,6 +43,9 @@
         "selector": [
           {
             "filenamePattern": "*.slate.json"
+          },
+          {
+            "filenamePattern": "**/slate/slate.json"
           }
         ],
         "priority": "default"

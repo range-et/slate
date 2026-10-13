@@ -1,0 +1,8 @@
+{
+  "slate": 3,
+  "name": "llama-demo",
+  "language": "python",
+  "compile": {
+    "outDir": "src/llama_demo"
+  }
+}

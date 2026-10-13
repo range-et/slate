@@ -1,8 +1,8 @@
 # Slate llama.cpp demo
 
-This demo exercises the source-linked loop: select a function, inspect its
-exact context packet, stream a local implementation, review the confined
-proposal, accept it as one VS Code edit, and undo it.
+This demo exercises the node loop on a `slate/` folder: select a node, edit
+its intent and code in the workbench, inspect its exact context packet, stream
+a local implementation, review it, accept it into the node JSON, and undo it.
 
 ## Start it
 
@@ -14,19 +14,35 @@ npm run demo:llama
 npm run package-extension -- --install
 ```
 
-Reload VS Code, then open this folder and open
-`examples/llama_demo/llama-demo.slate.json`. Select `normalize_score` in the
-graph. Its workbench shows `clamp` as named required context and the exact token
-budget. Click **Generate with llama.cpp**, inspect the candidate and structural
-checks, then **Accept WorkspaceEdit**. **Undo accepted edit** uses VS Code's
-native undo after revealing the current function.
+Reload VS Code, open the `examples/llama_demo` folder, and open
+`slate/slate.json` (it opens in the Slate canvas). The project is plain JSON:
 
-To start with an existing Python project, open its folder in VS Code and run
-**Slate: Scan Python Workspace** from the Command Palette. Slate creates a
-`.slate.json` project beside the source and opens the board. Two-finger scroll
-pans the board and pinch zooms it. Right-click empty space to create a board
-note, or right-click a function to attach a note to its durable identity. These
-notes and their positions live in Slate metadata; they never modify Python.
+```text
+examples/llama_demo/slate/
+├── slate.json                 project name, language, compile target
+├── layout.json                node positions and board notes
+└── nodes/
+    ├── clamp.json             locked reference implementation
+    └── normalize_score.json   the target; context: clamp
+```
+
+- **Click** a node to select it (your editor doesn't move). **Double-click**
+  or **Enter** opens the node's JSON file. Press **/** to focus the command
+  line.
+- Select `normalize_score`. The workbench shows its intent, contract, code
+  editor, `clamp` as named context, and the exact token budget.
+- Click **Generate with llama.cpp**, inspect the candidate and checks, then
+  **Accept WorkspaceEdit**. The candidate is written into the node's `code`.
+  **Undo accepted edit** reverts it with VS Code's native undo.
+- Edit code directly in the workbench and press **Save code**. Saves are
+  rejected unless the code is one definition with the node's name, or if the
+  node changed since you started editing.
+- Right-click empty canvas → **New node…** asks for a typed signature and an
+  intent and creates `slate/nodes/<name>.json` where you clicked. Two-finger
+  scroll pans; pinch zooms. Dragging only rewrites `layout.json`.
+
+To start your own project, open a folder and run **Slate: New Project**. It
+creates an empty `slate/` folder and opens the canvas.
 
 The endpoint defaults to `http://127.0.0.1:8080`. Change it under
 `slate.llama.endpoint` if needed. Slate has no model picker and no cloud

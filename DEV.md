@@ -85,8 +85,8 @@ coding GGUF. See [DEMO.md](DEMO.md) for the complete flow.
    - Click the slate icon in the activity bar (left sidebar) to open the
      slate panel, OR
    - `Cmd+Shift+P` → `Slate: Open Python Harness`, OR
-   - Open any `*.slate.json` file (e.g.
-     `examples/llama_demo/llama-demo.slate.json`).
+   - Open a `slate/slate.json` (e.g. `examples/llama_demo/slate/slate.json`)
+     or a legacy `*.slate.json`.
 
 ### Reloading after changes
 
@@ -111,8 +111,9 @@ For pure canvas iteration without VS Code:
 npm run dev
 ```
 
-Vite dev server with HMR; opens `http://localhost:5173/harness.html?demo`
+Vite dev server with HMR; opens `http://localhost:5173/harness.html?demo=folder`
 with a built-in demo snapshot (no host, so host actions are inert).
+`?demo` shows the older source-map mode used by the Playwright tests.
 
 The frozen legacy notebook lives in `legacy/` and runs with
 `npm run legacy:dev`.
@@ -128,7 +129,8 @@ The frozen legacy notebook lives in `legacy/` and runs with
 | Extension host code | `vscode-extension/src/extension.ts` | TS, tsc-built |
 | Extension built JS | `vscode-extension/out/` | tsc output |
 | Extension webview src | `vscode-extension/dist/` → `../dist` | symlink |
-| llama.cpp demo | `examples/llama_demo/` | v2 annotations |
+| llama.cpp demo | `examples/llama_demo/slate/` | node JSON format |
+| Folder format + loader | `vscode-extension/src/slate_folder.ts` | pure; host side in `slate_folder_host.ts` |
 | Legacy notebook | `legacy/` | frozen; GitHub Pages only |
 | Spec | `SLATE_HARNESS_PLAN.md` | source of truth |
 | Open work | `issues.md` | active ordered slices |

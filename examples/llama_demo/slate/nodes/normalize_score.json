@@ -1,0 +1,19 @@
+{
+  "slate": 3,
+  "name": "normalize_score",
+  "intent": "Convert a score to an integer percentage from 0 through 100",
+  "contract": "Use clamp as reference behavior; raise ValueError when maximum is not positive",
+  "context": [
+    "clamp"
+  ],
+  "examples": [
+    "normalize_score(50, 200) == 25",
+    "normalize_score(300, 200) == 100"
+  ],
+  "describedBy": "human",
+  "locked": false,
+  "code": [
+    "def normalize_score(score: int, maximum: int) -> int:",
+    "    raise NotImplementedError(\"Slate demo target\")"
+  ]
+}

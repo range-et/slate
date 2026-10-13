@@ -16,15 +16,93 @@ export type SlateNodeData = {
     path: string;
     unit?: HarnessUnit;
     note?: BoardNote;
+    /** Folder mode: the node's intent, shown under its signature. */
+    intent?: string;
+    /** First diagnostic, shown as a warning badge. */
+    problem?: string;
 };
 
 function directChildren(units: HarnessUnit[], parentId: string): HarnessUnit[] {
     return units.filter(unit => unit.parentId === parentId);
 }
 
+/** Folder mode: every node file is one free node; classes still contain their methods. */
+function buildFolderNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[]): void {
+    const folders = [...new Set(snapshot.documents.map(document => folderOf(document.path)))].sort();
+    const rows = new Map<string, number>();
+    for (const document of snapshot.documents) {
+        const folder = folderOf(document.path);
+        const column = folders.indexOf(folder);
+        const row = rows.get(folder) ?? 0;
+        const groupColor = GROUP_COLORS[column % GROUP_COLORS.length];
+        const top = document.units.find(unit => unit.parentId === null);
+        const nodeId = nodeIdOf(document.path);
+        const id = top?.id ?? document.id;
+        const children = top ? directChildren(document.units, top.id) : [];
+        const isClass = top?.kind === 'class';
+        const height = isClass ? Math.max(132, children.length * 96 + 72) : 0;
+        rows.set(folder, row + (isClass ? Math.ceil(height / 150) : 1));
+        const intent = typeof top?.annotation?.intent === 'string' ? top.annotation.intent : '';
+        nodes.push({
+            id,
+            type: 'slate',
+            position: snapshot.layout?.[id] ?? { x: 80 + column * 340, y: 60 + row * 150 },
+            style: isClass ? { width: 320, height } : undefined,
+            data: {
+                label: top?.name ?? nodeId,
+                detail: top?.signature ?? (top ? top.qualifiedName : 'unreadable node'),
+                kind: top?.kind ?? 'document',
+                identity: top?.identity,
+                invalid: !document.valid,
+                stale: document.stale,
+                container: isClass,
+                groupColor,
+                path: nodeId,
+                unit: top,
+                intent,
+                problem: document.diagnostics[0]?.message,
+            },
+        });
+        children.forEach((unit, index) => nodes.push({
+            id: unit.id,
+            type: 'slate',
+            parentId: id,
+            extent: 'parent',
+            position: snapshot.layout?.[unit.id] ?? { x: 28, y: 58 + index * 96 },
+            data: {
+                label: unit.name,
+                detail: unit.signature ?? unit.qualifiedName,
+                kind: unit.kind,
+                identity: unit.identity,
+                stale: document.stale,
+                groupColor,
+                path: nodeId,
+                unit,
+            },
+        }));
+    }
+}
+
+function folderOf(documentPath: string): string {
+    const nodeId = nodeIdOf(documentPath);
+    return nodeId.includes('/') ? nodeId.slice(0, nodeId.lastIndexOf('/')) : '';
+}
+
+export function nodeIdOf(documentPath: string): string {
+    return documentPath.replace(/^slate\/nodes\//, '').replace(/\.json$/, '');
+}
+
 export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeData>[]; edges: Edge[] } {
     const nodes: Node<SlateNodeData>[] = [];
     const edges: Edge[] = [];
+    if (snapshot.mode === 'folder') buildFolderNodes(snapshot, nodes);
+    else buildSourceMapNodes(snapshot, nodes);
+    addNotesAndEdges(snapshot, nodes, edges);
+    return { nodes, edges };
+}
+
+/** Legacy project-v2 mode: files → classes → functions as nested containers. */
+function buildSourceMapNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[]): void {
     let documentY = 60;
 
     snapshot.documents.forEach((document, documentIndex) => {
@@ -114,7 +192,9 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
         }
         documentY += documentHeight + 60;
     });
+}
 
+function addNotesAndEdges(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edges: Edge[]): void {
     for (const [index, note] of (snapshot.notes ?? []).entries()) {
         nodes.push({
             id: note.id,
@@ -125,7 +205,7 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
                 detail: note.body || 'Board-only note',
                 kind: 'note',
                 groupColor: 'var(--strata-warning)',
-                path: 'Board note — not written to source',
+                path: snapshot.mode === 'folder' ? 'Board note — slate/layout.json' : 'Board note — not written to source',
                 note,
             },
         });
@@ -170,5 +250,4 @@ export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeDa
             className: 'slate-edge slate-edge--note',
         });
     }
-    return { nodes, edges };
 }

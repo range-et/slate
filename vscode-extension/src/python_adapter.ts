@@ -157,7 +157,10 @@ function syntaxErrors(tree: Tree): SyntaxNode[] {
     return errors;
 }
 
-function parseDetailed(source: string, documentPath: string): ParsedDetails {
+// nodeId: when parsing a slate/nodes file, the top-level definition named like
+// the file (the last path segment of nodeId) takes nodeId as its durable id.
+function parseDetailed(source: string, documentPath: string, nodeId?: string): ParsedDetails {
+    const nodeName = nodeId?.split('/').pop();
     const tree = parser.parse(source);
     const starts = lineStarts(source);
     const errors = syntaxErrors(tree);
@@ -193,7 +196,8 @@ function parseDetailed(source: string, documentPath: string): ParsedDetails {
         else kind = parent ? 'nested_function' : 'function';
         const annotationResult = parseAnnotation(source, wrapper.from, starts);
         const durableId = typeof annotationResult.annotation?.id === 'string' ? annotationResult.annotation.id : null;
-        const id = durableId ?? stableId(documentPath, kind, qualifiedName);
+        const isNode = !durableId && !parent && nodeName !== undefined && name === nodeName;
+        const id = durableId ?? (isNode ? nodeId! : stableId(documentPath, kind, qualifiedName));
         const declarationTo = meaningfulEnd(source, node.to);
         const declaration = rangeAt(starts, wrapper.from, declarationTo);
         const full = rangeAt(starts, annotationResult.from, declarationTo);
@@ -204,7 +208,7 @@ function parseDetailed(source: string, documentPath: string): ParsedDetails {
             : [];
         const unit: ParsedUnit = {
             id,
-            identity: durableId ? 'durable' : 'provisional',
+            identity: durableId || isNode ? 'durable' : 'provisional',
             kind,
             name,
             qualifiedName,
@@ -277,8 +281,8 @@ function parseDetailed(source: string, documentPath: string): ParsedDetails {
     return { path: documentPath, sourceHash: sourceHash(source), valid: true, units, diagnostics, tree, offsets };
 }
 
-export function parseModule(source: string, documentPath = '<memory>'): ParseModuleResult {
-    const { tree: _tree, offsets: _offsets, ...result } = parseDetailed(source, documentPath);
+export function parseModule(source: string, documentPath = '<memory>', nodeId?: string): ParseModuleResult {
+    const { tree: _tree, offsets: _offsets, ...result } = parseDetailed(source, documentPath, nodeId);
     return result;
 }
 
@@ -367,8 +371,8 @@ function indentBlock(value: string, indent: string): string {
 }
 
 export class PythonAdapter {
-    async parseModule(source: string, documentPath: string): Promise<ParseModuleResult> {
-        return parseModule(source, documentPath);
+    async parseModule(source: string, documentPath: string, nodeId?: string): Promise<ParseModuleResult> {
+        return parseModule(source, documentPath, nodeId);
     }
 
     async adoptUnit(params: Record<string, unknown>): Promise<SourceProposal> {
@@ -422,7 +426,8 @@ export class PythonAdapter {
         const source = requireString(params, 'source');
         const documentPath = requireString(params, 'path');
         requireFresh(source, params.expectedHash);
-        const parsed = parseDetailed(source, documentPath);
+        const nodeId = typeof params.nodeId === 'string' ? params.nodeId : undefined;
+        const parsed = parseDetailed(source, documentPath, nodeId);
         const unit = requireUnit(parsed, requireString(params, 'unitId'));
         if (!['function', 'method'].includes(unit.kind)) throw new AdapterError('only top-level functions and methods can be replaced');
         if (unit.annotation?.locked === true) throw new AdapterError('unit is locked');

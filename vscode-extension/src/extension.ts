@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { HarnessPanel } from './harness_panel';
 import { createProjectV2, serializeProject } from './project_v2';
 import { PythonAdapter } from './python_adapter';
+import { CONFIG_PATH, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
 
 let pythonAdapter: PythonAdapter | undefined;
 
@@ -12,7 +13,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pythonAdapter = new PythonAdapter();
     const subscriptions: vscode.Disposable[] = [
         vscode.commands.registerCommand('slate.openHarness', () => {
-            if (pythonAdapter) HarnessPanel.createOrShow(context, pythonAdapter);
+            if (pythonAdapter) void HarnessPanel.createOrShow(context, pythonAdapter);
         }),
         vscode.commands.registerCommand('slate.newProject', () => createNewSlateProject()),
         vscode.commands.registerCommand('slate.scanWorkspace', () => scanWorkspaceToFile()),
@@ -42,23 +43,29 @@ export function deactivate(): void {
 async function createNewSlateProject(): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
-        vscode.window.showErrorMessage('Open a workspace folder first; Slate writes its project file there.');
+        vscode.window.showErrorMessage('Open a workspace folder first; Slate creates its slate/ folder there.');
         return;
     }
-    const name = await vscode.window.showInputBox({
-        prompt: 'Slate project name',
-        placeHolder: 'my-app',
-        validateInput: value => value && /^[A-Za-z0-9_-]+$/.test(value) ? null : 'Use letters, numbers, _ or -',
-    });
-    if (!name) return;
-    const target = vscode.Uri.joinPath(folder.uri, `${name}.slate.json`);
+    const config = vscode.Uri.joinPath(folder.uri, ...CONFIG_PATH.split('/'));
     try {
-        await vscode.workspace.fs.stat(target);
-        vscode.window.showWarningMessage(`${name}.slate.json already exists. Opening it.`);
+        await vscode.workspace.fs.stat(config);
+        vscode.window.showWarningMessage(`${CONFIG_PATH} already exists. Opening it.`);
     } catch {
-        await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(serializeProject(createProjectV2(name))));
+        const name = await vscode.window.showInputBox({
+            prompt: 'Slate project name',
+            value: folder.name,
+            validateInput: value => value && /^[A-Za-z0-9_-]+$/.test(value) ? null : 'Use letters, numbers, _ or -',
+        });
+        if (!name) return;
+        const encoder = new TextEncoder();
+        await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(folder.uri, ...NODES_DIR.split('/')));
+        await vscode.workspace.fs.writeFile(config, encoder.encode(`${JSON.stringify({ slate: 3, name, language: 'python' }, null, 2)}\n`));
+        await vscode.workspace.fs.writeFile(
+            vscode.Uri.joinPath(folder.uri, ...LAYOUT_PATH.split('/')),
+            encoder.encode(serializeLayout({ positions: {}, notes: [] })),
+        );
     }
-    await vscode.commands.executeCommand('vscode.openWith', target, 'slate.editor');
+    await vscode.commands.executeCommand('vscode.openWith', config, 'slate.editor');
 }
 
 async function scanWorkspaceToFile(): Promise<void> {
@@ -124,7 +131,12 @@ class HarnessEditorProvider implements vscode.CustomTextEditorProvider {
     constructor(private readonly context: vscode.ExtensionContext, private readonly adapter: PythonAdapter) {}
 
     resolveCustomTextEditor(document: vscode.TextDocument, panel: vscode.WebviewPanel): void {
-        HarnessPanel.attachToProject(this.context, this.adapter, panel, document);
+        const segments = document.uri.path.split('/');
+        if (segments.at(-1) === 'slate.json' && segments.at(-2) === 'slate') {
+            HarnessPanel.attachToFolder(this.context, this.adapter, panel, document);
+        } else {
+            HarnessPanel.attachToProject(this.context, this.adapter, panel, document);
+        }
     }
 }
 

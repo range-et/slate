@@ -1,0 +1,13 @@
+{
+  "slate": 3,
+  "name": "normalize",
+  "intent": "Convert a score to a percentage",
+  "context": [
+    "clamp"
+  ],
+  "locked": false,
+  "code": [
+    "def normalize(score: int, maximum: int) -> int:",
+    "    raise NotImplementedError"
+  ]
+}

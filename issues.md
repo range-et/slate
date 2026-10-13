@@ -9,139 +9,131 @@ noted.
 ### S-001 Delete `legacy/` once the harness can replace the site
 - **Done 2026-10-13:** the notebook is isolated in `legacy/`; Pages deploys
   `legacy/dist`; the root build and extension are harness-only.
-- **Remaining scope:** when Phases 1–4 land, replace the Pages output with a
-  static product page (current screenshots, install + llama.cpp setup), then
-  `rm -rf legacy/`, drop the `legacy:*` scripts and the legacy block in
-  `scripts/verify-baseline.sh`, and remove the legacy-only dependencies
-  (`openai`, `@google/genai`, `d3`, `marked`, `codemirror`, `uuid`, CodeMirror
-  language packs if unused).
-- **Acceptance:** `npm run test:harness` passes; clean-profile VSIX completes
-  search → generate → accept → undo after restart.
-- Absorbs H-031.
+- **Remaining:** when Phases 1–5 land, replace the Pages output with a static
+  product page, `rm -rf legacy/`, drop the `legacy:*` scripts and the legacy
+  block in `scripts/verify-baseline.sh`, and remove legacy-only dependencies
+  (`openai`, `@google/genai`, `d3`, `marked`, `uuid`; CodeMirror packages if
+  still unused). Absorbs H-031.
 
-## Phase 1 — stop the friction
+## Phase 1 — `slate/` folder and a calm canvas
 
-### S-010 Selection without side effects
-- Click selects only. F12, Cmd-click, or the menu reveals source. Double-click
-  expands inline code (S-014). Remove the global keystroke → command-line
-  hijack.
+S-100 to S-103 (folder format and loader, folder-mode canvas, node creation
+and editing, New Project and demo) shipped on 2026-10-13; see
+[features.md](features.md).
 
-### S-011 Cmd+K palette replaces the CAD command line
-- One fuzzy palette listing every typed action and target. Delete
-  `src/harness/commands.ts`'s uppercase/`::` grammar and the host's
-  `handleAction → handleCommand` string round-trip; the host switches on typed
-  actions directly.
-- Webview imports protocol types from one shared file instead of duplicating
-  `harness_protocol.ts` in `src/harness/types.ts`.
+### S-110 Cmd+K palette replaces the CAD command line
+- One fuzzy palette of typed actions and targets. Delete the uppercase/`::`
+  grammar (`src/harness/commands.ts`) and the host's
+  `handleAction → handleCommand` string round-trip.
+- The webview imports protocol types from one shared file instead of
+  duplicating `harness_protocol.ts` in `src/harness/types.ts`.
 
-### S-012 Free canvas and calm persistence
-- Drop `extent: 'parent'`; files and classes become optional collapsible
-  frames.
-- Debounce layout writes. Layout-only project edits must not trigger
-  re-indexing or a revision bump.
-- Staleness is checked per target unit hash, not per global revision.
+### S-111 Inline editing and context by wire
+- Intent is editable on the node and saves on blur.
+- Drag from a context port to add `context:`. A searchable popup replaces the
+  `<select>`. Absorbs H-026.
 
-### S-013 Context by wire and by search
-- Drag from a node's context port to another node to add `depends-on`. A
-  searchable popup (also used by `@` in intent fields and the node menu)
-  replaces the `<select>`.
-- Annotation, chip, edge, and packet stay in agreement. Absorbs H-026.
+## Phase 2 — port and compile
 
-### S-014 Inline node editing
-- Intent and contract are edited on the node and save on blur. Expanding a
-  node shows its code in CodeMirror, read-only first.
+### S-200 Importer: split a project into node files
+- Command **Slate: Port Python Project…** walks a chosen folder with the
+  TypeScript adapter. Each top-level function and class becomes a node file
+  with only the external imports it uses; calls between them resolve as node
+  references.
+  Module-level state and unsplittable code stays as a read-only library entry
+  and is listed in a port report.
+- The original project is never modified.
 
-### S-015 Bring the examples into the v2 grammar
-- Copy calculator and tic-tac-toe Python from `legacy/examples/` into
-  `examples/` with `## @slate v=2 … ## @slate-end` annotations, project-v2
-  files, and their pytest suites, so they open fully durable in the harness.
+### S-201 Micro-context description pass
+- For each node without an intent, leaves first, send llama.cpp one
+  function's source plus the signatures and intents of the nodes it calls.
+  Write back `intent:` (and optional `contract:`) with
+  `described-by: llama`.
+- Skipping already-described nodes makes runs resumable. Show progress and
+  allow cancel. Fake-server tests cover ordering, skip/resume, malformed
+  output, and timeouts.
 
-## Phase 2 — one workspace
+### S-202 Compile `slate/` → `src/`
+- Each `slate/nodes` folder becomes one output module. Node references
+  become package imports, external imports are merged and deduplicated,
+  intent/contract become comments, and every block is stamped
+  `# slate: nodes/<id>`. Deterministic output, via the language adapter.
+- **Acceptance:** port calculator and tic-tac-toe from `legacy/examples`,
+  compile them, and the original pytest suites pass against the output.
+  Golden tests for import rewriting and name collisions.
 
-### S-020 Library sidebar
-- File → class → function outline with search; dragging onto the canvas
-  creates a reference node.
+### S-203 Retire project-v2 / `## @slate` mode
+- Delete the in-module annotation grammar, ID adoption, tracked-path project
+  loader, and Scan Workspace command once porting works. Keep the Lezer adapter
+  for node files and the read-only library.
 
-### S-021 Reference nodes
-- Persisted in `.slate.json` as `{ id, targetId, position }`. Multiple per
-  target. Menu items: Go to definition, Find references (highlight all),
-  Select definition, Generate body. Deleting a reference never touches source.
-- Missing targets render as broken, not deleted.
+## Phase 3 — one workspace
 
-### S-022 Placeholder notes → stubs
-- A name-only note resolves to a reference when the name matches a durable
-  unit. Otherwise **Create stub** proposes a typed stub (signature from
-  attached wires or a small form) through the normal proposal flow.
+### S-300 Library sidebar
+- `slate/nodes` folders plus read-only library code, searchable. Dragging an
+  item to the canvas creates a reference.
 
-### S-023 Compose / Map toggle
-- Compose is the free canvas; Map is today's containment layout. Selection is
+### S-301 Reference nodes
+- Stored in layout.json as `{ id, target, position }`, many per target. Menu:
+  Go to definition, Find references, Select definition, Generate body.
+  Missing targets render as broken.
+
+### S-302 Placeholders → node files
+- A name-only note resolves to a reference if the node exists; otherwise
+  **Create node** proposes a new node JSON, with its signature from wires or
+  a small form.
+
+### S-303 Compose / Map toggle
+- Map groups nodes by folder (output module); Compose is free. Selection is
   shared between them.
 
-## Phase 3 — ports and wires
+## Phase 4 — ports, wires, flows
 
-### S-030 Typed ports
-- Ports come from `parameters` / `returnAnnotation`, colored by type. Untyped
-  ports are "any." Context ports are visually separate from data ports.
+### S-400 Typed ports
+- Ports come from parameters and return annotations, colored by type, with
+  "any" for untyped. Context ports are visually separate.
 
-### S-031 Data wires and add-node search
-- Port-to-port wires in Compose are persisted in `.slate.json`. Tab,
-  double-click, or Shift+A opens add-node search at the cursor; dragging into
-  empty space opens it filtered by type and auto-wires.
+### S-401 Data wires and add-node search
+- Port-to-port wires; Tab, double-click, or Shift+A opens add-node search;
+  dragging into empty space opens it filtered by type and auto-wires.
 
-### S-032 Flows (group → Python)
-- Ctrl+G turns a selection into a flow with Group Input/Output nodes.
-  Deterministic codegen produces a Python function body, written via a
-  proposal with a `kind=flow graph=<hash>` annotation. Tab enters a flow,
-  breadcrumbs exit.
-- Hand-edited flow bodies are detected as detached and never silently
-  overwritten.
-- **Acceptance:** golden tests for codegen (fan-out, multiple outputs,
-  unused inputs, name collisions); round-trip through apply + undo in the
-  Extension Host suite.
+### S-402 Flows
+- Ctrl+G saves the selection as `slate/flows/<name>.json` with Group
+  Input/Output. Compile generates the flow function deterministically. Tab
+  enters a flow; breadcrumbs exit.
+- **Acceptance:** codegen golden tests (fan-out, multiple outputs, unused
+  inputs, name collisions); the compiled flow runs under pytest.
 
-## Phase 4 — live values
+## Phase 5 — live values
 
-### S-040 Trusted Python runner
-- The host spawns the workspace interpreter with a bundled runner script. It
-  evaluates the active flow topologically and returns truncated reprs per wire
-  and errors per node, with a timeout and cancellation. It runs only in
-  trusted workspaces with Live on.
+### S-500 Trusted Python runner
+- The host materializes nodes into `.slate/build/`, spawns the workspace
+  interpreter,
+  evaluates the active flow topologically, and returns truncated reprs per
+  wire and errors per node. Timeout and cancel; trusted workspaces with Live
+  on only.
 
-### S-041 Input, Viewer, Example nodes
-- Number/Text/Bool/List inputs; Viewer shows the wire value; `## example:`
-  annotations seed inputs. Ctrl+Shift+click attaches a viewer.
+### S-501 Input, Viewer, Example nodes; auto-solve; mute
+- Inputs, viewers, `example:` seeding, Ctrl+Shift+click viewer, debounced
+  re-run, M to mute.
 
-### S-042 Auto-solve and mute
-- Debounced re-run on source or wiring change; M mutes (bypasses) a node;
-  errors render on the failing node.
+## Phase 6 — local model inside the graph
 
-## Phase 5 — local model inside the graph
+### S-600 Graph-derived packets and examples as oracle
+- Packet = signature + intent + wired neighbors + context + example values.
+  Candidates run against examples before review; iterate until they pass, up
+  to 3 attempts; edit/regenerate; llama.cpp health indicator. Optional
+  trusted Ruff/Basedpyright. Absorbs H-027 and H-028.
 
-### S-050 Graph-derived packets
-- Packet = signature + intent + wired neighbors + explicit context + example
-  values. Generation is allowed for placeholders and provisional units (the
-  annotation is adopted in the same proposal).
+## Phase 7 — zones
 
-### S-051 Examples as the oracle
-- Candidates run against examples before review. Iterate until they pass, up
-  to 3 attempts, showing every attempt. Edit and regenerate candidates.
-  Absorbs H-027's remaining items.
-
-### S-052 llama.cpp health and validation
-- Endpoint health indicator. Optional trusted Ruff/Basedpyright/pytest on
-  candidate snapshots. Absorbs H-028's remaining items.
-
-## Phase 6 — zones
-
-### S-060 For-each, repeat, branch zones
-- Frames on the canvas that compile to a comprehension/`for`, a state-carrying
-  loop, and `if`. The runner shows per-iteration values for the first N
-  iterations.
+### S-700 For-each, repeat, branch zones
+- Canvas frames that compile to a comprehension/`for`, a state-carrying loop,
+  and `if`; the runner shows per-iteration values.
 
 ## Deferred
 
-- Generate-all / queue as "fill placeholders in topological order" (was
-  H-030).
+- Generate-all as "fill placeholders in topological order" (was H-030).
 - Reverse codegen: import a straight-line function as a flow.
-- Rename across references; methods/classes as compose nodes.
-- Additional languages; autonomous model tools; cloud providers.
+- Methods/classes as compose nodes; other languages; autonomous model tools;
+  cloud providers.

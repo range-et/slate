@@ -9,6 +9,8 @@ import { streamLlamaCompletion } from './llama_transport';
 import { PythonAdapter } from './python_adapter';
 import { loadProject, serializeProject } from './project_v2';
 import { searchUnits } from './search';
+import { checkNodeCode, codeLines, nodeFromSignature, nodeIdForPath } from './slate_folder';
+import { SlateFolderHost } from './slate_folder_host';
 
 const PYTHON_EXCLUDE = '**/{.git,.venv,venv,node_modules,__pycache__,dist,build}/**';
 
@@ -75,12 +77,16 @@ export class HarnessPanel implements vscode.Disposable {
     } | undefined;
     private lastAcceptedUnitId: string | undefined;
 
-    static createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): HarnessPanel {
+    static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel> {
         if (HarnessPanel.current) {
             HarnessPanel.current.panel.reveal();
             HarnessPanel.current.scheduleRefresh(0);
             return HarnessPanel.current;
         }
+        const workspace = vscode.workspace.workspaceFolders?.[0];
+        const folder = workspace && await SlateFolderHost.detect(workspace.uri)
+            ? new SlateFolderHost(workspace.uri)
+            : undefined;
         const panel = vscode.window.createWebviewPanel(
             'slate.harness',
             'Slate Harness',
@@ -91,7 +97,23 @@ export class HarnessPanel implements vscode.Disposable {
                 localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
             },
         );
-        HarnessPanel.current = new HarnessPanel(context, adapter, panel);
+        HarnessPanel.current = folder
+            ? new HarnessPanel(context, adapter, panel, { uri: folder.root, name: workspace!.name }, undefined, folder)
+            : new HarnessPanel(context, adapter, panel);
+        return HarnessPanel.current;
+    }
+
+    /** Custom editor on slate/slate.json: the decoupled folder whose parent is the project root. */
+    static attachToFolder(
+        context: vscode.ExtensionContext,
+        adapter: PythonAdapter,
+        panel: vscode.WebviewPanel,
+        configDocument: vscode.TextDocument,
+    ): HarnessPanel {
+        HarnessPanel.current?.dispose();
+        const root = vscode.Uri.file(path.dirname(path.dirname(configDocument.uri.fsPath)));
+        const folder = new SlateFolderHost(root);
+        HarnessPanel.current = new HarnessPanel(context, adapter, panel, { uri: root, name: path.basename(root.fsPath) }, undefined, folder);
         return HarnessPanel.current;
     }
 
@@ -129,6 +151,7 @@ export class HarnessPanel implements vscode.Disposable {
         private readonly panel: vscode.WebviewPanel,
         private readonly projectRoot?: { uri: vscode.Uri; name: string },
         private readonly projectDocument?: vscode.TextDocument,
+        private readonly folder?: SlateFolderHost,
     ) {
         panel.webview.html = buildHtml(context, panel.webview);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
@@ -136,7 +159,8 @@ export class HarnessPanel implements vscode.Disposable {
 
         const root = this.workspaceRoot();
         const watcher = vscode.workspace.createFileSystemWatcher(
-            root ? new vscode.RelativePattern(root.uri.fsPath, '**/*.py') : '**/*.py'
+            folder ? folder.nodePattern()
+                : root ? new vscode.RelativePattern(root.uri.fsPath, '**/*.py') : '**/*.py'
         );
         watcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
         watcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
@@ -144,8 +168,9 @@ export class HarnessPanel implements vscode.Disposable {
         this.disposables.push(
             watcher,
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (event.document.languageId === 'python'
-                    || event.document.uri.toString() === this.projectDocument?.uri.toString()) {
+                if (this.folder ? this.folder.nodeId(event.document.uri) !== null
+                    : event.document.languageId === 'python'
+                        || event.document.uri.toString() === this.projectDocument?.uri.toString()) {
                     this.scheduleRefresh();
                 }
             }),
@@ -176,6 +201,7 @@ export class HarnessPanel implements vscode.Disposable {
             await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
             return;
         }
+        if (this.folder) return this.refreshFolder(this.folder);
         const generation = ++this.refreshGeneration;
         try {
             const project = this.projectDocument ? loadProject(this.projectDocument.getText()) : undefined;
@@ -279,6 +305,28 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
+    private async refreshFolder(folder: SlateFolderHost): Promise<void> {
+        const generation = ++this.refreshGeneration;
+        try {
+            const index = await folder.index();
+            if (generation !== this.refreshGeneration) return;
+            this.sources = index.sources;
+            this.snapshot = {
+                revision: ++this.revision,
+                projectName: index.config.name,
+                mode: 'folder',
+                documents: index.documents.map(document => ({ ...document, source: index.sources.get(document.path) })),
+                notes: folder.layout.notes,
+                contextEdges: [],
+                layout: folder.layout.positions,
+            };
+            await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
+        } catch (error) {
+            if (generation !== this.refreshGeneration) return;
+            this.postCommandResult(false, `Slate folder: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
     private async handleMessage(message: unknown): Promise<void> {
         if (!message || typeof message !== 'object') return;
         const value = message as Record<string, unknown>;
@@ -287,7 +335,11 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'layout') {
-            await this.updateLayout(value);
+            await (this.folder ? this.updateFolderLayout(this.folder, value) : this.updateLayout(value));
+            return;
+        }
+        if (this.folder && ['noteCreate', 'noteUpdate', 'noteDelete'].includes(value.type as string)) {
+            await this.updateFolderNotes(this.folder, value);
             return;
         }
         if (value.type === 'noteCreate') {
@@ -336,7 +388,8 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'action' && value.action && typeof value.action === 'object') {
-            await this.handleAction(value.action as Record<string, unknown>, value.revision);
+            if (this.folder) await this.handleFolderAction(this.folder, value.action as Record<string, unknown>);
+            else await this.handleAction(value.action as Record<string, unknown>, value.revision);
             return;
         }
         if (value.type === 'reveal' && typeof value.unitId === 'string') {
@@ -594,13 +647,16 @@ export class HarnessPanel implements vscode.Disposable {
                 void this.panel.webview.postMessage({ type: 'generationProgress', unitId, receivedCharacters: received });
             });
             const candidate = stripModelEnvelope(raw);
-            const document = await this.sourceDocument(target.document.path);
+            const source = this.folder
+                ? this.sources.get(target.document.path) ?? ''
+                : (await this.sourceDocument(target.document.path)).getText();
             const proposal = await this.adapter.replaceUnit({
-                source: document.getText(),
+                source,
                 path: target.document.path,
                 expectedHash: packet.items[0].sourceHash,
                 unitId,
                 replacement: candidate,
+                nodeId: this.folder ? nodeIdForPath(target.document.path) ?? undefined : undefined,
             });
             const id = randomUUID();
             this.pendingProposal = { id, packet, proposal, candidate, path: target.document.path };
@@ -628,6 +684,10 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         try {
+            if (this.folder) {
+                await this.acceptFolderProposal(this.folder, pending);
+                return;
+            }
             for (const item of pending.packet.items) {
                 const document = await this.sourceDocument(item.path);
                 const parsed = await this.adapter.parseModule(document.getText(), item.path);
@@ -648,6 +708,144 @@ export class HarnessPanel implements vscode.Disposable {
                 type: 'proposalStale', proposalId,
                 message: error instanceof Error ? error.message : String(error),
             });
+        }
+    }
+
+    private async acceptFolderProposal(
+        folder: SlateFolderHost,
+        pending: NonNullable<HarnessPanel['pendingProposal']>,
+    ): Promise<void> {
+        for (const item of pending.packet.items) {
+            const current = (await folder.readNode(nodeIdForPath(item.path)!)).code.join('\n') + '\n';
+            if ((await this.adapter.parseModule(current, item.path)).sourceHash !== item.sourceHash) {
+                throw new Error(`${item.qualifiedName} changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+        }
+        const nodeId = nodeIdForPath(pending.path)!;
+        const node = await folder.readNode(nodeId);
+        node.code = codeLines(pending.proposal.proposedSource);
+        await folder.writeNode(nodeId, node);
+        this.lastAcceptedUnitId = pending.packet.targetId;
+        this.pendingProposal = undefined;
+        await this.panel.webview.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
+        this.postCommandResult(true, `Wrote the candidate into ${pending.path}. Use Undo to revert it.`);
+    }
+
+    private folderNodeId(target: unknown): string {
+        const document = typeof target === 'string'
+            ? this.snapshot?.documents.find(item => item.units.some(unit => unit.id === target && unit.parentId === null))
+            : undefined;
+        const nodeId = document ? nodeIdForPath(document.path) : null;
+        if (!nodeId) throw new Error('Metadata belongs to a node; select a node.');
+        return nodeId;
+    }
+
+    private async updateFolderLayout(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
+        if (!this.snapshot || !message.positions || typeof message.positions !== 'object') return;
+        const validIds = new Set(this.snapshot.documents.flatMap(document => document.units.map(unit => unit.id))
+            .concat(folder.layout.notes.map(note => note.id)));
+        let changed = false;
+        for (const [id, point] of Object.entries(message.positions)) {
+            const { x, y } = (point ?? {}) as { x?: unknown; y?: unknown };
+            if (!validIds.has(id) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+            folder.layout.positions[id] = { x: x as number, y: y as number };
+            changed = true;
+        }
+        // Layout is canvas-only: a plain file write, no re-index, no revision bump.
+        if (changed) await folder.writeLayout();
+    }
+
+    private async updateFolderNotes(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
+        const attachment = message.attachedTo === null || message.attachedTo === undefined
+            ? null
+            : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo) ? message.attachedTo : null;
+        try {
+            let select: string | null = null;
+            if (message.type === 'noteCreate') {
+                if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) throw new Error('invalid board position');
+                const note: BoardNote = { id: randomUUID(), title: 'New note', body: '', attachedTo: attachment };
+                folder.layout.notes.push(note);
+                folder.layout.positions[note.id] = { x: message.x as number, y: message.y as number };
+                select = note.id;
+            } else if (message.type === 'noteUpdate') {
+                const index = folder.layout.notes.findIndex(note => note.id === message.noteId);
+                if (index < 0 || typeof message.title !== 'string' || !message.title.trim() || typeof message.body !== 'string') {
+                    throw new Error('invalid or missing note');
+                }
+                folder.layout.notes[index] = { id: folder.layout.notes[index].id, title: message.title.trim(), body: message.body, attachedTo: attachment };
+                select = folder.layout.notes[index].id;
+            } else {
+                folder.layout.notes = folder.layout.notes.filter(note => note.id !== message.noteId);
+                delete folder.layout.positions[message.noteId as string];
+            }
+            await folder.writeLayout();
+            await this.refresh();
+            if (select) await this.panel.webview.postMessage({ type: 'selectUnit', unitId: select });
+            this.postCommandResult(true, 'NOTE: saved to slate/layout.json');
+        } catch (error) {
+            this.postCommandResult(false, `NOTE: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private async handleFolderAction(folder: SlateFolderHost, action: Record<string, unknown>): Promise<void> {
+        try {
+            if (action.kind === 'refreshIndex') {
+                await this.refresh();
+                const invalid = this.snapshot?.documents.filter(document => !document.valid || document.diagnostics.length > 0).length ?? 0;
+                this.postCommandResult(invalid === 0, invalid === 0 ? 'All nodes are valid.' : `${invalid} node(s) have problems.`);
+                return;
+            }
+            if (action.kind === 'saveWorkspace') {
+                await vscode.commands.executeCommand('workbench.action.files.saveAll');
+                this.postCommandResult(true, 'Saved.');
+                return;
+            }
+            if (action.kind === 'createNode' && Number.isFinite(action.x) && Number.isFinite(action.y)) {
+                const signature = await vscode.window.showInputBox({
+                    title: 'New Slate node',
+                    prompt: 'Typed function signature',
+                    placeHolder: 'def clamp(value: int, lower: int, upper: int) -> int',
+                    validateInput: value => {
+                        try { nodeFromSignature(value, ''); return null; } catch (error) { return (error as Error).message; }
+                    },
+                });
+                if (!signature) return;
+                const intent = await vscode.window.showInputBox({ title: 'New Slate node', prompt: 'Intent (what it should do)' }) ?? '';
+                const nodeId = await folder.createNode(nodeFromSignature(signature, intent), { x: action.x as number, y: action.y as number });
+                await this.refresh();
+                await this.panel.webview.postMessage({ type: 'selectUnit', unitId: nodeId });
+                this.postCommandResult(true, `Created slate/nodes/${nodeId}.json`);
+                return;
+            }
+            const nodeId = this.folderNodeId(action.target ?? action.consumer);
+            const node = await folder.readNode(nodeId);
+            if (action.kind === 'setAnnotationField' && typeof action.text === 'string'
+                && (action.field === 'intent' || action.field === 'contract')) {
+                node[action.field] = action.text.trim();
+                if (action.field === 'intent') node.describedBy = 'human';
+            } else if (action.kind === 'setContext' && typeof action.dependency === 'string' && typeof action.enabled === 'boolean') {
+                const dependency = this.folderNodeId(action.dependency);
+                if (dependency === nodeId) throw new Error('A node cannot be its own context.');
+                node.context = action.enabled
+                    ? [...new Set([...node.context, dependency])]
+                    : node.context.filter(item => item !== dependency);
+            } else if (action.kind === 'setLock' && typeof action.locked === 'boolean') {
+                node.locked = action.locked;
+            } else if (action.kind === 'setNodeCode' && typeof action.code === 'string') {
+                const current = `${node.code.join('\n')}\n`;
+                if ((await this.adapter.parseModule(current, nodeId)).sourceHash !== action.baseHash) {
+                    throw new Error('The node changed since you started editing; your draft is kept. Reload the node and reapply.');
+                }
+                checkNodeCode(node, nodeId, action.code);
+                node.code = codeLines(action.code);
+            } else {
+                throw new Error('That action is not available for slate/ node folders.');
+            }
+            await folder.writeNode(nodeId, node);
+            this.scheduleRefresh(0);
+            this.postCommandResult(true, `Saved slate/nodes/${nodeId}.json`);
+        } catch (error) {
+            this.postCommandResult(false, error instanceof Error ? error.message : String(error));
         }
     }
 
@@ -716,6 +914,18 @@ export class HarnessPanel implements vscode.Disposable {
 
     async revealUnit(unitId: string, focus = false): Promise<void> {
         if (!this.snapshot) throw new Error('The graph is not indexed yet.');
+        if (this.folder) {
+            const document = this.snapshot.documents.find(item => item.units.some(unit => unit.id === unitId));
+            if (!document) throw new Error(`Node ${unitId} is not indexed.`);
+            const text = await vscode.workspace.openTextDocument(this.folder.uri(document.path));
+            const editor = await vscode.window.showTextDocument(text, {
+                preview: false, preserveFocus: !focus, viewColumn: vscode.ViewColumn.Beside,
+            });
+            const line = SlateFolderHost.codeLine(text.getText());
+            editor.selection = new vscode.Selection(line, 0, line, 0);
+            editor.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            return;
+        }
         const matches = this.snapshot.documents.flatMap(document => document.units
             .filter(unit => unit.id === unitId)
             .map(unit => ({ document, unit })));
@@ -915,6 +1125,11 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private selectFromEditor(editor: vscode.TextEditor): void {
+        if (this.folder) {
+            const nodeId = this.folder.nodeId(editor.document.uri);
+            if (nodeId && this.validUnitId(nodeId)) void this.panel.webview.postMessage({ type: 'selectUnit', unitId: nodeId });
+            return;
+        }
         const root = this.workspaceRoot();
         if (!root || !this.snapshot || editor.document.languageId !== 'python') return;
         const relativePath = path.relative(root.uri.fsPath, editor.document.uri.fsPath).replace(/\\/g, '/');

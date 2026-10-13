@@ -5,10 +5,14 @@ import * as vscode from 'vscode';
 
 type Snapshot = {
     revision: number;
+    mode?: 'folder';
     notes?: Array<{ id: string; title: string; body: string; attachedTo: string | null }>;
+    layout?: Record<string, { x: number; y: number }>;
     documents: Array<{
         path: string;
-        units: Array<{ id: string; name: string }>;
+        sourceHash: string;
+        diagnostics: Array<{ code: string }>;
+        units: Array<{ id: string; name: string; annotation: Record<string, unknown> | null }>;
     }>;
 };
 
@@ -101,6 +105,61 @@ suite('Slate Extension Host', () => {
             assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri)), sourceBefore);
         } finally {
             await vscode.workspace.fs.writeFile(projectUri, projectBefore);
+        }
+    });
+
+    test('edits slate/ node JSON through the folder host without re-indexing on layout', async () => {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        assert.ok(root, 'fixture workspace is open');
+        const folder = vscode.Uri.joinPath(root, 'folder_project', 'slate');
+        const configUri = vscode.Uri.joinPath(folder, 'slate.json');
+        const layoutUri = vscode.Uri.joinPath(folder, 'layout.json');
+        const normalizeUri = vscode.Uri.joinPath(folder, 'nodes', 'normalize.json');
+        const read = async (uri: vscode.Uri) => new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+        const layoutBefore = await read(layoutUri);
+        const normalizeBefore = await read(normalizeUri);
+        const post = (message: unknown) => vscode.commands.executeCommand('slate.test.postMessage', message);
+
+        try {
+            await vscode.commands.executeCommand('vscode.openWith', configUri, 'slate.editor');
+            const initial = await waitForSnapshot(snapshot => snapshot.mode === 'folder' && snapshot.documents.length === 2);
+            const normalize = initial.documents.find(document => document.path === 'slate/nodes/normalize.json');
+            assert.ok(normalize, 'normalize node is indexed by its path');
+            assert.deepEqual(normalize.diagnostics, []);
+            assert.equal(normalize.units[0].id, 'normalize');
+            assert.deepEqual(normalize.units[0].annotation?.dependencies, ['clamp']);
+
+            // Layout is a plain write: the file changes, the revision does not.
+            await post({ type: 'layout', revision: initial.revision, positions: { normalize: { x: 512, y: 256 } } });
+            assert.deepEqual(JSON.parse(await read(layoutUri)).positions.normalize, { x: 512, y: 256 });
+            await new Promise(resolve => setTimeout(resolve, 600));
+            const afterLayout = await vscode.commands.executeCommand<Snapshot>('slate.test.getSnapshot');
+            assert.equal(afterLayout?.revision, initial.revision);
+
+            // Metadata edits touch only that field.
+            await post({ type: 'action', action: { kind: 'setAnnotationField', target: 'normalize', field: 'intent', text: 'Scale a score to 0–100' } });
+            const withIntent = JSON.parse(await read(normalizeUri));
+            assert.equal(withIntent.intent, 'Scale a score to 0–100');
+            assert.equal(withIntent.describedBy, 'human');
+            assert.deepEqual(withIntent.code, JSON.parse(normalizeBefore).code);
+
+            // Code edits are rejected when stale or renamed, accepted otherwise.
+            const current = await waitForSnapshot(snapshot => snapshot.documents.some(document =>
+                document.units[0]?.annotation?.intent === 'Scale a score to 0–100'));
+            const hash = current.documents.find(document => document.path === 'slate/nodes/normalize.json')!.sourceHash;
+            const body = 'def normalize(score: int, maximum: int) -> int:\n    return score * 100 // maximum\n';
+            await post({ type: 'action', action: { kind: 'setNodeCode', target: 'normalize', code: body, baseHash: 'sha256:stale' } });
+            assert.deepEqual(JSON.parse(await read(normalizeUri)).code, JSON.parse(normalizeBefore).code);
+            await post({ type: 'action', action: { kind: 'setNodeCode', target: 'normalize', code: body.replace('def normalize', 'def renamed'), baseHash: hash } });
+            assert.deepEqual(JSON.parse(await read(normalizeUri)).code, JSON.parse(normalizeBefore).code);
+            await post({ type: 'action', action: { kind: 'setNodeCode', target: 'normalize', code: body, baseHash: hash } });
+            assert.deepEqual(JSON.parse(await read(normalizeUri)).code, [
+                'def normalize(score: int, maximum: int) -> int:',
+                '    return score * 100 // maximum',
+            ]);
+        } finally {
+            await vscode.workspace.fs.writeFile(layoutUri, new TextEncoder().encode(layoutBefore));
+            await vscode.workspace.fs.writeFile(normalizeUri, new TextEncoder().encode(normalizeBefore));
         }
     });
 });

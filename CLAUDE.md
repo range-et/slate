@@ -15,13 +15,19 @@ loader, search, llama.cpp transport, proposals).
 - Backlog: [issues.md](issues.md)
 - Dev loop: [DEV.md](DEV.md); llama.cpp demo: [DEMO.md](DEMO.md)
 
+Projects are a `slate/` folder of JSON: `slate.json`, `layout.json`, and one
+`nodes/**/*.json` per node (code as a list of lines plus intent, contract,
+context, examples). Format and loader: `vscode-extension/src/slate_folder.ts`;
+host IO: `slate_folder_host.ts`. The older project-v2 source-map mode
+(`*.slate.json`, `## @slate` annotations in Python) remains until S-203.
+
 `legacy/` holds the frozen original browser notebook, which GitHub Pages still
 deploys. Do not build on it; see [legacy/CLAUDE.md](legacy/CLAUDE.md).
 
 ## Commands
 
 ```bash
-npm run dev               # Vite dev server, opens /harness.html?demo
+npm run dev               # Vite dev server, opens /harness.html?demo=folder
 npm run build             # Harness webview -> dist/ (served by the extension)
 npm test                  # Vitest unit tests (test/)
 npm run test:webview      # Playwright against harness.html with a fake host
