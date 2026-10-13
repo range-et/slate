@@ -201,6 +201,18 @@ test('refs, placeholders, data wires, flows, add-node search, and grouping post 
     await page.goto('/harness.html?demo');
     const actions = async () => (await page.evaluate(() => (window as unknown as { __slateHostMessages: Array<{ type: string; action?: unknown }> }).__slateHostMessages))
         .filter(message => message.type === 'action').map(message => message.action);
+    // Entering a flow animates fit-to-view; measure a handle only once it stops moving (slow CI runners).
+    const settledBox = async (selector: string) => {
+        const locator = page.locator(selector);
+        let previous = await locator.boundingBox();
+        for (let attempt = 0; attempt < 50; attempt++) {
+            await page.waitForTimeout(100);
+            const current = await locator.boundingBox();
+            if (previous && current && current.x === previous.x && current.y === previous.y && current.width === previous.width) return current;
+            previous = current;
+        }
+        throw new Error(`${selector} did not settle`);
+    };
     const drag = async (from: { x: number; y: number; width: number; height: number } | null, to: { x: number; y: number }) => {
         if (!from) throw new Error('handle did not render');
         await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
@@ -226,8 +238,8 @@ test('refs, placeholders, data wires, flows, add-node search, and grouping post 
     expect(await actions()).toContainEqual({ kind: 'placeholderToNode', id: 'placeholder-letter' });
 
     // Port-to-port data wire on the root canvas.
-    const valueOut = await page.locator('.react-flow__node[data-id="value"] [data-handleid="out"]').boundingBox();
-    const clampIn = await page.locator('.react-flow__node[data-id="clamp"] [data-handleid="in:value"]').boundingBox();
+    const valueOut = await settledBox('.react-flow__node[data-id="value"] [data-handleid="out"]');
+    const clampIn = await settledBox('.react-flow__node[data-id="clamp"] [data-handleid="in:value"]');
     await drag(valueOut, { x: clampIn!.x + clampIn!.width / 2, y: clampIn!.y + clampIn!.height / 2 });
     expect(await actions()).toContainEqual({ kind: 'connectData', from: 'value.out', to: 'clamp.in:value' });
 
@@ -236,9 +248,11 @@ test('refs, placeholders, data wires, flows, add-node search, and grouping post 
     await page.getByLabel('Command palette input').fill('Flow: report');
     await page.keyboard.press('Enter');
     await expect(page.getByRole('navigation', { name: 'Canvas path' }).getByRole('button', { name: 'report' })).toBeVisible();
-    const out = await page.locator('.react-flow__node[data-id="normalize_score"] [data-handleid="out"]').boundingBox();
-    await drag(out, { x: out!.x + 240, y: out!.y + 220 });
+    const out = await settledBox('.react-flow__node[data-id="normalize_score"] [data-handleid="out"]');
+    await drag(out, { x: out.x + 240, y: out.y + 220 });
     const add = page.getByRole('dialog', { name: 'Add node' });
+    await expect(add).toBeVisible();
+    await expect(add.getByRole('option').filter({ hasText: 'clamp' })).toHaveCount(1);
     await expect(add.getByRole('option').filter({ hasText: 'shout' })).toHaveCount(0);
     await page.getByLabel('Add node input').fill('clamp');
     await page.keyboard.press('Enter');
