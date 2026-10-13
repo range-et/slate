@@ -1,10 +1,3 @@
----
-tags: [project, slate, northstar, explicit-context, human-in-the-loop]
-status: wip
-domain: code-tools
-repo: https://github.com/range-et/slate
----
-
 # Why Slate Exists
 
 ## The Problem with Current LLM Interfaces

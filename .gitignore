@@ -115,14 +115,13 @@ instance/
 .env
 .env.local
 
-src/config.js
+legacy/src/config.js
 scratch/scatch_notes.txt
 
 # AI / agent session artifacts
 .playwright-mcp/
 playwright-report/
 test-results/
-.assemblage.toml
 .claude/
 slate-after-*.png
 slate-textured-*.png
@@ -139,5 +138,6 @@ vscode-extension/*.vsix
 !vscode-extension/.vscode/launch.json
 !vscode-extension/.vscode/tasks.json
 
-# Backup created by scripts/package-extension.js while stubbing keys
-.config.js.backup
+
+# VS Code downloaded by @vscode/test-electron
+vscode-extension/.vscode-test/

@@ -1,197 +1,149 @@
----
-tags: [project, slate, features]
-status: living
----
+# Slate — feature inventory
 
-# Slate — implemented features
+Factual inventory of what exists, what is half-built, and what is not started.
+Direction and reasoning live in [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md);
+executable tasks live in [issues.md](issues.md). Audited 2026-10-13.
 
-This is a concise factual inventory of shipped code. It is not a roadmap.
-Active architecture lives in [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md) and
-unfinished work lives in [issues.md](issues.md). Detailed implementation history
-remains available in Git.
+## At a glance
 
-## Legacy notebook baseline
+| Area | State |
+| --- | --- |
+| Python indexing (TypeScript/Lezer, dirty buffers, annotations) | ✅ shipped |
+| Source map canvas (files → classes → functions) | ✅ shipped, interaction rough |
+| Search + exact reveal | ✅ shipped |
+| Board notes (free text, optional attachment) | ✅ shipped |
+| Explicit context (`depends-on`) + packet preview | ✅ shipped, entry points clumsy |
+| Single-function llama.cpp generate → review → accept → undo | ✅ shipped, no edit/regenerate |
+| CAD-style command line | ✅ shipped — slated for replacement |
+| Wiring nodes / typed ports / dataflow | ❌ not started (handles are drawn but not connectable) |
+| Reference (alias) nodes, "go to function" from anywhere | ❌ not started |
+| Placeholder nodes (name-only → stub) | ❌ not started |
+| Composite (group) nodes compiled to Python | ❌ not started |
+| Running code / live values on wires | ❌ not started |
+| Loops / zones (repeat, for-each, branch) | ❌ not started |
+| Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
+| Queue / generate-all in the new harness | ❌ not started |
+| Legacy browser notebook (`legacy/`) | 🧊 frozen, still deployed to GitHub Pages |
 
-The legacy application under `src/` still provides:
+## Shipped — source-first harness (VS Code extension)
 
-- Project → Documents → Cards JSON import/export.
-- Markdown, Python code, header, and class-card rendering.
-- Explicit project-wide `@` references and bibliography construction.
-- OpenAI, Gemini, and an OpenAI-compatible local agent originally configured
-  for Ollama. This is legacy behavior; llama.cpp is the active future backend.
-- Streaming/cancellation, project-wide Generate All, and Compile All.
-- Python compile/download/workspace-write flows.
-- `## @slate` compile → rehydrate → compile round-trip support.
-- D3 graph navigation, workspace scanning, and VS Code webview hosting.
-- Calculator and tic-tac-toe regression fixtures.
+### Indexing and project model
 
-This baseline is retained only until equivalent source-first invariants are
-covered. It is not the target interaction or ownership model.
+- Pure TypeScript Python adapter on `@lezer/python`: classes, functions,
+  methods, nested declarations, decorators, async/multiline signatures,
+  parameters, return annotations, UTF-16 ranges, CRLF, Unicode, syntax
+  diagnostics, durable/provisional IDs, and duplicate-ID detection.
+- `## @slate v=2 id=…` … `## @slate-end` annotations own identity, `intent`,
+  `contract`, `depends-on`, `example`, and `locked`.
+- Dirty buffers outrank disk. Invalid source keeps a visibly stale last-good
+  graph.
+- Project-v2 `.slate.json` (schema in `contracts/project-v2.schema.json`) owns
+  tracked paths, layout, notes, and queue state. Legacy projects migrate in
+  memory; newer schemas open read-only.
+- **New Project** and **Scan Python Workspace** commands create a project file.
 
-## Source-first harness foundation
+### Canvas
 
-### Versioned contracts and reproducible baseline
+- XYFlow canvas: files and classes render as nested containers holding
+  function/method nodes. Layout persists to the project file.
+- Single click reveals source beside the canvas; double-click, Enter, or
+  **Edit in code** focuses the editor. Editor cursor highlights the deepest
+  containing node.
+- Context edges (animated) and note attachment edges (dotted) are drawn.
+- Right-click menus for empty canvas, functions, and notes.
+- Trackpad two-finger pan, pinch zoom, node drag.
 
-- Project-v2 and worker protocol JSON schemas exist under `contracts/`.
-- `npm run verify:baseline` gates Vitest, Vite build, extension compilation,
-  parser/patcher tests, round-trip fixtures, and example Python tests.
-- Calculator and tic-tac-toe compile in isolated temporary directories so tests
-  do not accidentally consume checked-in output.
-- Resolved 2026-09-10 in
-  [`70fc4d1`](https://github.com/range-et/slate/commit/70fc4d1fe5f288a5a03e10c1bdc48987fce29238).
+### Search and commands
 
-### LibCST parser/patcher prototype
+- `/search` ranks names, qualified names, IDs, signatures, annotations, paths,
+  and dirty-buffer text; results explain why they matched.
+- Command line with completion/history: `SELECT`, `REVEAL`, `EDIT`, `FIT`,
+  `CLEAR`, `STUB`, `INTENT`, `CONTRACT`, `CONTEXT`, `UNCONTEXT`, `LOCK`,
+  `COMPILE`, `SAVE`, `HELP`.
+- All source mutations go through adapter proposals and one VS Code
+  `WorkspaceEdit` with native undo.
 
-- A supervised newline-delimited JSON worker parses Python snapshots without
-  workspace access.
-- It extracts classes, functions, methods, nested declarations, decorators,
-  signatures, annotations, durable/provisional IDs, UTF-16 ranges, diagnostics,
-  and source hashes.
-- It prepares checked proposals for annotation adoption/update, typed stub
-  insertion, unit replacement, and top-level moves.
-- Tests cover async/decorated/nested declarations, Unicode, CRLF, malformed
-  source, stale hashes, duplicate IDs, locks, typed signatures, and moves.
-- Resolved as a prototype in
-  [`70fc4d1`](https://github.com/range-et/slate/commit/70fc4d1fe5f288a5a03e10c1bdc48987fce29238)
-  and
-  [`b9e8f2f`](https://github.com/range-et/slate/commit/b9e8f2f1269c510f80669e15f9795c412cae06ef).
+### Notes
 
-The prototype proves contracts and fixtures, but its Python/LibCST bootstrap
-failed the desired clean packaged-extension experience. It is migration input
-for the approved pure-TypeScript adapter, not the shipping runtime.
+- Free-text board notes persist in project metadata and never touch source.
+- A note can attach to one function and draws a dotted edge to it.
 
-### XYFlow source browser
+### Local generation (llama.cpp)
 
-- The React/TypeScript harness is the default editor for `.slate.json` files;
-  the legacy notebook remains available through **Open With**.
-- Python files, classes, functions, methods, and nested declarations render as
-  grouped XYFlow nodes.
-- Dirty buffers outrank disk snapshots. Temporarily invalid source retains a
-  visibly stale last-good graph.
-- Graph double-click/inspector actions reveal source; editor selection highlights
-  the deepest containing node.
-- Layout persists in project JSON or workspace state.
-- Context edges remain visually distinct from containment.
-- Resolved in
-  [`cd0b40b`](https://github.com/range-et/slate/commit/cd0b40bfa89cde20d2c37aaa887ccab5b22db53a)
-  and
-  [`d77c500`](https://github.com/range-et/slate/commit/d77c50024845c5af7e8964da7f8a7b43678f6480).
+- Inspector edits intent/contract, shows context chips, adds/removes context
+  through a dropdown, and previews the exact packet with a token estimate.
+- Host-side OpenAI-compatible streaming transport with timeout and cancel. No
+  model picker, no cloud fallback.
+- Eligibility: typed, unlocked, durable functions/methods with an intent.
+- Candidates are rejected for syntax errors, extra statements, decorators,
+  renames, signature changes, or edits outside the function. Acceptance
+  rechecks hashes, applies one `WorkspaceEdit`, and supports undo.
+- `npm run demo:llama` + `examples/llama_demo` run the loop end to end.
 
-### CAD-style command prototype
+### Test platform
 
-- The webview parses deterministic commands with token completion and history.
-- Selection, reveal/edit, fit, clear, typed stub creation, intent/contract
-  updates, context add/remove, locks, compile/re-index, and save commands are
-  wired. Unsafe cross-file move was removed from the primary surface.
-- Source mutations use adapter proposals and VS Code `WorkspaceEdit`.
-- Resolved in
-  [`b9e8f2f`](https://github.com/range-et/slate/commit/b9e8f2f1269c510f80669e15f9795c412cae06ef).
+- Vitest unit suites (adapter, project-v2, search, commands, graph, packet,
+  transport, fake llama server).
+- Playwright against `harness.html` with an injected fake VS Code host.
+- `@vscode/test-electron` Extension Host suite (dirty buffers, reveal,
+  `WorkspaceEdit`, undo) and a Playwright/Electron workbench smoke test.
+- `npm run verify:baseline` and `npm run test:harness` compose the suites; CI
+  runs both.
 
-### Agent-runnable test platform
+## Partially done
 
-- Playwright runs `harness.html` against an injected VS Code host and verifies
-  the guided search and ID-based reveal journey.
-- A pinned VS Code 1.139 Electron build runs an Extension Host fixture that
-  proves dirty-buffer indexing, exact reveal, `WorkspaceEdit`, and native undo.
-- A separate Playwright/Electron workbench smoke test renders the real Slate
-  webview inside an Extension Development Host and captures an inspected image.
-- A deterministic OpenAI-compatible fake llama.cpp server records requests and
-  streams SSE chunks for later generation tests.
-- `npm run test:harness` composes unit, browser, Extension Host, and workbench
-  checks; CI installs the browser and retains Playwright failure artifacts.
-- Implemented 2026-09-23 in the current worktree.
+- **Context entry points.** Context can be added only through the inspector
+  dropdown or `CONTEXT a :: b`. `@`, drag-to-connect, and the node menu do not
+  open a shared picker.
+- **Proposal lifecycle.** Generated code is reviewed, but intent/contract/
+  context/lock edits apply immediately without review. Candidates cannot be
+  edited or regenerated with feedback.
+- **llama.cpp.** No health indicator; no bounded revision loop.
+- **Examples.** Only `examples/llama_demo` uses the v2 grammar. Calculator
+  and tic-tac-toe moved to `legacy/examples/` because they use the legacy
+  `## @slate id=… prompt:` annotation (no `@slate-end`), which the harness
+  shows as provisional, intent-less nodes.
+- **Retirement.** The extension, VSIX, and root build are harness-only. The
+  legacy notebook is isolated in `legacy/` and still deployed by GitHub Pages.
 
-### Pure TypeScript Python runtime
+## Not started
 
-- `@lezer/python` now indexes annotations, decorators, async/multiline
-  signatures, classes, methods, nested declarations, Unicode/UTF-16 ranges,
-  CRLF source, provisional IDs, duplicate IDs, and syntax diagnostics in-process.
-- Annotation adoption/update, typed stub insertion, and confined same-signature
-  function replacement produce hash-bound source proposals.
-- The extension no longer starts, configures, packages, or bootstraps a Python
-  worker. Its host entry is bundled with esbuild so Lezer ships in the VSIX.
-- The LibCST engine remains only as a reference prototype until final retirement.
-- Implemented 2026-09-23 in the current worktree.
+- Connectable ports derived from parameters/return types; dataflow wires.
+- Reference nodes (many canvas instances of one function) with go-to-definition
+  and find-references.
+- Placeholder notes that turn into typed stubs.
+- Composite/group nodes that generate a Python function body.
+- Input, viewer, and example nodes; executing code; showing values.
+- Repeat / for-each / branch zones.
+- Add-node search on the canvas (Tab, double-click, drag from port).
+- Inline code on nodes.
+- Ruff, Basedpyright, targeted pytest validation of candidates.
+- Dependency-ordered queue / generate-all for the harness.
+- Static product page replacing the GitHub Pages authoring app; clean-profile
+  VSIX install/update/restart test.
+- Any language other than Python (Slate cannot map its own TypeScript code).
 
-### Project-v2 runtime authority
+## Legacy browser notebook (frozen)
 
-- New and scanned projects use the checked project-v2 contract.
-- The loader validates roots, tracked Python paths, card kinds, finite layout,
-  and queue records; tracked paths alone enter a bound project index.
-- Legacy projects migrate in memory without making title links authoritative.
-  Newer schemas expose safe tracked source read-only and block source/layout
-  mutations.
-- Layout persistence uses project v2, annotation dependencies own context, and
-  project-wide durable-ID collisions become diagnostics.
-- Legacy project/layout/context helpers and regex workspace scanning were
-  removed from the extension runtime.
-- Implemented 2026-09-23 in the current worktree.
+`legacy/` holds the original card notebook (`legacy/src/`, tests, scripts,
+examples, and its docs: README, ARCHITECTURE, DEPLOYMENT, motivation): Project → Document → Card JSON, markdown/code/
+header cards, `@` references with bibliography, OpenAI/Gemini/OpenAI-compatible
+agents, Generate All, Compile All to Python, `## @slate` round-trip, a D3
+graph, and the calculator/tic-tac-toe compile fixtures. Run it with
+`npm run legacy:dev`, `legacy:build`, and `legacy:test`;
+`npm run verify:baseline` keeps it green and `.github/workflows/pages.yml`
+deploys `legacy/dist`. It is not shipped in the extension and receives no new
+work. Delete the folder once the harness replaces the site.
 
-### Guided search and exact navigation
+## Removed
 
-- `/search` enters a guided query state. The extension host ranks names,
-  qualified names, IDs, signatures, annotation intent/contracts, tracked paths,
-  and dirty-buffer declaration text.
-- Results show path, signature, snippet, and match reason, then select/reveal by
-  unit ID. Search logic is deterministic and independently tested.
-- Single click reveals without taking keyboard focus; double-click, **Edit in
-  code**, or Enter focuses the editor. The host reparses the current buffer and
-  resolves the current name/declaration range instead of trusting webview paths.
-- Implemented 2026-09-23 in the current worktree.
-
-### Persistent planning board
-
-- Freeform board notes persist in project metadata without modifying source.
-- Notes can optionally attach to durable function identities and render a
-  distinct dotted relationship edge.
-- Right-click menus expose relevant actions for empty canvas, functions, and
-  notes; note creation and editing stay in the contextual workbench.
-- Two-finger trackpad scrolling pans freely, pinch gestures zoom, and ordinary
-  node dragging remains available.
-- Implemented 2026-09-23 in the current worktree.
-
-### Playable confined llama.cpp loop
-
-- The contextual workbench edits intent/contract, shows named context chips,
-  adds/removes durable context, and previews every exact packet item and budget.
-- A host-owned OpenAI-compatible transport streams from a configured llama.cpp
-  endpoint with timeout and cancellation. It has no cloud fallback or model
-  picker.
-- Required context is never silently truncated. Generation is limited to typed,
-  unlocked durable functions and methods with an intent.
-- Candidate validation rejects malformed Python, extra module statements,
-  decorators, renamed or re-signed declarations, and edits outside the owned
-  function. Acceptance rechecks target and context hashes, applies one
-  `WorkspaceEdit`, and exposes native undo.
-- Fake transport tests cover chunking, malformed SSE, disconnect, timeout,
-  cancellation, an unavailable server, and context overflow. A real 0.5B
-  llama.cpp model generated the included fixture function in a local smoke
-  test.
-- `examples/llama_demo` and `npm run demo:llama` provide a runnable demo. The
-  harness-only VSIX was packaged, inspected, and installed locally.
-- Implemented 2026-09-23 in the current worktree.
-
-### Production extension retirement
-
-- The packaged extension now registers only the source-first XYFlow editor.
-  Legacy notebook commands, custom editor, state bridge, browser model UI, and
-  Python worker bootstrap were removed from the extension entry and VSIX.
-- The old browser application remains in the repository and static Vite build;
-  it is no longer shipped in the VS Code extension.
-- Implemented 2026-09-23 in the current worktree.
-
-## Known limits of the implemented harness
-
-The following are not shipped features:
-
-- `@` insertion and function context menus do not yet open the shared source
-  context picker; provisional context adoption still uses command actions.
-- Annotation/context mutations apply directly instead of entering the same
-  review lifecycle as generated proposals.
-- Proposal editing, regenerate/revision feedback, Ruff, Basedpyright, and
-  targeted pytest validation are not implemented.
-- The required week-long human-project pilot has not occurred.
-- Dependency scheduling, resumable queues, and proposal restart recovery remain
-  gated on that pilot.
-- The GitHub Pages authoring UI has not been replaced by a static product page,
-  and clean-profile installed-VSIX update/restart has not been exercised.
+- 2026-10-13: the legacy notebook moved from `src/`, `test/`, `scripts/`,
+  `examples/`, and root docs into `legacy/`. The root Vite build now emits
+  only `harness.html`, and extension packaging no longer stubs API-key config.
+- 2026-10-13: LibCST Python engine (`python-engine/`), the retired
+  `worker-protocol-v1` contract, `scripts/verify-phase1.mjs`,
+  `scratch/sample_project.json`, and the `setup:python-engine` /
+  `test:python-engine` scripts. The TypeScript adapter and its tests cover the
+  same behavior; history remains in Git.
+- 2026-09-23: legacy notebook commands, custom editor, state bridge, browser
+  model UI, and Python worker bootstrap removed from the extension.

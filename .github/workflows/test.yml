@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
       - run: npm ci
       - run: npm ci --prefix vscode-extension
-      - run: npm run setup:python-engine
+      - run: python -m pip install pytest
       - run: npm run verify:baseline
 
   harness-ui:

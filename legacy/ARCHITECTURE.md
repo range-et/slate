@@ -1,10 +1,8 @@
----
-tags: [project, slate, architecture, map, ai-guide]
-status: living
-audience: humans + AI agents
----
-
 # slate — architecture map
+
+> **Legacy scope.** This map covers only the frozen browser notebook now in
+> `legacy/src/` (paths below are relative to `legacy/`). The active product
+> is the harness; see [../SLATE_HARNESS_PLAN.md](../SLATE_HARNESS_PLAN.md).
 
 > **Read this before touching code.**
 > If your task is "add a button" or "fix a bug in X", this map tells you which

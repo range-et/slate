@@ -1,7 +1,3 @@
----
-tags: [project, slate, slate-code, dev, hot-reload]
----
-
 # Dev workflow — slate-code v0.2
 
 This guide gets you running the **VS Code extension** (the v0.2 code-mode
@@ -88,13 +84,13 @@ coding GGUF. See [DEMO.md](DEMO.md) for the complete flow.
 3. In the host window:
    - Click the slate icon in the activity bar (left sidebar) to open the
      slate panel, OR
-   - `Cmd+Shift+P` → `Slate: Open Empty Panel`, OR
-   - Open any `*.slate.json` file (e.g. once #28 ships,
-     `examples/tic_tac_toe/tic_tac_toe.slate.json`).
+   - `Cmd+Shift+P` → `Slate: Open Python Harness`, OR
+   - Open any `*.slate.json` file (e.g.
+     `examples/llama_demo/llama-demo.slate.json`).
 
 ### Reloading after changes
 
-- **Slate src changes** (`src/*.js`, `src/*.css`, `src/index.html`):
+- **Harness webview changes** (`src/harness/*`, `src/harness.html`):
   Vite rebuilds → in the host window, run `Developer: Reload Webviews`
   (or `Cmd+R` to reload the whole window).
 - **Extension TS changes** (`vscode-extension/src/*.ts`):
@@ -108,16 +104,18 @@ Developer Tools`) to see webview console logs and inspect the slate UI.
 
 ## Browser-only dev (no VS Code)
 
-For markdown-notebook work or pure UI iteration that doesn't need
-extension features, the original flow still works:
+For pure canvas iteration without VS Code:
 
 ```bash
 # from slate repo root
 npm run dev
 ```
 
-Vite dev server with HMR; opens at `http://localhost:5173`. Code-mode UI
-will be hidden once issue **#31** lands (the `isCodeHost()` gate).
+Vite dev server with HMR; opens `http://localhost:5173/harness.html?demo`
+with a built-in demo snapshot (no host, so host actions are inert).
+
+The frozen legacy notebook lives in `legacy/` and runs with
+`npm run legacy:dev`.
 
 ---
 
@@ -125,21 +123,22 @@ will be hidden once issue **#31** lands (the `isCodeHost()` gate).
 
 | What | Where | Notes |
 |---|---|---|
-| Slate UI source | `src/` | Vanilla JS, vite-built |
-| Slate built bundle | `dist/` | Vite output; symlinked into extension |
+| Harness webview source | `src/harness/` | React + TypeScript, vite-built |
+| Harness built bundle | `dist/` | Vite output; symlinked into extension |
 | Extension host code | `vscode-extension/src/extension.ts` | TS, tsc-built |
 | Extension built JS | `vscode-extension/out/` | tsc output |
 | Extension webview src | `vscode-extension/dist/` → `../dist` | symlink |
-| Tic-tac-toe scaffold | `examples/tic_tac_toe/` | CI gate per issue #28-#30 |
+| llama.cpp demo | `examples/llama_demo/` | v2 annotations |
+| Legacy notebook | `legacy/` | frozen; GitHub Pages only |
 | Spec | `SLATE_HARNESS_PLAN.md` | source of truth |
 | Open work | `issues.md` | active ordered slices |
-| Shipped work | `features.md` | append-only resolved log |
+| Inventory | `features.md` | shipped / partial / not started |
 
 ---
 
 ## Common snags
 
-- **"Webview blank / fonts missing"** → CSP issue. Check `dist/index.html`
+- **"Webview blank / fonts missing"** → CSP issue. Check `dist/harness.html`
   has no `<link>` to external CDNs; extension assets should be bundled.
 - **"llama.cpp is unreachable"** → run `npm run demo:llama`, then verify
   `slate.llama.endpoint` is `http://127.0.0.1:8080`.

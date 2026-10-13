@@ -5,16 +5,10 @@ out/**/*.map
 out/test/**
 **/*.ts
 node_modules/**
-python-engine/**
 scripts/**
 test-fixtures/**
 package-lock.json
 *.slate.json
-dist/index.html
-dist/assets/legacy-*
-dist/assets/favicon-*
-dist/assets/apple-touch-icon-*
-dist/assets/site-*
 .gitignore
 tsconfig.json
 !media/**

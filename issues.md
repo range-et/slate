@@ -1,155 +1,147 @@
----
-tags: [project, slate, harness, issues]
-status: open
----
+# Slate — active backlog
 
-# Slate harness — active implementation backlog
+Ordered by phase from [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md). Shipped
+work moves to [features.md](features.md). Old H-0xx items are folded in where
+noted.
 
-Tasks are ordered by dependency. The governing behavior and acceptance journeys
-are in [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md). H-022 through H-025 were
-implemented on 2026-09-23 and moved to [features.md](features.md). This backlog
-now starts at the first unfinished slice.
+## Phase 0 — cleanup
 
-## Slice 3 — context workbench
+### S-001 Delete `legacy/` once the harness can replace the site
+- **Done 2026-10-13:** the notebook is isolated in `legacy/`; Pages deploys
+  `legacy/dist`; the root build and extension are harness-only.
+- **Remaining scope:** when Phases 1–4 land, replace the Pages output with a
+  static product page (current screenshots, install + llama.cpp setup), then
+  `rm -rf legacy/`, drop the `legacy:*` scripts and the legacy block in
+  `scripts/verify-baseline.sh`, and remove the legacy-only dependencies
+  (`openai`, `@google/genai`, `d3`, `marked`, `codemirror`, `uuid`, CodeMirror
+  language packs if unused).
+- **Acceptance:** `npm run test:harness` passes; clean-profile VSIX completes
+  search → generate → accept → undo after restart.
+- Absorbs H-031.
 
-### H-026 Unify context, annotation editing, and proposal review
+## Phase 1 — stop the friction
 
-**Current status:** the unified workbench, named durable chips, add/remove
-picker, packet manifest, stale generation rejection, and native-undo apply are
-implemented. Shared `@`/context-menu entry, provisional adoption review, and a
-review lifecycle for annotation mutations remain.
+### S-010 Selection without side effects
+- Click selects only. F12, Cmd-click, or the menu reveals source. Double-click
+  expands inline code (S-014). Remove the global keystroke → command-line
+  hijack.
 
-- **Scope:** Replace the read-only inspector with one contextual workbench.
-  `@`, **Add context…**, slash actions, and function context menus use the H-025
-  picker with a pinned consumer. Show named context chips and an exact packet
-  preview. Put intent, contract, stub, lock, and context mutations through one
-  host-owned proposal/review/apply lifecycle.
-- **Acceptance:**
-  - Annotation, chip, graph edge, persisted project, and packet manifest agree.
-  - The UI explains that context does not imply an import or call dependency.
-  - Provisional dependencies offer an explicit adoption diff.
-  - Editing source while a proposal is open makes acceptance fail stale while
-    preserving the draft.
-  - Acceptance rechecks document versions/hashes and applies one native-undo
-    `WorkspaceEdit`.
-  - Unsafe cross-file `REASSIGN` is removed from the primary surface.
-- **Depends:** H-024, H-025.
-- **Blocks:** H-027, H-030.
+### S-011 Cmd+K palette replaces the CAD command line
+- One fuzzy palette listing every typed action and target. Delete
+  `src/harness/commands.ts`'s uppercase/`::` grammar and the host's
+  `handleAction → handleCommand` string round-trip; the host switches on typed
+  actions directly.
+- Webview imports protocol types from one shared file instead of duplicating
+  `harness_protocol.ts` in `src/harness/types.ts`.
 
-**Milestone:** after H-026, dogfood Slate daily for search, exact navigation,
-and context planning without model generation.
+### S-012 Free canvas and calm persistence
+- Drop `extent: 'parent'`; files and classes become optional collapsible
+  frames.
+- Debounce layout writes. Layout-only project edits must not trigger
+  re-indexing or a revision bump.
+- Staleness is checked per target unit hash, not per global revision.
 
-## Slice 4 — safe single-function loop
+### S-013 Context by wire and by search
+- Drag from a node's context port to another node to add `depends-on`. A
+  searchable popup (also used by `@` in intent fields and the node menu)
+  replaces the `<select>`.
+- Annotation, chip, edge, and packet stay in agreement. Absorbs H-026.
 
-### H-027 Generate and review one function with a deterministic fake model
+### S-014 Inline node editing
+- Intent and contract are edited on the node and save on blur. Expanding a
+  node shows its code in CodeMirror, read-only first.
 
-**Current status:** bounded packets, honest streaming activity, cancellation,
-structural confinement, proposal review, freshness checks, accept, and undo are
-implemented and fake-transport tested. Inline candidate editing, regenerate,
-and Extension Host coverage of the complete fake-model accept journey remain.
+### S-015 Bring the examples into the v2 grammar
+- Copy calculator and tic-tac-toe Python from `legacy/examples/` into
+  `examples/` with `## @slate v=2 … ## @slate-end` annotations, project-v2
+  files, and their pytest suites, so they open fully durable in the harness.
 
-- **Scope:** Define eligibility for supported typed functions/methods, build a
-  bounded packet with output headroom, stream honest activity events from the
-  fake server, confine candidate edits to the owned unit body, and expose diff,
-  diagnostics, accept, edit, regenerate, and cancel in the workbench.
-- **Acceptance:**
-  - Extra declarations, module statements, signature/decorator changes, locked
-    descendants, and edits outside the owned region are rejected.
-  - Required context is never silently truncated; omissions and budget use are
-    visible before send.
-  - Target or dependency changes invalidate acceptance and preserve the draft.
-  - Accept and undo pass through the real Extension Host fixture.
-  - Cancellation and malformed streams never mutate source.
-- **Depends:** H-022, H-023, H-026.
-- **Blocks:** H-028, H-030.
+## Phase 2 — one workspace
 
-## Slice 5 — llama.cpp and validation
+### S-020 Library sidebar
+- File → class → function outline with search; dragging onto the canvas
+  creates a reference node.
 
-### H-028 Connect the proven loop to llama.cpp
+### S-021 Reference nodes
+- Persisted in `.slate.json` as `{ id, targetId, position }`. Multiple per
+  target. Menu items: Go to definition, Find references (highlight all),
+  Select definition, Generate body. Deleting a reference never touches source.
+- Missing targets render as broken, not deleted.
 
-**Current status:** endpoint/model/budget/timeout settings, streaming,
-cancellation, transport failure coverage, and a real 0.5B server smoke test are
-implemented. Health UI, bounded revision feedback, trusted-workspace Ruff,
-Basedpyright, and targeted pytest validation remain.
+### S-022 Placeholder notes → stubs
+- A name-only note resolves to a reference when the name matches a durable
+  unit. Otherwise **Create stub** proposes a typed stub (signature from
+  attached wires or a small form) through the normal proposal flow.
 
-- **Scope:** Add extension-host transport for a workspace-configured llama.cpp
-  server: endpoint, model, context window, output budget, timeout, health,
-  streaming, and cancellation. Add staged candidate validation and bounded
-  revision feedback.
-- **Acceptance:**
-  - Fake transport tests cover chunking, malformed payloads, disconnects,
-    timeout, cancellation, unavailable server, and context overflow.
-  - A tagged real-server smoke test generates one fixture leaf function.
-  - No model picker or silent cloud fallback appears.
-  - Syntax and structural checks always run; configured Ruff, Basedpyright, and
-    targeted pytest commands run only in trusted workspaces against candidate
-    snapshots.
-  - Activity says what the harness included and checked, never what the model
-    allegedly browsed or thought.
-- **Depends:** H-027.
-- **Blocks:** H-029, H-030.
+### S-023 Compose / Map toggle
+- Compose is the free canvas; Map is today's containment layout. Selection is
+  shared between them.
 
-### H-029 Pilot the harness on one human Python project
+## Phase 3 — ports and wires
 
-- **Scope:** Select one non-sensitive, maintained 10–30-module Python project.
-  Run staged read-only, planning, deterministic-proposal, and real llama.cpp
-  trials on a branch. Capture failures as fixtures before fixing them.
-- **Acceptance:**
-  - At least one week of read-only search/navigation usage is recorded.
-  - Three real upcoming functions have human-reviewed context packets.
-  - Five low-risk leaf functions are attempted with llama.cpp and independent
-    tests.
-  - Report first-proposal acceptance, repair rounds, packet sizes, omitted
-    required context, validation failures, navigation/indexing errors, and
-    human review time versus ordinary prompting.
-  - Queue work continues only if single-unit review is trusted.
-- **Depends:** H-026 for read-only/planning stages; H-028 for generation stage.
+### S-030 Typed ports
+- Ports come from `parameters` / `returnAnnotation`, colored by type. Untyped
+  ports are "any." Context ports are visually separate from data ports.
 
-## Slice 6 — queue the proven loop
+### S-031 Data wires and add-node search
+- Port-to-port wires in Compose are persisted in `.slate.json`. Tab,
+  double-click, or Shift+A opens add-node search at the cursor; dragging into
+  empty space opens it filtered by type and auto-wires.
 
-### H-030 Implement explicit scheduling and a resumable review queue
+### S-032 Flows (group → Python)
+- Ctrl+G turns a selection into a flow with Group Input/Output nodes.
+  Deterministic codegen produces a Python function body, written via a
+  proposal with a `kind=flow graph=<hash>` annotation. Tab enters a flow,
+  breadcrumbs exit.
+- Hand-edited flow bodies are detected as detached and never silently
+  overwritten.
+- **Acceptance:** golden tests for codegen (fan-out, multiple outputs,
+  unused inputs, name collisions); round-trip through apply + undo in the
+  Extension Host suite.
 
-- **Scope:** Define scheduling prerequisites separately from context inclusion.
-  Compute eligible units and deterministic ordering for project, selection, or
-  selected dependency subgraph. Pause for every proposal and persist intent,
-  not stale trusted ranges.
-- **Acceptance:**
-  - Tests cover disconnected graphs, diamonds, cycles, methods, blocked and
-    oversized units, accepted versus locked state, and source-order tie breaks.
-  - Skip, regenerate, cancel, failure, close/reopen, and resume preserve work.
-  - Every resumed item rechecks source and dependency revisions.
-  - Upstream edits stale downstream proposals without erasing drafts.
-  - Calculator and tic-tac-toe pass end to end through the fake model.
-- **Depends:** H-024, H-026, H-027; begin only after H-029's decision gate.
+## Phase 4 — live values
 
-## Slice 7 — retirement and release
+### S-040 Trusted Python runner
+- The host spawns the workspace interpreter with a bundled runner script. It
+  evaluates the active flow topologically and returns truncated reprs per wire
+  and errors per node, with a timeout and cancellation. It runs only in
+  trusted workspaces with Live on.
 
-### H-031 Retire the legacy runtime and harden packaging
+### S-041 Input, Viewer, Example nodes
+- Number/Text/Bool/List inputs; Viewer shows the wire value; `## example:`
+  annotations seed inputs. Ctrl+Shift+click attaches a viewer.
 
-**Current status:** the production extension and VSIX are harness-only; legacy
-commands/editor/assets, browser model transport, state bridge, and Python
-worker are absent. The static-site replacement and clean installed-VSIX
-restart/update journey remain gated by the pilot and queue decision.
+### S-042 Auto-solve and mute
+- Debounced re-run on source or wiring change; M mutes (bypasses) a node;
+  errors render on the failing node.
 
-- **Scope:** Remove the old D3/card/chat authoring UI after replacement
-  invariants are covered. Package one XYFlow harness, replace GitHub Pages with
-  a static product page, and test clean install/update/restart.
-- **Acceptance:**
-  - Production extension contains no legacy runtime, browser model transport,
-    Python worker bootstrap, or old provider/model UI.
-  - Clean-profile VSIX completes search → context → generate → review → accept
-    → undo after restart.
-  - Static site contains current inspected screenshots and installation/local
-    llama.cpp instructions, but no authoring or API-key surface.
-  - All unit, browser, Extension Host, Electron, fake-model, migration, and
-    fixture suites pass in CI.
-- **Depends:** H-029, H-030.
+## Phase 5 — local model inside the graph
+
+### S-050 Graph-derived packets
+- Packet = signature + intent + wired neighbors + explicit context + example
+  values. Generation is allowed for placeholders and provisional units (the
+  annotation is adopted in the same proposal).
+
+### S-051 Examples as the oracle
+- Candidates run against examples before review. Iterate until they pass, up
+  to 3 attempts, showing every attempt. Edit and regenerate candidates.
+  Absorbs H-027's remaining items.
+
+### S-052 llama.cpp health and validation
+- Endpoint health indicator. Optional trusted Ruff/Basedpyright/pytest on
+  candidate snapshots. Absorbs H-028's remaining items.
+
+## Phase 6 — zones
+
+### S-060 For-each, repeat, branch zones
+- Frames on the canvas that compile to a comprehension/`for`, a state-carrying
+  loop, and `if`. The runner shows per-iteration values for the first N
+  iterations.
 
 ## Deferred
 
-- Autonomous model tools or shell execution.
-- Complete static call graphs and arbitrary cross-file moves.
-- Additional languages and generic adapter plugins.
-- Markdown transformation graphs.
-- Browser folder editing or browser llama.cpp access.
-- Automatic stale-proposal rebasing.
+- Generate-all / queue as "fill placeholders in topological order" (was
+  H-030).
+- Reverse codegen: import a straight-line function as a flow.
+- Rename across references; methods/classes as compose nodes.
+- Additional languages; autonomous model tools; cloud providers.

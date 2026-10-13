@@ -1,5 +1,8 @@
 # Deployment Guide for Slate
 
+> Legacy notebook. Build with `npm run legacy:build` from the repo root; the
+> output is `legacy/dist/`, which `.github/workflows/pages.yml` deploys.
+
 Since Slate is a **static site** (client-side only), you don't need a Node.js server running. The `dist/` folder contains everything you need - just static HTML, CSS, and JS files.
 
 **Live Demo**: [https://range-et.github.io/slate/](https://range-et.github.io/slate/)

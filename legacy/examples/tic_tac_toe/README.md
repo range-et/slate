@@ -1,7 +1,3 @@
----
-tags: [example, slate, slate-code, tic-tac-toe, ci-gate]
----
-
 # tic-tac-toe — slate-code v0.2 reference example & CI gate
 
 This folder is the **reference example** that gates v0.2 release per

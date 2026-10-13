@@ -4,11 +4,8 @@ name: Deploy slate (web) to GitHub Pages
 # main. The VS Code extension is NOT built or published here — that's a
 # separate concern (see vscode-extension/ + a future marketplace workflow).
 #
-# Same source, two delivery surfaces: web (this workflow) and VS Code
-# extension (manual / marketplace). Host-specific behavior (terminal hand-off,
-# workspace fs writes) is gated at runtime via host_bridge.js#isCodeHost(),
-# so the same bundle ships to both — but only the web bundle gets deployed
-# here.
+# It deploys the frozen legacy browser notebook from legacy/ until the
+# harness replaces it with a static product page.
 #
 # To enable: in the GitHub repo settings → Pages, set "Source" to
 # "GitHub Actions". The first push to main after this file lands will
@@ -50,8 +47,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build slate web bundle
-        run: npm run build
+      - name: Build legacy slate web bundle
+        run: npm run legacy:build
         env:
           # Vite reads import.meta.env.BASE_URL from this. GH Pages serves
           # at /<repo>/, so we need the bundle to know its base path.
@@ -64,7 +61,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: legacy/dist
 
   deploy:
     needs: build
