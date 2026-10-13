@@ -49,7 +49,7 @@ async function main() {
             console.error('Available workbench frames:', page.frames().map(frame => frame.url()));
             throw new Error('Slate Harness webview did not render in the VS Code workbench.');
         }
-        await harnessFrame.getByLabel('Slate action').waitFor();
+        await harnessFrame.locator('.react-flow__node').first().waitFor();
         for (const notificationClose of await page.getByRole('button', { name: /(?:clear|close) notification/i }).all()) {
             await notificationClose.click();
         }
