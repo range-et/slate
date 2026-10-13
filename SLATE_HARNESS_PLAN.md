@@ -1,6 +1,7 @@
 # Slate Plan — a node canvas for composing Python
 
-Status: active — revised 2026-10-13 (decoupled `slate/` folder adopted).
+Status: active — revised 2026-10-13 (Phases 0–4 shipped; Phases 5–9
+refined after an oracle review of plan and code).
 Replaces the 2026-09-23 "source-first harness" plan. Shipped work is in
 [features.md](features.md); tasks are in [issues.md](issues.md).
 
@@ -16,10 +17,28 @@ the graph live so you can see what every node does.
 The local model is a helper for writing one node's body. It is never the
 driver.
 
-## Why it does not click today
+### Reuse by identity
 
-Audit of the shipped harness (2026-10-13). The problems are structural, not
-polish.
+You write code in small snippets and build your own nodes. Every node has one
+**definition** (its node file; the path is its identity) and any number of
+**uses**: references on the canvas, instances in flows, and calls from other
+code. Copying comes in two kinds:
+
+- **Copy as linked** (the default paste): another use of the same
+  definition. Edit it once and every use changes.
+- **Copy as duplicate** / **Make unique**: fork into a new node file on
+  purpose, when one use must diverge.
+
+Because reuse never copies code, the project grows by composition instead of
+by duplicates, which keeps tech bloat in check. Slate makes that visible:
+every node shows how many places use it, editing a shared node says so, a
+health report lists unused and near-duplicate nodes, and executable cases on
+a node guard everything that shares it.
+
+## History: why the 2026-09 harness did not click
+
+Kept as the record of what Phases 1–4 fixed; none of these apply to the
+current canvas. Audit of the harness as of 2026-10-13, before the reset.
 
 1. **The canvas is a file browser, not a composition surface.** Nodes are laid
    out as files → classes → functions and are clamped inside their parent
@@ -217,41 +236,64 @@ A traditional Python project becomes a Slate project mechanically:
 
 ### Interaction grammar (one way to do each thing)
 
+Shipped unless marked *(planned, Phase N)*.
+
 | Gesture | Effect |
 | --- | --- |
-| Click | Select only; no editor jump |
-| Double-click node | Expand inline code (CodeMirror on the node) |
-| F12 / Cmd-click / menu | Go to definition in the side editor |
-| Double-click canvas, Tab, Shift+A | Add-node search at the cursor |
-| Drag port → port | Wire |
+| Click / Shift-click | Select / add to selection; no editor jump |
+| Double-click node | Open a flow; otherwise open the node file |
+| Double-click canvas, Tab (nothing selected), Shift+A | Add-node search at the cursor |
+| Drag port → port | Data wire (an input takes one wire) |
 | Drag port → empty space | Add-node search filtered by type, auto-wire |
-| Ctrl+Shift+click | Attach a viewer to this node's output |
-| Ctrl+G / Tab / Esc | Group into flow / enter / exit |
-| M / H | Mute (bypass) / collapse |
-| Cmd+K | Command palette (replaces the uppercase command line) |
-| Right-click | Context menu; every menu item is also in Cmd+K |
+| Drag node bottom → node top | Context link (prompt material, not dataflow) |
+| Ctrl/Cmd+G | Group the selection into a flow |
+| Tab on a flow / breadcrumb | Enter / exit a flow |
+| Drag from Library | Place a reference (root) or instance (flow) |
+| Cmd+C, Cmd+V | Copy; paste **linked** *(planned, Phase 5)* |
+| Cmd+Shift+V / Make unique | Paste **duplicate** / fork one use *(planned, Phase 5)* |
+| Cmd+Z | Undo any structural edit, incl. wires and flows *(planned, Phase 5)* |
+| Run / Live toggle | Run the chosen flow; Live reruns on committed edits *(planned, Phase 6)* |
+| Cmd+K | Command palette; every menu item is also here |
+| Right-click | Context menu |
 
 Every gesture dispatches the same typed action. Typed actions are never
-converted to command strings and re-parsed.
+converted to command strings and re-parsed. Mute/bypass (M) is cut: it has no
+unambiguous meaning for nodes with several inputs and outputs.
 
 ### Live evaluation
 
-In a trusted workspace, with **Live** toggled on, the extension host runs a
-small runner in the workspace's Python interpreter. The runner materializes
-nodes into `.slate/build/` (no full Compile needed), evaluates the active flow in topological order, and returns a
-truncated `repr` for every wire plus exceptions per node. Changes are
-debounced and every run has a timeout. Inputs come from Input nodes or
-`example:` metadata. This is the Grasshopper moment, and it also gives
-the local model an oracle.
+Phase 6. In a trusted workspace you **Run** a chosen flow (or the root
+`main`), or turn on **Live** for it, which reruns after committed edits (not
+on every keystroke, never on selection or navigation). The runner uses the
+same compiler as Compile, with optional trace emission, writes immutable runs
+under `.slate/build/`, and launches the selected interpreter with a timeout,
+output limits, and Stop. Values are shown per **use** (run + invocation path
++ instance + port), so two linked uses of one definition show different
+values. Invalid or stale graphs are refused rather than run from the last good
+state. Trust plus a child process is **not a sandbox**: Live explicitly
+authorizes rerunning the flow's side effects, and nothing is cached on the
+assumption that snippets are pure.
+
+Observed values are evidence, not correctness. Correctness comes from
+**cases**: structured inputs plus an expected output or exception, stored on
+the node or flow. A viewer can capture its inputs as a proposed case; you
+confirm the expected result. Cases run for hand edits and model candidates
+alike, and editing a shared node shows its cases and the affected flows'
+cases.
 
 ### The local model's role
 
-"Generate body" on a function or placeholder builds a packet automatically
-from what the canvas already knows: the signature (from ports), intent, wired
-upstream/downstream neighbors, explicit context, and example values flowing
-in. The candidate is run against the examples **before** review. A bounded
-"iterate until examples pass" loop (at most 3 attempts) shows every attempt.
-Confinement, review, accept, and undo stay as shipped.
+Phase 7. "Generate body" works on a definition reached through one of its
+uses. The packet is the target's code and signature, intent and contract, a
+bounded summary of what it uses and its immediate neighbors (signature +
+intent only), explicit context summaries, and selected cases. It never
+aggregates every linked use's neighborhood. The exact packet and anything
+omitted are shown; oversized targets are refused, not truncated. Candidates
+compile in a scratch overlay and run the cases before review. **Try up to
+three revisions** is an explicit action that shows every attempt and never
+accepts automatically; "no cases" means untested, not passed. Acceptance is
+bound to everything the packet used (code, imports, intent, contract, lock,
+cases, graph context), not just code hashes.
 
 ## Safety contract
 
@@ -259,12 +301,15 @@ Confinement, review, accept, and undo stay as shipped.
    writes files; it sends typed intent to the extension host.
 2. The extension host owns filesystem access, indexing, Compile, the runner,
    llama.cpp transport, proposals, and `WorkspaceEdit` application.
-3. Every node mutation (new node, metadata edit, code edit, generated body,
-   generated flow, port) is bound to the target node's code hash, applied as one
-   `WorkspaceEdit`, and undoable. Layout writes are plain file writes.
+3. Every node mutation (new node, metadata edit, code edit, generated body)
+   is bound to the target node's code hash, applied as one `WorkspaceEdit`,
+   and undoable. Structural edits (wires, flows, copies, forks, ports,
+   deletion) become undoable multi-file transactions in Phase 5; until then
+   they are plain file writes. Layout writes are plain file writes.
 4. Staleness is checked per affected node file, not per global revision.
-5. Code runs only in trusted workspaces, only when Live is on, and only with a
-   timeout. There is no cloud fallback.
+5. Code runs only in trusted workspaces, only on Run or with Live on, with a
+   timeout and Stop. A child process is not a sandbox. There is no cloud
+   fallback, and cloud or autonomous model behavior is out of scope.
 
 ## Phases
 
@@ -297,13 +342,13 @@ mode.
 **Exit:** port calculator and tic-tac-toe, compile them, and their original
 tests pass.
 
-### Phase 3 — one workspace: references, placeholders, library
+### Phase 3 — one workspace: references, placeholders, library (done 2026-10-13)
 
 Library sidebar (folders + read-only library code), reference nodes,
 placeholders → new nodes, find references, Compose/Map toggle.
 **Exit:** describe a function once, drop it anywhere, jump to it from anywhere.
 
-### Phase 4 — ports, wires, flows
+### Phase 4 — ports, wires, flows (done 2026-10-13)
 
 Typed ports, port-to-port wires, add-node search from canvas and ports,
 Ctrl+G flows saved to `slate/flows/*.json`, deterministic codegen in Compile,
@@ -311,35 +356,80 @@ Tab into flows.
 **Exit:** build a four-node pipeline from existing nodes without typing
 Python and get a real Python function out of Compile.
 
-### Phase 5 — live values
+Order from here: reuse is made safe first, because running code and model
+edits multiply the effect of changing a shared node. Execution and cases come
+next because they make composition tangible without a model. The model then
+uses that verification. Control flow extends it. Self-hosting comes last to
+prove the format is language-agnostic; swap Phases 8 and 9 only if dogfooding
+on TypeScript becomes the priority.
 
-Input/Viewer/Example nodes, trusted runner over `.slate/build`, per-wire
-previews, per-node errors, mute/bypass, auto-solve.
-**Exit:** change a number and every downstream value updates in under a
-second.
+### Phase 5 — linked building blocks and trustworthy editing
 
-### Phase 6 — local model writes leaves inside the graph
+One occurrence model: every use (root ref, flow instance) is an instance
+pointing at a definition; `main` owns root call instances, layout owns
+placement. Copy/paste linked (default), paste duplicate, Make unique; a
+duplicated flow forks its wiring but keeps its children linked. Used-by-N with
+navigable call sites, and "editing a definition; affects N uses" with a fork
+option. Undoable multi-file transactions for every structural edit; flow-port
+rename/remove; remove-use vs delete-definition with an impact preview. A
+read-only Node health report (unused, exact and near duplicates). The
+Inspector docks instead of covering the canvas; type mismatches are warned.
+**Exit:** place one node three times, edit it once and see all three change;
+fork one and see only it diverge; undo both; read usage and the duplicate
+report without leaving the canvas.
 
-Graph-derived packets, examples run before review, bounded iterate-until-pass,
-llama.cpp health, edit/regenerate candidates.
-**Exit:** sketch a placeholder between two wired nodes, generate it, watch it
-pass its examples, accept, undo.
+### Phase 6 — live execution with executable cases
 
-### Phase 7 — zones and control flow
+Run, Stop, and opt-in Live for a chosen flow through the real compiler with
+trace emission; values per use; structured value literals (JSON, migrated
+from Python expressions); input and viewer nodes; structured cases on nodes
+and flows; capture-to-case from a viewer; cases shown when editing a shared
+node.
+**Exit:** two linked uses get different inputs and show different results;
+changing a number updates a small fixture in about a second; Stop works; a
+bad edit to a shared node fails a saved case before it replaces anything.
 
-For-each, repeat, and branch zones compile to Python.
-**Exit:** the tic-tac-toe game loop is expressible as a flow.
+### Phase 7 — a small local helper with guardrails
 
-### Later
+Occurrence-aware micro packets, exact packet view, candidate edit and
+regenerate-with-feedback, llama.cpp health, scratch-overlay compile plus case
+runs, an explicit "try up to three revisions", and acceptance bound to all
+packet inputs. Typed stubs come from the add/wire-drop gesture; the model
+never invents the graph.
+**Exit:** create a typed leaf between two nodes, add a case, generate
+locally, inspect a failing attempt, revise, accept, undo — every linked use
+stays linked.
 
-Ruff/Basedpyright validation; generate-all as "fill every placeholder in a
-flow in topological order"; reverse codegen (straight-line function → flow);
-methods and classes as first-class compose nodes; a second language adapter (e.g. C#).
+### Phase 8 — explicit control flow
+
+Branch, then foreach, then repeat, as regions in flow JSON that reuse child
+flows as bodies, compiled to plain `if`/`for` through the same pipeline. Only
+the chosen branch runs; iterations are inspectable; repeat needs a finite
+bound.
+**Exit:** a list-processing graph and a bounded state update, with an
+inspected iteration and proof that an unselected branch never ran.
+
+### Phase 9 — TypeScript and staged self-hosting
+
+A real adapter boundary (index, ports, stubs, validation, prompts, imports,
+compile); TS/TSX with module paths and extensions preserved; class methods as
+durable node files owned by their class; React closures stay inside their
+component unless extracted. Staged gate: pure TS modules → an extension class
+with editable methods → a TSX component → a full extension rebuild. Compile
+refuses to overwrite files it did not generate.
+**Exit:** change an extension method and a React component through Slate,
+rebuild, and launch the result with both changes working and undo available.
+
+### Outside the numbered path
+
+Legacy-site retirement and packaging cleanup (S-001). Ruff/Basedpyright are
+optional extra checks. Deferred: generate-all, reverse codegen (straight-line
+function → flow), comprehension optimization, automatic deduplication.
 
 ## Open questions
 
-- **Class granularity.** Start with one node file per class; add per-method
-  ports later.
+- **Class granularity.** One node file per class until Phase 9, which gives
+  methods their own node files owned by the class.
 - **Interpreter selection.** Use the Python extension's active interpreter
   when present, or a `slate.python.path` setting otherwise.
 - **`src/` in git.** Recommended: commit the compiled output so the project

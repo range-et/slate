@@ -61,7 +61,8 @@ suite('Slate Extension Host', () => {
                 type: 'action', action: { kind: 'setAnnotationField', target: 'normalize', field: 'intent', text: 'Undoable intent' },
             });
             assert.ok(active.document.getText().includes('Undoable intent'));
-            await vscode.window.showTextDocument(active.document);
+            await waitForSnapshot(value => value.documents.some(document => document.units[0]?.annotation?.intent === 'Undoable intent'));
+            await vscode.window.showTextDocument(active.document, { preserveFocus: false });
             await vscode.commands.executeCommand('undo');
             const deadline = Date.now() + 5_000;
             while (active.document.getText().includes('Undoable intent') && Date.now() < deadline) {
@@ -134,7 +135,10 @@ suite('Slate Extension Host', () => {
 
         try {
             await vscode.commands.executeCommand('vscode.openWith', configUri, 'slate.editor');
-            const initial = await waitForSnapshot(snapshot => snapshot.documents.length === 2);
+            await waitForSnapshot(snapshot => snapshot.documents.length === 2);
+            // Opening refreshes more than once (open + webview ready); start from the settled snapshot.
+            await new Promise(resolve => setTimeout(resolve, 800));
+            const initial = (await vscode.commands.executeCommand<Snapshot>('slate.test.getSnapshot'))!;
             const normalize = initial.documents.find(document => document.path === 'slate/nodes/normalize.json');
             assert.ok(normalize, 'normalize node is indexed by its path');
             assert.deepEqual(normalize.diagnostics, []);
@@ -222,6 +226,11 @@ suite('Slate Extension Host', () => {
             await act({ flow: 'pipe', kind: 'connectData', from: 'input:+', to: 'clamp.in:lower' });
             await act({ flow: 'pipe', kind: 'connectData', from: 'input:+', to: 'clamp.in:upper' });
             await act({ flow: 'pipe', kind: 'connectData', from: 'clamp.out', to: 'output:+' });
+            // Auto-wire on add uses the port the canvas picked, not the first one.
+            await act({ flow: 'pipe', kind: 'addInstance', target: 'clamp', x: 600, y: 100, connectFrom: 'clamp.out', connectPort: 'in:upper' });
+            assert.ok((await read(vscode.Uri.joinPath(folder, 'flows', 'pipe.json'))).wires.some((wire: { from: string; to: string }) =>
+                wire.from === 'clamp.out' && wire.to === 'clamp_2.in:upper'));
+            await act({ flow: 'pipe', kind: 'deleteItems', ids: ['clamp_2'] });
             const pipe = await read(vscode.Uri.joinPath(folder, 'flows', 'pipe.json'));
             assert.deepEqual(pipe.inputs, [{ name: 'value', annotation: 'int' }, { name: 'lower', annotation: 'int' }, { name: 'upper', annotation: 'int' }]);
             assert.deepEqual(pipe.outputs, [{ name: 'clamp', annotation: 'int' }]);

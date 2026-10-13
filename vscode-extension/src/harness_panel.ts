@@ -66,7 +66,10 @@ export class HarnessPanel implements vscode.Disposable {
     private sources = new Map<string, string>();
     private snapshot: HarnessSnapshot | undefined;
     private refreshTimer: NodeJS.Timeout | undefined;
+    /** Bumped on dispose so in-flight refreshes stop posting. */
     private refreshGeneration = 0;
+    private refreshChain: Promise<void> = Promise.resolve();
+    private mutations: Promise<void> = Promise.resolve();
     private revision = 0;
     private generation: AbortController | undefined;
     private describeRun: AbortController | undefined;
@@ -160,9 +163,18 @@ export class HarnessPanel implements vscode.Disposable {
         }, delay);
     }
 
-    private async refresh(): Promise<void> {
+    /**
+     * Refreshes run one at a time, so awaiting refresh() guarantees the snapshot
+     * reflects every write made before the call (actions rely on that).
+     */
+    private refresh(): Promise<void> {
+        this.refreshChain = this.refreshChain.then(() => this.refreshNow(), () => this.refreshNow());
+        return this.refreshChain;
+    }
+
+    private async refreshNow(): Promise<void> {
         const folder = this.folder;
-        const generation = ++this.refreshGeneration;
+        const generation = this.refreshGeneration;
         try {
             const index = await folder.index();
             if (generation !== this.refreshGeneration) return;
@@ -188,7 +200,18 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
-    private async handleMessage(message: unknown): Promise<void> {
+    /** Edits run one at a time; long-running work (generate, describe) and cancels do not queue. */
+    private handleMessage(message: unknown): Promise<void> {
+        const value = (message && typeof message === 'object' ? message : {}) as Record<string, unknown>;
+        const kind = (value.action as Record<string, unknown> | undefined)?.kind;
+        const queued = ['layout', 'noteCreate', 'noteUpdate', 'noteDelete', 'acceptProposal'].includes(value.type as string)
+            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe');
+        if (!queued) return this.handleMessageNow(message);
+        this.mutations = this.mutations.then(() => this.handleMessageNow(message), () => this.handleMessageNow(message));
+        return this.mutations;
+    }
+
+    private async handleMessageNow(message: unknown): Promise<void> {
         if (!message || typeof message !== 'object') return;
         const value = message as Record<string, unknown>;
         if (value.type === 'ready') {
@@ -580,11 +603,13 @@ export class HarnessPanel implements vscode.Disposable {
                     const instance = scope === null ? this.rootInstanceAfter(flow, id) : flow.instances.find(item => item.id === id)!;
                     if (scope === null && !flow.instances.some(item => item.id === id)) flow = { ...flow, instances: [...flow.instances, instance] };
                     const ports = this.portsOf(instance);
+                    // The webview picks the type-matching port; fall back to the first one.
+                    const pick = (list: Port[]) => list.find(item => item.id === action.connectPort) ?? list[0];
                     if (connectFrom) {
-                        const port = ports.inputs[0];
+                        const port = pick(ports.inputs);
                         if (port) flow = connect(this.withRootEndpoints(flow, scope, connectFrom), connectFrom, `${id}.${port.id}`);
-                    } else if (ports.outputs[0]) {
-                        flow = connect(this.withRootEndpoints(flow, scope, connectTo!), `${id}.${ports.outputs[0].id}`, connectTo!);
+                    } else if (pick(ports.outputs)) {
+                        flow = connect(this.withRootEndpoints(flow, scope, connectTo!), `${id}.${pick(ports.outputs).id}`, connectTo!);
                     }
                 }
                 await saveFlow(flowId, flow);

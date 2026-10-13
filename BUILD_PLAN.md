@@ -84,6 +84,11 @@ design per phase.
   or ranges to trust. Node writes go through `SlateFolderHost.writeNode`
   (one `WorkspaceEdit`, then save). Layout goes through `writeLayout` (plain
   fs write, no re-index, no revision bump).
+- **Serialized host state.** Panel edits (`action`, `layout`, notes, accept)
+  run one at a time and `refresh()` is a chain, so `await this.refresh()`
+  always reflects prior writes. Long-running work (generate, describe) and
+  cancels bypass the queue. `folder.layout` is reloaded in place; keep it the
+  live object.
 - **Per-node staleness.** Code edits carry `baseHash` (the code hash the
   editor started from). Metadata edits read the current node fresh. Don't
   reintroduce global-revision checks for folder actions.
@@ -287,33 +292,179 @@ behavior. Decisions that differ from or sharpen the original design:
   `connect`/`disconnect`/`removeInstances`/`extractFlow`) is imported by the
   webview's `graph.ts`; keep it free of Node APIs.
 
-## Phase 5 — live values
+## Phases 5–9 (refined 2026-10-13)
 
-- `runner/slate_runner.py` is shipped as a string. The host compiles a traced
-  build into `.slate/build/` where each instance assignment also records
-  `repr(v)[:200]`, `type(v).__name__`, or the exception per instance. It runs
-  the interpreter (`slate.python.path` →
-  `python.defaultInterpreterPath` → `python3`) with JSON over stdio, a
-  timeout, and cancel. Trusted workspaces only, with Live toggled on.
-- Input/Viewer/Example instances; `examples` seed inputs. Debounce re-runs by
-  300 ms; M mutes (bypasses) an instance; errors render on the instance.
+Refined from an oracle review of the plan and code. Defaults: **paste
+linked, fork explicitly; Live off until turned on; type mismatches warned, not
+blocked.** The definition identity already exists (the node file path); do
+not invent a second global id system.
 
-## Phase 6 — model inside the graph
+Debt already fixed in the review thread: the host now honors the auto-wire
+port the canvas picks (`connectPort`); refreshes are serialized and edits are
+queued, so an action always sees its own writes (this also cured the flaky
+Extension Host tests); `layout.json` is reloaded in place.
 
-- Packet = node code/signature + intent + upstream/downstream instance
-  signatures and intents + explicit context + example values seen on its
-  input wires. Run the candidate on examples through the runner before
-  review. Iterate up to 3 times, feeding back the failing example and
-  traceback. Add edit/regenerate in review and a llama health dot in the top
-  bar.
+### Phase 5 — linked building blocks and trustworthy editing
 
-## Phase 7 — zones
+Goal: reuse one definition freely, fork deliberately, and understand and undo
+every structural change.
 
-- Zone entries in flow JSON:
-  `{ id, kind: 'foreach' | 'repeat' | 'branch', instances: [...], inputs, outputs }`.
-  Codegen: list comprehension when the body is a single expression chain, else
-  `for`; repeat carries state; branch → `if/else` with outputs merged. The
-  runner shows values for the first N iterations.
+- **One occurrence model.** Every use is an instance `{ id, node }` pointing
+  at a definition. `main.json` owns root call instances (root refs become
+  main instances; layout keeps only placement); nested flows already work
+  this way. Migrate `layout.refs` and the implied/pruned root instances
+  without breaking wires. Showing a definition on the canvas does not make it
+  run.
+- **Copy/paste.** Cmd+C copies the selection; **Paste linked** (Cmd+V)
+  creates new instances of the same definitions, no files; **Paste
+  duplicate** (Cmd+Shift+V) creates new node files with fresh ids and valid
+  names whose `uses` still point at existing nodes; **Make unique** forks one
+  instance. Duplicating a flow forks its wiring but keeps its children linked
+  (no recursive cloning). Shortcuts only when the canvas has focus.
+- **Usage index.** Derived, never stored: flow instances, root instances,
+  and compiler-resolved code dependencies (`uses` + unique bare names), with
+  prompt-context links listed separately. "Used by N" on nodes and in the
+  Inspector, navigable call sites, deletion impact. Don't double-count during
+  migration.
+- **Editing shared code.** A banner "Editing definition; affects N uses" with
+  a Fork button — no modal on every save.
+- **Undoable structural edits.** Copy, fork, group, wire, port edits, and
+  deletion become one `WorkspaceEdit` across affected files (flows, layout,
+  new node files), checked against dirty buffers and file versions. Pure
+  positioning stays a plain write.
+- **Flow ports and deletion.** Rename/remove flow inputs and outputs, updating
+  caller wires or previewing what breaks. "Remove this use" vs "Delete
+  definition" (with impact preview).
+- **Node health report** (read-only): unreferenced candidates, exact
+  duplicates (normalized code), near duplicates (heuristic), with navigation
+  and diff. Label coverage gaps (dynamic imports, `import module` style); never
+  call "no known references" safe to delete.
+- **Canvas.** Dock/resize the Inspector instead of overlaying nodes; show
+  type-mismatch warnings on wires; context links on demand so ordinary wires
+  read as dataflow.
+- Non-goals: automatic deduplication, dependency cloning, full type checking.
+- **Exit:** place one node three times, edit once, all three change; fork
+  one, only it diverges; undo both; read usage and the duplicate report on
+  the canvas.
+- Risk: confusing definitions with uses, or misleading usage counts.
+
+### Phase 6 — live execution with executable cases
+
+Goal: run the graph you chose, see its behavior, and protect shared
+definitions with repeatable cases.
+
+- **Run / Stop / Live** for a named flow or the root `main`. Selection,
+  navigation, and dragging never run code; Live reruns after committed
+  semantic edits, not keystrokes.
+- **Runner = compiler + trace.** Reuse `compilePython`/`flowToNode` with an
+  optional trace mode; no second evaluator. Immutable runs under
+  `.slate/build/<run>/`; trusted workspaces only; interpreter from
+  `slate.python.path` → Python extension → `python3`. Protocol messages
+  separate from user stdout/stderr; time and output limits; Stop kills the
+  process tree.
+- **Values per use:** key observations by run id + invocation path +
+  instance + port, so two linked uses (and two calls of one nested flow) show
+  different values. Discard stale results by semantic fingerprint; layout
+  changes never invalidate a run.
+- Refuse invalid or stale graphs (no last-good runs); show failures and
+  downstream "not executed". Reject unsupported call forms (async) until
+  codegen handles them.
+- **Values and viewers:** value instances become structured JSON literals
+  (explicitly language-tagged expressions where needed; migrate today's
+  Python-expression strings). Editable inputs, wire previews, pin/unpin
+  viewers.
+- **Cases:** structured `cases` on node and flow JSON (named inputs +
+  expected output or expected exception); `examples` stays as free-text
+  documentation. JSON-representable first. A viewer can propose a case from
+  observed inputs; you confirm the expectation. Cases run for hand edits and
+  model drafts; editing a shared node shows its cases and the affected flows'
+  cases with pass/fail/stale/untested.
+- Parity fixtures for known port-fidelity gaps (module docstrings, module
+  state effects); never hide unresolved imports.
+- Non-goals: persistent kernels, running on project open, persisting
+  arbitrary objects, mute/bypass, running whole applications.
+- **Exit:** two linked uses with different inputs show different results; a
+  number change updates a small fixture in about a second; Stop works; a bad
+  shared-node draft fails a saved case before replacing anything.
+- Risk: surprising repeated side effects; results differing from normal
+  compiled execution. Slices: runner, then cases, then Live.
+
+### Phase 7 — a small local helper with guardrails
+
+Goal: generate or revise one shared definition with bounded context and
+owner-controlled verification.
+
+- Packets take the **definition and the occurrence** it was reached from:
+  target code/signature, intent/contract, bounded `uses` and immediate
+  neighbors as signature + intent, explicit context summaries, selected cases.
+  Never aggregate every linked use's neighborhood. Reuse Describe's
+  micro-context discipline (`port/describe.ts`); full dependency bodies only on
+  explicit inclusion. Show the exact packet and omissions; refuse oversized
+  targets.
+- Candidate edit, regenerate with feedback, cancel, llama.cpp health dot.
+  Validate syntax/signature, compile in a scratch overlay, run Phase 6 cases.
+- **Try up to three revisions** is an explicit action: attempts visible,
+  expectations immutable, bounded failure feedback, never auto-accept. "No
+  cases" = untested.
+- Acceptance is bound to every packet input (code, imports/uses, intent,
+  contract, lock, cases, relevant graph context), not just code hashes
+  (today: `generation.ts` + `acceptFolderProposal`).
+- Replace "wire a placeholder and generate it" with: create a typed stub
+  from add-node search or a wire drop, then generate its body. The model does
+  not invent the graph.
+- Non-goals: generate-all, automatic wiring, autonomous tools, cloud.
+  Ruff/Basedpyright optional.
+- **Exit:** create a typed leaf between two nodes, add a case, generate,
+  inspect a failing attempt, revise, accept, undo; linked uses stay linked.
+- Risk: context creep; generating for one use while silently changing all.
+
+### Phase 8 — explicit control flow
+
+- Discriminated `branch` / `foreach` / `repeat` regions in flow JSON with
+  explicit boundaries, reusing child flows as bodies (their inputs/outputs are
+  the region contract). Ship branch, then foreach, then repeat.
+- Branch: separate true/false bodies with compatible outputs. Foreach: item
+  and index in, collected results out. Repeat: initial state, next state, a
+  finite bound.
+- Compile through the same pipeline to plain `if`/`for` (no comprehension
+  optimization); only the selected branch executes.
+- Create-region and group-into-region actions, visible boundary ports,
+  bounded iteration inspection; invocation paths gain branch/iteration
+  identity; reuse cancel and cases.
+- Non-goals: arbitrary cycles, unbounded while, events, parallelism, a full
+  interactive game loop.
+- **Exit:** a list-processing graph and a bounded state update; inspect an
+  iteration; prove an unselected branch did not run.
+- Risk: eager branch evaluation; ambiguous loop-carried state.
+
+### Phase 9 — TypeScript and staged self-hosting
+
+- A real adapter boundary for index/signature/ports, stubs, replacement
+  validation, describe/generate prompts, import resolution, and compile.
+  Python keeps working; no cross-language execution.
+- TS and TSX: functions and arrow declarations, types/interfaces,
+  imports/exports, ambient declarations, module initialization, side-effect
+  imports. Preserve module paths, order, and `.ts`/`.tsx` through module JSON
+  (Python's folder-to-module rule is not enough).
+- Class methods as durable node files with an explicit owning class; class
+  JSON holds header, fields, and ordered member references (no duplicated
+  method source); preserve constructors, static/private members, `this`,
+  overloads.
+- React closures stay inside their component unless explicitly extracted with
+  parameters; a method adapter alone does not solve `HarnessApp`'s captured
+  hook state.
+- Staged gate: pure TS modules → an extension class with editable methods →
+  a TSX component → full extension + webview rebuild and smoke test. Compile
+  into a separate tree before cutover. Compile must refuse to overwrite files
+  it did not generate (`port_compile_host.ts` writes output paths
+  unconditionally today).
+- Build tooling and assets stay outside the authored-code model.
+- Non-goals: hot self-modification, Node/browser live evaluation, extracting
+  every closure.
+- **Exit:** change an extension method and a React component through Slate,
+  rebuild, and launch the result with both changes working and undo
+  available.
+- Risk: preserving module/closure semantics, not parsing.
 
 ## Phase log
 
@@ -346,5 +497,10 @@ behavior. Decisions that differ from or sharpen the original design:
   flow codegen in compile; `examples/flow_demo` gate (3 pytest cases). Tests:
   Vitest flow format/extract/codegen goldens and graph scopes; Playwright
   refs/placeholders/wires/flows/grouping/library drag/Map; Extension Host
-  refs → wires → flows → extract → compile. **Next thread: Phase 5** (live
-  values: runner, viewers, examples).
+  refs → wires → flows → extract → compile.
+- **2026-10-13 — Plan review** (same thread). Oracle review of plan and code
+  produced refined Phases 5–9 (linked reuse and undo → live execution with
+  cases → local helper → control flow → TypeScript self-hosting). Fixed the
+  ignored auto-wire port, serialized panel refreshes and queued edits (the
+  root cause of flaky Extension Host tests), and reload layout in place.
+  **Next thread: Phase 5** (linked building blocks and trustworthy editing).

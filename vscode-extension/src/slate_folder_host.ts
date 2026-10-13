@@ -134,7 +134,8 @@ export class SlateFolderHost {
         if (!configFile) throw new Error(`${CONFIG_PATH} is missing.`);
         const config = parseConfig(configFile.text);
         try {
-            this.layout = parseLayout((await this.read(LAYOUT_PATH))?.text);
+            // In place, so actions holding `layout` keep writing the live object.
+            Object.assign(this.layout, parseLayout((await this.read(LAYOUT_PATH))?.text));
         } catch (error) {
             throw new Error(`${LAYOUT_PATH}: ${(error as Error).message}`);
         }
