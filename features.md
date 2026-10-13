@@ -17,7 +17,8 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13.
 | Board notes (free text, optional attachment) | ✅ shipped |
 | Explicit context (`depends-on`) + packet preview | ✅ shipped, entry points clumsy |
 | Single-function llama.cpp generate → review → accept → undo | ✅ shipped, no edit/regenerate |
-| CAD-style command line | ✅ shipped — replaced by Cmd+K in S-110 |
+| Cmd+K command palette (actions, go-to-node, search) | ✅ shipped |
+| Context by wire, edge menu, searchable picker; inline intent on nodes | ✅ shipped |
 | Wiring nodes / typed ports / dataflow | ❌ not started (handles are drawn but not connectable) |
 | Reference (alias) nodes, "go to function" from anywhere | ❌ not started |
 | Placeholder nodes (name-only → stub) | ❌ not started |
@@ -55,6 +56,18 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13.
   Code saves are hash-checked against the version you started from, and must
   be one definition with the node's name. Every edit is one `WorkspaceEdit`
   on the node file.
+- **Palette.** Cmd/Ctrl+K or `/` opens a ranked palette. It holds actions on
+  the selection (open, generate, lock, add note, add/remove context), canvas
+  actions (new node, new note, fit, refresh, save, clear), go-to for every
+  node and note, and "Search code for …". A status bar shows the last result.
+  The uppercase/`::` command grammar and its host string round trip were
+  removed.
+- **Context by wire.** Dragging from a node's right handle to another node's
+  left handle adds the first as context of the second. Right-clicking a
+  context edge offers **Remove context**. The workbench picker is a
+  searchable list that matches names, signatures, and intents.
+- **Inline intent.** Clicking a node's intent (or "add intent…") edits it in
+  place; Enter or blur saves, and Esc cancels.
 - **Generation.** Packets are built from node code and context nodes, and
   accepted candidates are written into the node's `code` after rechecking
   every packet item's hash.
@@ -93,13 +106,11 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13.
 - Right-click menus for empty canvas, functions, and notes.
 - Trackpad two-finger pan, pinch zoom, node drag.
 
-### Search and commands
+### Search
 
-- `/search` ranks names, qualified names, IDs, signatures, annotations, paths,
-  and dirty-buffer text; results explain why they matched.
-- Command line with completion/history: `SELECT`, `REVEAL`, `EDIT`, `FIT`,
-  `CLEAR`, `STUB`, `INTENT`, `CONTRACT`, `CONTEXT`, `UNCONTEXT`, `LOCK`,
-  `COMPILE`, `SAVE`, `HELP`.
+- Host search ranks names, qualified names, IDs, signatures, annotations,
+  paths, and dirty-buffer text; results explain why they matched (run from
+  the palette).
 - All source mutations go through adapter proposals and one VS Code
   `WorkspaceEdit` with native undo.
 
@@ -132,9 +143,8 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13.
 
 ## Partially done
 
-- **Context entry points.** Context can be added only through the inspector
-  dropdown or `CONTEXT a :: b`. `@`, drag-to-connect, and the node menu do not
-  open a shared picker.
+- **Context entry points.** Wire, palette, and picker are shipped; `@`
+  completion inside intent text is not.
 - **Proposal lifecycle.** Generated code is reviewed, but intent/contract/
   context/lock edits apply immediately without review. Candidates cannot be
   edited or regenerated with feedback.

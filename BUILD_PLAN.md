@@ -114,8 +114,7 @@ this config in `.amp/in/tsc.json` and run
 ```
 
 `env.d.ts`: `interface ImportMeta { env: { DEV: boolean } }` and
-`declare module '*.css';`. The baseline is **12 pre-existing errors** in
-`main.tsx`'s message handler (narrowing inside closures). Don't add new ones.
+`declare module '*.css';`. The baseline is **0 errors**; keep it there.
 
 Visual checks: start `npx vite --port 5199`, then use a Playwright script that
 stubs `window.acquireVsCodeApi` (record `postMessage` calls in
@@ -125,6 +124,10 @@ that states the expected result.
 
 ## Learnings and gotchas
 
+- The pre-existing Extension Host test "indexes dirty buffers… preserves
+  native undo" is flaky: it failed 1 of 3 runs on 2026-10-13 at the
+  post-undo assertion. Rerun before debugging; consider awaiting a document
+  change event before asserting.
 - `npm run test:electron` sometimes passes and then hangs while VS Code shuts
   down. Check the log for `N passing` and kill the process if it lingers. The
   pinned VS Code (1.139) is cached in `vscode-extension/.vscode-test/`
@@ -140,7 +143,17 @@ that states the expected result.
   nodes from local state. Children need `parentId` and `extent: 'parent'`.
   Wires need `nodesConnectable` plus `onConnect`.
 - Keyboard shortcuts must ignore `input`, `textarea`, `[contenteditable]`,
-  and `.cm-editor` targets (CodeMirror).
+  and `.cm-editor` targets (CodeMirror). Cmd/Ctrl+K is the one global
+  exception.
+- Interactive elements inside XYFlow nodes need `nodrag nopan` (and
+  `nowheel` for textareas), plus `stopPropagation` on double-click, or the
+  canvas steals the gesture.
+- Playwright: scope `getByRole('option')` to a named listbox (the palette is
+  `Commands`, the picker is `Context candidates`). Edge paths have zero-height
+  bounding boxes, so right-click them with `page.mouse.click` at the box
+  midpoint instead of `locator.click`.
+- Dropdowns inside the scrolling side panel must flow inline; absolute
+  positioning gets clipped by the panel's `overflow: auto`.
 - The default CodeMirror highlight is unreadable on dark backgrounds; use the
   `HighlightStyle` defined in `main.tsx`.
 - Don't call `selectFromEditor` after every refresh in folder mode. It snaps
@@ -157,8 +170,10 @@ that states the expected result.
 
 ## Phase 1 — `slate/` folder and a calm canvas
 
-**Done (1a, 2026-10-13):** S-100–S-103 (format, loader, folder canvas, node
-creation/editing, New Project, demo).
+**Done 2026-10-13:** 1a S-100–S-103 (format, loader, folder canvas, node
+creation/editing, New Project, demo), 1b S-110 (palette, typed actions,
+shared types), and 1c S-111 (inline intent, context by wire, searchable
+picker). The steps below are kept as the record of what was built.
 
 ### 1b — S-110 Cmd+K palette, typed actions, shared types
 
@@ -352,3 +367,12 @@ the Extension Host tests and fixtures. `HarnessPanel.createOrShow` without a
   Removed the LibCST engine; moved the notebook to `legacy/`; reset the plan
   to a composable node canvas; adopted the per-node JSON `slate/` folder;
   shipped S-100–S-103. Commits `92a4148`, `85c88a7`.
+- **2026-10-13 — Phase 1b + 1c** (same thread). Cmd+K palette (`palette.ts`
+  ranking + `CommandPalette`), status bar, CAD grammar and string round trip
+  deleted, protocol types shared (webview re-exports), webview type errors
+  fixed (0 baseline), inline intent, wire → context, edge menu, searchable
+  picker. Tests: Vitest palette ranking; Playwright palette and wiring
+  journeys; Extension Host folder `setContext` and a legacy typed-action
+  undo. Phase 1 exit is the owner's "an hour without fighting it" check,
+  which is pending. **Next thread: Phase 2** (start at S-200 in the
+  Phase 2 section above).

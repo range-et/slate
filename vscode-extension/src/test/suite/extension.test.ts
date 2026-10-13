@@ -115,9 +115,11 @@ suite('Slate Extension Host', () => {
         const configUri = vscode.Uri.joinPath(folder, 'slate.json');
         const layoutUri = vscode.Uri.joinPath(folder, 'layout.json');
         const normalizeUri = vscode.Uri.joinPath(folder, 'nodes', 'normalize.json');
+        const clampUri = vscode.Uri.joinPath(folder, 'nodes', 'clamp.json');
         const read = async (uri: vscode.Uri) => new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
         const layoutBefore = await read(layoutUri);
         const normalizeBefore = await read(normalizeUri);
+        const clampBefore = await read(clampUri);
         const post = (message: unknown) => vscode.commands.executeCommand('slate.test.postMessage', message);
 
         try {
@@ -143,6 +145,12 @@ suite('Slate Extension Host', () => {
             assert.equal(withIntent.describedBy, 'human');
             assert.deepEqual(withIntent.code, JSON.parse(normalizeBefore).code);
 
+            // Context added by a wire or the picker lands in the consumer's JSON and can be removed.
+            await post({ type: 'action', action: { kind: 'setContext', consumer: 'clamp', dependency: 'normalize', enabled: true } });
+            assert.deepEqual(JSON.parse(await read(clampUri)).context, ['normalize']);
+            await post({ type: 'action', action: { kind: 'setContext', consumer: 'clamp', dependency: 'normalize', enabled: false } });
+            assert.equal(JSON.parse(await read(clampUri)).context, undefined);
+
             // Code edits are rejected when stale or renamed, accepted otherwise.
             const current = await waitForSnapshot(snapshot => snapshot.documents.some(document =>
                 document.units[0]?.annotation?.intent === 'Scale a score to 0–100'));
@@ -160,6 +168,27 @@ suite('Slate Extension Host', () => {
         } finally {
             await vscode.workspace.fs.writeFile(layoutUri, new TextEncoder().encode(layoutBefore));
             await vscode.workspace.fs.writeFile(normalizeUri, new TextEncoder().encode(normalizeBefore));
+            await vscode.workspace.fs.writeFile(clampUri, new TextEncoder().encode(clampBefore));
         }
+    });
+
+    test('legacy source-map mode applies typed intent actions as one undoable source edit', async () => {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        assert.ok(root, 'fixture workspace is open');
+        const sourceUri = vscode.Uri.joinPath(root, 'sample.py');
+        const projectUri = vscode.Uri.joinPath(root, 'fixture.slate.json');
+        await vscode.commands.executeCommand('vscode.openWith', projectUri, 'slate.editor');
+        const snapshot = await waitForSnapshot(value => value.mode === undefined && value.documents.length > 0);
+        const unit = snapshot.documents.flatMap(document => document.units).find(candidate => candidate.annotation);
+        assert.ok(unit, 'fixture has an annotated unit');
+        await vscode.commands.executeCommand('slate.test.postMessage', {
+            type: 'action', revision: snapshot.revision,
+            action: { kind: 'setAnnotationField', target: unit.id, field: 'intent', text: 'Typed action intent' },
+        });
+        const source = await vscode.workspace.openTextDocument(sourceUri);
+        assert.ok(source.getText().includes('## intent: Typed action intent'), 'intent written into the annotation');
+        await vscode.window.showTextDocument(source);
+        await vscode.commands.executeCommand('undo');
+        assert.ok(!source.getText().includes('Typed action intent'), 'native undo reverts the edit');
     });
 });

@@ -17,21 +17,7 @@ noted.
 
 ## Phase 1 — `slate/` folder and a calm canvas
 
-S-100 to S-103 (folder format and loader, folder-mode canvas, node creation
-and editing, New Project and demo) shipped on 2026-10-13; see
-[features.md](features.md).
-
-### S-110 Cmd+K palette replaces the CAD command line
-- One fuzzy palette of typed actions and targets. Delete the uppercase/`::`
-  grammar (`src/harness/commands.ts`) and the host's
-  `handleAction → handleCommand` string round-trip.
-- The webview imports protocol types from one shared file instead of
-  duplicating `harness_protocol.ts` in `src/harness/types.ts`.
-
-### S-111 Inline editing and context by wire
-- Intent is editable on the node and saves on blur.
-- Drag from a context port to add `context:`. A searchable popup replaces the
-  `<select>`. Absorbs H-026.
+Phase 1 (S-100 to S-111) shipped on 2026-10-13; see [features.md](features.md).
 
 ## Phase 2 — port and compile
 

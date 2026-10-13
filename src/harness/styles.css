@@ -97,7 +97,15 @@ button, input, textarea, select { font: inherit; }
 .context-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
 .context-chips button { width: auto; padding: 5px 7px; color: var(--strata-info, #62d9ff); border: 1px solid color-mix(in srgb, var(--strata-info, #62d9ff) 40%, transparent); background: transparent; font-size: 9px; }
 .context-chips span { color: var(--strata-text-secondary, #9da5ad); font-size: 10px; }
-.context-picker { display: grid; grid-template-columns: 1fr 62px; gap: 6px; }
+.context-picker { position: relative; }
+.context-picker input { width: 100%; padding: 6px; color: inherit; border: 1px solid var(--strata-border, #343a40); background: var(--strata-bg, #101214); font-size: 10px; }
+.context-picker ul {
+    max-height: 220px; margin: 2px 0 0; padding: 3px 0; overflow: auto; list-style: none;
+    border: 1px solid var(--strata-info, #62d9ff); background: var(--strata-layer-01, #191d21); box-shadow: 0 12px 30px rgba(0,0,0,.45);
+}
+.context-picker li { display: flex; flex-direction: column; gap: 2px; padding: 5px 8px; cursor: pointer; font-size: 11px; }
+.context-picker li small { color: var(--strata-text-secondary, #9da5ad); font-size: 9px; }
+.context-picker li[aria-selected="true"] { background: color-mix(in srgb, var(--strata-info, #62d9ff) 14%, transparent); }
 .packet-preview ul, .proposal-review ul { margin: 8px 0; padding: 0; list-style: none; font-size: 9px; }
 .packet-preview li { margin: 5px 0; }
 .packet-preview li strong { display: inline; color: var(--strata-info, #62d9ff); font-size: 8px; }
@@ -186,3 +194,13 @@ button, input, textarea, select { font: inherit; }
 .node-code { margin: 14px 0; padding-top: 12px; border-top: 1px solid var(--strata-border, #343a40); }
 .node-code h3 { margin: 0 0 7px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .node-code-editor { margin-bottom: 8px; border: 1px solid var(--strata-border, #343a40); max-height: 320px; overflow: auto; }
+
+.slate-node__intent { cursor: text; }
+.slate-node__intent.is-empty { font-style: italic; opacity: .6; }
+.slate-node__intent:hover { color: var(--strata-text-primary, #f3f4f6); }
+.slate-node__intent-edit {
+    width: 100%; min-height: 48px; margin-top: 6px; padding: 5px; resize: vertical;
+    color: inherit; border: 1px solid var(--strata-info, #62d9ff); background: var(--strata-bg, #101214); font: inherit; font-size: 10px;
+}
+.slate-node__handle { width: 9px; height: 9px; }
+.react-flow__handle-connecting, .react-flow__handle-valid { background: var(--strata-info, #62d9ff); }

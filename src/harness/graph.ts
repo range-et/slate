@@ -20,6 +20,8 @@ export type SlateNodeData = {
     intent?: string;
     /** First diagnostic, shown as a warning badge. */
     problem?: string;
+    /** Folder mode: the intent can be edited inline on the node. */
+    editableIntent?: boolean;
 };
 
 function directChildren(units: HarnessUnit[], parentId: string): HarnessUnit[] {
@@ -60,6 +62,7 @@ function buildFolderNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[
                 path: nodeId,
                 unit: top,
                 intent,
+                editableIntent: Boolean(top) && !isClass,
                 problem: document.diagnostics[0]?.message,
             },
         });

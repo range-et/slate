@@ -152,3 +152,42 @@ test('command palette selects a node and runs actions scoped to it; plain keys a
         action: { kind: 'setContext', consumer: 'scoring/normalize_score', dependency: 'clamp', enabled: false },
     }));
 });
+
+test('inline intent edits, wires, edge menu, and the context picker all post typed context actions', async ({ page }) => {
+    await page.addInitScript(() => {
+        const messages: unknown[] = [];
+        Object.defineProperty(window, '__slateHostMessages', { value: messages });
+        window.acquireVsCodeApi = () => ({ postMessage(message: unknown) { messages.push(message); } });
+    });
+    await page.goto('/harness.html?demo=folder');
+    const actions = async () => (await page.evaluate(() => (window as unknown as { __slateHostMessages: Array<{ type: string; action?: unknown }> }).__slateHostMessages))
+        .filter(message => message.type === 'action').map(message => message.action);
+
+    const clamp = page.locator('.react-flow__node[data-id="clamp"]');
+    await clamp.getByTitle('Click to edit intent').click();
+    const editor = page.getByLabel('Edit intent');
+    await editor.fill('Clamp into [lower, upper]');
+    await editor.press('Enter');
+    expect(await actions()).toContainEqual({ kind: 'setAnnotationField', target: 'clamp', field: 'intent', text: 'Clamp into [lower, upper]' });
+
+    const from = await page.locator('.react-flow__node[data-id="scoring/normalize_score"] .react-flow__handle.source').boundingBox();
+    const to = await clamp.locator('.react-flow__handle.target').boundingBox();
+    if (!from || !to) throw new Error('handles did not render');
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+    await page.mouse.up();
+    expect(await actions()).toContainEqual({ kind: 'setContext', consumer: 'clamp', dependency: 'scoring/normalize_score', enabled: true });
+
+    const edge = await page.locator('.slate-edge--context .react-flow__edge-interaction').first().boundingBox();
+    if (!edge) throw new Error('context edge did not render');
+    await page.mouse.click(edge.x + edge.width / 2, edge.y + edge.height / 2, { button: 'right' });
+    await page.getByRole('menuitem', { name: 'Remove context' }).click();
+    expect(await actions()).toContainEqual({ kind: 'setContext', consumer: 'scoring/normalize_score', dependency: 'clamp', enabled: false });
+
+    await page.locator('.react-flow__node[data-id="scoring/normalize_score"]').click();
+    const picker = page.getByLabel('Add context');
+    await picker.fill('grad');
+    await page.getByRole('listbox', { name: 'Context candidates' }).getByRole('option', { name: /Grader/ }).click();
+    expect(await actions()).toContainEqual({ kind: 'setContext', consumer: 'scoring/normalize_score', dependency: 'scoring/Grader', enabled: true });
+});

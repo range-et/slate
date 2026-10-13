@@ -23,7 +23,7 @@ import { tags } from '@lezer/highlight';
 import { demoSnapshot, folderDemoSnapshot } from './demo';
 import { buildGraph, nodeIdOf, SlateNodeData } from './graph';
 import { rankPalette, type Rankable } from './palette';
-import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HostMessage, PacketPreview } from './types';
+import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, PacketPreview } from './types';
 import './styles.css';
 
 interface VsCodeApi {
@@ -39,6 +39,40 @@ declare global {
 const vscode = typeof window.acquireVsCodeApi === 'function'
     ? window.acquireVsCodeApi()
     : null;
+
+function InlineIntent({ unitId, intent }: { unitId: string; intent: string }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(intent);
+    useEffect(() => { if (!editing) setDraft(intent); }, [intent, editing]);
+    const save = () => {
+        setEditing(false);
+        if (draft.trim() !== intent.trim()) {
+            vscode?.postMessage({ type: 'action', action: { kind: 'setAnnotationField', target: unitId, field: 'intent', text: draft } });
+        }
+    };
+    if (editing) {
+        return <textarea
+            className="slate-node__intent-edit nodrag nopan nowheel"
+            aria-label="Edit intent"
+            autoFocus
+            value={draft}
+            onChange={event => setDraft(event.target.value)}
+            onBlur={save}
+            onDoubleClick={event => event.stopPropagation()}
+            onKeyDown={event => {
+                event.stopPropagation();
+                if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); save(); }
+                if (event.key === 'Escape') { setDraft(intent); setEditing(false); }
+            }}
+        />;
+    }
+    return <p
+        className={`slate-node__intent nodrag ${intent ? '' : 'is-empty'}`}
+        title="Click to edit intent"
+        onClick={() => setEditing(true)}
+        onDoubleClick={event => event.stopPropagation()}
+    >{intent || 'add intent…'}</p>;
+}
 
 function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
     const colorStyle = { '--slate-group': data.groupColor } as React.CSSProperties;
@@ -58,7 +92,9 @@ function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
             </div>
             <strong>{data.label}</strong>
             {!data.container && <code>{data.detail}</code>}
-            {data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
+            {data.editableIntent && data.unit && !data.container
+                ? <InlineIntent unitId={data.unit.id} intent={data.intent ?? ''} />
+                : data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
             {!data.container && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
         </div>
     );
@@ -124,7 +160,6 @@ function Inspector({
         : [];
     const [intentDraft, setIntentDraft] = useState(intent);
     const [contractDraft, setContractDraft] = useState(contract);
-    const [contextChoice, setContextChoice] = useState('');
     const [noteTitle, setNoteTitle] = useState(note?.title ?? '');
     const [noteBody, setNoteBody] = useState(note?.body ?? '');
     const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
@@ -139,7 +174,8 @@ function Inspector({
         setNoteAttachment(note?.attachedTo ?? '');
     }, [note?.id, note?.title, note?.body, note?.attachedTo]);
     const availableContext = snapshot.documents.flatMap(item => item.units)
-        .filter(candidate => candidate.identity === 'durable' && candidate.id !== unit?.id && !dependencies.includes(candidate.id));
+        .filter(candidate => candidate.identity === 'durable' && candidate.id !== unit?.id && !dependencies.includes(candidate.id)
+            && (!folderMode || candidate.parentId === null));
     const namedDependency = (id: string) => snapshot.documents.flatMap(item => item.units).find(candidate => candidate.id === id);
     const action = (value: unknown) => vscode?.postMessage({ type: 'action', action: value, revision: snapshot.revision });
     return (
@@ -210,16 +246,10 @@ function Inspector({
                             })}
                             {dependencies.length === 0 && <span>None</span>}
                         </div>
-                        <div className="context-picker">
-                            <select value={contextChoice} onChange={event => setContextChoice(event.target.value)} aria-label="Add context">
-                                <option value="">Add context…</option>
-                                {availableContext.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.qualifiedName}</option>)}
-                            </select>
-                            <button className="secondary" disabled={!contextChoice} onClick={() => {
-                                action({ kind: 'setContext', consumer: unit.id, dependency: contextChoice, enabled: true });
-                                setContextChoice('');
-                            }}>Add</button>
-                        </div>
+                        <ContextPicker
+                            candidates={availableContext}
+                            onPick={id => action({ kind: 'setContext', consumer: unit.id, dependency: id, enabled: true })}
+                        />
                     </section>
                     <section className="packet-preview">
                         <h3>Exact packet</h3>
@@ -253,12 +283,64 @@ function Inspector({
     );
 }
 
+function ContextPicker({ candidates, onPick }: { candidates: HarnessUnit[]; onPick(id: string): void }) {
+    const [query, setQuery] = useState('');
+    const [open, setOpen] = useState(false);
+    const [index, setIndex] = useState(0);
+    const ranked = useMemo(() => rankPalette(candidates.map(candidate => ({
+        id: candidate.id,
+        label: candidate.qualifiedName,
+        detail: candidate.signature,
+        keywords: typeof candidate.annotation?.intent === 'string' ? candidate.annotation.intent : undefined,
+        group: 'node' as const,
+    })), query).slice(0, 8), [candidates, query]);
+    useEffect(() => setIndex(0), [query]);
+    const pick = (id: string | undefined) => {
+        if (!id) return;
+        onPick(id);
+        setQuery('');
+        setOpen(false);
+    };
+    return <div className="context-picker">
+        <input
+            aria-label="Add context"
+            placeholder="Add context… (type to search nodes)"
+            value={query}
+            onFocus={() => setOpen(true)}
+            onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+            onChange={event => { setQuery(event.target.value); setOpen(true); }}
+            onKeyDown={event => {
+                if (event.key === 'ArrowDown') { event.preventDefault(); setIndex(current => Math.min(ranked.length - 1, current + 1)); }
+                if (event.key === 'ArrowUp') { event.preventDefault(); setIndex(current => Math.max(0, current - 1)); }
+                if (event.key === 'Enter') { event.preventDefault(); pick(ranked[index]?.id); }
+                if (event.key === 'Escape') setOpen(false);
+            }}
+            autoComplete="off"
+            spellCheck={false}
+        />
+        {open && <ul role="listbox" aria-label="Context candidates">
+            {ranked.map((entry, position) => <li
+                key={entry.id}
+                role="option"
+                aria-selected={position === index}
+                onMouseDown={event => { event.preventDefault(); pick(entry.id); }}
+            >
+                <span>{entry.label}</span>
+                {entry.keywords && <small>{entry.keywords}</small>}
+            </li>)}
+            {ranked.length === 0 && <li className="palette__empty">No matching nodes.</li>}
+        </ul>}
+    </div>;
+}
+
 type BoardMenuState = {
     screenX: number;
     screenY: number;
     flowX: number;
     flowY: number;
     node: Node<SlateNodeData> | null;
+    /** A right-clicked context edge: dependency → consumer. */
+    edge?: { dependency: string; consumer: string };
 };
 
 function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
@@ -280,10 +362,19 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
     return <div
         className="board-context-menu"
         role="menu"
-        aria-label={menu.node ? `${menu.node.data.kind} actions` : 'Board actions'}
+        aria-label={menu.edge ? 'Context edge actions' : menu.node ? `${menu.node.data.kind} actions` : 'Board actions'}
         style={{ left: Math.min(menu.screenX, window.innerWidth - 240), top: Math.min(menu.screenY, window.innerHeight - 200) }}
     >
-        {!menu.node && <>
+        {menu.edge && <>
+            <div className="board-context-menu__label">{menu.edge.dependency} → {menu.edge.consumer}</div>
+            <button role="menuitem" className="danger" onClick={() => {
+                vscode?.postMessage({ type: 'action', revision: snapshot.revision, action: {
+                    kind: 'setContext', consumer: menu.edge!.consumer, dependency: menu.edge!.dependency, enabled: false,
+                } });
+                onClose();
+            }}>Remove context</button>
+        </>}
+        {!menu.node && !menu.edge && <>
             {snapshot.mode === 'folder' && <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'action', action: { kind: 'createNode', x: menu.flowX, y: menu.flowY }, revision: snapshot.revision });
                 onClose();
@@ -518,6 +609,10 @@ function HarnessApp() {
         setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: point.x, flowY: point.y, node });
     };
 
+    const isContextEndpoint = (id: string | null) => {
+        const unit = id ? snapshot.documents.flatMap(document => document.units).find(candidate => candidate.id === id) : undefined;
+        return Boolean(unit && unit.identity === 'durable' && (snapshot.mode !== 'folder' || unit.parentId === null));
+    };
     const post = (action: Record<string, unknown>) => vscode?.postMessage({ type: 'action', action, revision: snapshot.revision });
     const centerOn = (id: string) => {
         selectNode(id);
@@ -643,7 +738,23 @@ function HarnessApp() {
                     zoomOnPinch
                     panOnDrag={[0, 1]}
                     nodesDraggable
-                    nodesConnectable={false}
+                    nodesConnectable
+                    connectionLineStyle={{ stroke: 'var(--strata-info, #62d9ff)', strokeDasharray: '4 4' }}
+                    isValidConnection={connection => isContextEndpoint(connection.source) && isContextEndpoint(connection.target)
+                        && connection.source !== connection.target}
+                    onConnect={connection => {
+                        if (!connection.source || !connection.target) return;
+                        vscode?.postMessage({ type: 'action', revision: snapshot.revision, action: {
+                            kind: 'setContext', consumer: connection.target, dependency: connection.source, enabled: true,
+                        } });
+                        setCommandResult(`Context: ${connection.source} → ${connection.target}`);
+                    }}
+                    onEdgeContextMenu={(event, edge) => {
+                        if (!edge.id.startsWith('context:')) return;
+                        event.preventDefault();
+                        setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: 0, flowY: 0, node: null,
+                            edge: { dependency: edge.source, consumer: edge.target } });
+                    }}
                     deleteKeyCode={null}
                     elementsSelectable
                 >
