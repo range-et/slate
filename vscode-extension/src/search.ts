@@ -1,14 +1,6 @@
-import type { HarnessDocument, ParsedUnit } from './harness_protocol';
+import type { HarnessDocument, HarnessSearchResult, ParsedUnit } from './harness_protocol';
 
-export type SearchResult = {
-    unitId: string;
-    path: string;
-    qualifiedName: string;
-    signature: string | null;
-    snippet: string;
-    reason: 'exact name' | 'name' | 'signature' | 'annotation' | 'source' | 'path';
-    score: number;
-};
+export type SearchResult = HarnessSearchResult;
 
 function annotationText(unit: ParsedUnit): string {
     if (!unit.annotation) return '';

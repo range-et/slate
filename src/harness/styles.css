@@ -22,7 +22,7 @@ button, input, textarea, select { font: inherit; }
 .status-warning { color: var(--strata-warning, #f6c453) !important; }
 .status-error { color: var(--strata-error, #ff6b6b) !important; }
 .status-context { color: var(--strata-info, #62d9ff) !important; }
-.harness-canvas { position: absolute; inset: 44px 0 92px; }
+.harness-canvas { position: absolute; inset: 44px 0 32px; }
 .harness-empty { position: absolute; z-index: 5; inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--strata-text-secondary, #9da5ad); }
 
 .slate-node {
@@ -70,7 +70,7 @@ button, input, textarea, select { font: inherit; }
 }
 
 .harness-inspector {
-    position: absolute; z-index: 21; top: 58px; right: 14px; bottom: 108px; width: min(360px, calc(100vw - 28px));
+    position: absolute; z-index: 21; top: 58px; right: 14px; bottom: 46px; width: min(360px, calc(100vw - 28px));
     overflow: auto; padding: 16px;
     border: 1px solid var(--strata-border, #343a40); background: var(--strata-layer-01, #191d21);
     box-shadow: 0 16px 40px rgba(0,0,0,.35);
@@ -130,7 +130,7 @@ button, input, textarea, select { font: inherit; }
 }
 
 .harness-search-results {
-    position: absolute; z-index: 18; left: 50%; bottom: 104px; transform: translateX(-50%);
+    position: absolute; z-index: 18; left: 50%; bottom: 46px; transform: translateX(-50%);
     width: min(760px, calc(100vw - 32px)); max-height: min(440px, calc(100vh - 170px));
     overflow: hidden; border: 1px solid var(--strata-border, #343a40);
     background: color-mix(in srgb, var(--strata-layer-01, #191d21) 98%, transparent);
@@ -146,17 +146,35 @@ button, input, textarea, select { font: inherit; }
 .harness-search-result small { color: var(--strata-info, #62d9ff); font-size: 9px; text-transform: uppercase; }
 .harness-search-result code, .harness-search-result em { display: block; margin-top: 4px; overflow: hidden; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
 
-.harness-commandline {
-    position: absolute; z-index: 20; left: 50%; bottom: 18px; transform: translateX(-50%);
-    width: min(720px, calc(100vw - 32px));
-    border: 1px solid var(--strata-info, #62d9ff); background: var(--strata-layer-01, #191d21);
-    box-shadow: 0 12px 34px rgba(0,0,0,.4);
+.harness-statusbar {
+    position: absolute; z-index: 20; inset: auto 0 0 0; height: 32px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px;
+    border-top: 1px solid var(--strata-border, #30353a); background: var(--strata-layer-01, #181b1f);
+    font-size: 11px;
 }
-.harness-commandline__result { padding: 7px 12px 0; overflow-wrap: anywhere; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; }
-.harness-commandline__completions { padding: 5px 12px 0; color: var(--strata-info, #62d9ff); font-size: 10px; }
-.harness-command { display: flex; align-items: center; padding: 0 12px; }
-.harness-command span { color: var(--strata-info, #62d9ff); font-size: 10px; letter-spacing: .08em; }
-.harness-command input { flex: 1; height: 38px; padding: 0 10px; color: inherit; border: 0; outline: 0; background: transparent; font-size: 12px; }
+.harness-statusbar__result { overflow: hidden; color: var(--strata-text-secondary, #9da5ad); text-overflow: ellipsis; white-space: nowrap; }
+.harness-statusbar button {
+    flex: none; padding: 3px 9px; color: var(--strata-info, #62d9ff); cursor: pointer;
+    border: 1px solid color-mix(in srgb, var(--strata-info, #62d9ff) 45%, transparent); background: transparent; font-size: 10px;
+}
+.palette-backdrop { position: absolute; z-index: 40; inset: 0; background: rgba(0,0,0,.35); }
+.palette {
+    position: absolute; left: 50%; top: 14vh; transform: translateX(-50%);
+    width: min(640px, calc(100vw - 32px)); border: 1px solid var(--strata-info, #62d9ff);
+    background: var(--strata-layer-01, #191d21); box-shadow: 0 24px 60px rgba(0,0,0,.55);
+}
+.palette input {
+    width: 100%; height: 44px; padding: 0 14px; color: inherit; border: 0; outline: 0;
+    border-bottom: 1px solid var(--strata-border, #343a40); background: transparent; font-size: 13px;
+}
+.palette ul { max-height: min(420px, 60vh); margin: 0; padding: 4px 0; overflow: auto; list-style: none; }
+.palette li {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    padding: 7px 14px; cursor: pointer; font-size: 12px;
+}
+.palette li small { overflow: hidden; color: var(--strata-text-secondary, #9da5ad); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.palette li[aria-selected="true"] { background: color-mix(in srgb, var(--strata-info, #62d9ff) 14%, transparent); }
+.palette__empty { color: var(--strata-text-secondary, #9da5ad); cursor: default !important; }
 
 .react-flow__controls { border: 1px solid var(--strata-border, #343a40); border-radius: 0; background: var(--strata-layer-01, #191d21); }
 .react-flow__controls-button { color: var(--strata-text-primary, #f3f4f6); border-color: var(--strata-border, #343a40); background: var(--strata-layer-01, #191d21); }

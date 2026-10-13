@@ -13,6 +13,7 @@ loader, search, llama.cpp transport, proposals).
 - Direction: [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)
 - Inventory: [features.md](features.md)
 - Backlog: [issues.md](issues.md)
+- How to build the next phase (code map, conventions, verification, learnings): [BUILD_PLAN.md](BUILD_PLAN.md)
 - Dev loop: [DEV.md](DEV.md); llama.cpp demo: [DEMO.md](DEMO.md)
 
 Projects are a `slate/` folder of JSON: `slate.json`, `layout.json`, and one

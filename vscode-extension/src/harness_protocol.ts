@@ -87,3 +87,51 @@ export interface SourceProposal {
     proposedSource: string;
     parsed: ParseModuleResult;
 }
+
+// Webview-facing messages and views (shared with src/harness via types.ts).
+
+export interface HarnessSearchResult {
+    unitId: string;
+    path: string;
+    qualifiedName: string;
+    signature: string | null;
+    snippet: string;
+    reason: 'exact name' | 'name' | 'signature' | 'annotation' | 'source' | 'path';
+    score: number;
+}
+
+export interface PacketPreview {
+    items: Array<{
+        id: string;
+        path: string;
+        qualifiedName: string;
+        role: 'target' | 'required-context';
+        sourceHash: string;
+        characters: number;
+    }>;
+    estimatedInputTokens: number;
+    inputBudgetTokens: number;
+    outputBudgetTokens: number;
+}
+
+export interface HarnessProposal {
+    id: string;
+    unitId: string;
+    path: string;
+    candidate: string;
+    checks: string[];
+    staleMessage?: string;
+}
+
+export type HostMessage =
+    | { type: 'snapshot'; snapshot: HarnessSnapshot }
+    | { type: 'selectUnit'; unitId: string | null }
+    | { type: 'commandResult'; ok: boolean; message: string }
+    | { type: 'searchResults'; query: string; results: HarnessSearchResult[]; stale: boolean }
+    | { type: 'packetPreview'; unitId: string; packet?: PacketPreview; error?: string }
+    | { type: 'generationStarted'; unitId: string; message: string }
+    | { type: 'generationProgress'; unitId: string; receivedCharacters: number }
+    | { type: 'generationFailed'; unitId: string; message: string }
+    | { type: 'proposalReady'; proposal: HarnessProposal }
+    | { type: 'proposalStale'; proposalId: string; message: string }
+    | { type: 'proposalAccepted'; unitId: string };

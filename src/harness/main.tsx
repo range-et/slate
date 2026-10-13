@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import {
     Background,
     BackgroundVariant,
+    PanOnScrollMode,
     Controls,
     Edge,
     Handle,
@@ -19,9 +20,9 @@ import { python } from '@codemirror/lang-python';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 
-import { commandCompletions, commandHelp, commandToAction, parseCommand, resolveTargets } from './commands';
 import { demoSnapshot, folderDemoSnapshot } from './demo';
 import { buildGraph, nodeIdOf, SlateNodeData } from './graph';
+import { rankPalette, type Rankable } from './palette';
 import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HostMessage, PacketPreview } from './types';
 import './styles.css';
 
@@ -317,26 +318,81 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
     </div>;
 }
 
+type PaletteEntry = Rankable & { id: string; run(): void };
+
+const GROUP_LABELS: Record<PaletteEntry['group'], string> = {
+    selection: 'Selected', canvas: 'Canvas', node: 'Go to', search: 'Search',
+};
+
+function CommandPalette({ items, query, setQuery, onClose }: {
+    items: PaletteEntry[];
+    query: string;
+    setQuery(value: string): void;
+    onClose(): void;
+}) {
+    const [index, setIndex] = useState(0);
+    const ranked = useMemo(() => rankPalette(items, query).slice(0, 60), [items, query]);
+    const list = useRef<HTMLUListElement | null>(null);
+    useEffect(() => setIndex(0), [query]);
+    useEffect(() => {
+        list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+    }, [index]);
+    const run = (entry: PaletteEntry | undefined) => {
+        if (!entry) return;
+        onClose();
+        entry.run();
+    };
+    return <div className="palette-backdrop" onMouseDown={onClose}>
+        <div className="palette" role="dialog" aria-label="Command palette" onMouseDown={event => event.stopPropagation()}>
+            <input
+                autoFocus
+                aria-label="Command palette input"
+                placeholder="Type a command, a node name, or text to search code…"
+                value={query}
+                onChange={event => setQuery(event.target.value)}
+                onKeyDown={event => {
+                    if (event.key === 'ArrowDown') { event.preventDefault(); setIndex(current => Math.min(ranked.length - 1, current + 1)); }
+                    if (event.key === 'ArrowUp') { event.preventDefault(); setIndex(current => Math.max(0, current - 1)); }
+                    if (event.key === 'Enter') { event.preventDefault(); run(ranked[index]); }
+                    if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+                }}
+                autoComplete="off"
+                spellCheck={false}
+            />
+            <ul role="listbox" aria-label="Commands" ref={list}>
+                {ranked.map((entry, position) => <li
+                    key={entry.id}
+                    role="option"
+                    aria-selected={position === index}
+                    onMouseEnter={() => setIndex(position)}
+                    onClick={() => run(entry)}
+                >
+                    <span>{entry.label}</span>
+                    <small>{entry.detail ?? GROUP_LABELS[entry.group]}</small>
+                </li>)}
+                {ranked.length === 0 && <li className="palette__empty">Nothing matches.</li>}
+            </ul>
+        </div>
+    </div>;
+}
+
 function HarnessApp() {
     const search = new URLSearchParams(window.location.search);
     const showDemo = import.meta.env.DEV && search.has('demo');
     const [snapshot, setSnapshot] = useState<HarnessSnapshot>(showDemo
         ? search.get('demo') === 'folder' ? folderDemoSnapshot : demoSnapshot
         : { revision: 0, projectName: 'Slate', documents: [] });
-    const [query, setQuery] = useState(showDemo ? search.get('command') ?? '' : '');
-    const [commandResult, setCommandResult] = useState('READY');
-    const [searchMode, setSearchMode] = useState(false);
+    const [paletteQuery, setPaletteQuery] = useState('');
+    const [paletteOpen, setPaletteOpen] = useState(false);
+    const [commandResult, setCommandResult] = useState('Ready — press ⌘K for commands');
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState<HarnessSearchResult[]>([]);
-    const [history, setHistory] = useState<string[]>([]);
-    const [historyIndex, setHistoryIndex] = useState(-1);
     const [packets, setPackets] = useState<Record<string, { packet?: PacketPreview; error?: string }>>({});
     const [generation, setGeneration] = useState<{ unitId: string; message: string } | null>(null);
     const [proposal, setProposal] = useState<HarnessProposal | null>(null);
     const [acceptedUnitId, setAcceptedUnitId] = useState<string | null>(null);
     const [boardMenu, setBoardMenu] = useState<BoardMenuState | null>(null);
     const flow = useRef<ReactFlowInstance<Node<SlateNodeData>, Edge> | null>(null);
-    const commandInput = useRef<HTMLInputElement | null>(null);
     const graph = useMemo(() => buildGraph(snapshot), [snapshot]);
     const [nodes, setNodes, onNodesChange] = useNodesState<Node<SlateNodeData>>(graph.nodes);
     const selectedNodes = nodes.filter(node => node.selected);
@@ -351,47 +407,47 @@ function HarnessApp() {
 
     useEffect(() => {
         const onMessage = (event: MessageEvent<HostMessage>) => {
-            if (!event.data || typeof event.data !== 'object') return;
-            if (event.data.type === 'snapshot') setSnapshot(event.data.snapshot);
-            if (event.data.type === 'selectUnit') {
+            const data = event.data;
+            if (!data || typeof data !== 'object') return;
+            if (data.type === 'snapshot') setSnapshot(data.snapshot);
+            if (data.type === 'selectUnit') {
                 setNodes(current => current.map(node => ({
                     ...node,
-                    selected: node.id === event.data.unitId,
+                    selected: node.id === data.unitId,
                 })));
             }
-            if (event.data.type === 'commandResult') setCommandResult(event.data.message);
-            if (event.data.type === 'searchResults') {
-                setSearchMode(false);
-                setSearchQuery(event.data.query);
-                setSearchResults(event.data.results);
-                setCommandResult(event.data.stale
-                    ? 'SEARCH: source graph changed; search again'
-                    : `SEARCH: ${event.data.results.length} result${event.data.results.length === 1 ? '' : 's'} for “${event.data.query}”`);
+            if (data.type === 'commandResult') setCommandResult(data.message);
+            if (data.type === 'searchResults') {
+                setSearchQuery(data.query);
+                setSearchResults(data.results);
+                setCommandResult(data.stale
+                    ? 'Search: the graph changed; search again'
+                    : `Search: ${data.results.length} result${data.results.length === 1 ? '' : 's'} for “${data.query}”`);
             }
-            if (event.data.type === 'packetPreview') {
-                setPackets(current => ({ ...current, [event.data.unitId]: { packet: event.data.packet, error: event.data.error } }));
+            if (data.type === 'packetPreview') {
+                setPackets(current => ({ ...current, [data.unitId]: { packet: data.packet, error: data.error } }));
             }
-            if (event.data.type === 'generationStarted') {
+            if (data.type === 'generationStarted') {
                 setProposal(null);
                 setAcceptedUnitId(null);
-                setGeneration({ unitId: event.data.unitId, message: event.data.message });
+                setGeneration({ unitId: data.unitId, message: data.message });
             }
-            if (event.data.type === 'generationProgress') {
-                setGeneration(current => current?.unitId === event.data.unitId
-                    ? { ...current, message: `Receiving candidate from llama.cpp… ${event.data.receivedCharacters} characters` }
+            if (data.type === 'generationProgress') {
+                setGeneration(current => current?.unitId === data.unitId
+                    ? { ...current, message: `Receiving candidate from llama.cpp… ${data.receivedCharacters} characters` }
                     : current);
             }
-            if (event.data.type === 'generationFailed') {
+            if (data.type === 'generationFailed') {
                 setGeneration(null);
-                setCommandResult(`GENERATE: ${event.data.message}`);
+                setCommandResult(`Generate: ${data.message}`);
             }
-            if (event.data.type === 'proposalReady') { setGeneration(null); setProposal(event.data.proposal); }
-            if (event.data.type === 'proposalStale') {
-                setProposal(current => current?.id === event.data.proposalId ? { ...current, staleMessage: event.data.message } : current);
+            if (data.type === 'proposalReady') { setGeneration(null); setProposal(data.proposal); }
+            if (data.type === 'proposalStale') {
+                setProposal(current => current?.id === data.proposalId ? { ...current, staleMessage: data.message } : current);
             }
-            if (event.data.type === 'proposalAccepted') {
+            if (data.type === 'proposalAccepted') {
                 setProposal(null);
-                setAcceptedUnitId(event.data.unitId);
+                setAcceptedUnitId(data.unitId);
             }
         };
         window.addEventListener('message', onMessage);
@@ -412,16 +468,22 @@ function HarnessApp() {
     }, [selected?.data.unit?.id, snapshot.revision]);
 
     useEffect(() => {
-        const focusCommandLine = (event: KeyboardEvent) => {
+        const openPalette = (event: KeyboardEvent) => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+                event.preventDefault();
+                setPaletteQuery('');
+                setPaletteOpen(open => !open);
+                return;
+            }
             const target = event.target as HTMLElement | null;
             if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
             if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
             event.preventDefault();
-            commandInput.current?.focus();
-            setQuery('/');
+            setPaletteQuery('');
+            setPaletteOpen(true);
         };
-        window.addEventListener('keydown', focusCommandLine);
-        return () => window.removeEventListener('keydown', focusCommandLine);
+        window.addEventListener('keydown', openPalette);
+        return () => window.removeEventListener('keydown', openPalette);
     }, []);
 
     useEffect(() => {
@@ -447,7 +509,7 @@ function HarnessApp() {
 
     const selectNode = (id: string) => setNodes(current => current.map(node => ({ ...node, selected: node.id === id })));
 
-    const openBoardMenu = (event: React.MouseEvent, node: Node<SlateNodeData> | null) => {
+    const openBoardMenu = (event: React.MouseEvent | MouseEvent, node: Node<SlateNodeData> | null) => {
         event.preventDefault();
         event.stopPropagation();
         const point = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY })
@@ -456,91 +518,84 @@ function HarnessApp() {
         setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: point.x, flowY: point.y, node });
     };
 
-    const runCommand = () => {
-        const raw = query.trim();
-        const searchText = searchMode
-            ? raw
-            : raw.toLowerCase().startsWith('/search')
-                ? raw.slice('/search'.length).trim()
-                : raw.toUpperCase().startsWith('SEARCH ')
-                    ? raw.slice('SEARCH '.length).trim()
-                    : null;
-        if (searchText !== null) {
-            if (!searchText) {
-                setSearchMode(true);
-                setCommandResult('SEARCH: what should Slate find?');
-            } else if (vscode) {
-                vscode.postMessage({ type: 'search', query: searchText, revision: snapshot.revision });
-                setCommandResult(`SEARCH: scanning indexed source for “${searchText}”…`);
-            } else {
-                setCommandResult('SEARCH: requires the VS Code extension');
-            }
-            setQuery('');
-            return;
-        }
-        if (raw.toLowerCase() === '/search' || raw.toUpperCase() === 'SEARCH') {
-            setSearchMode(true);
-            setQuery('');
-            setCommandResult('SEARCH: what should Slate find?');
-            return;
-        }
-        const command = parseCommand(raw);
-        if (!command) return;
-        setHistory(current => [...current.filter(item => item !== raw), raw]);
-        setHistoryIndex(-1);
-
-        const targets = nodes.map(node => ({
-            id: node.id,
-            label: node.data.label,
-            detail: node.data.detail,
-            qualifiedName: node.data.unit?.qualifiedName,
-        }));
-        const argument = command.args.join(' ');
-        if (command.name === 'FIT') {
-            flow.current?.fitView({ padding: 0.2, duration: 300 });
-            setCommandResult('FIT: drawing extents');
-        } else if (command.name === 'CLEAR' || (command.name === 'SELECT' && argument.toUpperCase() === 'NONE')) {
-            setNodes(current => current.map(node => ({ ...node, selected: false })));
-            setCommandResult('SELECT: 0 objects');
-        } else if (command.name === 'SELECT' && argument.toUpperCase() === 'ALL') {
-            setNodes(current => current.map(node => ({ ...node, selected: true })));
-            setCommandResult(`SELECT: ${nodes.length} objects`);
-        } else if (command.name === 'SELECT') {
-            const matches = resolveTargets(targets, argument);
-            setNodes(current => current.map(node => ({ ...node, selected: matches.some(match => match.id === node.id) })));
-            setCommandResult(matches.length > 0 ? `SELECT: ${matches.length} object${matches.length === 1 ? '' : 's'}` : 'SELECT: no match');
-            const match = matches[0] && nodes.find(node => node.id === matches[0].id);
-            if (match) flow.current?.setCenter(match.position.x + 130, match.position.y + 36, { zoom: 1.2, duration: 300 });
-        } else if (command.name === 'REVEAL' || command.name === 'EDIT') {
-            const matches = argument
-                ? resolveTargets(targets, argument)
-                : selectedNodes;
-            const match = matches.length === 1 ? nodes.find(node => node.id === matches[0].id) : undefined;
-            if (match?.data.unit) {
-                vscode?.postMessage({ type: 'reveal', unitId: match.data.unit.id, focus: command.name === 'EDIT' });
-                setCommandResult(`${command.name}: ${match.data.unit.qualifiedName}`);
-            } else {
-                setCommandResult(matches.length > 1 ? `${command.name}: selection is ambiguous` : `${command.name}: select one code unit`);
-            }
-        } else if (command.name === 'HELP') {
-            setCommandResult(commandHelp(command.args[0]));
-        } else if (['STUB', 'INTENT', 'CONTRACT', 'CONTEXT', 'UNCONTEXT', 'LOCK', 'COMPILE', 'RECOMPILE', 'SAVE'].includes(command.name)) {
-            const action = commandToAction(command);
-            if (!action) {
-                setCommandResult(`INVALID ACTION: ${commandHelp(command.name)}`);
-            } else if (vscode) {
-                vscode.postMessage({ type: 'action', action, revision: snapshot.revision });
-                setCommandResult(`${command.name}: working…`);
-            } else {
-                setCommandResult(`${command.name}: requires the VS Code extension`);
-            }
-        } else {
-            setCommandResult(`UNKNOWN COMMAND: ${command.name}`);
-        }
-        setQuery('');
+    const post = (action: Record<string, unknown>) => vscode?.postMessage({ type: 'action', action, revision: snapshot.revision });
+    const centerOn = (id: string) => {
+        selectNode(id);
+        flow.current?.fitView({ nodes: [{ id }], duration: 300, maxZoom: 1.2, padding: 0.8 });
+    };
+    const viewCenter = () => {
+        const pane = document.querySelector('.react-flow__pane')?.getBoundingClientRect();
+        return pane && flow.current
+            ? flow.current.screenToFlowPosition({ x: pane.x + pane.width / 2, y: pane.y + pane.height / 2 })
+            : { x: 0, y: 0 };
+    };
+    const runSearch = (text: string) => {
+        if (!vscode) { setCommandResult('Search needs the VS Code extension.'); return; }
+        vscode.postMessage({ type: 'search', query: text, revision: snapshot.revision });
+        setCommandResult(`Search: scanning for “${text}”…`);
     };
 
-    const completions = searchMode ? [] : commandCompletions(query);
+    const paletteItems = useMemo<PaletteEntry[]>(() => {
+        const items: PaletteEntry[] = [];
+        const units = snapshot.documents.flatMap(document => document.units);
+        const unit = selected?.data.unit;
+        if (unit) {
+            const locked = unit.annotation?.locked === true;
+            const dependencies = Array.isArray(unit.annotation?.dependencies)
+                ? unit.annotation.dependencies.filter((value): value is string => typeof value === 'string')
+                : [];
+            items.push({ id: 'open', group: 'selection', label: `Open ${unit.name} in editor`,
+                run: () => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true }) });
+            if (['function', 'method'].includes(unit.kind)) {
+                items.push({ id: 'generate', group: 'selection', label: `Generate ${unit.name} with llama.cpp`,
+                    run: () => vscode?.postMessage({ type: 'generate', unitId: unit.id }) });
+            }
+            items.push({ id: 'lock', group: 'selection', label: `${locked ? 'Unlock' : 'Lock'} ${unit.name}`,
+                run: () => post({ kind: 'setLock', target: unit.id, locked: !locked }) });
+            items.push({ id: 'note-here', group: 'selection', label: `Add note attached to ${unit.name}`,
+                run: () => {
+                    const point = viewCenter();
+                    vscode?.postMessage({ type: 'noteCreate', revision: snapshot.revision, x: point.x, y: point.y, attachedTo: unit.id });
+                } });
+            for (const candidate of units) {
+                if (candidate.id === unit.id || candidate.identity !== 'durable' || candidate.parentId !== null) continue;
+                const intent = typeof candidate.annotation?.intent === 'string' ? candidate.annotation.intent : undefined;
+                if (dependencies.includes(candidate.id)) {
+                    items.push({ id: `uncontext:${candidate.id}`, group: 'selection', label: `Remove context: ${candidate.qualifiedName}`, keywords: intent,
+                        run: () => post({ kind: 'setContext', consumer: unit.id, dependency: candidate.id, enabled: false }) });
+                } else {
+                    items.push({ id: `context:${candidate.id}`, group: 'selection', label: `Add context: ${candidate.qualifiedName}`, keywords: intent,
+                        run: () => post({ kind: 'setContext', consumer: unit.id, dependency: candidate.id, enabled: true }) });
+                }
+            }
+        }
+        if (snapshot.mode === 'folder') {
+            items.push({ id: 'new-node', group: 'canvas', label: 'New node…', detail: 'Typed signature + intent',
+                run: () => { const point = viewCenter(); post({ kind: 'createNode', x: point.x, y: point.y }); } });
+        }
+        items.push(
+            { id: 'new-note', group: 'canvas', label: 'New board note',
+                run: () => { const point = viewCenter(); vscode?.postMessage({ type: 'noteCreate', revision: snapshot.revision, x: point.x, y: point.y, attachedTo: null }); } },
+            { id: 'fit', group: 'canvas', label: 'Fit view', run: () => flow.current?.fitView({ padding: 0.2, duration: 300 }) },
+            { id: 'refresh', group: 'canvas', label: 'Refresh index', run: () => post({ kind: 'refreshIndex' }) },
+            { id: 'save', group: 'canvas', label: 'Save all files', run: () => post({ kind: 'saveWorkspace' }) },
+            { id: 'clear', group: 'canvas', label: 'Clear selection', run: () => setNodes(current => current.map(node => ({ ...node, selected: false }))) },
+        );
+        for (const candidate of units) {
+            items.push({
+                id: `goto:${candidate.id}`, group: 'node', label: candidate.qualifiedName,
+                detail: candidate.signature ?? candidate.kind.replace('_', ' '),
+                keywords: typeof candidate.annotation?.intent === 'string' ? candidate.annotation.intent : undefined,
+                run: () => centerOn(candidate.id),
+            });
+        }
+        for (const note of snapshot.notes ?? []) {
+            items.push({ id: `goto:${note.id}`, group: 'node', label: `Note: ${note.title}`, detail: note.body, run: () => centerOn(note.id) });
+        }
+        const text = paletteQuery.trim();
+        if (text) items.push({ id: 'search', group: 'search', always: true, label: `Search code for “${text}”`, run: () => runSearch(text) });
+        return items;
+    }, [snapshot, selected?.data.unit, paletteQuery]);
 
     return (
         <main className="harness-shell">
@@ -583,7 +638,7 @@ function HarnessApp() {
                     minZoom={0.1}
                     maxZoom={2.5}
                     panOnScroll
-                    panOnScrollMode="free"
+                    panOnScrollMode={PanOnScrollMode.Free}
                     zoomOnScroll={false}
                     zoomOnPinch
                     panOnDrag={[0, 1]}
@@ -641,44 +696,16 @@ function HarnessApp() {
                 onFit={() => flow.current?.fitView({ padding: 0.2, duration: 300 })}
                 onSelect={selectNode}
             />}
-            <div className="harness-commandline">
-                <div className="harness-commandline__result">{commandResult}</div>
-                {query && completions.length > 0 && (
-                    <div className="harness-commandline__completions">{completions.join('   ')}</div>
-                )}
-                <div className="harness-command">
-                    <span>{searchMode ? 'SEARCH:' : 'ACTION:'}</span>
-                    <input
-                        ref={commandInput}
-                        value={query}
-                        onChange={event => setQuery(event.target.value)}
-                        onKeyDown={event => {
-                            if (event.key === 'Enter') runCommand();
-                            if (event.key === 'Tab' && completions.length === 1) {
-                                event.preventDefault();
-                                setQuery(`${completions[0]} `);
-                            }
-                            if (event.key === 'Escape') { setQuery(''); setSearchMode(false); setHistoryIndex(-1); }
-                            if (event.key === 'ArrowUp' && history.length > 0) {
-                                event.preventDefault();
-                                const next = historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1);
-                                setHistoryIndex(next);
-                                setQuery(history[next]);
-                            }
-                            if (event.key === 'ArrowDown' && historyIndex >= 0) {
-                                event.preventDefault();
-                                const next = historyIndex + 1;
-                                setHistoryIndex(next >= history.length ? -1 : next);
-                                setQuery(next >= history.length ? '' : history[next]);
-                            }
-                        }}
-                        placeholder={searchMode ? 'Name, signature, annotation, or source text' : 'Type /search or HELP'}
-                        aria-label={searchMode ? 'Search indexed code' : 'Slate action'}
-                        autoComplete="off"
-                        spellCheck={false}
-                    />
-                </div>
-            </div>
+            <footer className="harness-statusbar">
+                <span className="harness-statusbar__result" role="status">{commandResult}</span>
+                <button onClick={() => { setPaletteQuery(''); setPaletteOpen(true); }}>⌘K Commands</button>
+            </footer>
+            {paletteOpen && <CommandPalette
+                items={paletteItems}
+                query={paletteQuery}
+                setQuery={setPaletteQuery}
+                onClose={() => setPaletteOpen(false)}
+            />}
         </main>
     );
 }

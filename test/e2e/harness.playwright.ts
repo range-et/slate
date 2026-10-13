@@ -28,15 +28,11 @@ test('guided search returns provenance and reveals by durable unit id', async ({
     });
     await page.goto('/harness.html?demo');
 
-    const action = page.getByLabel('Slate action');
-    await action.fill('/search');
-    await action.press('Enter');
-    await expect(page.getByLabel('Search indexed code')).toBeFocused();
-    await expect(page.getByText('SEARCH: what should Slate find?')).toBeVisible();
-
-    const search = page.getByLabel('Search indexed code');
-    await search.fill('execute(config)');
-    await search.press('Enter');
+    await page.keyboard.press('Control+k');
+    const palette = page.getByLabel('Command palette input');
+    await expect(palette).toBeFocused();
+    await palette.fill('execute(config)');
+    await page.getByRole('option', { name: /Search code for “execute\(config\)”/ }).click();
     await expect(page.getByRole('region', { name: 'Search results for execute(config)' })).toBeVisible();
     await expect(page.getByRole('button', { name: /run.*source/i })).toContainText('calculator.py');
 
@@ -125,4 +121,34 @@ test('board context menus, board-only notes, and trackpad-style panning work', a
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.wheel(90, 70);
     await expect.poll(() => viewport.getAttribute('style')).not.toBe(before);
+});
+
+test('command palette selects a node and runs actions scoped to it; plain keys are not hijacked', async ({ page }) => {
+    await page.addInitScript(() => {
+        const messages: unknown[] = [];
+        Object.defineProperty(window, '__slateHostMessages', { value: messages });
+        window.acquireVsCodeApi = () => ({ postMessage(message: unknown) { messages.push(message); } });
+    });
+    await page.goto('/harness.html?demo=folder');
+    await page.locator('.react-flow__pane').click();
+
+    await page.keyboard.press('a');
+    await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(0);
+
+    await page.keyboard.press('/');
+    const palette = page.getByLabel('Command palette input');
+    await palette.fill('normalize');
+    await palette.press('Enter');
+    await expect(page.getByRole('heading', { name: 'normalize_score' })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(0);
+
+    await page.keyboard.press('Control+k');
+    await palette.fill('remove context');
+    await expect(page.getByRole('listbox', { name: 'Commands' }).getByRole('option').first()).toContainText('Remove context: clamp');
+    await palette.press('Enter');
+    const messages = await page.evaluate(() => (window as unknown as { __slateHostMessages: unknown[] }).__slateHostMessages);
+    expect(messages).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: { kind: 'setContext', consumer: 'scoring/normalize_score', dependency: 'clamp', enabled: false },
+    }));
 });

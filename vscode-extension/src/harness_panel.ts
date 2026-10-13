@@ -861,28 +861,6 @@ export class HarnessPanel implements vscode.Disposable {
         this.scheduleRefresh(0);
     }
 
-    private async handleAction(action: Record<string, unknown>, revision: unknown): Promise<void> {
-        const invoke = (command: string, args: string[]) => this.handleCommand({ command, args, revision });
-        if (action.kind === 'refreshIndex') return invoke('COMPILE', []);
-        if (action.kind === 'saveWorkspace') return invoke('SAVE', []);
-        if (action.kind === 'createStub'
-            && typeof action.target === 'string' && typeof action.signature === 'string' && typeof action.intent === 'string') {
-            return invoke('STUB', [action.target, '::', action.signature, '::', action.intent]);
-        }
-        if (action.kind === 'setAnnotationField' && typeof action.target === 'string'
-            && typeof action.text === 'string' && (action.field === 'intent' || action.field === 'contract')) {
-            return invoke(action.field.toUpperCase(), [action.target, '::', action.text]);
-        }
-        if (action.kind === 'setContext' && typeof action.consumer === 'string'
-            && typeof action.dependency === 'string' && typeof action.enabled === 'boolean') {
-            return invoke(action.enabled ? 'CONTEXT' : 'UNCONTEXT', [action.consumer, '::', action.dependency]);
-        }
-        if (action.kind === 'setLock' && typeof action.target === 'string' && typeof action.locked === 'boolean') {
-            return invoke('LOCK', [action.target, action.locked ? 'ON' : 'OFF']);
-        }
-        this.postCommandResult(false, 'The webview sent an invalid typed action.');
-    }
-
     private resolveUnit(query: string): { document: HarnessDocument; unit: ParsedUnit } {
         if (!this.snapshot) throw new Error('The graph is not indexed yet.');
         const normalized = query.toLowerCase();
@@ -892,17 +870,6 @@ export class HarnessPanel implements vscode.Disposable {
                 || unit.name.toLowerCase() === normalized)
             .map(unit => ({ document, unit })));
         if (matches.length !== 1) throw new Error(`Unit ${query || '<empty>'} resolved to ${matches.length} nodes.`);
-        return matches[0];
-    }
-
-    private resolveDocument(query: string): HarnessDocument {
-        if (!this.snapshot) throw new Error('The graph is not indexed yet.');
-        const normalized = query.replace(/\\/g, '/').toLowerCase();
-        const matches = this.snapshot.documents.filter(document =>
-            document.path.toLowerCase() === normalized
-            || path.basename(document.path).toLowerCase() === normalized
-        );
-        if (matches.length !== 1) throw new Error(`File ${query || '<empty>'} resolved to ${matches.length} groups.`);
         return matches[0];
     }
 
@@ -987,140 +954,74 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
-    private async handleCommand(message: Record<string, unknown>): Promise<void> {
-        if (!this.snapshot || typeof message.command !== 'string' || !Array.isArray(message.args)
-            || !message.args.every(argument => typeof argument === 'string')) return;
-        const command = message.command;
-        if (message.revision !== this.snapshot.revision) {
-            this.postCommandResult(false, `${command}: graph changed; run the command again`);
+    /** Legacy project-v2 mode: annotation edits inside Python modules (retires in S-203). */
+    private async handleAction(action: Record<string, unknown>, revision: unknown): Promise<void> {
+        if (!this.snapshot) return;
+        const label = String(action.kind);
+        if (revision !== this.snapshot.revision) {
+            this.postCommandResult(false, `${label}: graph changed; try again`);
             return;
         }
-        const rawArgs = (message.args as string[]).join(' ');
-        const parts = rawArgs.split('::').map(part => part.trim());
         try {
-            const sourceMutations = new Set(['STUB', 'INTENT', 'CONTRACT', 'CONTEXT', 'UNCONTEXT', 'LOCK']);
-            if (this.projectDocument && sourceMutations.has(command)
-                && loadProject(this.projectDocument.getText()).readOnly) {
-                throw new Error('This project uses a newer schema and is read-only.');
-            }
-            if (command === 'COMPILE' || command === 'RECOMPILE') {
+            if (action.kind === 'refreshIndex') {
                 await this.refresh();
                 const invalid = this.snapshot?.documents.filter(document => !document.valid).length ?? 0;
                 this.postCommandResult(invalid === 0, invalid === 0
-                    ? `${command}: source graph is current; all Python modules parse`
-                    : `${command}: ${invalid} invalid Python module${invalid === 1 ? '' : 's'}`);
+                    ? 'Source graph is current; all Python modules parse.'
+                    : `${invalid} invalid Python module${invalid === 1 ? '' : 's'}.`);
                 return;
             }
-            if (command === 'SAVE') {
+            if (action.kind === 'saveWorkspace') {
                 const saved = await vscode.workspace.saveAll(false);
-                this.postCommandResult(saved, saved ? 'SAVE: workspace files saved' : 'SAVE: one or more files were not saved');
+                this.postCommandResult(saved, saved ? 'Saved.' : 'One or more files were not saved.');
                 return;
             }
-            if (command === 'STUB') {
-                if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) {
-                    throw new Error('Usage: STUB file.py|Class :: def name(arg: Type) -> Type :: intent');
-                }
-                let target: HarnessDocument;
-                let parentId: string | null = null;
-                try {
-                    target = this.resolveDocument(parts[0]);
-                } catch {
-                    const parent = this.resolveUnit(parts[0]);
-                    if (!['class', 'nested_class'].includes(parent.unit.kind)) {
-                        throw new Error('A stub target must be a Python file or class group.');
-                    }
-                    target = parent.document;
-                    parentId = parent.unit.id;
-                }
-                const document = await this.sourceDocument(target.path);
-                const unitId = randomUUID();
-                const proposal = await this.adapter.insertStub({
-                    source: document.getText(), path: target.path, expectedHash: target.sourceHash,
-                    signature: parts[1], annotation: {
-                        id: unitId, intent: parts.slice(2).join(' :: '), contract: '',
-                        dependencies: [], examples: [], locked: false,
-                    }, parentId,
-                });
-                const edit = new vscode.WorkspaceEdit();
-                this.addProposal(edit, document, proposal);
-                if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
-                this.postCommandResult(true, `STUB: created ${parts[1]} in ${target.path}`);
-                return;
+            if (this.projectDocument && loadProject(this.projectDocument.getText()).readOnly) {
+                throw new Error('This project uses a newer schema and is read-only.');
             }
-            if (command === 'INTENT' || command === 'CONTRACT') {
-                if (parts.length < 2 || !parts[0] || !parts[1]) throw new Error(`Usage: ${command} unit :: text`);
-                const target = this.resolveUnit(parts[0]);
-                const document = await this.sourceDocument(target.document.path);
-                const annotation = this.annotation(target.unit, {
-                    [command === 'INTENT' ? 'intent' : 'contract']: parts.slice(1).join(' :: '),
-                });
-                const params = {
-                    source: document.getText(), path: target.document.path,
-                    expectedHash: target.document.sourceHash, unitId: target.unit.id, annotation,
-                };
-                const proposal = target.unit.annotation
-                    ? await this.adapter.updateAnnotation(params)
-                    : await this.adapter.adoptUnit(params);
-                const edit = new vscode.WorkspaceEdit();
-                this.addProposal(edit, document, proposal);
-                if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
-                this.postCommandResult(true, `${command}: updated ${target.unit.qualifiedName}`);
-                return;
-            }
-            if (command === 'CONTEXT' || command === 'UNCONTEXT') {
-                if (parts.length !== 2 || !parts[0] || !parts[1]) {
-                    throw new Error(`Usage: ${command} consumer :: dependency`);
-                }
-                const consumer = this.resolveUnit(parts[0]);
-                const dependency = this.resolveUnit(parts[1]);
-                if (consumer.unit.id === dependency.unit.id) throw new Error('A unit cannot borrow itself.');
+            let target: { document: HarnessDocument; unit: ParsedUnit };
+            let overrides: Record<string, unknown>;
+            if (action.kind === 'setAnnotationField' && typeof action.target === 'string' && typeof action.text === 'string'
+                && (action.field === 'intent' || action.field === 'contract')) {
+                target = this.resolveUnit(action.target);
+                overrides = { [action.field]: action.text };
+            } else if (action.kind === 'setContext' && typeof action.consumer === 'string'
+                && typeof action.dependency === 'string' && typeof action.enabled === 'boolean') {
+                target = this.resolveUnit(action.consumer);
+                const dependency = this.resolveUnit(action.dependency);
+                if (target.unit.id === dependency.unit.id) throw new Error('A unit cannot borrow itself.');
                 if (dependency.unit.identity !== 'durable') {
-                    throw new Error(`Adopt ${dependency.unit.qualifiedName} with INTENT before using it as context.`);
+                    throw new Error(`Give ${dependency.unit.qualifiedName} an intent before using it as context.`);
                 }
-                const document = await this.sourceDocument(consumer.document.path);
-                const current = Array.isArray(consumer.unit.annotation?.dependencies)
-                    ? consumer.unit.annotation.dependencies.filter(value => typeof value === 'string') as string[]
+                const current = Array.isArray(target.unit.annotation?.dependencies)
+                    ? target.unit.annotation.dependencies.filter(value => typeof value === 'string') as string[]
                     : [];
-                const dependencies = command === 'CONTEXT'
-                    ? [...new Set([...current, dependency.unit.id])]
-                    : current.filter(id => id !== dependency.unit.id);
-                const annotation = this.annotation(consumer.unit, { dependencies });
-                const params = {
-                    source: document.getText(), path: consumer.document.path,
-                    expectedHash: consumer.document.sourceHash, unitId: consumer.unit.id, annotation,
+                overrides = {
+                    dependencies: action.enabled
+                        ? [...new Set([...current, dependency.unit.id])]
+                        : current.filter(id => id !== dependency.unit.id),
                 };
-                const proposal = consumer.unit.annotation
-                    ? await this.adapter.updateAnnotation(params)
-                    : await this.adapter.adoptUnit(params);
-                const edit = new vscode.WorkspaceEdit();
-                this.addProposal(edit, document, proposal);
-                if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
-                this.postCommandResult(true, `${command}: ${consumer.unit.qualifiedName} ↔ ${dependency.unit.qualifiedName}`);
-                return;
+            } else if (action.kind === 'setLock' && typeof action.target === 'string' && typeof action.locked === 'boolean') {
+                target = this.resolveUnit(action.target);
+                overrides = { locked: action.locked };
+            } else {
+                throw new Error('That action is not available in source-map mode.');
             }
-            if (command === 'LOCK') {
-                const args = rawArgs.trim().split(/\s+/);
-                if (args.length !== 2 || !['ON', 'OFF'].includes(args[1].toUpperCase())) {
-                    throw new Error('Usage: LOCK unit ON|OFF');
-                }
-                const target = this.resolveUnit(args[0]);
-                const document = await this.sourceDocument(target.document.path);
-                const annotation = this.annotation(target.unit, { locked: args[1].toUpperCase() === 'ON' });
-                const params = {
-                    source: document.getText(), path: target.document.path,
-                    expectedHash: target.document.sourceHash, unitId: target.unit.id, annotation,
-                };
-                const proposal = target.unit.annotation
-                    ? await this.adapter.updateAnnotation(params)
-                    : await this.adapter.adoptUnit(params);
-                const edit = new vscode.WorkspaceEdit();
-                this.addProposal(edit, document, proposal);
-                if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
-                this.postCommandResult(true, `LOCK: ${target.unit.qualifiedName} ${args[1].toUpperCase()}`);
-                return;
-            }
+            const document = await this.sourceDocument(target.document.path);
+            const params = {
+                source: document.getText(), path: target.document.path,
+                expectedHash: target.document.sourceHash, unitId: target.unit.id,
+                annotation: this.annotation(target.unit, overrides),
+            };
+            const proposal = target.unit.annotation
+                ? await this.adapter.updateAnnotation(params)
+                : await this.adapter.adoptUnit(params);
+            const edit = new vscode.WorkspaceEdit();
+            this.addProposal(edit, document, proposal);
+            if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
+            this.postCommandResult(true, `Updated ${target.unit.qualifiedName}.`);
         } catch (error) {
-            this.postCommandResult(false, `${command}: ${error instanceof Error ? error.message : String(error)}`);
+            this.postCommandResult(false, `${label}: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
