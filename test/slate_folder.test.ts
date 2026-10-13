@@ -13,6 +13,8 @@ const normalize = {
     owner: 'scoring-team',
     locked: false,
     imports: ['import math'],
+    uses: ['scoring/clamp'],
+    order: 2,
     code: [
         'def normalize(score: int, maximum: int) -> int:',
         '    raise NotImplementedError',
@@ -34,7 +36,10 @@ const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
 describe('slate/ folder format', () => {
     it('round-trips a node with unknown keys preserved and code written last', () => {
-        const text = serializeNode(parseNode(json(normalize)));
+        const node = parseNode(json(normalize));
+        expect(node).toMatchObject({ uses: ['scoring/clamp'], order: 2, extra: { owner: 'scoring-team' } });
+        expect(() => parseNode(json({ ...normalize, kind: 'module' }))).toThrow(SlateFormatError);
+        const text = serializeNode(node);
         const parsed = JSON.parse(text);
         expect(parsed.owner).toBe('scoring-team');
         expect(Object.keys(parsed).at(-1)).toBe('code');

@@ -3,6 +3,8 @@ export interface LlamaOptions {
     model: string;
     outputTokens: number;
     timeoutMs: number;
+    /** System message; defaults to the function implementation contract. */
+    system?: string;
 }
 
 export class LlamaTransportError extends Error {}
@@ -28,7 +30,7 @@ export async function streamLlamaCompletion(
             body: JSON.stringify({
                 model: options.model,
                 messages: [
-                    { role: 'system', content: 'You are a constrained Python function implementation engine. Follow the output contract exactly.' },
+                    { role: 'system', content: options.system ?? 'You are a constrained Python function implementation engine. Follow the output contract exactly.' },
                     { role: 'user', content: prompt },
                 ],
                 stream: true,

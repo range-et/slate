@@ -35,13 +35,21 @@ export interface SlateNode {
     examples: string[];
     describedBy?: 'human' | 'llama';
     locked: boolean;
+    /** Module-level statements instead of one definition: `prelude` compiles before the nodes, `epilogue` after. */
+    kind?: NodeKind;
+    /** Compile order within the output module (importer-assigned); otherwise node id order. */
+    order?: number;
     imports: string[];
+    /** Node ids this node references; compile turns cross-module ones into imports. */
+    uses: string[];
     code: string[];
     /** Unknown keys, preserved on write. */
     extra: Record<string, unknown>;
 }
 
-const NODE_KEYS = ['slate', 'name', 'language', 'intent', 'contract', 'context', 'examples', 'describedBy', 'locked', 'imports', 'code'];
+export type NodeKind = 'prelude' | 'epilogue';
+
+const NODE_KEYS = ['slate', 'name', 'language', 'kind', 'intent', 'contract', 'context', 'examples', 'describedBy', 'locked', 'order', 'imports', 'uses', 'code'];
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ZERO_RANGE = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
 
@@ -124,6 +132,10 @@ export function parseNode(text: string): SlateNode {
         throw new SlateFormatError('describedBy must be "human" or "llama"');
     }
     if (value.locked !== undefined && typeof value.locked !== 'boolean') throw new SlateFormatError('locked must be true or false');
+    if (value.kind !== undefined && value.kind !== 'prelude' && value.kind !== 'epilogue') {
+        throw new SlateFormatError('kind must be "prelude" or "epilogue"');
+    }
+    if (value.order !== undefined && !Number.isInteger(value.order)) throw new SlateFormatError('order must be an integer');
     const extra: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) if (!NODE_KEYS.includes(key)) extra[key] = item;
     return {
@@ -135,7 +147,10 @@ export function parseNode(text: string): SlateNode {
         examples: stringList(value.examples, 'examples'),
         describedBy: value.describedBy as SlateNode['describedBy'],
         locked: value.locked === true,
+        kind: value.kind as NodeKind | undefined,
+        order: value.order as number | undefined,
         imports: stringList(value.imports, 'imports'),
+        uses: stringList(value.uses, 'uses'),
         code: stringList(value.code, 'code'),
         extra,
     };
@@ -144,13 +159,16 @@ export function parseNode(text: string): SlateNode {
 export function serializeNode(node: SlateNode): string {
     const value: Record<string, unknown> = { slate: FORMAT_VERSION, name: node.name };
     if (node.language) value.language = node.language;
+    if (node.kind) value.kind = node.kind;
     if (node.intent) value.intent = node.intent;
     if (node.contract) value.contract = node.contract;
     if (node.context.length) value.context = node.context;
     if (node.examples.length) value.examples = node.examples;
     if (node.describedBy) value.describedBy = node.describedBy;
     value.locked = node.locked;
+    if (node.order !== undefined) value.order = node.order;
     if (node.imports.length) value.imports = node.imports;
+    if (node.uses.length) value.uses = node.uses;
     Object.assign(value, node.extra);
     value.code = node.code;
     return `${JSON.stringify(value, null, 2)}\n`;
@@ -227,6 +245,10 @@ export function indexNode(
     }
     const parsed = parseModule(code, relativePath, nodeId);
     const diagnostics = [...parsed.diagnostics];
+    if (node.kind) {
+        // Module state: any statements; conditional definitions inside it are not separate nodes.
+        return { document: { ...parsed, ...base, nodeKind: node.kind, units: [], diagnostics }, node, code };
+    }
     if (parsed.valid) {
         const topLevel = parsed.units.filter(unit => unit.parentId === null);
         const definition = topLevel.find(unit => unit.id === nodeId);
@@ -255,11 +277,12 @@ export function indexNode(
     return { document: { ...parsed, ...base, diagnostics }, node, code };
 }
 
-/** Validate replacement code for a node: one definition with the node's name. */
+/** Validate replacement code for a node: one definition with the node's name (any statements for module state). */
 export function checkNodeCode(node: SlateNode, nodeId: string, code: string): void {
     const source = `${codeLines(code).join('\n')}\n`;
     const parsed = parseModule(source, '<node>', nodeId);
     if (!parsed.valid) throw new SlateFormatError('code is not valid Python');
+    if (node.kind) return;
     const topLevel = parsed.units.filter(unit => unit.parentId === null);
     if (topLevel.length !== 1 || topLevel[0].name !== node.name || extraPythonStatements(source) > 0) {
         throw new SlateFormatError(`code must contain exactly one definition named ${node.name} (put imports in "imports")`);
@@ -277,6 +300,6 @@ export function nodeFromSignature(signature: string, intent: string): SlateNode 
     }
     return {
         name: unit.name, intent: intent.trim(), contract: '', context: [], examples: [],
-        describedBy: 'human', locked: false, imports: [], code, extra: {},
+        describedBy: 'human', locked: false, imports: [], uses: [], code, extra: {},
     };
 }

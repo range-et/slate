@@ -113,6 +113,7 @@ export const folderDemoSnapshot: HarnessSnapshot = {
             intent: 'Convert a score to an integer percentage from 0 through 100', contract: '',
             dependencies: ['clamp'], examples: [], locked: false,
         })]),
+        { ...nodeDocument('scoring/_prelude', '# Letter grade cutoffs.\nCUTOFFS = {90: "A", 80: "B", 70: "C"}\n', []), nodeKind: 'prelude' },
         nodeDocument('scoring/Grader', 'class Grader:\n    def grade(self, score: int) -> int:\n        ...\n', [
             nodeUnit('scoring/Grader', '', { intent: 'Assign letter grades', contract: '', dependencies: [], examples: [], locked: false }, 'class'),
             nodeUnit('scoring/Grader.grade', 'def grade(self, score: int) -> int', null, 'method', 'scoring/Grader'),

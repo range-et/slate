@@ -14,8 +14,11 @@ export type FakeLlamaBehavior = {
     delayMs?: number;
 };
 
+/** Fixed chunks for every request, or chunks computed per request (0-based index). */
+export type FakeLlamaReply = string[] | ((request: FakeLlamaRequest, index: number) => string[]);
+
 export async function startFakeLlamaServer(
-    chunks = ['def generated() -> int:\n', '    return 42\n'],
+    reply: FakeLlamaReply = ['def generated() -> int:\n', '    return 42\n'],
     behavior: FakeLlamaBehavior = {},
 ): Promise<FakeLlamaServer> {
     const requests: FakeLlamaRequest[] = [];
@@ -42,6 +45,7 @@ export async function startFakeLlamaServer(
                 return;
             }
             requests.push(parsed);
+            const chunks = typeof reply === 'function' ? reply(parsed, requests.length - 1) : reply;
             if (parsed.stream === true) {
                 response.writeHead(200, {
                     'content-type': 'text/event-stream',
@@ -70,6 +74,9 @@ export async function startFakeLlamaServer(
     return {
         url: `http://127.0.0.1:${address.port}`,
         requests,
-        close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
+        close: () => new Promise<void>((resolve, reject) => {
+            server.close(error => error ? reject(error) : resolve());
+            server.closeAllConnections();
+        }),
     };
 }

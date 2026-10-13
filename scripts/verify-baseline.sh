@@ -37,4 +37,14 @@ SLATE_CALCULATOR_DIR="$TMP/calculator" \
 SLATE_TIC_TAC_TOE_FILE="$TMP/tic_tac_toe/game.py" \
   "$PYTHON" -m pytest --import-mode=importlib legacy/examples/tic_tac_toe/tests
 
+# Phase 2 gate: port the example Python into slate/ nodes, compile them back,
+# and run the original suites against the output. The checked-in tic-tac-toe
+# game.py lacks its imports, so its legacy compile output is the port source.
+node scripts/port-compile.js legacy/examples/calculator "$TMP/ported/calculator"
+node scripts/port-compile.js "$TMP/tic_tac_toe" "$TMP/ported/tic_tac_toe"
+SLATE_CALCULATOR_DIR="$TMP/ported/calculator" \
+  "$PYTHON" -m pytest --import-mode=importlib legacy/examples/calculator/tests
+SLATE_TIC_TAC_TOE_FILE="$TMP/ported/tic_tac_toe/game.py" \
+  "$PYTHON" -m pytest --import-mode=importlib legacy/examples/tic_tac_toe/tests
+
 echo "Slate baseline verification passed."

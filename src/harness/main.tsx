@@ -81,7 +81,7 @@ function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
             className={`slate-node slate-node--${data.kind} ${data.container ? 'slate-node--container' : ''} ${selected ? 'is-selected' : ''} ${data.invalid ? 'is-invalid' : ''} ${data.stale ? 'is-stale' : ''}`}
             style={colorStyle}
         >
-            {!data.container && <Handle type="target" position={Position.Left} className="slate-node__handle" />}
+            {!data.container && data.kind !== 'module' && <Handle type="target" position={Position.Left} className="slate-node__handle" />}
             <div className="slate-node__kind">
                 <span>{data.kind.replace('_', ' ')}</span>
                 <span>
@@ -95,7 +95,7 @@ function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
             {data.editableIntent && data.unit && !data.container
                 ? <InlineIntent unitId={data.unit.id} intent={data.intent ?? ''} />
                 : data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
-            {!data.container && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
+            {!data.container && data.kind !== 'module' && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
         </div>
     );
 }
@@ -164,7 +164,7 @@ function Inspector({
     const [noteBody, setNoteBody] = useState(note?.body ?? '');
     const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
     const folderMode = snapshot.mode === 'folder';
-    const nodeCode = folderMode && unit?.parentId === null ? document?.source ?? '' : null;
+    const nodeCode = folderMode && (unit?.parentId === null || node.data.kind === 'module') ? document?.source ?? '' : null;
     const [codeDraft, setCodeDraft] = useState(nodeCode ?? '');
     useEffect(() => { setCodeDraft(nodeCode ?? ''); }, [unit?.id, document?.sourceHash]);
     useEffect(() => { setIntentDraft(intent); setContractDraft(contract); }, [unit?.id, intent, contract]);
@@ -207,6 +207,17 @@ function Inspector({
                     type: 'noteDelete', revision: snapshot.revision, noteId: note.id,
                 })}>Delete board note</button>
             </>}
+            {node.data.kind === 'module' && nodeCode !== null && <section className="node-code">
+                <p>{document?.nodeKind === 'prelude'
+                    ? 'Module-level statements that compile right after the imports, before the nodes.'
+                    : 'Module-level statements that compile after the nodes, such as the main guard.'}</p>
+                <CodeEditor key={`${node.id}:${document?.sourceHash}`} initial={nodeCode} onChange={setCodeDraft} />
+                <div className="harness-inspector__actions">
+                    <button disabled={codeDraft === nodeCode} onClick={() => action({
+                        kind: 'setNodeCode', target: node.id, code: codeDraft, baseHash: document?.sourceHash,
+                    })}>Save code</button>
+                </div>
+            </section>}
             {unit && (
                 <>
                     <dl>
@@ -476,6 +487,7 @@ function HarnessApp() {
     const [paletteQuery, setPaletteQuery] = useState('');
     const [paletteOpen, setPaletteOpen] = useState(false);
     const [commandResult, setCommandResult] = useState('Ready — press ⌘K for commands');
+    const [describing, setDescribing] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState<HarnessSearchResult[]>([]);
     const [packets, setPackets] = useState<Record<string, { packet?: PacketPreview; error?: string }>>({});
@@ -540,6 +552,7 @@ function HarnessApp() {
                 setProposal(null);
                 setAcceptedUnitId(data.unitId);
             }
+            if (data.type === 'describeState') setDescribing(data.running);
         };
         window.addEventListener('message', onMessage);
         vscode?.postMessage({ type: 'ready' });
@@ -667,6 +680,12 @@ function HarnessApp() {
         if (snapshot.mode === 'folder') {
             items.push({ id: 'new-node', group: 'canvas', label: 'New node…', detail: 'Typed signature + intent',
                 run: () => { const point = viewCenter(); post({ kind: 'createNode', x: point.x, y: point.y }); } });
+            items.push(describing
+                ? { id: 'describe-stop', group: 'canvas', label: 'Stop describing', run: () => post({ kind: 'cancelDescribe' }) }
+                : { id: 'describe', group: 'canvas', label: 'Describe nodes with llama.cpp', detail: 'Fills missing intents, leaves first',
+                    run: () => post({ kind: 'describeNodes' }) });
+            items.push({ id: 'compile', group: 'canvas', label: 'Compile project', detail: 'slate/ → Python modules',
+                run: () => post({ kind: 'compile' }) });
         }
         items.push(
             { id: 'new-note', group: 'canvas', label: 'New board note',
@@ -690,7 +709,7 @@ function HarnessApp() {
         const text = paletteQuery.trim();
         if (text) items.push({ id: 'search', group: 'search', always: true, label: `Search code for “${text}”`, run: () => runSearch(text) });
         return items;
-    }, [snapshot, selected?.data.unit, paletteQuery]);
+    }, [snapshot, selected?.data.unit, paletteQuery, describing]);
 
     return (
         <main className="harness-shell">

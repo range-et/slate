@@ -54,6 +54,8 @@ export interface HarnessDocument extends ParseModuleResult {
     stale: boolean;
     /** Folder mode: the node's code text (unit ranges are relative to it). */
     source?: string;
+    /** Folder mode: module state (`prelude`/`epilogue`) instead of one definition. */
+    nodeKind?: 'prelude' | 'epilogue';
 }
 
 export interface HarnessSnapshot {
@@ -134,4 +136,5 @@ export type HostMessage =
     | { type: 'generationFailed'; unitId: string; message: string }
     | { type: 'proposalReady'; proposal: HarnessProposal }
     | { type: 'proposalStale'; proposalId: string; message: string }
-    | { type: 'proposalAccepted'; unitId: string };
+    | { type: 'proposalAccepted'; unitId: string }
+    | { type: 'describeState'; running: boolean };

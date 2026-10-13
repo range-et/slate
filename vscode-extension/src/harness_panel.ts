@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import { BoardNote, HarnessDocument, HarnessSnapshot, ParsedUnit, ParseModuleResult, SourceProposal, SourceRange } from './harness_protocol';
 import { buildGenerationPacket, GenerationPacket, stripModelEnvelope } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
+import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
+import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
 import { loadProject, serializeProject } from './project_v2';
 import { searchUnits } from './search';
@@ -68,6 +70,7 @@ export class HarnessPanel implements vscode.Disposable {
     private revision = 0;
     private projectWarningsShown = false;
     private generation: AbortController | undefined;
+    private describeRun: AbortController | undefined;
     private pendingProposal: {
         id: string;
         packet: GenerationPacket;
@@ -733,7 +736,8 @@ export class HarnessPanel implements vscode.Disposable {
 
     private folderNodeId(target: unknown): string {
         const document = typeof target === 'string'
-            ? this.snapshot?.documents.find(item => item.units.some(unit => unit.id === target && unit.parentId === null))
+            ? this.snapshot?.documents.find(item => item.units.some(unit => unit.id === target && unit.parentId === null)
+                || (item.nodeKind && nodeIdForPath(item.path) === target))
             : undefined;
         const nodeId = document ? nodeIdForPath(document.path) : null;
         if (!nodeId) throw new Error('Metadata belongs to a node; select a node.');
@@ -743,6 +747,7 @@ export class HarnessPanel implements vscode.Disposable {
     private async updateFolderLayout(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
         if (!this.snapshot || !message.positions || typeof message.positions !== 'object') return;
         const validIds = new Set(this.snapshot.documents.flatMap(document => document.units.map(unit => unit.id))
+            .concat(this.snapshot.documents.filter(document => document.nodeKind).map(document => nodeIdForPath(document.path)!))
             .concat(folder.layout.notes.map(note => note.id)));
         let changed = false;
         for (const [id, point] of Object.entries(message.positions)) {
@@ -793,6 +798,22 @@ export class HarnessPanel implements vscode.Disposable {
                 await this.refresh();
                 const invalid = this.snapshot?.documents.filter(document => !document.valid || document.diagnostics.length > 0).length ?? 0;
                 this.postCommandResult(invalid === 0, invalid === 0 ? 'All nodes are valid.' : `${invalid} node(s) have problems.`);
+                return;
+            }
+            if (action.kind === 'compile') {
+                const result = await compileSlateFolder(folder.root);
+                const errors = result.diagnostics.filter(item => item.severity === 'error').length;
+                this.postCommandResult(errors === 0, errors === 0
+                    ? `Compiled ${result.files.length} file(s)${result.diagnostics.length ? ` with ${result.diagnostics.length} warning(s)` : ''}.`
+                    : `Compile stopped with ${errors} error(s); see Output → Slate.`);
+                return;
+            }
+            if (action.kind === 'describeNodes') {
+                await this.describe(folder);
+                return;
+            }
+            if (action.kind === 'cancelDescribe') {
+                this.describeRun?.abort();
                 return;
             }
             if (action.kind === 'saveWorkspace') {
@@ -846,6 +867,49 @@ export class HarnessPanel implements vscode.Disposable {
             this.postCommandResult(true, `Saved slate/nodes/${nodeId}.json`);
         } catch (error) {
             this.postCommandResult(false, error instanceof Error ? error.message : String(error));
+        }
+    }
+
+    /** Describe pass: one llama.cpp request per undescribed node, leaves first. */
+    private async describe(folder: SlateFolderHost): Promise<void> {
+        if (this.describeRun) {
+            this.postCommandResult(false, 'Describing is already running.');
+            return;
+        }
+        const controller = new AbortController();
+        this.describeRun = controller;
+        void this.panel.webview.postMessage({ type: 'describeState', running: true });
+        try {
+            const settings = this.generationSettings();
+            const { nodes } = await folder.readNodes();
+            const report = await describeNodes({
+                nodes,
+                complete: (prompt, signal) => streamLlamaCompletion(
+                    prompt, { ...settings, outputTokens: DESCRIBE_OUTPUT_TOKENS, system: DESCRIBE_SYSTEM }, signal, () => {},
+                ),
+                write: async (nodeId, described) => {
+                    const node = await folder.readNode(nodeId);
+                    if (node.intent.trim()) return; // Someone described it meanwhile; theirs wins.
+                    node.intent = described.intent;
+                    if (!node.contract.trim()) node.contract = described.contract;
+                    node.describedBy = 'llama';
+                    await folder.writeNode(nodeId, node);
+                    this.scheduleRefresh(0);
+                },
+                onProgress: message => this.postCommandResult(true, message),
+                signal: controller.signal,
+                hardLimitTokens: settings.contextWindowTokens - DESCRIBE_OUTPUT_TOKENS,
+            });
+            if (report.skipped.length) {
+                const output = slateOutput();
+                output.appendLine(`Describe skipped ${report.skipped.length} node(s):`);
+                for (const item of report.skipped) output.appendLine(`  - ${item.nodeId}: ${item.reason}`);
+            }
+        } catch (error) {
+            this.postCommandResult(false, `Describe: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            this.describeRun = undefined;
+            void this.panel.webview.postMessage({ type: 'describeState', running: false });
         }
     }
 
@@ -924,6 +988,11 @@ export class HarnessPanel implements vscode.Disposable {
         );
         editor.selection = new vscode.Selection(selection.start, selection.end);
         editor.revealRange(declaration, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
+
+    /** Project root (parent of slate/) in folder mode. */
+    get folderRoot(): vscode.Uri | undefined {
+        return this.folder?.root;
     }
 
     snapshotForTest(): HarnessSnapshot | undefined {
@@ -1048,6 +1117,7 @@ export class HarnessPanel implements vscode.Disposable {
         this.panel.dispose();
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.generation?.abort();
+        this.describeRun?.abort();
         this.refreshGeneration++;
         while (this.disposables.length) this.disposables.pop()?.dispose();
     }

@@ -15,7 +15,9 @@
   "activationEvents": [
     "onView:slate.launcher",
     "onCustomEditor:slate.editor",
-    "onCommand:slate.openHarness"
+    "onCommand:slate.openHarness",
+    "onCommand:slate.portProject",
+    "onCommand:slate.compile"
   ],
   "contributes": {
     "viewsContainers": {
@@ -59,6 +61,14 @@
       {
         "command": "slate.newProject",
         "title": "Slate: New Project…"
+      },
+      {
+        "command": "slate.portProject",
+        "title": "Slate: Port Python Project…"
+      },
+      {
+        "command": "slate.compile",
+        "title": "Slate: Compile Project"
       },
       {
         "command": "slate.scanWorkspace",

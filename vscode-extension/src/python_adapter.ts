@@ -286,6 +286,97 @@ export function parseModule(source: string, documentPath = '<memory>', nodeId?: 
     return result;
 }
 
+/** One binding of an import statement, normalized to its own line. */
+export interface PythonImport {
+    /** e.g. `from typing import Dict as D` or `import a.b`. */
+    line: string;
+    /** Name bound in the importing module; null for `*`. */
+    binding: string | null;
+    /** Module as written, including leading dots for relative imports. */
+    module: string;
+    /** Imported name for `from` imports; null for plain `import`. */
+    name: string | null;
+}
+
+/** Split an import statement (`ImportStatement` node or its text) into one import per binding. */
+export function splitImport(statement: string): PythonImport[] {
+    const node = parser.parse(statement).topNode.firstChild;
+    if (!node || node.name !== 'ImportStatement') return [];
+    const tokens = directChildren(node)
+        .filter(child => !['(', ')'].includes(child.name))
+        .map(child => ({ name: child.name, text: statement.slice(child.from, child.to) }));
+    const imports: PythonImport[] = [];
+    if (tokens[0]?.name === 'from') {
+        const importAt = tokens.findIndex(token => token.name === 'import');
+        const module = tokens.slice(1, importAt).map(token => token.text).join('');
+        const rest = tokens.slice(importAt + 1);
+        for (let index = 0; index < rest.length; index++) {
+            const token = rest[index];
+            if (token.name === '*') imports.push({ line: `from ${module} import *`, binding: null, module, name: '*' });
+            if (token.name !== 'VariableName') continue;
+            const alias = rest[index + 1]?.name === 'as' ? rest[index + 2]?.text : undefined;
+            imports.push({
+                line: `from ${module} import ${token.text}${alias ? ` as ${alias}` : ''}`,
+                binding: alias ?? token.text,
+                module,
+                name: token.text,
+            });
+            if (alias) index += 2;
+        }
+        return imports;
+    }
+    let dotted: string[] = [];
+    const flush = (alias?: string) => {
+        if (!dotted.length) return;
+        const module = dotted.join('.');
+        imports.push({ line: `import ${module}${alias ? ` as ${alias}` : ''}`, binding: alias ?? dotted[0], module, name: null });
+        dotted = [];
+    };
+    for (let index = 1; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (token.name === 'VariableName') dotted.push(token.text);
+        else if (token.name === 'as') { flush(tokens[index + 1]?.text); index++; }
+        else if (token.name === ',') flush();
+    }
+    flush();
+    return imports;
+}
+
+/** Every `VariableName` in the source: references, parameters, and assignment targets. */
+export function identifierNames(source: string): Set<string> {
+    const names = new Set<string>();
+    const cursor = parser.parse(source).cursor();
+    do {
+        if (cursor.name === 'VariableName') names.add(source.slice(cursor.from, cursor.to));
+    } while (cursor.next());
+    return names;
+}
+
+/** Names bound by top-level statements: assignment targets, definitions (also conditional ones), and imports. */
+export function topLevelBindings(source: string): Set<string> {
+    const names = new Set<string>();
+    const visit = (node: SyntaxNode) => {
+        if (node.name === 'AssignStatement') {
+            const assignAt = directChildren(node).map(child => child.name).lastIndexOf('AssignOp');
+            directChildren(node).slice(0, assignAt)
+                .filter(child => child.name === 'VariableName')
+                .forEach(child => names.add(source.slice(child.from, child.to)));
+        } else if (node.name === 'FunctionDefinition' || node.name === 'ClassDefinition') {
+            const name = firstDirect(node, 'VariableName');
+            if (name) names.add(source.slice(name.from, name.to));
+            return;
+        } else if (node.name === 'ImportStatement') {
+            for (const item of splitImport(source.slice(node.from, node.to))) if (item.binding) names.add(item.binding);
+            return;
+        }
+        if (['Script', 'Body', 'IfStatement', 'TryStatement', 'WithStatement', 'DecoratedStatement'].includes(node.name)) {
+            for (const child of directChildren(node)) visit(child);
+        }
+    };
+    visit(parser.parse(source).topNode);
+    return names;
+}
+
 function requireFresh(source: string, expectedHash: unknown): void {
     const actual = sourceHash(source);
     if (expectedHash !== actual) throw new AdapterError(`stale source: expected ${String(expectedHash)}, current ${actual}`);

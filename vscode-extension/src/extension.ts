@@ -3,9 +3,11 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { HarnessPanel } from './harness_panel';
+import { compileSlateFolder, portPythonFolder } from './port_compile_host';
 import { createProjectV2, serializeProject } from './project_v2';
 import { PythonAdapter } from './python_adapter';
 import { CONFIG_PATH, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
+import { SlateFolderHost } from './slate_folder_host';
 
 let pythonAdapter: PythonAdapter | undefined;
 
@@ -17,6 +19,8 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
         vscode.commands.registerCommand('slate.newProject', () => createNewSlateProject()),
         vscode.commands.registerCommand('slate.scanWorkspace', () => scanWorkspaceToFile()),
+        vscode.commands.registerCommand('slate.portProject', (source?: vscode.Uri) => portProject(source)),
+        vscode.commands.registerCommand('slate.compile', () => compileProject()),
         vscode.window.registerWebviewViewProvider('slate.launcher', new SlateLauncherView()),
         vscode.window.registerCustomEditorProvider(
             'slate.editor',
@@ -66,6 +70,26 @@ async function createNewSlateProject(): Promise<void> {
         );
     }
     await vscode.commands.executeCommand('vscode.openWith', config, 'slate.editor');
+}
+
+async function portProject(source?: vscode.Uri): Promise<number> {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first; Slate writes its slate/ folder there.');
+        return 0;
+    }
+    const count = await portPythonFolder(folder.uri, source);
+    if (count > 0) await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.joinPath(folder.uri, ...CONFIG_PATH.split('/')), 'slate.editor');
+    return count;
+}
+
+async function compileProject(): Promise<Awaited<ReturnType<typeof compileSlateFolder>> | undefined> {
+    const root = HarnessPanel.current?.folderRoot ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root || !await SlateFolderHost.detect(root)) {
+        vscode.window.showErrorMessage(`No ${CONFIG_PATH} found. Create or port a Slate project first.`);
+        return undefined;
+    }
+    return compileSlateFolder(root);
 }
 
 async function scanWorkspaceToFile(): Promise<void> {

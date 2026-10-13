@@ -7,7 +7,7 @@ const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 export type SlateNodeData = {
     label: string;
     detail: string;
-    kind: 'document' | 'note' | HarnessUnit['kind'];
+    kind: 'document' | 'note' | 'module' | HarnessUnit['kind'];
     identity?: HarnessUnit['identity'];
     invalid?: boolean;
     stale?: boolean;
@@ -37,8 +37,29 @@ function buildFolderNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[
         const column = folders.indexOf(folder);
         const row = rows.get(folder) ?? 0;
         const groupColor = GROUP_COLORS[column % GROUP_COLORS.length];
-        const top = document.units.find(unit => unit.parentId === null);
         const nodeId = nodeIdOf(document.path);
+        if (document.nodeKind) {
+            // Module state: a small node showing the statement it starts with.
+            rows.set(folder, row + 1);
+            const firstLine = (document.source ?? '').split('\n').find(line => line.trim() && !line.trim().startsWith('#'));
+            nodes.push({
+                id: nodeId,
+                type: 'slate',
+                position: snapshot.layout?.[nodeId] ?? { x: 80 + column * 340, y: 60 + row * 150 },
+                data: {
+                    label: document.nodeKind === 'prelude' ? 'module state' : 'module tail',
+                    detail: firstLine?.trim() ?? '',
+                    kind: 'module',
+                    invalid: !document.valid,
+                    stale: document.stale,
+                    groupColor,
+                    path: nodeId,
+                    problem: document.diagnostics[0]?.message,
+                },
+            });
+            continue;
+        }
+        const top = document.units.find(unit => unit.parentId === null);
         const id = top?.id ?? document.id;
         const children = top ? directChildren(document.units, top.id) : [];
         const isClass = top?.kind === 'class';

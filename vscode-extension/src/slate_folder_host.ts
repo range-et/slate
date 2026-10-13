@@ -89,6 +89,25 @@ export class SlateFolderHost {
         return { config, documents, sources };
     }
 
+    /** Every node file, parsed (dirty buffers included); unreadable files are reported, not thrown. */
+    async readNodes(): Promise<{ config: SlateConfig; nodes: Map<string, SlateNode>; errors: string[] }> {
+        const configFile = await this.read(CONFIG_PATH);
+        if (!configFile) throw new Error(`${CONFIG_PATH} is missing.`);
+        const config = parseConfig(configFile.text);
+        const nodes = new Map<string, SlateNode>();
+        const errors: string[] = [];
+        for (const uri of await vscode.workspace.findFiles(this.nodePattern())) {
+            const relativePath = this.relative(uri);
+            const file = await this.read(relativePath);
+            try {
+                if (file) nodes.set(nodeIdForPath(relativePath)!, parseNode(file.text));
+            } catch (error) {
+                errors.push(`${relativePath}: ${(error as Error).message}`);
+            }
+        }
+        return { config, nodes, errors };
+    }
+
     async writeLayout(): Promise<void> {
         await vscode.workspace.fs.writeFile(this.uri(LAYOUT_PATH), new TextEncoder().encode(serializeLayout(this.layout)));
     }
