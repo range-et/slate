@@ -1,0 +1,21 @@
+{
+  "slate": 3,
+  "name": "report",
+  "inputs": [
+    { "name": "score", "annotation": "int" }
+  ],
+  "outputs": [
+    { "name": "text", "annotation": "str" }
+  ],
+  "instances": [
+    { "id": "half", "kind": "value", "value": "50" },
+    { "id": "g", "node": "grade" },
+    { "id": "s", "node": "lib:vendor/textutil.py:shout" }
+  ],
+  "wires": [
+    { "from": "input:score", "to": "g.in:score" },
+    { "from": "half.out", "to": "g.in:maximum" },
+    { "from": "g.out:text", "to": "s.in:text" },
+    { "from": "s.out", "to": "output:text" }
+  ]
+}

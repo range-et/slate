@@ -1,22 +1,26 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import type { HarnessDocument } from './harness_protocol';
+import { FLOWS_DIR, flowIdForPath, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
+import type { HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
+import { parseModule } from './python_adapter';
 import {
-    CONFIG_PATH, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
+    CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
     serializeLayout, serializeNode, SlateConfig, SlateLayout, SlateNode,
 } from './slate_folder';
 
 export interface FolderIndex {
     config: SlateConfig;
     documents: HarnessDocument[];
+    flows: HarnessFlow[];
+    library: LibraryDocument[];
     /** Node code text keyed by document path; unit ranges are relative to it. */
     sources: Map<string, string>;
 }
 
 /** Filesystem side of the decoupled slate/ folder. The panel owns the webview. */
 export class SlateFolderHost {
-    layout: SlateLayout = { positions: {}, notes: [] };
+    layout: SlateLayout = emptyLayout();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
     constructor(readonly root: vscode.Uri) {}
@@ -45,6 +49,73 @@ export class SlateFolderHost {
 
     nodePattern(): vscode.RelativePattern {
         return new vscode.RelativePattern(this.root, `${NODES_DIR}/**/*.json`);
+    }
+
+    flowPattern(): vscode.RelativePattern {
+        return new vscode.RelativePattern(this.root, `${FLOWS_DIR}/**/*.json`);
+    }
+
+    /** Parsed flows by id; unreadable flow files are reported with a problem. */
+    async readFlows(): Promise<HarnessFlow[]> {
+        const flows: HarnessFlow[] = [];
+        for (const uri of await vscode.workspace.findFiles(this.flowPattern())) {
+            const id = flowIdForPath(this.relative(uri));
+            const file = id ? await this.read(pathForFlowId(id)) : undefined;
+            if (!id || !file) continue;
+            try {
+                flows.push({ id, flow: parseFlow(file.text) });
+            } catch (error) {
+                flows.push({ id, flow: null, problem: (error as Error).message });
+            }
+        }
+        return flows.sort((left, right) => left.id.localeCompare(right.id));
+    }
+
+    async writeFlow(flowId: string, flow: SlateFlow): Promise<void> {
+        const uri = this.uri(pathForFlowId(flowId));
+        await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(serializeFlow(flow)));
+    }
+
+    /** Library files from slate.json `library` (files or folders of .py), with top-level ids `lib:<path>:<name>`. */
+    async readLibrary(config: SlateConfig): Promise<LibraryDocument[]> {
+        const documents: LibraryDocument[] = [];
+        const visit = async (relativePath: string): Promise<void> => {
+            const uri = this.uri(relativePath);
+            let type: vscode.FileType;
+            try {
+                type = (await vscode.workspace.fs.stat(uri)).type;
+            } catch {
+                documents.push({ path: relativePath, units: [], problem: 'not found' });
+                return;
+            }
+            if (type & vscode.FileType.Directory) {
+                for (const [name, childType] of await vscode.workspace.fs.readDirectory(uri)) {
+                    if (childType & vscode.FileType.Directory ? !name.startsWith('.') && name !== '__pycache__' : name.endsWith('.py')) {
+                        await visit(`${relativePath.replace(/\/+$/, '')}/${name}`);
+                    }
+                }
+                return;
+            }
+            const parsed = parseModule((await this.read(relativePath))?.text ?? '', relativePath);
+            const ids = new Map(parsed.units.filter(unit => unit.parentId === null).map(unit => [unit.id, `lib:${relativePath}:${unit.name}`]));
+            documents.push({
+                path: relativePath,
+                units: parsed.units.map(unit => ({ ...unit, id: ids.get(unit.id) ?? unit.id, parentId: unit.parentId && (ids.get(unit.parentId) ?? unit.parentId), annotation: null })),
+                problem: parsed.valid ? undefined : parsed.diagnostics[0]?.message,
+            });
+        };
+        for (const entry of config.library ?? []) await visit(entry.replace(/\\/g, '/'));
+        return documents.sort((left, right) => left.path.localeCompare(right.path));
+    }
+
+    /** Callable signatures of library top-level units, for compile. */
+    static librarySignatures(library: LibraryDocument[]): Map<string, CallableSignature> {
+        const signatures = new Map<string, CallableSignature>();
+        for (const document of library) {
+            for (const unit of document.units.filter(item => item.parentId === null)) signatures.set(unit.id, unitSignature(unit, document.units));
+        }
+        return signatures;
     }
 
     private async read(relativePath: string): Promise<{ text: string; version: number | null } | undefined> {
@@ -86,7 +157,7 @@ export class SlateFolderHost {
             documents.push(document);
         }
         documents.sort((left, right) => left.path.localeCompare(right.path));
-        return { config, documents, sources };
+        return { config, documents, sources, flows: await this.readFlows(), library: await this.readLibrary(config) };
     }
 
     /** Every node file, parsed (dirty buffers included); unreadable files are reported, not thrown. */
@@ -106,6 +177,12 @@ export class SlateFolderHost {
             }
         }
         return { config, nodes, errors };
+    }
+
+    async readConfigText(): Promise<string> {
+        const file = await this.read(CONFIG_PATH);
+        if (!file) throw new Error(`${CONFIG_PATH} is missing.`);
+        return file.text;
     }
 
     async writeLayout(): Promise<void> {

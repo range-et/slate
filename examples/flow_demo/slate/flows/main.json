@@ -1,0 +1,13 @@
+{
+  "slate": 3,
+  "name": "main",
+  "inputs": [],
+  "outputs": [],
+  "instances": [
+    { "id": "value", "kind": "value", "value": "42" },
+    { "id": "flow:report", "node": "report" }
+  ],
+  "wires": [
+    { "from": "value.out", "to": "flow:report.in:score" }
+  ]
+}

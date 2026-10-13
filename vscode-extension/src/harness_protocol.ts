@@ -30,8 +30,17 @@ export interface ParsedUnit {
     decorators: string[];
     async?: boolean;
     parameters?: string;
+    /** Structured parameters (functions only); `positional` = positional-only. */
+    params?: UnitParam[];
     returnAnnotation?: string | null;
     signature?: string;
+}
+
+export interface UnitParam {
+    name: string;
+    annotation: string | null;
+    default: string | null;
+    kind: 'positional' | 'keyword' | 'var' | 'kwvar';
 }
 
 export interface ParseModuleResult {
@@ -56,13 +65,80 @@ export interface HarnessDocument extends ParseModuleResult {
     nodeKind?: 'prelude' | 'epilogue';
 }
 
+export type Point = { x: number; y: number };
+
 export interface HarnessSnapshot {
     revision: number;
     projectName: string;
     documents: HarnessDocument[];
     notes?: BoardNote[];
     contextEdges?: HarnessGraphEdge[];
-    layout?: Record<string, { x: number; y: number }>;
+    /** Root (Compose) canvas positions by canvas id. */
+    layout?: Record<string, Point>;
+    /** Map view positions by node id. */
+    mapPositions?: Record<string, Point>;
+    /** Flow canvas positions: flow id → instance id (or `__input`/`__output`) → point. */
+    flowPositions?: Record<string, Record<string, Point>>;
+    refs?: CanvasRef[];
+    placeholders?: Placeholder[];
+    flows?: HarnessFlow[];
+    library?: LibraryDocument[];
+}
+
+/** A canvas alias of a node, flow, or library unit (stored in layout.json). */
+export interface CanvasRef {
+    id: string;
+    target: string;
+}
+
+/** A name-only stand-in for a node that may not exist yet (stored in layout.json). */
+export interface Placeholder {
+    id: string;
+    name: string;
+    signature?: string;
+}
+
+export interface FlowPort {
+    name: string;
+    annotation: string | null;
+}
+
+/** An instance calls a node, flow, or library unit (`node`), or is a literal value (`kind: 'value'`, Python expression). */
+export interface FlowInstance {
+    id: string;
+    node?: string;
+    kind?: 'value';
+    value?: string;
+}
+
+/** Endpoints: `<instance>.out`, `<instance>.out:<name>`, `<instance>.in:<param>`, `input:<name>`, `output:<name>`. */
+export interface FlowWire {
+    from: string;
+    to: string;
+}
+
+export interface SlateFlow {
+    name: string;
+    inputs: FlowPort[];
+    outputs: FlowPort[];
+    instances: FlowInstance[];
+    wires: FlowWire[];
+    /** Unknown keys, preserved on write. */
+    extra: Record<string, unknown>;
+}
+
+export interface HarnessFlow {
+    /** Path under slate/flows without `.json`; `main` is the root canvas. */
+    id: string;
+    flow: SlateFlow | null;
+    problem?: string;
+}
+
+/** Read-only library code from slate.json `library`; top-level unit ids are `lib:<path>:<qualifiedName>`. */
+export interface LibraryDocument {
+    path: string;
+    units: ParsedUnit[];
+    problem?: string;
 }
 
 export interface BoardNote {

@@ -99,7 +99,7 @@ describe('slate/ folder format', () => {
     it('validates slate.json and tolerates a missing or partial layout.json', () => {
         expect(parseConfig('{"slate": 3, "name": "demo"}')).toEqual({ slate: 3, name: 'demo', language: 'python' });
         expect(() => parseConfig('{"slate": 2, "name": "demo"}')).toThrow(SlateFormatError);
-        expect(parseLayout(undefined)).toEqual({ positions: {}, notes: [] });
+        expect(parseLayout(undefined)).toEqual({ positions: {}, notes: [], refs: [], placeholders: [], mapPositions: {}, flowPositions: {} });
         expect(parseLayout('{"positions": {"a": {"x": 1, "y": 2}, "b": {"x": "no"}}}').positions).toEqual({ a: { x: 1, y: 2 } });
     });
 

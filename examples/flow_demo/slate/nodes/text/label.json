@@ -1,0 +1,10 @@
+{
+  "slate": 3,
+  "name": "label",
+  "intent": "Format a percentage for display",
+  "locked": false,
+  "code": [
+    "def label(value: int) -> str:",
+    "    return f\"{value}%\""
+  ]
+}

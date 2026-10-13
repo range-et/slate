@@ -1,6 +1,6 @@
 import { parser } from '@lezer/python';
 
-import type { BoardNote, HarnessDocument } from './harness_protocol';
+import type { BoardNote, CanvasRef, HarnessDocument, Placeholder, Point } from './harness_protocol';
 import { parseModule } from './python_adapter';
 
 // The decoupled `slate/` folder: slate.json, layout.json, and one JSON file per
@@ -19,11 +19,17 @@ export interface SlateConfig {
     name: string;
     language: string;
     compile?: { outDir: string };
+    /** Read-only library files (relative to the project root), callable from flows and refs. */
+    library?: string[];
 }
 
 export interface SlateLayout {
-    positions: Record<string, { x: number; y: number }>;
+    positions: Record<string, Point>;
     notes: BoardNote[];
+    refs: CanvasRef[];
+    placeholders: Placeholder[];
+    mapPositions: Record<string, Point>;
+    flowPositions: Record<string, Record<string, Point>>;
 }
 
 export interface SlateNode {
@@ -90,31 +96,55 @@ export function parseConfig(text: string): SlateConfig {
         }
         config.compile = { outDir: value.compile.outDir };
     }
+    if (value.library !== undefined) config.library = stringList(value.library, 'slate.json library');
     return config;
 }
 
+export function emptyLayout(): SlateLayout {
+    return { positions: {}, notes: [], refs: [], placeholders: [], mapPositions: {}, flowPositions: {} };
+}
+
+function points(value: unknown): Record<string, Point> {
+    const result: Record<string, Point> = {};
+    if (!isRecord(value)) return result;
+    for (const [id, point] of Object.entries(value)) {
+        if (isRecord(point) && Number.isFinite(point.x) && Number.isFinite(point.y)) result[id] = { x: point.x as number, y: point.y as number };
+    }
+    return result;
+}
+
 export function parseLayout(text: string | undefined): SlateLayout {
-    if (text === undefined || !text.trim()) return { positions: {}, notes: [] };
+    if (text === undefined || !text.trim()) return emptyLayout();
     const value: unknown = JSON.parse(text);
     if (!isRecord(value)) throw new SlateFormatError('layout.json must be an object');
-    const positions: SlateLayout['positions'] = {};
-    if (isRecord(value.positions)) {
-        for (const [id, point] of Object.entries(value.positions)) {
-            if (isRecord(point) && Number.isFinite(point.x) && Number.isFinite(point.y)) {
-                positions[id] = { x: point.x as number, y: point.y as number };
-            }
-        }
-    }
+    const positions = points(value.positions);
     const notes = Array.isArray(value.notes)
         ? value.notes.filter((note): note is BoardNote => isRecord(note)
             && typeof note.id === 'string' && typeof note.title === 'string' && typeof note.body === 'string'
             && (note.attachedTo === null || typeof note.attachedTo === 'string'))
         : [];
-    return { positions, notes };
+    const refs = Array.isArray(value.refs)
+        ? value.refs.filter((ref): ref is CanvasRef => isRecord(ref) && typeof ref.id === 'string' && typeof ref.target === 'string')
+            .map(ref => ({ id: ref.id, target: ref.target }))
+        : [];
+    const placeholders = Array.isArray(value.placeholders)
+        ? value.placeholders.filter((item): item is Placeholder => isRecord(item) && typeof item.id === 'string' && typeof item.name === 'string'
+            && (item.signature === undefined || typeof item.signature === 'string'))
+            .map(item => item.signature ? { id: item.id, name: item.name, signature: item.signature } : { id: item.id, name: item.name })
+        : [];
+    const flowPositions: SlateLayout['flowPositions'] = {};
+    if (isRecord(value.flowPositions)) for (const [flow, entries] of Object.entries(value.flowPositions)) flowPositions[flow] = points(entries);
+    return { positions, notes, refs, placeholders, mapPositions: points(value.mapPositions), flowPositions };
 }
 
+/** Empty sections are omitted so older layout files stay unchanged. */
 export function serializeLayout(layout: SlateLayout): string {
-    return `${JSON.stringify({ positions: layout.positions, notes: layout.notes }, null, 2)}\n`;
+    const value: Record<string, unknown> = { positions: layout.positions, notes: layout.notes };
+    if (layout.refs.length) value.refs = layout.refs;
+    if (layout.placeholders.length) value.placeholders = layout.placeholders;
+    if (Object.keys(layout.mapPositions).length) value.mapPositions = layout.mapPositions;
+    if (Object.keys(layout.flowPositions).length) value.flowPositions = layout.flowPositions;
+    return `${JSON.stringify(value, null, 2)}\n`;
 }
 
 export function parseNode(text: string): SlateNode {

@@ -3,7 +3,7 @@ import { createHash } from 'crypto';
 import { parser } from '@lezer/python';
 import type { SyntaxNode, Tree } from '@lezer/common';
 
-import type { ParseModuleResult, ParsedUnit, SourcePosition, SourceProposal, SourceRange } from './harness_protocol';
+import type { ParseModuleResult, ParsedUnit, SourcePosition, SourceProposal, SourceRange, UnitParam } from './harness_protocol';
 
 type ParsedDetails = ParseModuleResult & {
     tree: Tree;
@@ -77,6 +77,36 @@ function normalizeParameters(raw: string): string {
     const common = indents.length ? Math.min(...indents) : 0;
     const value = lines.map(line => line.slice(common)).join('\n');
     return closedOnOwnLine ? `${value}\n` : value;
+}
+
+/** Split a ParamList at top-level commas; a lone `/` marks the preceding params positional-only. */
+function structuredParams(list: SyntaxNode, source: string): UnitParam[] {
+    const params: UnitParam[] = [];
+    const children = directChildren(list).filter(child => child.name !== '(' && child.name !== ')');
+    let group: SyntaxNode[] = [];
+    let from = list.from + 1;
+    const flush = (to: number) => {
+        const text = source.slice(from, to).trim();
+        if (text === '/') params.forEach(param => { if (param.kind === 'keyword') param.kind = 'positional'; });
+        const name = group.find(child => child.name === 'VariableName');
+        if (name) {
+            const type = group.find(child => child.name === 'TypeDef');
+            const assign = group.findIndex(child => child.name === 'AssignOp');
+            const star = group.find(child => child.name === '*' || child.name === '**');
+            params.push({
+                name: source.slice(name.from, name.to),
+                annotation: type ? source.slice(type.from, type.to).replace(/^\s*:\s*/, '').trim() : null,
+                default: assign >= 0 && group[assign + 1] ? source.slice(group[assign + 1].from, group.at(-1)!.to).trim() : null,
+                kind: star?.name === '**' ? 'kwvar' : star ? 'var' : 'keyword',
+            });
+        }
+        group = [];
+    };
+    for (const child of children) {
+        if (child.name === ',') { flush(child.from); from = child.to; } else group.push(child);
+    }
+    flush(list.to - 1);
+    return params;
 }
 
 function syntaxErrors(tree: Tree): SyntaxNode[] {
@@ -164,6 +194,7 @@ function parseDetailed(source: string, documentPath: string, nodeId?: string): P
             const asynchronous = directChildren(node).some(child => child.name === 'async');
             unit.async = asynchronous;
             unit.parameters = parameters;
+            unit.params = params ? structuredParams(params, source) : [];
             unit.returnAnnotation = returnAnnotation;
             unit.signature = `${asynchronous ? 'async ' : ''}def ${name}(${parameters})${returnAnnotation ? ` -> ${returnAnnotation}` : ''}`;
         }

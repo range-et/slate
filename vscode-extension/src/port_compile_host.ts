@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { compilePython, GENERATED_HEADER, type CompileDiagnostic } from './compile/python';
 import { formatPortReport, portPythonProject } from './port/python_importer';
-import { CONFIG_PATH, LAYOUT_PATH, NODES_DIR, pathForNodeId, serializeLayout, serializeNode } from './slate_folder';
+import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, pathForNodeId, serializeLayout, serializeNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 
 // VS Code side of Port Python Project… and Compile. Both write with plain fs
@@ -74,7 +74,7 @@ export async function portPythonFolder(root: vscode.Uri, source?: vscode.Uri): P
         await writeText(config, `${JSON.stringify({ slate: 3, name, language: 'python', compile: { outDir: 'src' } }, null, 2)}\n`);
     }
     const layout = vscode.Uri.joinPath(root, ...LAYOUT_PATH.split('/'));
-    if (!await exists(layout)) await writeText(layout, serializeLayout({ positions: {}, notes: [] }));
+    if (!await exists(layout)) await writeText(layout, serializeLayout(emptyLayout()));
     for (const [nodeId, node] of nodes) {
         await writeText(vscode.Uri.joinPath(root, ...pathForNodeId(nodeId).split('/')), serializeNode(node));
     }
@@ -91,9 +91,16 @@ export async function portPythonFolder(root: vscode.Uri, source?: vscode.Uri): P
 
 /** Slate: Compile — write `<outDir>/**.py` from the nodes, removing stale generated files. */
 export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: string[]; diagnostics: CompileDiagnostic[] }> {
-    const { config, nodes, errors } = await new SlateFolderHost(root).readNodes();
-    const result = compilePython(nodes, config);
-    const diagnostics: CompileDiagnostic[] = [...errors.map(message => ({ severity: 'error' as const, message })), ...result.diagnostics];
+    const host = new SlateFolderHost(root);
+    const { config, nodes, errors } = await host.readNodes();
+    const flowFiles = await host.readFlows();
+    const flows = new Map(flowFiles.filter(item => item.flow).map(item => [item.id, item.flow!]));
+    const result = compilePython(nodes, config, flows, SlateFolderHost.librarySignatures(await host.readLibrary(config)));
+    const diagnostics: CompileDiagnostic[] = [
+        ...errors.map(message => ({ severity: 'error' as const, message })),
+        ...flowFiles.filter(item => item.problem).map(item => ({ severity: 'error' as const, message: `flows/${item.id}: ${item.problem}` })),
+        ...result.diagnostics,
+    ];
     const outDir = (config.compile?.outDir ?? 'src').replace(/\\/g, '/').replace(/\/+$/, '');
     if (!outDir || outDir.startsWith('/') || outDir.split('/').includes('..') || outDir.split('/')[0] === 'slate') {
         diagnostics.push({ severity: 'error', message: `compile.outDir "${outDir}" must be a relative folder outside slate/.` });

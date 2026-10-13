@@ -1,0 +1,25 @@
+{
+  "slate": 3,
+  "name": "grade",
+  "inputs": [
+    { "name": "score", "annotation": "int" },
+    { "name": "maximum", "annotation": "int" }
+  ],
+  "outputs": [
+    { "name": "percent", "annotation": "int" },
+    { "name": "text", "annotation": "str" }
+  ],
+  "instances": [
+    { "id": "p", "node": "scoring/percent" },
+    { "id": "c", "node": "scoring/clamp" },
+    { "id": "l", "node": "text/label" }
+  ],
+  "wires": [
+    { "from": "input:score", "to": "p.in:score" },
+    { "from": "input:maximum", "to": "p.in:maximum" },
+    { "from": "p.out", "to": "c.in:value" },
+    { "from": "c.out", "to": "l.in:value" },
+    { "from": "c.out", "to": "output:percent" },
+    { "from": "l.out", "to": "output:text" }
+  ]
+}

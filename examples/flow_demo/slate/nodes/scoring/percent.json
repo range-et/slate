@@ -1,0 +1,10 @@
+{
+  "slate": 3,
+  "name": "percent",
+  "intent": "Score as a whole-number percentage of the maximum",
+  "locked": false,
+  "code": [
+    "def percent(score: int, maximum: int) -> int:",
+    "    return score * 100 // maximum"
+  ]
+}

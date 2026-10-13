@@ -3,14 +3,18 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, HarnessDocument, HarnessSnapshot, ParsedUnit, SourceProposal } from './harness_protocol';
+import { BoardNote, FlowInstance, HarnessDocument, HarnessSnapshot, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
 import { buildGenerationPacket, GenerationPacket, stripModelEnvelope } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
 import { searchUnits } from './search';
-import { checkNodeCode, codeLines, nodeFromSignature, nodeIdForPath } from './slate_folder';
+import {
+    connect, disconnect, emptyFlow, extractFlow, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
+    removeInstances, uniqueName, unitSignature, type Port,
+} from './flow';
+import { checkNodeCode, codeLines, CONFIG_PATH, nodeFromSignature, nodeIdForPath } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 
 function nonce(): string {
@@ -20,6 +24,12 @@ function nonce(): string {
         value += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return value;
+}
+
+/** A placeholder name resolves to the node whose id or last path segment equals it, when exactly one does. */
+export function resolvePlaceholder(name: string, nodeIds: string[]): string | null {
+    const matches = nodeIds.filter(id => id === name || id.split('/').pop() === name);
+    return matches.length === 1 ? matches[0] : null;
 }
 
 function buildHtml(context: vscode.ExtensionContext, webview: vscode.Webview): string {
@@ -123,12 +133,14 @@ export class HarnessPanel implements vscode.Disposable {
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
         panel.webview.onDidReceiveMessage(message => this.handleMessage(message), null, this.disposables);
 
-        const watcher = vscode.workspace.createFileSystemWatcher(folder.nodePattern());
-        watcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
-        watcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
-        watcher.onDidDelete(() => this.scheduleRefresh(), null, this.disposables);
+        for (const pattern of [folder.nodePattern(), folder.flowPattern()]) {
+            const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+            watcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
+            watcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
+            watcher.onDidDelete(() => this.scheduleRefresh(), null, this.disposables);
+            this.disposables.push(watcher);
+        }
         this.disposables.push(
-            watcher,
             vscode.workspace.onDidChangeTextDocument(event => {
                 if (this.folder.nodeId(event.document.uri) !== null) this.scheduleRefresh();
             }),
@@ -162,6 +174,12 @@ export class HarnessPanel implements vscode.Disposable {
                 notes: folder.layout.notes,
                 contextEdges: [],
                 layout: folder.layout.positions,
+                mapPositions: folder.layout.mapPositions,
+                flowPositions: folder.layout.flowPositions,
+                refs: folder.layout.refs,
+                placeholders: folder.layout.placeholders,
+                flows: index.flows,
+                library: index.library,
             };
             await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
         } catch (error) {
@@ -385,18 +403,316 @@ export class HarnessPanel implements vscode.Disposable {
 
     private async updateFolderLayout(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
         if (!this.snapshot || !message.positions || typeof message.positions !== 'object') return;
-        const validIds = new Set(this.snapshot.documents.flatMap(document => document.units.map(unit => unit.id))
-            .concat(this.snapshot.documents.filter(document => document.nodeKind).map(document => nodeIdForPath(document.path)!))
-            .concat(folder.layout.notes.map(note => note.id)));
+        // scope: undefined = root canvas, 'map' = Map view, otherwise a flow id.
+        const scope = typeof message.scope === 'string' ? message.scope : null;
+        const flow = scope && scope !== 'map' ? this.flow(scope) : null;
+        const validIds = new Set(scope === 'map'
+            ? this.snapshot.documents.map(document => nodeIdForPath(document.path)!)
+            : flow ? [...flow.instances.map(instance => instance.id), '__input', '__output']
+                : this.rootCanvasIds());
+        const target = scope === 'map' ? folder.layout.mapPositions
+            : flow ? (folder.layout.flowPositions[scope!] ??= {}) : folder.layout.positions;
         let changed = false;
         for (const [id, point] of Object.entries(message.positions)) {
             const { x, y } = (point ?? {}) as { x?: unknown; y?: unknown };
             if (!validIds.has(id) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
-            folder.layout.positions[id] = { x: x as number, y: y as number };
+            target[id] = { x: x as number, y: y as number };
             changed = true;
         }
         // Layout is canvas-only: a plain file write, no re-index, no revision bump.
         if (changed) await folder.writeLayout();
+    }
+
+    /** Ids that can sit on the root canvas. */
+    private rootCanvasIds(): string[] {
+        const snapshot = this.snapshot!;
+        return [
+            ...snapshot.documents.flatMap(document => document.units.map(unit => unit.id)),
+            ...snapshot.documents.filter(document => document.nodeKind).map(document => nodeIdForPath(document.path)!),
+            ...this.folder.layout.notes.map(note => note.id),
+            ...this.folder.layout.refs.map(ref => ref.id),
+            ...this.folder.layout.placeholders.map(item => item.id),
+            ...(snapshot.flows ?? []).filter(item => item.id !== MAIN_FLOW).map(item => `flow:${item.id}`),
+            ...this.flow(MAIN_FLOW).instances.filter(instance => instance.kind === 'value').map(instance => instance.id),
+        ];
+    }
+
+    /** Current flow (main defaults to empty until first written). */
+    private flow(flowId: string): SlateFlow {
+        const found = this.snapshot?.flows?.find(item => item.id === flowId);
+        if (found && !found.flow) throw new Error(`flows/${flowId}.json is unreadable: ${found.problem}`);
+        if (!found && flowId !== MAIN_FLOW) throw new Error(`Flow ${flowId} does not exist.`);
+        return found?.flow ?? emptyFlow(MAIN_FLOW);
+    }
+
+    /** Whether a target (node id, flow id, or library id) can be called. */
+    private targetExists(target: string): boolean {
+        const snapshot = this.snapshot!;
+        return snapshot.documents.some(document => document.units.some(unit => unit.id === target && unit.parentId === null))
+            || (snapshot.flows ?? []).some(item => item.id === target && target !== MAIN_FLOW)
+            || (snapshot.library ?? []).some(document => document.units.some(unit => unit.id === target));
+    }
+
+    /** Input and output ports of an instance, from the target's signature. */
+    private portsOf(instance: FlowInstance): { inputs: Port[]; outputs: Port[] } {
+        if (instance.kind === 'value' || !instance.node) return { inputs: [], outputs: [{ id: 'out', name: 'value', annotation: null }] };
+        const snapshot = this.snapshot!;
+        const flow = snapshot.flows?.find(item => item.id === instance.node)?.flow;
+        if (flow) return { inputs: inputPorts(flowSignature(flow)), outputs: outputPorts(flowSignature(flow)) };
+        const units = [...snapshot.documents, ...(snapshot.library ?? [])].map(document => document.units)
+            .find(list => list.some(unit => unit.id === instance.node && unit.parentId === null));
+        const unit = units?.find(item => item.id === instance.node)!;
+        if (!unit) return { inputs: [], outputs: [] };
+        const signature = unitSignature(unit, units!);
+        return { inputs: inputPorts(signature), outputs: outputPorts(signature) };
+    }
+
+    /** A root canvas id as a main-flow instance: existing, or implied by a node, ref, or flow node. */
+    private rootInstance(canvasId: string): FlowInstance {
+        const existing = this.flow(MAIN_FLOW).instances.find(instance => instance.id === canvasId);
+        if (existing) return existing;
+        const ref = this.folder.layout.refs.find(item => item.id === canvasId);
+        const target = canvasId.startsWith('flow:') ? canvasId.slice('flow:'.length) : ref ? ref.target : canvasId;
+        if (!this.targetExists(target)) throw new Error(`${canvasId} cannot be wired.`);
+        return { id: canvasId, node: target };
+    }
+
+    private placeAt(scope: string | null, id: string, x: unknown, y: unknown): void {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        const point = { x: x as number, y: y as number };
+        if (scope === null) this.folder.layout.positions[id] = point;
+        else (this.folder.layout.flowPositions[scope] ??= {})[id] = point;
+    }
+
+    /** Canvas actions for refs, placeholders, flows, and data wires. Returns false when not one of them. */
+    private async handleCanvasAction(action: Record<string, unknown>): Promise<boolean> {
+        const folder = this.folder;
+        const layout = folder.layout;
+        const scope = typeof action.flow === 'string' && action.flow !== MAIN_FLOW ? action.flow : null;
+        const flowId = scope ?? MAIN_FLOW;
+        const finish = async (message: string, select?: string) => {
+            await folder.writeLayout();
+            await this.refresh();
+            if (select) await this.panel.webview.postMessage({ type: 'selectUnit', unitId: select });
+            this.postCommandResult(true, message);
+        };
+        const saveFlow = async (id: string, flow: SlateFlow) => {
+            if (id === MAIN_FLOW) {
+                // Root wires imply instances; drop wireless ones that the canvas shows anyway.
+                const wired = new Set(flow.wires.flatMap(wire => [parseEndpoint(wire.from).instance, parseEndpoint(wire.to).instance]));
+                flow = { ...flow, instances: flow.instances.filter(instance => instance.kind === 'value' || wired.has(instance.id)) };
+            }
+            await folder.writeFlow(id, flow);
+        };
+        const ask = async (title: string, value = '', validate?: (text: string) => string | null) =>
+            vscode.window.showInputBox({ title, value, validateInput: text => validate?.(text.trim()) ?? null });
+        const flowName = (text: string) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? 'Use a Python identifier'
+            : this.snapshot?.flows?.some(item => item.id === text) || this.targetExists(text) ? `${text} already exists` : null;
+
+        switch (action.kind) {
+            case 'createRef': {
+                const target = String(action.target);
+                if (!this.targetExists(target)) throw new Error(`${target} does not exist.`);
+                const id = `ref-${randomUUID().slice(0, 8)}`;
+                layout.refs.push({ id, target });
+                this.placeAt(null, id, action.x, action.y);
+                await finish(`Added a reference to ${target}.`, id);
+                return true;
+            }
+            case 'createPlaceholder': {
+                const name = typeof action.name === 'string' && action.name.trim() ? action.name.trim()
+                    : (await ask('New placeholder', '', text => /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? null : 'Use a Python identifier'))?.trim();
+                if (!name) return true;
+                const id = `placeholder-${randomUUID().slice(0, 8)}`;
+                layout.placeholders.push({ id, name });
+                this.placeAt(null, id, action.x, action.y);
+                await finish(`Added placeholder ${name}.`, id);
+                return true;
+            }
+            case 'placeholderToRef':
+            case 'placeholderToNode': {
+                const placeholder = layout.placeholders.find(item => item.id === action.id);
+                if (!placeholder) throw new Error('That placeholder no longer exists.');
+                const position = layout.positions[placeholder.id] ?? { x: 0, y: 0 };
+                if (action.kind === 'placeholderToRef') {
+                    const target = resolvePlaceholder(placeholder.name, this.snapshot!.documents.map(document => nodeIdForPath(document.path)!));
+                    if (!target) throw new Error(`No single node is named ${placeholder.name}.`);
+                    const id = `ref-${randomUUID().slice(0, 8)}`;
+                    layout.refs.push({ id, target });
+                    layout.positions[id] = position;
+                    layout.placeholders = layout.placeholders.filter(item => item !== placeholder);
+                    delete layout.positions[placeholder.id];
+                    await finish(`${placeholder.name} now references ${target}.`, id);
+                    return true;
+                }
+                const signature = await ask(`Create node ${placeholder.name}`, placeholder.signature ?? `def ${placeholder.name}() -> None`, text => {
+                    try { nodeFromSignature(text, ''); return null; } catch (error) { return (error as Error).message; }
+                });
+                if (!signature) return true;
+                const nodeId = await folder.createNode(nodeFromSignature(signature, ''), position);
+                layout.placeholders = layout.placeholders.filter(item => item !== placeholder);
+                delete layout.positions[placeholder.id];
+                await finish(`Created slate/nodes/${nodeId}.json`, nodeId);
+                return true;
+            }
+            case 'addInstance': {
+                let flow = this.flow(flowId);
+                let id: string;
+                if (typeof action.value === 'string') {
+                    id = uniqueName('value', flow.instances.map(instance => instance.id));
+                    flow = { ...flow, instances: [...flow.instances, { id, kind: 'value', value: action.value || '0' }] };
+                } else {
+                    const target = String(action.target);
+                    if (!this.targetExists(target)) throw new Error(`${target} does not exist.`);
+                    if (scope === null) {
+                        id = `ref-${randomUUID().slice(0, 8)}`;
+                        layout.refs.push({ id, target });
+                    } else {
+                        if (target === scope) throw new Error('A flow cannot contain itself.');
+                        id = uniqueName(target.split(/[/:]/).pop()!, flow.instances.map(instance => instance.id));
+                        flow = { ...flow, instances: [...flow.instances, { id, node: target }] };
+                    }
+                }
+                this.placeAt(scope, id, action.x, action.y);
+                const connectFrom = typeof action.connectFrom === 'string' ? action.connectFrom : null;
+                const connectTo = typeof action.connectTo === 'string' ? action.connectTo : null;
+                if (connectFrom || connectTo) {
+                    const instance = scope === null ? this.rootInstanceAfter(flow, id) : flow.instances.find(item => item.id === id)!;
+                    if (scope === null && !flow.instances.some(item => item.id === id)) flow = { ...flow, instances: [...flow.instances, instance] };
+                    const ports = this.portsOf(instance);
+                    if (connectFrom) {
+                        const port = ports.inputs[0];
+                        if (port) flow = connect(this.withRootEndpoints(flow, scope, connectFrom), connectFrom, `${id}.${port.id}`);
+                    } else if (ports.outputs[0]) {
+                        flow = connect(this.withRootEndpoints(flow, scope, connectTo!), `${id}.${ports.outputs[0].id}`, connectTo!);
+                    }
+                }
+                await saveFlow(flowId, flow);
+                await finish(`Added ${id}.`, id);
+                return true;
+            }
+            case 'setValue': {
+                const flow = this.flow(flowId);
+                await saveFlow(flowId, { ...flow, instances: flow.instances.map(instance =>
+                    instance.id === action.id && instance.kind === 'value' ? { ...instance, value: String(action.value) } : instance) });
+                await finish('Saved value.');
+                return true;
+            }
+            case 'connectData':
+            case 'disconnectData': {
+                let from = String(action.from);
+                let to = String(action.to);
+                let flow = this.flow(flowId);
+                if (action.kind === 'disconnectData') {
+                    await saveFlow(flowId, disconnect(flow, from, to));
+                    await finish(`Removed wire ${from} → ${to}.`);
+                    return true;
+                }
+                flow = this.withRootEndpoints(this.withRootEndpoints(flow, scope, from), scope, to);
+                // Dropping on the group's empty slot creates a port named after the other end.
+                if (from === 'input:+') {
+                    const target = parseEndpoint(to);
+                    const port = this.portsOf(flow.instances.find(item => item.id === target.instance)!).inputs.find(item => item.id === target.port);
+                    const name = uniqueName(target.port.replace(/^in:/, ''), flow.inputs.map(input => input.name));
+                    flow = { ...flow, inputs: [...flow.inputs, { name, annotation: port?.annotation ?? null }] };
+                    from = `input:${name}`;
+                }
+                if (to === 'output:+') {
+                    const source = parseEndpoint(from);
+                    const instance = flow.instances.find(item => item.id === source.instance);
+                    const port = instance ? this.portsOf(instance).outputs.find(item => item.id === source.port) : undefined;
+                    const base = source.instance === null ? source.port.replace(/^input:/, '') : source.port === 'out' ? instance?.node?.split(/[/:]/).pop() ?? source.instance : source.port.slice(4);
+                    const name = uniqueName(base, flow.outputs.map(output => output.name));
+                    flow = { ...flow, outputs: [...flow.outputs, { name, annotation: port?.annotation ?? null }] };
+                    to = `output:${name}`;
+                }
+                if (parseEndpoint(from).instance !== null && parseEndpoint(from).instance === parseEndpoint(to).instance) throw new Error('A node cannot feed itself.');
+                await saveFlow(flowId, connect(flow, from, to));
+                await finish(`Wired ${from} → ${to}.`);
+                return true;
+            }
+            case 'deleteItems': {
+                const ids = new Set(Array.isArray(action.ids) ? action.ids.map(String) : []);
+                if (scope === null) {
+                    layout.refs = layout.refs.filter(ref => !ids.has(ref.id));
+                    layout.placeholders = layout.placeholders.filter(item => !ids.has(item.id));
+                    for (const id of ids) delete layout.positions[id];
+                } else for (const id of ids) delete layout.flowPositions[scope]?.[id];
+                await saveFlow(flowId, removeInstances(this.flow(flowId), ids));
+                await finish(`Removed ${ids.size} item(s).`);
+                return true;
+            }
+            case 'createFlow':
+            case 'extractFlow': {
+                const name = (await ask(action.kind === 'createFlow' ? 'New flow' : 'Group selection into flow', '', flowName))?.trim();
+                if (!name) return true;
+                if (action.kind === 'createFlow') {
+                    await folder.writeFlow(name, emptyFlow(name));
+                    this.placeAt(null, `flow:${name}`, action.x, action.y);
+                    await finish(`Created slate/flows/${name}.json`, `flow:${name}`);
+                    return true;
+                }
+                let parent = this.flow(flowId);
+                const ids = (Array.isArray(action.ids) ? action.ids.map(String) : []);
+                for (const id of ids) {
+                    if (scope === null && !parent.instances.some(item => item.id === id)) {
+                        try { parent = { ...parent, instances: [...parent.instances, this.rootInstance(id)] }; } catch { /* notes, placeholders */ }
+                    }
+                }
+                const selected = ids.filter(id => parent.instances.some(item => item.id === id));
+                if (!selected.length) throw new Error('Select nodes, references, or values to group.');
+                const instanceId = scope === null ? `flow:${name}` : uniqueName(name, parent.instances.map(item => item.id));
+                const result = extractFlow(parent, selected, { id: name, name, instanceId }, instance => this.portsOf(instance));
+                const positions = scope === null ? layout.positions : layout.flowPositions[scope] ?? {};
+                const points = selected.map(id => positions[id]).filter(Boolean);
+                layout.flowPositions[name] = Object.fromEntries(selected.filter(id => positions[id]).map(id => [id, positions[id]]));
+                if (points.length) this.placeAt(scope, instanceId, points.reduce((sum, point) => sum + point.x, 0) / points.length, points.reduce((sum, point) => sum + point.y, 0) / points.length);
+                if (scope !== null) for (const id of selected) delete positions[id];
+                await folder.writeFlow(name, result.child);
+                await saveFlow(flowId, result.parent);
+                await finish(`Grouped ${selected.length} item(s) into flow ${name}.`, instanceId);
+                return true;
+            }
+            case 'deleteFlow': {
+                const id = String(action.id);
+                const choice = await vscode.window.showWarningMessage(`Delete slate/flows/${id}.json?`, { modal: true }, 'Delete');
+                if (choice !== 'Delete') return true;
+                await vscode.workspace.fs.delete(folder.uri(pathForFlowId(id)));
+                delete layout.positions[`flow:${id}`];
+                delete layout.flowPositions[id];
+                await finish(`Deleted flow ${id}.`);
+                return true;
+            }
+            case 'addLibrary': {
+                const picked = await vscode.window.showOpenDialog({
+                    canSelectFiles: true, canSelectFolders: true, canSelectMany: true, defaultUri: folder.root,
+                    filters: { Python: ['py'] }, openLabel: 'Add to library',
+                });
+                if (!picked?.length) return true;
+                const config = await folder.readConfigText();
+                const value = JSON.parse(config) as Record<string, unknown>;
+                const library = new Set(Array.isArray(value.library) ? value.library as string[] : []);
+                for (const uri of picked) library.add(folder.relative(uri));
+                value.library = [...library];
+                await vscode.workspace.fs.writeFile(folder.uri(CONFIG_PATH), new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`));
+                await finish(`Library: ${[...library].join(', ')}`);
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+
+    /** At the root, endpoints name canvas items; make sure each is a main-flow instance. */
+    private withRootEndpoints(flow: SlateFlow, scope: string | null, endpoint: string): SlateFlow {
+        const instance = parseEndpoint(endpoint).instance;
+        if (scope !== null || instance === null || flow.instances.some(item => item.id === instance)) return flow;
+        return { ...flow, instances: [...flow.instances, this.rootInstance(instance)] };
+    }
+
+    /** rootInstance for an id that may have just been added to layout.refs. */
+    private rootInstanceAfter(flow: SlateFlow, id: string): FlowInstance {
+        return flow.instances.find(item => item.id === id) ?? this.rootInstance(id);
     }
 
     private async updateFolderNotes(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
@@ -433,6 +749,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     private async handleFolderAction(folder: SlateFolderHost, action: Record<string, unknown>): Promise<void> {
         try {
+            if (await this.handleCanvasAction(action)) return;
             if (action.kind === 'refreshIndex') {
                 await this.refresh();
                 const invalid = this.snapshot?.documents.filter(document => !document.valid || document.diagnostics.length > 0).length ?? 0;

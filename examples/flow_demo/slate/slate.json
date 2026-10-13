@@ -1,0 +1,11 @@
+{
+  "slate": 3,
+  "name": "flow_demo",
+  "language": "python",
+  "compile": {
+    "outDir": "src"
+  },
+  "library": [
+    "vendor/textutil.py"
+  ]
+}

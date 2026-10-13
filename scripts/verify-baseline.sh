@@ -47,4 +47,9 @@ SLATE_CALCULATOR_DIR="$TMP/ported/calculator" \
 SLATE_TIC_TAC_TOE_FILE="$TMP/ported/tic_tac_toe/game.py" \
   "$PYTHON" -m pytest --import-mode=importlib legacy/examples/tic_tac_toe/tests
 
+# Phase 4 gate: compile a project with flows and a library file, then run its tests.
+node scripts/compile-slate.js examples/flow_demo "$TMP/flow_demo"
+SLATE_FLOW_DEMO_DIR="$TMP/flow_demo" \
+  "$PYTHON" -m pytest --import-mode=importlib examples/flow_demo/tests
+
 echo "Slate baseline verification passed."

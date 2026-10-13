@@ -1,0 +1,10 @@
+{
+  "slate": 3,
+  "name": "clamp",
+  "intent": "Clamp a value to inclusive bounds",
+  "locked": false,
+  "code": [
+    "def clamp(value: int, lower: int = 0, upper: int = 100) -> int:",
+    "    return max(lower, min(value, upper))"
+  ]
+}

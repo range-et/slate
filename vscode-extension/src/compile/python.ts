@@ -1,3 +1,5 @@
+import { flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature } from '../flow';
+import type { SlateFlow } from '../harness_protocol';
 import { identifierNames, parseModule, splitImport, topLevelBindings } from '../python_adapter';
 import type { SlateConfig, SlateNode } from '../slate_folder';
 
@@ -51,9 +53,168 @@ function comment(label: string, text: string): string[] {
     return text.trim() ? text.trim().split('\n').map((line, index) => `# ${index === 0 ? `${label}: ` : '  '}${line}`) : [];
 }
 
-export function compilePython(nodes: ReadonlyMap<string, SlateNode>, config: SlateConfig): CompileResult {
+/** `lib:<path>:<name>` → `from <module> import <name>` (the library root must be importable). */
+export function libraryImport(target: string): string | null {
+    const match = target.match(/^lib:(.+\.py):([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (!match) return null;
+    const module = match[1].slice(0, -'.py'.length).replace(/\/__init__$/, '').replace(/\//g, '.');
+    return `from ${module} import ${match[2]}`;
+}
+
+/** Signature of a definition node from its code, or null. */
+export function nodeSignature(node: SlateNode): CallableSignature | null {
+    if (node.kind) return null;
+    const units = parseModule(`${node.code.join('\n')}\n`, '<signature>').units;
+    const unit = units.find(item => item.parentId === null && item.name === node.name);
+    return unit ? unitSignature(unit, units) : null;
+}
+
+const variable = (instanceId: string) => `v_${instanceId.replace(/[^A-Za-z0-9_]/g, '_')}`;
+
+/**
+ * Generate one Python function for a flow: instances in dependency order, each
+ * assigned to a variable; unwired inputs use their defaults; outputs are
+ * returned (a tuple when there are several). Returns a node for the compiler.
+ */
+export function flowToNode(
+    flowId: string,
+    flow: SlateFlow,
+    resolve: (target: string) => { signature: CallableSignature; imports: string[] } | null,
+    diagnostics: CompileDiagnostic[],
+): SlateNode | null {
+    const label = `flows/${flowId}`;
+    const errors: string[] = [];
+    const signatures = new Map<string, CallableSignature | null>();
+    for (const instance of flow.instances) {
+        if (instance.kind === 'value') { signatures.set(instance.id, null); continue; }
+        const resolved = resolve(instance.node!);
+        if (!resolved) errors.push(`instance ${instance.id} calls ${instance.node}, which does not exist`);
+        signatures.set(instance.id, resolved?.signature ?? null);
+    }
+    const names = new Map<string, string>();
+    for (const instance of flow.instances) {
+        const name = variable(instance.id);
+        if (names.has(name) || flow.inputs.some(input => input.name === name)) errors.push(`instance ${instance.id} needs a distinct variable name (${name})`);
+        names.set(name, instance.id);
+    }
+    const outputsOf = (id: string) => {
+        const signature = signatures.get(id);
+        return signature ? outputPorts(signature) : [{ id: 'out', name: 'out', annotation: null }];
+    };
+    const incoming = new Map<string, string>();
+    for (const wire of flow.wires) {
+        const from = parseEndpoint(wire.from);
+        const to = parseEndpoint(wire.to);
+        const fromOk = from.instance === null
+            ? from.port.startsWith('input:') && flow.inputs.some(input => `input:${input.name}` === from.port)
+            : signatures.has(from.instance) && outputsOf(from.instance).some(port => port.id === from.port);
+        const toOk = to.instance === null
+            ? to.port.startsWith('output:') && flow.outputs.some(output => `output:${output.name}` === to.port)
+            : signatures.has(to.instance) && (signatures.get(to.instance)?.params ?? []).some(param => `in:${param.name}` === to.port);
+        if (!fromOk || !toOk) errors.push(`wire ${wire.from} → ${wire.to} has an unknown endpoint`);
+        else if (incoming.has(wire.to)) errors.push(`${wire.to} has more than one wire`);
+        else incoming.set(wire.to, wire.from);
+    }
+    const expression = (endpoint: string) => {
+        const { instance, port } = parseEndpoint(endpoint);
+        if (instance === null) return port.slice('input:'.length);
+        return port === 'out' ? variable(instance) : `${variable(instance)}_${port.slice('out:'.length)}`;
+    };
+
+    // Kahn's algorithm in instance order; leftovers form a cycle.
+    const order: string[] = [];
+    const pending = new Set(flow.instances.map(instance => instance.id));
+    while (pending.size) {
+        const ready = [...pending].find(id => [...incoming].every(([to, from]) =>
+            parseEndpoint(to).instance !== id || parseEndpoint(from).instance === null || !pending.has(parseEndpoint(from).instance!)));
+        if (!ready) { errors.push(`instances ${[...pending].join(', ')} form a cycle`); break; }
+        order.push(ready);
+        pending.delete(ready);
+    }
+
+    const body: string[] = [];
+    for (const id of order) {
+        const instance = flow.instances.find(item => item.id === id)!;
+        if (instance.kind === 'value') { body.push(`    ${variable(id)} = ${instance.value ?? 'None'}`); continue; }
+        const signature = signatures.get(id);
+        if (!signature) continue;
+        const args: string[] = [];
+        let skippedPositional = false;
+        for (const param of signature.params) {
+            if (param.kind === 'var' || param.kind === 'kwvar') continue;
+            const source = incoming.get(`${id}.in:${param.name}`);
+            if (!source) {
+                if (param.default === null) errors.push(`${id}.in:${param.name} is not wired and has no default`);
+                if (param.kind === 'positional') skippedPositional = true;
+                continue;
+            }
+            if (param.kind === 'positional') {
+                if (skippedPositional) errors.push(`${id}.in:${param.name} is positional-only after an unwired one`);
+                args.push(expression(source));
+            } else args.push(`${param.name}=${expression(source)}`);
+        }
+        const call = `${signature.name}(${args.join(', ')})`;
+        const outputs = outputPorts(signature);
+        if (signature.outputs && signature.outputs.length === 0) body.push(`    ${call}`);
+        else if (signature.outputs && signature.outputs.length > 1) {
+            body.push(`    ${outputs.map(port => expression(`${id}.${port.id}`)).join(', ')} = ${call}`);
+        } else body.push(`    ${variable(id)} = ${call}`);
+    }
+    for (const input of flow.inputs) {
+        if (!flow.wires.some(wire => wire.from === `input:${input.name}`)) {
+            diagnostics.push({ severity: 'warning', message: `${label}: input ${input.name} is unused.` });
+        }
+    }
+    const results = flow.outputs.map(output => {
+        const source = incoming.get(`output:${output.name}`);
+        if (!source) errors.push(`output ${output.name} is not wired`);
+        return source ? expression(source) : 'None';
+    });
+    if (results.length === 1) body.push(`    return ${results[0]}`);
+    else if (results.length > 1) body.push(`    return (${results.join(', ')})`);
+    if (body.length === 0) body.push('    pass');
+
+    if (errors.length) {
+        for (const message of errors) diagnostics.push({ severity: 'error', message: `${label}: ${message}.` });
+        return null;
+    }
+    const parameters = flow.inputs.map(input => input.annotation ? `${input.name}: ${input.annotation}` : input.name).join(', ');
+    const annotations = flow.outputs.map(output => output.annotation);
+    const returns = flow.outputs.length === 0 ? ' -> None'
+        : annotations.every(Boolean) ? ` -> ${annotations.length === 1 ? annotations[0] : `tuple[${annotations.join(', ')}]`}` : '';
+    const code = [`def ${flow.name}(${parameters})${returns}:`, ...body];
+    const used = identifierNames(code.join('\n'));
+    const targets = [...new Set(flow.instances.filter(instance => instance.node).map(instance => instance.node!))];
+    const imports = [...new Set(targets.flatMap(target => resolve(target)?.imports ?? []))]
+        .filter(line => splitImport(line).some(item => item.binding !== null && used.has(item.binding)));
+    return {
+        name: flow.name, intent: '', contract: '', context: [], examples: [], locked: true,
+        order: 1e9, imports, uses: targets.sort(), code, extra: { flow: true },
+    };
+}
+
+export function compilePython(
+    sourceNodes: ReadonlyMap<string, SlateNode>,
+    config: SlateConfig,
+    flows: ReadonlyMap<string, SlateFlow> = new Map(),
+    library: ReadonlyMap<string, CallableSignature> = new Map(),
+): CompileResult {
     const diagnostics: CompileDiagnostic[] = [];
     const error = (message: string) => diagnostics.push({ severity: 'error', message });
+    const nodes = new Map(sourceNodes);
+    const resolve = (target: string) => {
+        const node = sourceNodes.get(target);
+        const flow = node ? undefined : flows.get(target);
+        if (flow) return { signature: flowSignature(flow), imports: [] };
+        const signature = node ? nodeSignature(node) : library.get(target) ?? null;
+        return signature ? { signature, imports: node?.imports ?? [] } : null;
+    };
+    for (const [flowId, flow] of [...flows].sort(([left], [right]) => left.localeCompare(right))) {
+        if (flowId === MAIN_FLOW && flow.instances.length === 0) continue;
+        if (sourceNodes.has(flowId)) { error(`flows/${flowId} has the same id as a node.`); continue; }
+        const node = flowToNode(flowId, flow, resolve, diagnostics);
+        if (node) nodes.set(flowId, node);
+    }
     const valid = new Map<string, SlateNode>();
     for (const [nodeId, node] of nodes) {
         const language = node.language ?? config.language;
@@ -122,6 +283,13 @@ export function compilePython(nodes: ReadonlyMap<string, SlateNode>, config: Sla
                 moduleEdges.set(folder, (moduleEdges.get(folder) ?? new Set()).add(folderOf(target)));
             };
             for (const target of node.uses) {
+                const external = libraryImport(target);
+                if (external) {
+                    if (!library.has(target)) error(`${nodeId} uses ${target}, which is not in the library.`);
+                    const item = splitImport(external)[0];
+                    if (names.has(item.binding!)) { crossModule.push(external); own.add(item.binding!); bind(item.binding!, `"${external}"`, nodeId); }
+                    continue;
+                }
                 const used = valid.get(target);
                 if (!used) {
                     error(`${nodeId} uses ${target}, which ${nodes.has(target) ? 'did not compile' : 'does not exist'}.`);
@@ -147,7 +315,7 @@ export function compilePython(nodes: ReadonlyMap<string, SlateNode>, config: Sla
             [...mergeImports(external.filter(line => !future.includes(line))), ...mergeImports(crossModule)],
         ].filter(section => section.length).map(section => section.join('\n'));
         const blocks = members.map(([nodeId, node]) => [
-            `# slate: nodes/${nodeId}`,
+            `# slate: ${node.extra.flow ? 'flows' : 'nodes'}/${nodeId}`,
             ...comment('intent', node.intent),
             ...comment('contract', node.contract),
             ...node.code,

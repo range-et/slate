@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { HarnessPanel } from './harness_panel';
 import { compileSlateFolder, portPythonFolder } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
-import { CONFIG_PATH, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
+import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 
 let pythonAdapter: PythonAdapter | undefined;
@@ -62,7 +62,7 @@ async function createNewSlateProject(): Promise<void> {
         await vscode.workspace.fs.writeFile(config, encoder.encode(`${JSON.stringify({ slate: 3, name, language: 'python' }, null, 2)}\n`));
         await vscode.workspace.fs.writeFile(
             vscode.Uri.joinPath(folder.uri, ...LAYOUT_PATH.split('/')),
-            encoder.encode(serializeLayout({ positions: {}, notes: [] })),
+            encoder.encode(serializeLayout(emptyLayout())),
         );
     }
     await vscode.commands.executeCommand('vscode.openWith', config, 'slate.editor');
