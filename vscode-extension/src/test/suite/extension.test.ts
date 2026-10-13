@@ -6,7 +6,6 @@ import * as vscode from 'vscode';
 
 type Snapshot = {
     revision: number;
-    mode?: 'folder';
     notes?: Array<{ id: string; title: string; body: string; attachedTo: string | null }>;
     layout?: Record<string, { x: number; y: number }>;
     documents: Array<{
@@ -28,84 +27,94 @@ async function waitForSnapshot(predicate: (snapshot: Snapshot) => boolean): Prom
 }
 
 suite('Slate Extension Host', () => {
-    test('indexes dirty buffers, reveals exact units, and preserves native undo', async () => {
+    test('indexes dirty node buffers, reveals node files, and undoes host edits natively', async () => {
         const extension = vscode.extensions.getExtension('indrajeet-haldar.slate-code');
         assert.ok(extension, 'Slate extension is installed in the test host');
         await extension.activate();
 
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         assert.ok(root, 'fixture workspace is open');
-        const sourceUri = vscode.Uri.joinPath(root, 'sample.py');
-        const projectUri = vscode.Uri.joinPath(root, 'fixture.slate.json');
-        const source = await vscode.workspace.openTextDocument(sourceUri);
-        const editor = await vscode.window.showTextDocument(source);
-        await editor.edit(builder => builder.insert(new vscode.Position(source.lineCount, 0), '\ndef dirty_only(value: int) -> int:\n    return value + 1\n'));
-        assert.equal(source.isDirty, true);
+        const folder = vscode.Uri.joinPath(root, 'folder_project', 'slate');
+        const clampUri = vscode.Uri.joinPath(folder, 'nodes', 'clamp.json');
+        const normalizeUri = vscode.Uri.joinPath(folder, 'nodes', 'normalize.json');
+        const clampBefore = await vscode.workspace.fs.readFile(clampUri);
+        const normalizeBefore = await vscode.workspace.fs.readFile(normalizeUri);
+        try {
+            const clamp = await vscode.workspace.openTextDocument(clampUri);
+            const editor = await vscode.window.showTextDocument(clamp);
+            const intentAt = clamp.getText().indexOf('Clamp an integer');
+            await editor.edit(builder => builder.replace(new vscode.Range(
+                clamp.positionAt(intentAt), clamp.positionAt(intentAt + 'Clamp an integer'.length),
+            ), 'Dirty intent'));
+            assert.equal(clamp.isDirty, true);
 
-        await vscode.commands.executeCommand('vscode.openWith', projectUri, 'slate.editor');
-        const snapshot = await waitForSnapshot(value =>
-            value.documents.some(document => document.units.some(unit => unit.name === 'dirty_only'))
-        );
-        const unit = snapshot.documents.flatMap(document => document.units).find(candidate => candidate.name === 'dirty_only');
-        assert.ok(unit, 'dirty-buffer function is indexed');
+            await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.joinPath(folder, 'slate.json'), 'slate.editor');
+            await waitForSnapshot(value => value.documents.some(document =>
+                document.units[0]?.annotation?.intent === 'Dirty intent to inclusive bounds'));
 
-        await vscode.commands.executeCommand('slate.test.revealUnit', unit.id);
-        assert.equal(vscode.window.activeTextEditor?.document.uri.toString(), sourceUri.toString());
-        assert.equal(vscode.window.activeTextEditor?.document.getText(vscode.window.activeTextEditor.selection), 'dirty_only');
+            await vscode.commands.executeCommand('slate.test.revealUnit', 'normalize');
+            const active = vscode.window.activeTextEditor!;
+            assert.equal(active?.document.uri.toString(), normalizeUri.toString());
+            assert.ok(active.document.lineAt(active.selection.active.line).text.includes('"code"'), 'reveal lands on the code');
 
-        const current = vscode.window.activeTextEditor!.document;
-        const returnOffset = current.getText().indexOf('return name.upper()');
-        assert.ok(returnOffset >= 0);
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(current.uri, new vscode.Range(
-            current.positionAt(returnOffset),
-            current.positionAt(returnOffset + 'return name.upper()'.length),
-        ), 'return name.lower()');
-        assert.equal(await vscode.workspace.applyEdit(edit), true);
-        assert.ok(current.getText().includes('return name.lower()'));
-        await vscode.commands.executeCommand('undo');
-        assert.ok(current.getText().includes('return name.upper()'));
+            await vscode.commands.executeCommand('slate.test.postMessage', {
+                type: 'action', action: { kind: 'setAnnotationField', target: 'normalize', field: 'intent', text: 'Undoable intent' },
+            });
+            assert.ok(active.document.getText().includes('Undoable intent'));
+            await vscode.window.showTextDocument(active.document);
+            await vscode.commands.executeCommand('undo');
+            const deadline = Date.now() + 5_000;
+            while (active.document.getText().includes('Undoable intent') && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            assert.ok(!active.document.getText().includes('Undoable intent'), 'native undo reverts the host edit');
+        } finally {
+            for (const document of vscode.workspace.textDocuments.filter(item => item.isDirty)) {
+                await vscode.window.showTextDocument(document);
+                await vscode.commands.executeCommand('workbench.action.files.revert');
+            }
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            await vscode.workspace.fs.writeFile(clampUri, clampBefore);
+            await vscode.workspace.fs.writeFile(normalizeUri, normalizeBefore);
+        }
     });
 
-    test('persists board notes in project metadata without changing Python', async () => {
+    test('persists board notes in layout.json without changing node files', async () => {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         assert.ok(root, 'fixture workspace is open');
-        const sourceUri = vscode.Uri.joinPath(root, 'sample.py');
-        const projectUri = vscode.Uri.joinPath(root, 'fixture.slate.json');
-        const sourceBefore = new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri));
-        const projectBefore = await vscode.workspace.fs.readFile(projectUri);
+        const folder = vscode.Uri.joinPath(root, 'folder_project', 'slate');
+        const layoutUri = vscode.Uri.joinPath(folder, 'layout.json');
+        const clampUri = vscode.Uri.joinPath(folder, 'nodes', 'clamp.json');
+        const read = async (uri: vscode.Uri) => new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+        const layoutBefore = await read(layoutUri);
+        const clampBefore = await read(clampUri);
+        const post = (message: unknown) => vscode.commands.executeCommand('slate.test.postMessage', message);
 
         try {
-            await vscode.commands.executeCommand('vscode.openWith', projectUri, 'slate.editor');
-            const initial = await waitForSnapshot(snapshot => snapshot.documents.length > 0);
-            const attachedTo = initial.documents.flatMap(document => document.units)[0]?.id;
-            assert.ok(attachedTo, 'fixture contains an attachable source unit');
-            await vscode.commands.executeCommand('slate.test.postMessage', {
-                type: 'noteCreate', revision: initial.revision, x: 321, y: 123, attachedTo,
-            });
+            await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.joinPath(folder, 'slate.json'), 'slate.editor');
+            const initial = await waitForSnapshot(snapshot => snapshot.documents.length === 2);
+            await post({ type: 'noteCreate', revision: initial.revision, x: 321, y: 123, attachedTo: 'clamp' });
             const created = await waitForSnapshot(snapshot => snapshot.notes?.length === 1);
             const note = created.notes![0];
-            await vscode.commands.executeCommand('slate.test.postMessage', {
+            await post({
                 type: 'noteUpdate', revision: created.revision, noteId: note.id,
-                title: 'Review behavior', body: 'Keep this on the board.', attachedTo,
+                title: 'Review behavior', body: 'Keep this on the board.', attachedTo: 'clamp',
             });
             const updated = await waitForSnapshot(snapshot => snapshot.notes?.[0]?.title === 'Review behavior');
 
-            const project = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(projectUri)));
-            assert.deepEqual(project.notes, [{ id: note.id, title: 'Review behavior', body: 'Keep this on the board.', attachedTo }]);
-            assert.deepEqual(project.layout[note.id], { x: 321, y: 123 });
-            assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri)), sourceBefore);
+            const layout = JSON.parse(await read(layoutUri));
+            assert.deepEqual(layout.notes, [{ id: note.id, title: 'Review behavior', body: 'Keep this on the board.', attachedTo: 'clamp' }]);
+            assert.deepEqual(layout.positions[note.id], { x: 321, y: 123 });
+            assert.equal(await read(clampUri), clampBefore);
 
-            await vscode.commands.executeCommand('slate.test.postMessage', {
-                type: 'noteDelete', revision: updated.revision, noteId: note.id,
-            });
+            await post({ type: 'noteDelete', revision: updated.revision, noteId: note.id });
             await waitForSnapshot(snapshot => snapshot.notes?.length === 0);
-            const afterDelete = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(projectUri)));
+            const afterDelete = JSON.parse(await read(layoutUri));
             assert.deepEqual(afterDelete.notes, []);
-            assert.equal(afterDelete.layout[note.id], undefined);
-            assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(sourceUri)), sourceBefore);
+            assert.equal(afterDelete.positions[note.id], undefined);
         } finally {
-            await vscode.workspace.fs.writeFile(projectUri, projectBefore);
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            await vscode.workspace.fs.writeFile(layoutUri, new TextEncoder().encode(layoutBefore));
         }
     });
 
@@ -125,7 +134,7 @@ suite('Slate Extension Host', () => {
 
         try {
             await vscode.commands.executeCommand('vscode.openWith', configUri, 'slate.editor');
-            const initial = await waitForSnapshot(snapshot => snapshot.mode === 'folder' && snapshot.documents.length === 2);
+            const initial = await waitForSnapshot(snapshot => snapshot.documents.length === 2);
             const normalize = initial.documents.find(document => document.path === 'slate/nodes/normalize.json');
             assert.ok(normalize, 'normalize node is indexed by its path');
             assert.deepEqual(normalize.diagnostics, []);
@@ -206,7 +215,7 @@ suite('Slate Extension Host', () => {
             assert.equal(await read(vscode.Uri.joinPath(source, 'app.py')), appBefore, 'the source project is untouched');
             assert.equal(await vscode.commands.executeCommand<number>('slate.portProject', source), 0, 'refuses a non-empty slate/nodes');
 
-            const snapshot = await waitForSnapshot(value => value.mode === 'folder' && value.documents.length === 4);
+            const snapshot = await waitForSnapshot(value => value.documents.length === 4);
             assert.ok(snapshot.documents.some(document => document.path === 'slate/nodes/ops/_prelude.json' && document.diagnostics.length === 0));
 
             // Leaves first: add before run; module state is never described.
@@ -235,25 +244,5 @@ suite('Slate Extension Host', () => {
             await vscode.workspace.fs.delete(slate, { recursive: true, useTrash: false }).then(undefined, () => undefined);
             await vscode.workspace.fs.delete(out, { recursive: true, useTrash: false }).then(undefined, () => undefined);
         }
-    });
-
-    test('legacy source-map mode applies typed intent actions as one undoable source edit', async () => {
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-        assert.ok(root, 'fixture workspace is open');
-        const sourceUri = vscode.Uri.joinPath(root, 'sample.py');
-        const projectUri = vscode.Uri.joinPath(root, 'fixture.slate.json');
-        await vscode.commands.executeCommand('vscode.openWith', projectUri, 'slate.editor');
-        const snapshot = await waitForSnapshot(value => value.mode === undefined && value.documents.length > 0);
-        const unit = snapshot.documents.flatMap(document => document.units).find(candidate => candidate.annotation);
-        assert.ok(unit, 'fixture has an annotated unit');
-        await vscode.commands.executeCommand('slate.test.postMessage', {
-            type: 'action', revision: snapshot.revision,
-            action: { kind: 'setAnnotationField', target: unit.id, field: 'intent', text: 'Typed action intent' },
-        });
-        const source = await vscode.workspace.openTextDocument(sourceUri);
-        assert.ok(source.getText().includes('## intent: Typed action intent'), 'intent written into the annotation');
-        await vscode.window.showTextDocument(source);
-        await vscode.commands.executeCommand('undo');
-        assert.ok(!source.getText().includes('Typed action intent'), 'native undo reverts the edit');
     });
 });

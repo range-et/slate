@@ -85,8 +85,10 @@ coding GGUF. See [DEMO.md](DEMO.md) for the complete flow.
    - Click the slate icon in the activity bar (left sidebar) to open the
      slate panel, OR
    - `Cmd+Shift+P` → `Slate: Open Python Harness`, OR
-   - Open a `slate/slate.json` (e.g. `examples/llama_demo/slate/slate.json`)
-     or a legacy `*.slate.json`.
+   - Open a `slate/slate.json` (e.g. `examples/llama_demo/slate/slate.json`),
+     OR
+   - `Slate: Port Python Project…` to split an existing Python folder into
+     `slate/`, then `Slate: Compile Project` to write it back out to `src/`.
 
 ### Reloading after changes
 
@@ -111,9 +113,9 @@ For pure canvas iteration without VS Code:
 npm run dev
 ```
 
-Vite dev server with HMR; opens `http://localhost:5173/harness.html?demo=folder`
-with a built-in demo snapshot (no host, so host actions are inert).
-`?demo` shows the older source-map mode used by the Playwright tests.
+Vite dev server with HMR; opens `http://localhost:5173/harness.html?demo`
+with a built-in demo snapshot (no host, so host actions are inert). The
+Playwright tests use the same demo.
 
 The frozen legacy notebook lives in `legacy/` and runs with
 `npm run legacy:dev`.

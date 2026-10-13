@@ -21,37 +21,7 @@ Phase 1 (S-100 to S-111) shipped on 2026-10-13; see [features.md](features.md).
 
 ## Phase 2 — port and compile
 
-### S-200 Importer: split a project into node files
-- Command **Slate: Port Python Project…** walks a chosen folder with the
-  TypeScript adapter. Each top-level function and class becomes a node file
-  with only the external imports it uses; calls between them resolve as node
-  references.
-  Module-level state and unsplittable code stays as a read-only library entry
-  and is listed in a port report.
-- The original project is never modified.
-
-### S-201 Micro-context description pass
-- For each node without an intent, leaves first, send llama.cpp one
-  function's source plus the signatures and intents of the nodes it calls.
-  Write back `intent:` (and optional `contract:`) with
-  `described-by: llama`.
-- Skipping already-described nodes makes runs resumable. Show progress and
-  allow cancel. Fake-server tests cover ordering, skip/resume, malformed
-  output, and timeouts.
-
-### S-202 Compile `slate/` → `src/`
-- Each `slate/nodes` folder becomes one output module. Node references
-  become package imports, external imports are merged and deduplicated,
-  intent/contract become comments, and every block is stamped
-  `# slate: nodes/<id>`. Deterministic output, via the language adapter.
-- **Acceptance:** port calculator and tic-tac-toe from `legacy/examples`,
-  compile them, and the original pytest suites pass against the output.
-  Golden tests for import rewriting and name collisions.
-
-### S-203 Retire project-v2 / `## @slate` mode
-- Delete the in-module annotation grammar, ID adoption, tracked-path project
-  loader, and Scan Workspace command once porting works. Keep the Lezer adapter
-  for node files and the read-only library.
+Phase 2 (S-200 to S-203) shipped on 2026-10-13; see [features.md](features.md).
 
 ## Phase 3 — one workspace
 

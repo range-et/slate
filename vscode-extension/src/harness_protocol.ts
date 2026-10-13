@@ -25,8 +25,6 @@ export interface ParsedUnit {
     ranges: {
         name: SourceRange;
         declaration: SourceRange;
-        annotation: SourceRange | null;
-        full: SourceRange;
     };
     annotation: Record<string, unknown> | null;
     decorators: string[];
@@ -52,17 +50,15 @@ export interface HarnessDocument extends ParseModuleResult {
     id: string;
     version: number | null;
     stale: boolean;
-    /** Folder mode: the node's code text (unit ranges are relative to it). */
+    /** The node's code text (unit ranges are relative to it). */
     source?: string;
-    /** Folder mode: module state (`prelude`/`epilogue`) instead of one definition. */
+    /** Module state (`prelude`/`epilogue`) instead of one definition. */
     nodeKind?: 'prelude' | 'epilogue';
 }
 
 export interface HarnessSnapshot {
     revision: number;
     projectName: string;
-    /** 'folder' = decoupled slate/ node JSON; absent = legacy project-v2 source map. */
-    mode?: 'folder';
     documents: HarnessDocument[];
     notes?: BoardNote[];
     contextEdges?: HarnessGraphEdge[];

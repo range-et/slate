@@ -3,18 +3,15 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, HarnessDocument, HarnessSnapshot, ParsedUnit, ParseModuleResult, SourceProposal, SourceRange } from './harness_protocol';
+import { BoardNote, HarnessDocument, HarnessSnapshot, ParsedUnit, SourceProposal } from './harness_protocol';
 import { buildGenerationPacket, GenerationPacket, stripModelEnvelope } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
-import { loadProject, serializeProject } from './project_v2';
 import { searchUnits } from './search';
 import { checkNodeCode, codeLines, nodeFromSignature, nodeIdForPath } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
-
-const PYTHON_EXCLUDE = '**/{.git,.venv,venv,node_modules,__pycache__,dist,build}/**';
 
 function nonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -23,12 +20,6 @@ function nonce(): string {
         value += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return value;
-}
-
-function contains(range: SourceRange, position: vscode.Position): boolean {
-    const start = new vscode.Position(range.start.line, range.start.character);
-    const end = new vscode.Position(range.end.line, range.end.character);
-    return position.isAfterOrEqual(start) && position.isBeforeOrEqual(end);
 }
 
 function buildHtml(context: vscode.ExtensionContext, webview: vscode.Webview): string {
@@ -62,13 +53,11 @@ export class HarnessPanel implements vscode.Disposable {
     static current: HarnessPanel | undefined;
 
     private readonly disposables: vscode.Disposable[] = [];
-    private readonly lastGood = new Map<string, ParseModuleResult>();
     private sources = new Map<string, string>();
     private snapshot: HarnessSnapshot | undefined;
     private refreshTimer: NodeJS.Timeout | undefined;
     private refreshGeneration = 0;
     private revision = 0;
-    private projectWarningsShown = false;
     private generation: AbortController | undefined;
     private describeRun: AbortController | undefined;
     private pendingProposal: {
@@ -80,16 +69,21 @@ export class HarnessPanel implements vscode.Disposable {
     } | undefined;
     private lastAcceptedUnitId: string | undefined;
 
-    static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel> {
+    static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
             HarnessPanel.current.panel.reveal();
             HarnessPanel.current.scheduleRefresh(0);
             return HarnessPanel.current;
         }
         const workspace = vscode.workspace.workspaceFolders?.[0];
-        const folder = workspace && await SlateFolderHost.detect(workspace.uri)
-            ? new SlateFolderHost(workspace.uri)
-            : undefined;
+        if (!workspace || !await SlateFolderHost.detect(workspace.uri)) {
+            const choice = await vscode.window.showInformationMessage(
+                'This workspace has no slate/ project yet.', 'New Project', 'Port Python Project…',
+            );
+            if (choice === 'New Project') await vscode.commands.executeCommand('slate.newProject');
+            if (choice === 'Port Python Project…') await vscode.commands.executeCommand('slate.portProject');
+            return undefined;
+        }
         const panel = vscode.window.createWebviewPanel(
             'slate.harness',
             'Slate Harness',
@@ -100,9 +94,7 @@ export class HarnessPanel implements vscode.Disposable {
                 localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')],
             },
         );
-        HarnessPanel.current = folder
-            ? new HarnessPanel(context, adapter, panel, { uri: folder.root, name: workspace!.name }, undefined, folder)
-            : new HarnessPanel(context, adapter, panel);
+        HarnessPanel.current = new HarnessPanel(context, adapter, panel, new SlateFolderHost(workspace.uri));
         return HarnessPanel.current;
     }
 
@@ -115,67 +107,30 @@ export class HarnessPanel implements vscode.Disposable {
     ): HarnessPanel {
         HarnessPanel.current?.dispose();
         const root = vscode.Uri.file(path.dirname(path.dirname(configDocument.uri.fsPath)));
-        const folder = new SlateFolderHost(root);
-        HarnessPanel.current = new HarnessPanel(context, adapter, panel, { uri: root, name: path.basename(root.fsPath) }, undefined, folder);
-        return HarnessPanel.current;
-    }
-
-    static attachToProject(
-        context: vscode.ExtensionContext,
-        adapter: PythonAdapter,
-        panel: vscode.WebviewPanel,
-        projectDocument: vscode.TextDocument,
-    ): HarnessPanel {
-        HarnessPanel.current?.dispose();
-        const projectDirectory = path.dirname(projectDocument.uri.fsPath);
-        let projectName = path.basename(projectDocument.uri.fsPath, '.slate.json');
-        try {
-            projectName = loadProject(projectDocument.getText()).project.name;
-        } catch {
-            // The panel reports the complete validation error during refresh.
-        }
-        let projectRoot = '.';
-        try {
-            projectRoot = loadProject(projectDocument.getText()).project.root;
-        } catch {
-            // Refresh reports malformed metadata.
-        }
-        const rootUri = vscode.Uri.file(path.resolve(projectDirectory, projectRoot));
-        HarnessPanel.current = new HarnessPanel(context, adapter, panel, {
-            uri: rootUri,
-            name: projectName,
-        }, projectDocument);
+        HarnessPanel.current = new HarnessPanel(context, adapter, panel, new SlateFolderHost(root));
         return HarnessPanel.current;
     }
 
     private constructor(
-        private readonly context: vscode.ExtensionContext,
+        context: vscode.ExtensionContext,
         private readonly adapter: PythonAdapter,
         private readonly panel: vscode.WebviewPanel,
-        private readonly projectRoot?: { uri: vscode.Uri; name: string },
-        private readonly projectDocument?: vscode.TextDocument,
-        private readonly folder?: SlateFolderHost,
+        private readonly folder: SlateFolderHost,
     ) {
+        // Custom editor panels arrive without options; createWebviewPanel ones already match.
+        panel.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')] };
         panel.webview.html = buildHtml(context, panel.webview);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
         panel.webview.onDidReceiveMessage(message => this.handleMessage(message), null, this.disposables);
 
-        const root = this.workspaceRoot();
-        const watcher = vscode.workspace.createFileSystemWatcher(
-            folder ? folder.nodePattern()
-                : root ? new vscode.RelativePattern(root.uri.fsPath, '**/*.py') : '**/*.py'
-        );
+        const watcher = vscode.workspace.createFileSystemWatcher(folder.nodePattern());
         watcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
         watcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
         watcher.onDidDelete(() => this.scheduleRefresh(), null, this.disposables);
         this.disposables.push(
             watcher,
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (this.folder ? this.folder.nodeId(event.document.uri) !== null
-                    : event.document.languageId === 'python'
-                        || event.document.uri.toString() === this.projectDocument?.uri.toString()) {
-                    this.scheduleRefresh();
-                }
+                if (this.folder.nodeId(event.document.uri) !== null) this.scheduleRefresh();
             }),
             vscode.window.onDidChangeTextEditorSelection(event => this.selectFromEditor(event.textEditor)),
             vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -183,10 +138,6 @@ export class HarnessPanel implements vscode.Disposable {
             }),
         );
         this.scheduleRefresh(0);
-    }
-
-    private workspaceRoot(): { uri: vscode.Uri; name: string } | undefined {
-        return this.projectRoot ?? vscode.workspace.workspaceFolders?.[0];
     }
 
     private scheduleRefresh(delay = 250): void {
@@ -198,117 +149,7 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private async refresh(): Promise<void> {
-        const root = this.workspaceRoot();
-        if (!root) {
-            this.snapshot = { revision: ++this.revision, projectName: 'No workspace', documents: [] };
-            await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
-            return;
-        }
-        if (this.folder) return this.refreshFolder(this.folder);
-        const generation = ++this.refreshGeneration;
-        try {
-            const project = this.projectDocument ? loadProject(this.projectDocument.getText()) : undefined;
-            const uris = project
-                ? project.project.documents.map(document => vscode.Uri.joinPath(root.uri, ...document.path.split('/')))
-                : await vscode.workspace.findFiles(
-                    new vscode.RelativePattern(root.uri.fsPath, '**/*.py'),
-                    PYTHON_EXCLUDE,
-                    5000,
-                );
-            const openDocuments = new Map(
-                vscode.workspace.textDocuments
-                    .filter(document => document.languageId === 'python')
-                    .map(document => [document.uri.toString(), document]),
-            );
-            const documents: HarnessDocument[] = [];
-            const sources = new Map<string, string>();
-            for (const uri of uris) {
-                if (generation !== this.refreshGeneration) return;
-                const relativePath = path.relative(root.uri.fsPath, uri.fsPath).replace(/\\/g, '/');
-                const open = openDocuments.get(uri.toString());
-                let source: string;
-                try {
-                    source = open
-                        ? open.getText()
-                        : new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-                } catch {
-                    const empty = await this.adapter.parseModule('', relativePath);
-                    documents.push({
-                        ...empty,
-                        id: `document:${relativePath}`,
-                        path: relativePath,
-                        version: null,
-                        valid: false,
-                        stale: false,
-                        diagnostics: [{
-                            code: 'missing-document',
-                            message: `Tracked Python document ${relativePath} does not exist.`,
-                            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
-                        }],
-                    });
-                    continue;
-                }
-                sources.set(relativePath, source);
-                const parsed = await this.adapter.parseModule(source, relativePath);
-                const previous = this.lastGood.get(relativePath);
-                if (parsed.valid) this.lastGood.set(relativePath, parsed);
-                const visible = parsed.valid || !previous ? parsed : { ...parsed, units: previous.units };
-                documents.push({
-                    ...visible,
-                    id: `document:${relativePath}`,
-                    path: relativePath,
-                    version: open?.version ?? null,
-                    stale: !parsed.valid && Boolean(previous),
-                });
-            }
-            if (generation !== this.refreshGeneration) return;
-            const durableIds = new Map<string, Array<{ document: HarnessDocument; unit: ParsedUnit }>>();
-            for (const document of documents) {
-                for (const unit of document.units.filter(candidate => candidate.identity === 'durable')) {
-                    durableIds.set(unit.id, [...(durableIds.get(unit.id) ?? []), { document, unit }]);
-                }
-            }
-            for (const [id, matches] of durableIds) {
-                if (matches.length < 2) continue;
-                for (const match of matches) {
-                    match.document.valid = false;
-                    match.document.diagnostics.push({
-                        code: 'duplicate-project-slate-id',
-                        message: `Slate id ${id} is duplicated across ${matches.length} project declarations.`,
-                        range: match.unit.ranges.annotation ?? match.unit.ranges.name,
-                    });
-                }
-            }
-            documents.sort((left, right) => left.path.localeCompare(right.path));
-            this.sources = sources;
-            this.snapshot = {
-                revision: ++this.revision,
-                projectName: project?.project.name ?? root.name,
-                documents,
-                notes: project
-                    ? project.project.notes
-                    : this.context.workspaceState.get(this.notesKey(root), []),
-                contextEdges: [],
-                layout: project
-                    ? project.project.layout
-                    : this.context.workspaceState.get(this.layoutKey(root), {}),
-            };
-            await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
-            if (project && project.warnings.length > 0 && !this.projectWarningsShown) {
-                this.projectWarningsShown = true;
-                this.postCommandResult(false, project.warnings.join(' '));
-            }
-            const active = vscode.window.activeTextEditor;
-            if (active) this.selectFromEditor(active);
-        } catch (error) {
-            if (generation !== this.refreshGeneration) return;
-            vscode.window.showErrorMessage(
-                `Slate could not index Python source: ${error instanceof Error ? error.message : String(error)}`
-            );
-        }
-    }
-
-    private async refreshFolder(folder: SlateFolderHost): Promise<void> {
+        const folder = this.folder;
         const generation = ++this.refreshGeneration;
         try {
             const index = await folder.index();
@@ -317,7 +158,6 @@ export class HarnessPanel implements vscode.Disposable {
             this.snapshot = {
                 revision: ++this.revision,
                 projectName: index.config.name,
-                mode: 'folder',
                 documents: index.documents.map(document => ({ ...document, source: index.sources.get(document.path) })),
                 notes: folder.layout.notes,
                 contextEdges: [],
@@ -338,23 +178,11 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'layout') {
-            await (this.folder ? this.updateFolderLayout(this.folder, value) : this.updateLayout(value));
+            await this.updateFolderLayout(this.folder, value);
             return;
         }
-        if (this.folder && ['noteCreate', 'noteUpdate', 'noteDelete'].includes(value.type as string)) {
+        if (['noteCreate', 'noteUpdate', 'noteDelete'].includes(value.type as string)) {
             await this.updateFolderNotes(this.folder, value);
-            return;
-        }
-        if (value.type === 'noteCreate') {
-            await this.createNote(value);
-            return;
-        }
-        if (value.type === 'noteUpdate') {
-            await this.updateNote(value);
-            return;
-        }
-        if (value.type === 'noteDelete') {
-            await this.deleteNote(value);
             return;
         }
         if (value.type === 'search' && typeof value.query === 'string') {
@@ -391,8 +219,7 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'action' && value.action && typeof value.action === 'object') {
-            if (this.folder) await this.handleFolderAction(this.folder, value.action as Record<string, unknown>);
-            else await this.handleAction(value.action as Record<string, unknown>, value.revision);
+            await this.handleFolderAction(this.folder, value.action as Record<string, unknown>);
             return;
         }
         if (value.type === 'reveal' && typeof value.unitId === 'string') {
@@ -404,175 +231,8 @@ export class HarnessPanel implements vscode.Disposable {
         await this.handleMessage(message);
     }
 
-    private layoutKey(root: { uri: vscode.Uri }): string {
-        return `slate.harness.layout:${root.uri.toString()}`;
-    }
-
-    private notesKey(root: { uri: vscode.Uri }): string {
-        return `slate.harness.notes:${root.uri.toString()}`;
-    }
-
     private validUnitId(id: string): boolean {
         return this.snapshot?.documents.some(document => document.units.some(unit => unit.id === id)) ?? false;
-    }
-
-    private async writeProject(project: ReturnType<typeof loadProject>['project']): Promise<void> {
-        if (!this.projectDocument) throw new Error('No bound project document.');
-        const replacement = serializeProject(project);
-        if (replacement === this.projectDocument.getText()) return;
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(
-            this.projectDocument.uri,
-            new vscode.Range(
-                this.projectDocument.positionAt(0),
-                this.projectDocument.positionAt(this.projectDocument.getText().length),
-            ),
-            replacement,
-        );
-        if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the board update.');
-        await this.projectDocument.save();
-    }
-
-    private async createNote(message: Record<string, unknown>): Promise<void> {
-        const root = this.workspaceRoot();
-        if (!root || !this.snapshot || message.revision !== this.snapshot.revision) {
-            this.postCommandResult(false, 'ADD NOTE: board changed; try again');
-            return;
-        }
-        const x = message.x;
-        const y = message.y;
-        const attachedTo = message.attachedTo === null || message.attachedTo === undefined
-            ? null
-            : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo)
-                ? message.attachedTo
-                : undefined;
-        if (!Number.isFinite(x) || !Number.isFinite(y) || attachedTo === undefined) {
-            this.postCommandResult(false, 'ADD NOTE: invalid board position or attachment');
-            return;
-        }
-        const note: BoardNote = { id: randomUUID(), title: 'New note', body: '', attachedTo };
-        try {
-            if (this.projectDocument) {
-                const loaded = loadProject(this.projectDocument.getText());
-                if (loaded.readOnly) throw new Error(loaded.warnings.join(' '));
-                loaded.project.notes.push(note);
-                loaded.project.layout[note.id] = { x: x as number, y: y as number };
-                await this.writeProject(loaded.project);
-            } else {
-                const notes = this.context.workspaceState.get<BoardNote[]>(this.notesKey(root), []);
-                const layout = this.context.workspaceState.get<Record<string, { x: number; y: number }>>(this.layoutKey(root), {});
-                await this.context.workspaceState.update(this.notesKey(root), [...notes, note]);
-                await this.context.workspaceState.update(this.layoutKey(root), { ...layout, [note.id]: { x: x as number, y: y as number } });
-            }
-            await this.refresh();
-            await this.panel.webview.postMessage({ type: 'selectUnit', unitId: note.id });
-            this.postCommandResult(true, attachedTo ? 'NOTE: attached to source unit' : 'NOTE: added to board');
-        } catch (error) {
-            this.postCommandResult(false, `ADD NOTE: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
-    private async updateNote(message: Record<string, unknown>): Promise<void> {
-        const root = this.workspaceRoot();
-        if (!root || !this.snapshot || message.revision !== this.snapshot.revision
-            || typeof message.noteId !== 'string' || typeof message.title !== 'string'
-            || typeof message.body !== 'string' || !message.title.trim()) {
-            this.postCommandResult(false, 'SAVE NOTE: invalid or stale note');
-            return;
-        }
-        const replacement: BoardNote = {
-            id: message.noteId,
-            title: message.title.trim(),
-            body: message.body,
-            attachedTo: message.attachedTo === null || message.attachedTo === undefined
-                ? null
-                : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo)
-                    ? message.attachedTo
-                    : null,
-        };
-        try {
-            if (this.projectDocument) {
-                const loaded = loadProject(this.projectDocument.getText());
-                if (loaded.readOnly) throw new Error(loaded.warnings.join(' '));
-                const index = loaded.project.notes.findIndex(note => note.id === replacement.id);
-                if (index < 0) throw new Error('note no longer exists');
-                loaded.project.notes[index] = replacement;
-                await this.writeProject(loaded.project);
-            } else {
-                const notes = this.context.workspaceState.get<BoardNote[]>(this.notesKey(root), []);
-                if (!notes.some(note => note.id === replacement.id)) throw new Error('note no longer exists');
-                await this.context.workspaceState.update(this.notesKey(root), notes.map(note => note.id === replacement.id ? replacement : note));
-            }
-            await this.refresh();
-            await this.panel.webview.postMessage({ type: 'selectUnit', unitId: replacement.id });
-            this.postCommandResult(true, 'NOTE: saved to board metadata; source was not changed');
-        } catch (error) {
-            this.postCommandResult(false, `SAVE NOTE: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
-    private async deleteNote(message: Record<string, unknown>): Promise<void> {
-        const root = this.workspaceRoot();
-        if (!root || !this.snapshot || message.revision !== this.snapshot.revision || typeof message.noteId !== 'string') {
-            this.postCommandResult(false, 'DELETE NOTE: invalid or stale note');
-            return;
-        }
-        try {
-            if (this.projectDocument) {
-                const loaded = loadProject(this.projectDocument.getText());
-                if (loaded.readOnly) throw new Error(loaded.warnings.join(' '));
-                loaded.project.notes = loaded.project.notes.filter(note => note.id !== message.noteId);
-                delete loaded.project.layout[message.noteId];
-                await this.writeProject(loaded.project);
-            } else {
-                const notes = this.context.workspaceState.get<BoardNote[]>(this.notesKey(root), []);
-                const layout = this.context.workspaceState.get<Record<string, { x: number; y: number }>>(this.layoutKey(root), {});
-                delete layout[message.noteId];
-                await this.context.workspaceState.update(this.notesKey(root), notes.filter(note => note.id !== message.noteId));
-                await this.context.workspaceState.update(this.layoutKey(root), layout);
-            }
-            await this.refresh();
-            this.postCommandResult(true, 'NOTE: removed from board; source was not changed');
-        } catch (error) {
-            this.postCommandResult(false, `DELETE NOTE: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
-    private async updateLayout(message: Record<string, unknown>): Promise<void> {
-        const root = this.workspaceRoot();
-        if (!root || !this.snapshot || message.revision !== this.snapshot.revision
-            || !message.positions || typeof message.positions !== 'object') return;
-        const validIds = new Set(this.snapshot.documents.flatMap(document => [
-            document.id,
-            ...document.units.map(unit => unit.id),
-        ]).concat((this.snapshot.notes ?? []).map(note => note.id)));
-        const positions: Record<string, { x: number; y: number }> = {};
-        for (const [id, point] of Object.entries(message.positions)) {
-            if (!validIds.has(id) || !point || typeof point !== 'object') continue;
-            const { x, y } = point as { x?: unknown; y?: unknown };
-            if (Number.isFinite(x) && Number.isFinite(y)) {
-                positions[id] = { x: x as number, y: y as number };
-            }
-        }
-        if (Object.keys(positions).length === 0) return;
-
-        if (!this.projectDocument) {
-            const current = this.context.workspaceState.get<Record<string, { x: number; y: number }>>(
-                this.layoutKey(root),
-                {},
-            );
-            await this.context.workspaceState.update(this.layoutKey(root), { ...current, ...positions });
-            return;
-        }
-
-        const loaded = loadProject(this.projectDocument.getText());
-        if (loaded.readOnly) {
-            this.postCommandResult(false, loaded.warnings.join(' '));
-            return;
-        }
-        const project = loaded.project;
-        project.layout = { ...project.layout, ...positions };
-        await this.writeProject(project);
     }
 
     private postCommandResult(ok: boolean, message: string): void {
@@ -650,16 +310,13 @@ export class HarnessPanel implements vscode.Disposable {
                 void this.panel.webview.postMessage({ type: 'generationProgress', unitId, receivedCharacters: received });
             });
             const candidate = stripModelEnvelope(raw);
-            const source = this.folder
-                ? this.sources.get(target.document.path) ?? ''
-                : (await this.sourceDocument(target.document.path)).getText();
             const proposal = await this.adapter.replaceUnit({
-                source,
+                source: this.sources.get(target.document.path) ?? '',
                 path: target.document.path,
                 expectedHash: packet.items[0].sourceHash,
                 unitId,
                 replacement: candidate,
-                nodeId: this.folder ? nodeIdForPath(target.document.path) ?? undefined : undefined,
+                nodeId: nodeIdForPath(target.document.path) ?? undefined,
             });
             const id = randomUUID();
             this.pendingProposal = { id, packet, proposal, candidate, path: target.document.path };
@@ -687,25 +344,7 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         try {
-            if (this.folder) {
-                await this.acceptFolderProposal(this.folder, pending);
-                return;
-            }
-            for (const item of pending.packet.items) {
-                const document = await this.sourceDocument(item.path);
-                const parsed = await this.adapter.parseModule(document.getText(), item.path);
-                if (parsed.sourceHash !== item.sourceHash) {
-                    throw new Error(`${item.qualifiedName} changed after generation. The draft was preserved; regenerate against current source.`);
-                }
-            }
-            const document = await this.sourceDocument(pending.path);
-            const edit = new vscode.WorkspaceEdit();
-            this.addProposal(edit, document, pending.proposal);
-            if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the proposal edit.');
-            this.lastAcceptedUnitId = pending.packet.targetId;
-            this.pendingProposal = undefined;
-            await this.panel.webview.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
-            this.postCommandResult(true, 'Proposal accepted as one WorkspaceEdit. Use Undo to revert it.');
+            await this.acceptFolderProposal(this.folder, pending);
         } catch (error) {
             await this.panel.webview.postMessage({
                 type: 'proposalStale', proposalId,
@@ -937,178 +576,31 @@ export class HarnessPanel implements vscode.Disposable {
         return matches[0];
     }
 
-    private async sourceDocument(documentPath: string): Promise<vscode.TextDocument> {
-        const root = this.workspaceRoot();
-        if (!root) throw new Error('Open a project first.');
-        return vscode.workspace.openTextDocument(vscode.Uri.joinPath(root.uri, ...documentPath.split('/')));
-    }
-
     async revealUnit(unitId: string, focus = false): Promise<void> {
         if (!this.snapshot) throw new Error('The graph is not indexed yet.');
-        if (this.folder) {
-            const document = this.snapshot.documents.find(item => item.units.some(unit => unit.id === unitId));
-            if (!document) throw new Error(`Node ${unitId} is not indexed.`);
-            const text = await vscode.workspace.openTextDocument(this.folder.uri(document.path));
-            const editor = await vscode.window.showTextDocument(text, {
-                preview: false, preserveFocus: !focus, viewColumn: vscode.ViewColumn.Beside,
-            });
-            const line = SlateFolderHost.codeLine(text.getText());
-            editor.selection = new vscode.Selection(line, 0, line, 0);
-            editor.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-            return;
-        }
-        const matches = this.snapshot.documents.flatMap(document => document.units
-            .filter(unit => unit.id === unitId)
-            .map(unit => ({ document, unit })));
-        if (matches.length !== 1) throw new Error(`Unit id ${unitId} resolved to ${matches.length} declarations.`);
-
-        const sourceDocument = await this.sourceDocument(matches[0].document.path);
-        const current = await this.adapter.parseModule(sourceDocument.getText(), matches[0].document.path);
-        const currentUnits = current.units.filter(unit => unit.id === unitId);
-        if (currentUnits.length !== 1) {
-            throw new Error(`Unit ${matches[0].unit.qualifiedName} changed before it could be revealed.`);
-        }
-        const unit = currentUnits[0];
-        const editor = await vscode.window.showTextDocument(sourceDocument, {
-            preview: false,
-            preserveFocus: !focus,
-            viewColumn: vscode.ViewColumn.Beside,
+        const document = this.snapshot.documents.find(item => item.units.some(unit => unit.id === unitId));
+        if (!document) throw new Error(`Node ${unitId} is not indexed.`);
+        const text = await vscode.workspace.openTextDocument(this.folder.uri(document.path));
+        const editor = await vscode.window.showTextDocument(text, {
+            preview: false, preserveFocus: !focus, viewColumn: vscode.ViewColumn.Beside,
         });
-        const selection = new vscode.Range(
-            unit.ranges.name.start.line,
-            unit.ranges.name.start.character,
-            unit.ranges.name.end.line,
-            unit.ranges.name.end.character,
-        );
-        const declaration = new vscode.Range(
-            unit.ranges.declaration.start.line,
-            unit.ranges.declaration.start.character,
-            unit.ranges.declaration.end.line,
-            unit.ranges.declaration.end.character,
-        );
-        editor.selection = new vscode.Selection(selection.start, selection.end);
-        editor.revealRange(declaration, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+        const line = SlateFolderHost.codeLine(text.getText());
+        editor.selection = new vscode.Selection(line, 0, line, 0);
+        editor.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     }
 
-    /** Project root (parent of slate/) in folder mode. */
-    get folderRoot(): vscode.Uri | undefined {
-        return this.folder?.root;
+    /** Project root (the parent of slate/). */
+    get folderRoot(): vscode.Uri {
+        return this.folder.root;
     }
 
     snapshotForTest(): HarnessSnapshot | undefined {
         return this.snapshot;
     }
 
-    private annotation(unit: ParsedUnit, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-        return {
-            id: typeof unit.annotation?.id === 'string' ? unit.annotation.id : randomUUID(),
-            intent: '',
-            contract: '',
-            dependencies: [],
-            examples: [],
-            locked: false,
-            ...(unit.annotation ?? {}),
-            ...overrides,
-        };
-    }
-
-    private addProposal(edit: vscode.WorkspaceEdit, document: vscode.TextDocument, proposal: SourceProposal): void {
-        for (const change of proposal.edits) {
-            edit.replace(document.uri, new vscode.Range(
-                change.range.start.line,
-                change.range.start.character,
-                change.range.end.line,
-                change.range.end.character,
-            ), change.newText);
-        }
-    }
-
-    /** Legacy project-v2 mode: annotation edits inside Python modules (retires in S-203). */
-    private async handleAction(action: Record<string, unknown>, revision: unknown): Promise<void> {
-        if (!this.snapshot) return;
-        const label = String(action.kind);
-        if (revision !== this.snapshot.revision) {
-            this.postCommandResult(false, `${label}: graph changed; try again`);
-            return;
-        }
-        try {
-            if (action.kind === 'refreshIndex') {
-                await this.refresh();
-                const invalid = this.snapshot?.documents.filter(document => !document.valid).length ?? 0;
-                this.postCommandResult(invalid === 0, invalid === 0
-                    ? 'Source graph is current; all Python modules parse.'
-                    : `${invalid} invalid Python module${invalid === 1 ? '' : 's'}.`);
-                return;
-            }
-            if (action.kind === 'saveWorkspace') {
-                const saved = await vscode.workspace.saveAll(false);
-                this.postCommandResult(saved, saved ? 'Saved.' : 'One or more files were not saved.');
-                return;
-            }
-            if (this.projectDocument && loadProject(this.projectDocument.getText()).readOnly) {
-                throw new Error('This project uses a newer schema and is read-only.');
-            }
-            let target: { document: HarnessDocument; unit: ParsedUnit };
-            let overrides: Record<string, unknown>;
-            if (action.kind === 'setAnnotationField' && typeof action.target === 'string' && typeof action.text === 'string'
-                && (action.field === 'intent' || action.field === 'contract')) {
-                target = this.resolveUnit(action.target);
-                overrides = { [action.field]: action.text };
-            } else if (action.kind === 'setContext' && typeof action.consumer === 'string'
-                && typeof action.dependency === 'string' && typeof action.enabled === 'boolean') {
-                target = this.resolveUnit(action.consumer);
-                const dependency = this.resolveUnit(action.dependency);
-                if (target.unit.id === dependency.unit.id) throw new Error('A unit cannot borrow itself.');
-                if (dependency.unit.identity !== 'durable') {
-                    throw new Error(`Give ${dependency.unit.qualifiedName} an intent before using it as context.`);
-                }
-                const current = Array.isArray(target.unit.annotation?.dependencies)
-                    ? target.unit.annotation.dependencies.filter(value => typeof value === 'string') as string[]
-                    : [];
-                overrides = {
-                    dependencies: action.enabled
-                        ? [...new Set([...current, dependency.unit.id])]
-                        : current.filter(id => id !== dependency.unit.id),
-                };
-            } else if (action.kind === 'setLock' && typeof action.target === 'string' && typeof action.locked === 'boolean') {
-                target = this.resolveUnit(action.target);
-                overrides = { locked: action.locked };
-            } else {
-                throw new Error('That action is not available in source-map mode.');
-            }
-            const document = await this.sourceDocument(target.document.path);
-            const params = {
-                source: document.getText(), path: target.document.path,
-                expectedHash: target.document.sourceHash, unitId: target.unit.id,
-                annotation: this.annotation(target.unit, overrides),
-            };
-            const proposal = target.unit.annotation
-                ? await this.adapter.updateAnnotation(params)
-                : await this.adapter.adoptUnit(params);
-            const edit = new vscode.WorkspaceEdit();
-            this.addProposal(edit, document, proposal);
-            if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the source edit.');
-            this.postCommandResult(true, `Updated ${target.unit.qualifiedName}.`);
-        } catch (error) {
-            this.postCommandResult(false, `${label}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
     private selectFromEditor(editor: vscode.TextEditor): void {
-        if (this.folder) {
-            const nodeId = this.folder.nodeId(editor.document.uri);
-            if (nodeId && this.validUnitId(nodeId)) void this.panel.webview.postMessage({ type: 'selectUnit', unitId: nodeId });
-            return;
-        }
-        const root = this.workspaceRoot();
-        if (!root || !this.snapshot || editor.document.languageId !== 'python') return;
-        const relativePath = path.relative(root.uri.fsPath, editor.document.uri.fsPath).replace(/\\/g, '/');
-        const document = this.snapshot.documents.find(item => item.path === relativePath);
-        if (!document) return;
-        const position = editor.selection.active;
-        const matches = document.units.filter(unit => contains(unit.ranges.declaration, position));
-        matches.sort((left, right) => right.qualifiedName.split('.').length - left.qualifiedName.split('.').length);
-        void this.panel.webview.postMessage({ type: 'selectUnit', unitId: matches[0]?.id ?? null });
+        const nodeId = this.folder.nodeId(editor.document.uri);
+        if (nodeId && this.validUnitId(nodeId)) void this.panel.webview.postMessage({ type: 'selectUnit', unitId: nodeId });
     }
 
     dispose(): void {

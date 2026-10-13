@@ -4,44 +4,32 @@ import { demoSnapshot } from '../src/harness/demo';
 import { buildGraph } from '../src/harness/graph';
 
 describe('Python harness graph', () => {
-    it('creates one node per file and declaration using nested group containment', () => {
+    it('creates one free node per node file; classes contain their methods; module state is a small node', () => {
         const graph = buildGraph(demoSnapshot);
 
         expect(graph.nodes.map(node => node.id)).toEqual([
-            'document:calculator.py',
-            'durable-run',
-            'provisional-main',
-            'document:operations.py',
-            'durable-operations',
-            'durable-add',
-            'provisional-divide',
-            'board-note-review',
+            'clamp',
+            'scoring/normalize_score',
+            'scoring/_prelude',
+            'scoring/Grader',
+            'scoring/Grader.grade',
+            'board-note-port',
         ]);
-        expect(graph.edges.filter(edge => edge.id.startsWith('contains:'))).toEqual([]);
-        expect(graph.nodes.find(node => node.id === 'durable-run')).toMatchObject({
-            parentId: 'document:calculator.py',
-            extent: 'parent',
-        });
-        expect(graph.nodes.find(node => node.id === 'durable-add')).toMatchObject({
-            parentId: 'durable-operations',
-            extent: 'parent',
-        });
-        expect(graph.nodes.find(node => node.id === 'durable-operations')?.data.container).toBe(true);
-        expect(graph.edges.find(edge => edge.id.startsWith('note:'))).toMatchObject({
-            source: 'board-note-review',
-            target: 'durable-run',
-            selectable: false,
-            className: 'slate-edge slate-edge--note',
+        expect(graph.nodes.find(node => node.id === 'clamp')?.parentId).toBeUndefined();
+        expect(graph.nodes.find(node => node.id === 'scoring/Grader.grade')).toMatchObject({ parentId: 'scoring/Grader', extent: 'parent' });
+        expect(graph.nodes.find(node => node.id === 'scoring/Grader')?.data.container).toBe(true);
+        expect(graph.nodes.find(node => node.id === 'scoring/_prelude')?.data).toMatchObject({
+            kind: 'module', label: 'module state', detail: 'CUTOFFS = {90: "A", 80: "B", 70: "C"}', path: 'scoring/_prelude',
         });
     });
 
-    it('keeps generation context distinct from structural containment', () => {
+    it('draws context wires from the context node to its consumer', () => {
         const graph = buildGraph(demoSnapshot);
         const edge = graph.edges.find(item => item.id.startsWith('context:'));
 
         expect(edge).toMatchObject({
-            source: 'durable-run',
-            target: 'provisional-main',
+            source: 'clamp',
+            target: 'scoring/normalize_score',
             animated: true,
             className: 'slate-edge slate-edge--context',
         });
@@ -50,20 +38,20 @@ describe('Python harness graph', () => {
 
     it('preserves stale and invalid states on the corresponding nodes', () => {
         const snapshot = structuredClone(demoSnapshot);
-        snapshot.documents[0].valid = false;
-        snapshot.documents[0].stale = true;
+        const grader = snapshot.documents.find(document => document.path === 'slate/nodes/scoring/Grader.json')!;
+        grader.valid = false;
+        grader.stale = true;
 
-        const graph = buildGraph(snapshot);
+        const nodes = buildGraph(snapshot).nodes;
 
-        expect(graph.nodes[0].data).toMatchObject({ invalid: true, stale: true });
-        expect(graph.nodes[1].data).toMatchObject({ stale: true });
+        expect(nodes.find(node => node.id === 'scoring/Grader')?.data).toMatchObject({ invalid: true, stale: true });
+        expect(nodes.find(node => node.id === 'scoring/Grader.grade')?.data).toMatchObject({ stale: true });
     });
 
     it('uses persisted node positions instead of regenerating their layout', () => {
         const snapshot = structuredClone(demoSnapshot);
-        snapshot.layout = { 'durable-run': { x: 901, y: 407 } };
+        snapshot.layout = { clamp: { x: 901, y: 407 } };
 
-        expect(buildGraph(snapshot).nodes.find(node => node.id === 'durable-run')?.position)
-            .toEqual({ x: 901, y: 407 });
+        expect(buildGraph(snapshot).nodes.find(node => node.id === 'clamp')?.position).toEqual({ x: 901, y: 407 });
     });
 });

@@ -60,7 +60,7 @@ export function buildGenerationPacket(
 ): GenerationPacket {
     const target = findUnit(snapshot, targetId);
     if (target.unit.identity !== 'durable' || !target.unit.annotation) {
-        throw new PacketError('Adopt this function with an intent before generation.');
+        throw new PacketError('Generation works on a node function; select the node itself.');
     }
     if (!['function', 'method'].includes(target.unit.kind)) {
         throw new PacketError('Generation currently supports top-level functions and methods.');

@@ -1,10 +1,7 @@
-import { randomUUID } from 'crypto';
-import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { HarnessPanel } from './harness_panel';
 import { compileSlateFolder, portPythonFolder } from './port_compile_host';
-import { createProjectV2, serializeProject } from './project_v2';
 import { PythonAdapter } from './python_adapter';
 import { CONFIG_PATH, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
@@ -18,7 +15,6 @@ export function activate(context: vscode.ExtensionContext): void {
             if (pythonAdapter) void HarnessPanel.createOrShow(context, pythonAdapter);
         }),
         vscode.commands.registerCommand('slate.newProject', () => createNewSlateProject()),
-        vscode.commands.registerCommand('slate.scanWorkspace', () => scanWorkspaceToFile()),
         vscode.commands.registerCommand('slate.portProject', (source?: vscode.Uri) => portProject(source)),
         vscode.commands.registerCommand('slate.compile', () => compileProject()),
         vscode.window.registerWebviewViewProvider('slate.launcher', new SlateLauncherView()),
@@ -92,46 +88,6 @@ async function compileProject(): Promise<Awaited<ReturnType<typeof compileSlateF
     return compileSlateFolder(root);
 }
 
-async function scanWorkspaceToFile(): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder || !pythonAdapter) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
-        return;
-    }
-    const projectName = folder.name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'project';
-    const target = vscode.Uri.joinPath(folder.uri, `${projectName}.slate.json`);
-    try {
-        await vscode.workspace.fs.stat(target);
-        const choice = await vscode.window.showWarningMessage(
-            `${projectName}.slate.json exists. Replace it with a fresh scan?`, { modal: true }, 'Replace',
-        );
-        if (choice !== 'Replace') return;
-    } catch {
-        // The scan creates a new project file.
-    }
-    const uris = await vscode.workspace.findFiles(
-        new vscode.RelativePattern(folder, '**/*.py'),
-        '**/{.git,.venv,venv,node_modules,__pycache__,dist,build}/**',
-    );
-    const documents = [];
-    let unitCount = 0;
-    for (const uri of uris) {
-        const relativePath = path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, '/');
-        const source = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-        const parsed = await pythonAdapter.parseModule(source, relativePath);
-        unitCount += parsed.units.length;
-        documents.push({
-            id: randomUUID(),
-            path: relativePath,
-            cards: parsed.units.filter(unit => unit.identity === 'durable').map(unit => ({ id: unit.id, kind: unit.kind })),
-        });
-    }
-    const project = createProjectV2(projectName, documents);
-    await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(serializeProject(project)));
-    vscode.window.showInformationMessage(`Slate: tracked ${documents.length} files and indexed ${unitCount} units.`);
-    await vscode.commands.executeCommand('vscode.openWith', target, 'slate.editor');
-}
-
 class SlateLauncherView implements vscode.WebviewViewProvider {
     resolveWebviewView(view: vscode.WebviewView): void {
         view.webview.options = { enableScripts: true };
@@ -139,14 +95,13 @@ class SlateLauncherView implements vscode.WebviewViewProvider {
         const csp = `default-src 'none'; style-src ${view.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'`;
         view.webview.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>
 body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:16px;line-height:1.5}h3{margin:0 0 8px;font-size:13px;letter-spacing:.06em}p{font-size:12px;opacity:.75}button{width:100%;padding:7px 10px;margin-bottom:8px;font:inherit;cursor:pointer;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:0}button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}</style></head><body>
-<h3>Slate</h3><p>Navigate, contextualize, and implement typed Python units with a local llama.cpp server.</p>
-<button id="open">Open Python Harness</button><button class="secondary" id="new">New Slate Project…</button><button class="secondary" id="scan">Scan Python Workspace</button>
-<script nonce="${nonce}">const vscode=acquireVsCodeApi();for(const [id,type] of [['open','open'],['new','new-project'],['scan','scan']])document.getElementById(id).addEventListener('click',()=>vscode.postMessage({type}));</script>
+<h3>Slate</h3><p>Compose Python as nodes in a slate/ folder, with a local llama.cpp server as helper.</p>
+<button id="open">Open Slate Canvas</button><button class="secondary" id="new">New Slate Project…</button><button class="secondary" id="port">Port Python Project…</button><button class="secondary" id="compile">Compile Project</button>
+<script nonce="${nonce}">const vscode=acquireVsCodeApi();for(const id of ['open','new','port','compile'])document.getElementById(id).addEventListener('click',()=>vscode.postMessage({type:id}));</script>
 </body></html>`;
         view.webview.onDidReceiveMessage(message => {
-            if (message?.type === 'open') void vscode.commands.executeCommand('slate.openHarness');
-            if (message?.type === 'new-project') void vscode.commands.executeCommand('slate.newProject');
-            if (message?.type === 'scan') void vscode.commands.executeCommand('slate.scanWorkspace');
+            const command = { open: 'slate.openHarness', new: 'slate.newProject', port: 'slate.portProject', compile: 'slate.compile' }[message?.type as string];
+            if (command) void vscode.commands.executeCommand(command);
         });
     }
 }
@@ -154,13 +109,9 @@ body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);paddin
 class HarnessEditorProvider implements vscode.CustomTextEditorProvider {
     constructor(private readonly context: vscode.ExtensionContext, private readonly adapter: PythonAdapter) {}
 
+    // Registered only for slate/slate.json (see package.json customEditors).
     resolveCustomTextEditor(document: vscode.TextDocument, panel: vscode.WebviewPanel): void {
-        const segments = document.uri.path.split('/');
-        if (segments.at(-1) === 'slate.json' && segments.at(-2) === 'slate') {
-            HarnessPanel.attachToFolder(this.context, this.adapter, panel, document);
-        } else {
-            HarnessPanel.attachToProject(this.context, this.adapter, panel, document);
-        }
+        HarnessPanel.attachToFolder(this.context, this.adapter, panel, document);
     }
 }
 

@@ -20,9 +20,26 @@ node…** or a board note. Click selects; double-click opens the node JSON. The
 workbench edits intent, contract, context, and code. Layout and notes live in
 `slate/layout.json` and never touch node files.
 
-The older source-map mode (**Slate: Scan Python Workspace**, `*.slate.json`
-projects that index existing Python in place) still works until the Phase 2
-importer replaces it.
+## Port and compile
+
+**Slate: Port Python Project…** picks a folder and splits it into node files
+under `slate/nodes/` (the source folder is never modified). Module `a/b.py`
+becomes folder `a/b/`; each top-level function or class becomes a node with
+only the imports it uses, and references to other ported names are recorded
+as `uses`. Other module-level statements become a `_prelude` node (runs before
+the nodes) and an `_epilogue` node (runs after, e.g. the `__main__` guard).
+The port report opens in **Output → Slate**.
+
+**Describe nodes with llama.cpp** (Cmd+K) asks the local model for a one-line
+intent per undescribed node, leaves first, sending only that node's code plus
+the signatures and intents of the nodes it uses. Runs are resumable and can be
+stopped from the palette.
+
+**Slate: Compile Project** (also on Cmd+K) writes one Python module per node
+folder into `compile.outDir` (default `src/`): merged imports, cross-module
+imports for `uses`, and a `# slate: nodes/<id>` stamp plus intent and
+contract comments on every block. Any compile error stops the write; stale
+generated files are removed, hand-written files are kept.
 
 ## Local generation
 

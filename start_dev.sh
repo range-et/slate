@@ -4,7 +4,7 @@
 #
 # Usage:  ./start_dev.sh
 # Then:   open VS Code on this repo and hit F5 to launch the Extension Host
-#         against examples/ (or any *.slate.json in your workspace).
+#         against examples/ (or any slate/slate.json in your workspace).
 
 set -euo pipefail
 
@@ -37,8 +37,8 @@ cat <<'EOF'
 
   In the VS Code window that just opened:
     1. press F5  → launches the Extension Development Host
-    2. in the host window, open any *.slate.json from
-       examples/ (or anywhere in your workspace) to test.
+    2. in the host window, open a slate/slate.json from
+       examples/ (or run "Slate: Port Python Project…") to test.
 ────────────────────────────────────────────────────────────
 
 EOF

@@ -16,11 +16,11 @@ export type SlateNodeData = {
     path: string;
     unit?: HarnessUnit;
     note?: BoardNote;
-    /** Folder mode: the node's intent, shown under its signature. */
+    /** The node's intent, shown under its signature. */
     intent?: string;
     /** First diagnostic, shown as a warning badge. */
     problem?: string;
-    /** Folder mode: the intent can be edited inline on the node. */
+    /** The intent can be edited inline on the node. */
     editableIntent?: boolean;
 };
 
@@ -28,7 +28,7 @@ function directChildren(units: HarnessUnit[], parentId: string): HarnessUnit[] {
     return units.filter(unit => unit.parentId === parentId);
 }
 
-/** Folder mode: every node file is one free node; classes still contain their methods. */
+/** Every node file is one free node; classes still contain their methods. */
 function buildFolderNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[]): void {
     const folders = [...new Set(snapshot.documents.map(document => folderOf(document.path)))].sort();
     const rows = new Map<string, number>();
@@ -119,103 +119,9 @@ export function nodeIdOf(documentPath: string): string {
 export function buildGraph(snapshot: HarnessSnapshot): { nodes: Node<SlateNodeData>[]; edges: Edge[] } {
     const nodes: Node<SlateNodeData>[] = [];
     const edges: Edge[] = [];
-    if (snapshot.mode === 'folder') buildFolderNodes(snapshot, nodes);
-    else buildSourceMapNodes(snapshot, nodes);
+    buildFolderNodes(snapshot, nodes);
     addNotesAndEdges(snapshot, nodes, edges);
     return { nodes, edges };
-}
-
-/** Legacy project-v2 mode: files → classes → functions as nested containers. */
-function buildSourceMapNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[]): void {
-    let documentY = 60;
-
-    snapshot.documents.forEach((document, documentIndex) => {
-        const documentId = `document:${document.path}`;
-        const groupColor = GROUP_COLORS[documentIndex % GROUP_COLORS.length];
-        const topLevel = document.units.filter(unit => unit.parentId === null);
-        const topFunctions = topLevel.filter(unit => !unit.kind.includes('class'));
-        const classes = topLevel.filter(unit => unit.kind.includes('class'));
-        const classHeights = new Map(classes.map(unit => [
-            unit.id,
-            Math.max(132, directChildren(document.units, unit.id).length * 96 + 72),
-        ]));
-        const classLaneHeight = classes.reduce((height, unit) => height + classHeights.get(unit.id)! + 24, 0);
-        const looseNested = document.units.filter(unit => unit.parentId !== null
-            && !classes.some(parent => parent.id === unit.parentId));
-        const documentHeight = Math.max(
-            210,
-            topFunctions.length * 106 + 96,
-            classLaneHeight + 72,
-            looseNested.length * 106 + 96,
-        );
-
-        nodes.push({
-            id: documentId,
-            type: 'slate',
-            position: snapshot.layout?.[documentId] ?? { x: 80, y: documentY },
-            style: { width: 1020, height: documentHeight },
-            data: {
-                label: document.path.split('/').pop() ?? document.path,
-                detail: document.path,
-                kind: 'document',
-                invalid: !document.valid,
-                stale: document.stale,
-                container: true,
-                groupColor,
-                path: document.path,
-            },
-        });
-
-        let functionY = 64;
-        let classY = 64;
-        let looseY = 64;
-        for (const unit of document.units) {
-            const isClass = unit.kind === 'class' || unit.kind === 'nested_class';
-            const parentClass = classes.find(parent => parent.id === unit.parentId);
-            let parentId = documentId;
-            let position: { x: number; y: number };
-            let style: { width: number; height: number } | undefined;
-            let container = false;
-
-            if (unit.parentId === null && isClass) {
-                position = { x: 360, y: classY };
-                style = { width: 620, height: classHeights.get(unit.id) ?? 132 };
-                classY += style.height + 24;
-                container = true;
-            } else if (unit.parentId === null) {
-                position = { x: 32, y: functionY };
-                functionY += 106;
-            } else if (parentClass) {
-                parentId = parentClass.id;
-                const siblingIndex = directChildren(document.units, parentClass.id).findIndex(child => child.id === unit.id);
-                position = { x: 28, y: 58 + siblingIndex * 96 };
-            } else {
-                position = { x: 700, y: looseY };
-                looseY += 106;
-            }
-
-            nodes.push({
-                id: unit.id,
-                type: 'slate',
-                parentId,
-                extent: 'parent',
-                position: snapshot.layout?.[unit.id] ?? position,
-                style,
-                data: {
-                    label: unit.name,
-                    detail: unit.signature ?? unit.qualifiedName,
-                    kind: unit.kind,
-                    identity: unit.identity,
-                    stale: document.stale,
-                    container,
-                    groupColor,
-                    path: document.path,
-                    unit,
-                },
-            });
-        }
-        documentY += documentHeight + 60;
-    });
 }
 
 function addNotesAndEdges(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edges: Edge[]): void {
@@ -229,7 +135,7 @@ function addNotesAndEdges(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[
                 detail: note.body || 'Board-only note',
                 kind: 'note',
                 groupColor: 'var(--strata-warning)',
-                path: snapshot.mode === 'folder' ? 'Board note — slate/layout.json' : 'Board note — not written to source',
+                path: 'Board note — slate/layout.json',
                 note,
             },
         });

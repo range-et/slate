@@ -5,17 +5,10 @@ import type { SyntaxNode, Tree } from '@lezer/common';
 
 import type { ParseModuleResult, ParsedUnit, SourcePosition, SourceProposal, SourceRange } from './harness_protocol';
 
-const ANNOTATION_START = '## @slate';
-const ANNOTATION_END = '## @slate-end';
-
-type Annotation = Record<string, unknown>;
-
 type ParsedDetails = ParseModuleResult & {
     tree: Tree;
     offsets: Map<string, {
         code: { from: number; to: number };
-        declaration: { from: number; to: number };
-        full: { from: number; to: number };
     }>;
 };
 
@@ -53,15 +46,6 @@ function rangeAt(starts: number[], from: number, to: number): SourceRange {
     return { start: positionAt(starts, from), end: positionAt(starts, to) };
 }
 
-export function offsetAt(source: string, position: SourcePosition): number {
-    const starts = lineStarts(source);
-    if (position.line < 0 || position.line >= starts.length) throw new AdapterError('source position line is out of range');
-    const lineEnd = position.line + 1 < starts.length ? starts[position.line + 1] - 1 : source.length;
-    const offset = starts[position.line] + position.character;
-    if (offset > lineEnd) throw new AdapterError('source position character is out of range');
-    return offset;
-}
-
 function directChildren(node: SyntaxNode): SyntaxNode[] {
     const children: SyntaxNode[] = [];
     for (let child = node.firstChild; child; child = child.nextSibling) children.push(child);
@@ -93,54 +77,6 @@ function normalizeParameters(raw: string): string {
     const common = indents.length ? Math.min(...indents) : 0;
     const value = lines.map(line => line.slice(common)).join('\n');
     return closedOnOwnLine ? `${value}\n` : value;
-}
-
-function parseAnnotation(source: string, anchor: number, starts: number[]): {
-    annotation: Annotation | null;
-    range: SourceRange | null;
-    from: number;
-} {
-    const lines = source.split(/\r?\n/);
-    const anchorPosition = positionAt(starts, anchor);
-    let end = anchorPosition.line - 1;
-    if (end < 0 || lines[end]?.trim() !== ANNOTATION_END) return { annotation: null, range: null, from: anchor };
-    let start = end - 1;
-    while (start >= 0 && !lines[start].trim().startsWith(ANNOTATION_START)) start--;
-    if (start < 0) return { annotation: null, range: null, from: anchor };
-    for (let line = start; line <= end; line++) {
-        if (!lines[line].trim().startsWith('##')) return { annotation: null, range: null, from: anchor };
-    }
-
-    const first = lines[start].trim();
-    const annotation: Annotation = { version: null, unknown: { tag: {}, fields: {} } };
-    for (const token of first.slice(ANNOTATION_START.length).trim().split(/\s+/)) {
-        if (!token.includes('=')) continue;
-        const [key, ...rest] = token.split('=');
-        const value = rest.join('=');
-        if (key === 'v') annotation.version = /^\d+$/.test(value) ? Number(value) : value;
-        else if (key === 'id') annotation.id = value;
-        else ((annotation.unknown as { tag: Record<string, string> }).tag)[key] = value;
-    }
-
-    const repeated = new Map<string, string[]>();
-    for (let line = start + 1; line < end; line++) {
-        const value = lines[line].trim();
-        if (!value.startsWith('## ') || !value.includes(':')) continue;
-        const separator = value.indexOf(':');
-        const key = value.slice(3, separator).trim();
-        const entry = value.slice(separator + 1).trimStart();
-        repeated.set(key, [...(repeated.get(key) ?? []), entry]);
-    }
-    for (const [key, values] of repeated) {
-        if (key === 'depends-on') annotation.dependencies = values;
-        else if (key === 'example') annotation.examples = values;
-        else if (key === 'locked') annotation.locked = values.at(-1)?.toLowerCase() === 'true';
-        else if (key === 'intent' || key === 'contract') annotation[key] = values.join('\n');
-        else ((annotation.unknown as { fields: Record<string, string[]> }).fields)[key] = values;
-    }
-    const from = starts[start];
-    const to = end + 1 < starts.length ? starts[end + 1] : source.length;
-    return { annotation, range: rangeAt(starts, from, to), from };
 }
 
 function syntaxErrors(tree: Tree): SyntaxNode[] {
@@ -194,13 +130,10 @@ function parseDetailed(source: string, documentPath: string, nodeId?: string): P
         if (isClass) kind = parent ? 'nested_class' : 'class';
         else if (parent && ['class', 'nested_class'].includes(parent.kind)) kind = 'method';
         else kind = parent ? 'nested_function' : 'function';
-        const annotationResult = parseAnnotation(source, wrapper.from, starts);
-        const durableId = typeof annotationResult.annotation?.id === 'string' ? annotationResult.annotation.id : null;
-        const isNode = !durableId && !parent && nodeName !== undefined && name === nodeName;
-        const id = durableId ?? (isNode ? nodeId! : stableId(documentPath, kind, qualifiedName));
+        const isNode = !parent && nodeName !== undefined && name === nodeName;
+        const id = isNode ? nodeId! : stableId(documentPath, kind, qualifiedName);
         const declarationTo = meaningfulEnd(source, node.to);
         const declaration = rangeAt(starts, wrapper.from, declarationTo);
-        const full = rangeAt(starts, annotationResult.from, declarationTo);
         const decorators = wrapper.name === 'DecoratedStatement'
             ? directChildren(wrapper)
                 .filter(child => child.name === 'Decorator')
@@ -208,7 +141,7 @@ function parseDetailed(source: string, documentPath: string, nodeId?: string): P
             : [];
         const unit: ParsedUnit = {
             id,
-            identity: durableId || isNode ? 'durable' : 'provisional',
+            identity: isNode ? 'durable' : 'provisional',
             kind,
             name,
             qualifiedName,
@@ -216,10 +149,8 @@ function parseDetailed(source: string, documentPath: string, nodeId?: string): P
             ranges: {
                 name: rangeAt(starts, nameNode.from, nameNode.to),
                 declaration,
-                annotation: annotationResult.range,
-                full,
             },
-            annotation: annotationResult.annotation,
+            annotation: null,
             decorators,
         };
         if (!isClass) {
@@ -239,8 +170,6 @@ function parseDetailed(source: string, documentPath: string, nodeId?: string): P
         units.push(unit);
         offsets.set(id, {
             code: { from: node.from, to: declarationTo },
-            declaration: { from: wrapper.from, to: declarationTo },
-            full: { from: annotationResult.from, to: declarationTo },
         });
         return unit;
     };
@@ -264,21 +193,7 @@ function parseDetailed(source: string, documentPath: string, nodeId?: string): P
     };
     visit(tree.topNode, null);
 
-    const diagnostics: ParseModuleResult['diagnostics'] = [];
-    const durable = new Map<string, ParsedUnit[]>();
-    for (const unit of units.filter(candidate => candidate.identity === 'durable')) {
-        durable.set(unit.id, [...(durable.get(unit.id) ?? []), unit]);
-    }
-    for (const [id, matches] of durable) {
-        if (matches.length > 1) {
-            diagnostics.push({
-                code: 'duplicate-slate-id',
-                message: `Slate id ${id} is attached to ${matches.length} declarations.`,
-                range: matches[1].ranges.annotation ?? matches[1].ranges.name,
-            });
-        }
-    }
-    return { path: documentPath, sourceHash: sourceHash(source), valid: true, units, diagnostics, tree, offsets };
+    return { path: documentPath, sourceHash: sourceHash(source), valid: true, units, diagnostics: [], tree, offsets };
 }
 
 export function parseModule(source: string, documentPath = '<memory>', nodeId?: string): ParseModuleResult {
@@ -393,32 +308,6 @@ function requireUnit(parsed: ParsedDetails, unitId: string): ParsedUnit {
     return matches[0];
 }
 
-function annotationLines(annotation: Annotation, indent = ''): string {
-    const id = annotation.id;
-    if (typeof id !== 'string' || !id) throw new AdapterError('annotation.id must be a non-empty string');
-    const unknown = annotation.unknown as { tag?: Record<string, string>; fields?: Record<string, string[]> } | undefined;
-    const tags = Object.entries(unknown?.tag ?? {}).map(([key, value]) => ` ${key}=${value}`).join('');
-    const lines = [`${indent}## @slate v=2 id=${id}${tags}`];
-    for (const key of ['intent', 'contract'] as const) {
-        const value = annotation[key];
-        if (typeof value === 'string') {
-            for (const line of value.split('\n')) lines.push(`${indent}## ${key}: ${line}`);
-        }
-    }
-    for (const value of Array.isArray(annotation.dependencies) ? annotation.dependencies : []) {
-        if (typeof value === 'string') lines.push(`${indent}## depends-on: ${value}`);
-    }
-    for (const value of Array.isArray(annotation.examples) ? annotation.examples : []) {
-        if (typeof value === 'string') lines.push(`${indent}## example: ${value}`);
-    }
-    lines.push(`${indent}## locked: ${annotation.locked === true ? 'true' : 'false'}`);
-    for (const [key, values] of Object.entries(unknown?.fields ?? {})) {
-        for (const value of values) lines.push(`${indent}## ${key}: ${value}`);
-    }
-    lines.push(`${indent}## @slate-end`);
-    return `${lines.join('\n')}\n`;
-}
-
 function proposal(source: string, documentPath: string, from: number, to: number, newText: string): SourceProposal {
     const starts = lineStarts(source);
     const proposedSource = source.slice(0, from) + newText + source.slice(to);
@@ -433,30 +322,6 @@ function proposal(source: string, documentPath: string, from: number, to: number
     };
 }
 
-function typedFunction(signature: string): ParsedUnit {
-    const candidate = `${signature.trim().replace(/:$/, '')}:\n    pass\n`;
-    const detailed = parseDetailed(candidate, '<signature>');
-    if (!detailed.valid || detailed.units.length !== 1 || detailed.units[0].kind !== 'function') {
-        throw new AdapterError('stub signature must define exactly one top-level function');
-    }
-    const unit = detailed.units[0];
-    if (!unit.returnAnnotation) throw new AdapterError('stub signature requires a return annotation');
-    const functionNode = detailed.tree.topNode.getChild('FunctionDefinition');
-    const params = functionNode?.getChild('ParamList');
-    if (!params) throw new AdapterError('stub signature has invalid parameters');
-    const children = directChildren(params);
-    for (let index = 0; index < children.length; index++) {
-        const child = children[index];
-        if (child.name !== 'VariableName') continue;
-        const name = candidate.slice(child.from, child.to);
-        if (name === 'self' || name === 'cls') continue;
-        if (children[index + 1]?.name !== 'TypeDef') {
-            throw new AdapterError(`stub parameter ${JSON.stringify(name)} requires a type annotation`);
-        }
-    }
-    return unit;
-}
-
 function indentBlock(value: string, indent: string): string {
     return value.split('\n').map(line => `${indent}${line}`).join('\n');
 }
@@ -464,53 +329,6 @@ function indentBlock(value: string, indent: string): string {
 export class PythonAdapter {
     async parseModule(source: string, documentPath: string, nodeId?: string): Promise<ParseModuleResult> {
         return parseModule(source, documentPath, nodeId);
-    }
-
-    async adoptUnit(params: Record<string, unknown>): Promise<SourceProposal> {
-        const source = requireString(params, 'source');
-        const documentPath = requireString(params, 'path');
-        requireFresh(source, params.expectedHash);
-        const parsed = parseDetailed(source, documentPath);
-        if (!parsed.valid) throw new AdapterError('cannot adopt a unit while the module is invalid');
-        const unit = requireUnit(parsed, requireString(params, 'unitId'));
-        if (unit.annotation) throw new AdapterError('unit already has a Slate annotation');
-        const from = parsed.offsets.get(unit.id)!.declaration.from;
-        return proposal(source, documentPath, from, from, annotationLines(params.annotation as Annotation, declarationIndent(source, from)));
-    }
-
-    async updateAnnotation(params: Record<string, unknown>): Promise<SourceProposal> {
-        const source = requireString(params, 'source');
-        const documentPath = requireString(params, 'path');
-        requireFresh(source, params.expectedHash);
-        const parsed = parseDetailed(source, documentPath);
-        const unit = requireUnit(parsed, requireString(params, 'unitId'));
-        if (!unit.ranges.annotation) throw new AdapterError('unit has no v2 Slate annotation; adopt it first');
-        if (unit.annotation?.version !== 2) throw new AdapterError('unsupported Slate annotation version');
-        const from = offsetAt(source, unit.ranges.annotation.start);
-        const to = offsetAt(source, unit.ranges.annotation.end);
-        return proposal(source, documentPath, from, to, annotationLines(params.annotation as Annotation, declarationIndent(source, parsed.offsets.get(unit.id)!.declaration.from)));
-    }
-
-    async insertStub(params: Record<string, unknown>): Promise<SourceProposal> {
-        const source = requireString(params, 'source');
-        const documentPath = requireString(params, 'path');
-        requireFresh(source, params.expectedHash);
-        const signature = requireString(params, 'signature').trim().replace(/:$/, '');
-        typedFunction(signature);
-        const parsed = parseDetailed(source, documentPath);
-        if (!parsed.valid) throw new AdapterError('cannot insert a stub while the module is invalid');
-        const parentId = params.parentId === null || params.parentId === undefined ? null : requireString(params, 'parentId');
-        let insertion = source.length;
-        let indent = '';
-        if (parentId) {
-            const parent = requireUnit(parsed, parentId);
-            if (!['class', 'nested_class'].includes(parent.kind)) throw new AdapterError('stub parent must be a class');
-            insertion = parsed.offsets.get(parent.id)!.declaration.to;
-            indent = `${declarationIndent(source, parsed.offsets.get(parent.id)!.declaration.from)}    `;
-        }
-        const separator = insertion === 0 ? '' : source.slice(0, insertion).endsWith('\n\n') ? '' : source.slice(0, insertion).endsWith('\n') ? '\n' : '\n\n';
-        const stub = `${annotationLines(params.annotation as Annotation, indent)}${indentBlock(`${signature}:\n    raise NotImplementedError("Slate stub")`, indent)}\n`;
-        return proposal(source, documentPath, insertion, insertion, `${separator}${stub}`);
     }
 
     async replaceUnit(params: Record<string, unknown>): Promise<SourceProposal> {

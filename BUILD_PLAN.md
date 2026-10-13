@@ -41,24 +41,27 @@ design per phase.
 
 | Area | File | Notes |
 | --- | --- | --- |
-| Folder format (pure) | `vscode-extension/src/slate_folder.ts` | parse/serialize slate.json, layout.json, node JSON; `indexNode`, `checkNodeCode`, `nodeFromSignature` |
-| Folder IO (VS Code) | `vscode-extension/src/slate_folder_host.ts` | index folder, read/write nodes (WorkspaceEdit + save), layout (fs write), create node |
-| Panel / webview host | `vscode-extension/src/harness_panel.ts` | ~1100 lines; folder-mode branches come first; old project-v2 branches are deleted in S-203 |
-| Python parsing | `vscode-extension/src/python_adapter.ts` | Lezer; `parseModule(source, path, nodeId?)`; `replaceUnit` (confined function replacement); old annotation/stub helpers are deleted in S-203 |
-| Protocol types | `vscode-extension/src/harness_protocol.ts` | shared host ↔ webview types (webview re-exports them after S-110) |
-| Generation | `vscode-extension/src/generation.ts`, `llama_transport.ts` | packet builder (uses `annotation.intent/contract/dependencies/locked`), SSE transport |
+| Folder format (pure) | `vscode-extension/src/slate_folder.ts` | parse/serialize slate.json, layout.json, node JSON (`uses`, `order`, `kind`); `indexNode`, `checkNodeCode`, `nodeFromSignature` |
+| Folder IO (VS Code) | `vscode-extension/src/slate_folder_host.ts` | index folder, `readNodes`, read/write nodes (WorkspaceEdit + save), layout (fs write), create node |
+| Panel / webview host | `vscode-extension/src/harness_panel.ts` | ~620 lines, folder only; typed actions incl. `compile`, `describeNodes`, `cancelDescribe` |
+| Python parsing | `vscode-extension/src/python_adapter.ts` | Lezer; `parseModule(source, path, nodeId?)`; `replaceUnit`; `splitImport`, `identifierNames`, `topLevelBindings` |
+| Port / describe | `vscode-extension/src/port/python_importer.ts`, `port/describe.ts` | pure; importer `portPythonProject(files)`; describe order/packet/parse/loop |
+| Compile | `vscode-extension/src/compile/python.ts` | pure `compilePython(nodes, config)` → files + diagnostics |
+| Port/compile host | `vscode-extension/src/port_compile_host.ts` | `portPythonFolder`, `compileSlateFolder`, the `Slate` output channel |
+| Protocol types | `vscode-extension/src/harness_protocol.ts` | shared host ↔ webview types (webview re-exports them) |
+| Generation | `vscode-extension/src/generation.ts`, `llama_transport.ts` | packet builder (uses `annotation.intent/contract/dependencies/locked`), SSE transport (optional `system`) |
 | Search | `vscode-extension/src/search.ts` | ranks units over documents + `sources` |
-| Old source-map mode | `vscode-extension/src/project_v2.ts`, `## @slate` parts of the adapter | retire in S-203 |
-| Extension entry | `vscode-extension/src/extension.ts` | commands, custom editor (`*.slate.json`, `**/slate/slate.json`), test-only commands |
+| Extension entry | `vscode-extension/src/extension.ts` | commands (open, new, port, compile), custom editor (`**/slate/slate.json` only), launcher view, test-only commands |
 | Webview app | `src/harness/main.tsx` | React + XYFlow; Inspector, menus, command UI |
-| Graph building | `src/harness/graph.ts` | `buildGraph` → folder mode (`buildFolderNodes`) or legacy (`buildSourceMapNodes`), plus notes and edges |
-| Demo snapshots | `src/harness/demo.ts` | `?demo` = legacy source map (Playwright uses it); `?demo=folder` = folder mode |
-| Tests | `test/*.test.ts` (Vitest), `test/e2e/*.playwright.ts`, `vscode-extension/src/test/suite/extension.test.ts` (Extension Host) | fixtures in `vscode-extension/test-fixtures/electron/` (incl. `folder_project/`) |
+| Graph building | `src/harness/graph.ts` | `buildGraph` → `buildFolderNodes` (incl. module-state nodes), notes, and edges |
+| Demo snapshot | `src/harness/demo.ts` | `?demo` (any value) loads it; Playwright uses it |
+| Gate script | `scripts/port-compile.js` | port a folder and compile it with the built `vscode-extension/out` modules |
+| Tests | `test/*.test.ts` (Vitest), `test/e2e/*.playwright.ts`, `vscode-extension/src/test/suite/extension.test.ts` (Extension Host) | fixtures in `vscode-extension/test-fixtures/electron/` (`folder_project/`, `port_source/`) |
 | Legacy notebook | `legacy/` | frozen; Pages deploys it; keep `verify:baseline` green |
 
 ### Folder-mode snapshot contract
 
-- `snapshot.mode === 'folder'`. Each node file is one `HarnessDocument`:
+- Each node file is one `HarnessDocument`:
   `path = slate/nodes/<id>.json`, `id = node:<id>`, `source` = code text, and
   `sourceHash` = hash of the code text (not the JSON).
 - The top-level unit's `id` is the node ID (path without `.json`) with
@@ -68,8 +71,11 @@ design per phase.
 - Unit ranges are relative to the code text. The host's `sources` map holds
   that text keyed by document path, which is what generation and search
   slice.
-- In the webview, `node.data.path` is the node ID in folder mode (a file path
-  in legacy mode). Use `nodeIdOf(document.path)` to match.
+- In the webview, `node.data.path` is the node ID. Use
+  `nodeIdOf(document.path)` to match.
+- Prelude/epilogue node files set `document.nodeKind` and have no units. The
+  graph node ID is the node ID itself; the host accepts it for layout and
+  `setNodeCode`.
 
 ## Conventions
 
@@ -96,9 +102,9 @@ design per phase.
 
 ```bash
 npx vitest run                         # harness unit tests (~1s)
-npx playwright test                    # webview with fake host (~3s); uses ?demo
+npx playwright test                    # webview with fake host (~4s); uses ?demo
 npm run test:electron                  # Extension Host (~45s); builds + compiles first
-npm run verify:baseline                # CI gate incl. legacy tests/build + example pytest
+npm run verify:baseline                # CI gate incl. legacy, port → compile → pytest of the examples
 npm run package-extension              # VSIX smoke (needs network for npx vsce)
 ```
 
@@ -118,16 +124,19 @@ this config in `.amp/in/tsc.json` and run
 
 Visual checks: start `npx vite --port 5199`, then use a Playwright script that
 stubs `window.acquireVsCodeApi` (record `postMessage` calls in
-`window.__messages`). Load `/harness.html?demo=folder`, screenshot into
+`window.__messages`). Load `/harness.html?demo`, screenshot into
 `.amp/in/artifacts/`, and inspect with `view_media`, passing an objective
 that states the expected result.
 
 ## Learnings and gotchas
 
-- The pre-existing Extension Host test "indexes dirty buffers… preserves
-  native undo" is flaky: it failed 1 of 3 runs on 2026-10-13 at the
-  post-undo assertion. Rerun before debugging; consider awaiting a document
-  change event before asserting.
+- Extension Host tests share one panel. A test that opens the same
+  `slate.json` again can read the previous test's snapshot first; close all
+  editors in `finally` so the next test starts with a fresh panel. The undo
+  test polls for the reverted text instead of asserting right after `undo`.
+- Custom editor webviews start without options. The panel constructor sets
+  `enableScripts` and `localResourceRoots`; without it the canvas is blank
+  (only the workbench smoke test catches this).
 - `npm run test:electron` sometimes passes and then hangs while VS Code shuts
   down. Check the log for `N passing` and kill the process if it lingers. The
   pinned VS Code (1.139) is cached in `vscode-extension/.vscode-test/`
@@ -158,9 +167,15 @@ that states the expected result.
   `HighlightStyle` defined in `main.tsx`.
 - Don't call `selectFromEditor` after every refresh in folder mode. It snaps
   the canvas selection back to whatever editor was last active.
-- Legacy calculator/tic-tac-toe annotations (`## @slate id=… prompt:`) are
-  not the current grammar. Phase 2 ports their Python from
-  `legacy/examples/`; don't hand-convert them.
+- The checked-in `legacy/examples/tic_tac_toe/game.py` lacks its imports, so
+  the gate ports the legacy compile output (`$TMP/tic_tac_toe`) instead.
+  Calculator is ported from the checked-in files. When `legacy/` is deleted
+  (S-001), move those Python sources and their tests somewhere the gate can
+  still reach.
+- Compile uses absolute imports rooted at `outDir` (not the relative imports
+  this plan first proposed): the example suites load modules as top-level
+  files, and absolute imports keep the original project's import paths
+  valid.
 - The owner's worktree may contain their own changes (e.g. an unstaged
   `dev_notes.md` deletion, untracked `slate.slate.json` and
   `vscode-extension/vscode_extension.slate.json`). Never stage or revert
@@ -214,79 +229,26 @@ picker). The steps below are kept as the record of what was built.
    Playwright covers wiring → message; Extension Host covers `setContext`
    writing `context` in the node JSON.
 
-## Phase 2 — port and compile (next thread)
+## Phase 2 — port and compile
 
-Read first: `slate_folder.ts`, `python_adapter.ts` (`parseDetailed`),
-`legacy/examples/calculator/*.py` and their `tests/`, plus
-`legacy/examples/tic_tac_toe/`.
+**Done 2026-10-13:** S-200 importer, S-201 describe pass, S-202 compile with
+the port → compile → pytest gate, S-203 project-v2 retirement. See
+features.md for behavior. Deviations from the original design:
 
-### S-200 Importer (`vscode-extension/src/port/python_importer.ts`, pure)
-
-- Input: `Map<relativePath, source>`. Output:
-  `{ nodes: Map<nodeId, SlateNode>, report: PortReport }`.
-- Each module `a/b.py` maps to folder `a/b/`. Each top-level def or class
-  becomes `a/b/<name>.json` (name == stem).
-- **Imports.** Parse the module's import statements. Each node gets only the
-  imports whose bound names appear as identifiers in its code (walk Lezer
-  `VariableName` nodes). Imports of other *ported* modules' definitions are
-  dropped and recorded as `uses` (node IDs).
-- **New optional field `uses: string[]`** (node IDs). Compile resolves bare
-  names same-folder first, then via `uses`, then a unique global match.
-  Ambiguity is a diagnostic. Add the field to `slate_folder.ts` (parse,
-  serialize, preserve).
-- **Module-level state** (assignments, constants, `if __name__ == ...`,
-  side-effect statements) goes into `a/b/_prelude.json` with
-  `"kind": "prelude"` (exempt from the name == stem and single-definition
-  rules; `code` holds the statements). Compile emits it right after imports.
-  The canvas shows it as a small "module state" node.
-- **Report:** counts, preludes created, warnings (star imports, conditional
-  or dynamic definitions, `global` usage, name collisions).
-- **Host command** `slate.portProject`: pick a source folder and write
-  `slate/` into the workspace with fs writes. Refuse if `slate/nodes` is
-  non-empty. Show the report in an output channel. Never modify the source
-  project.
-
-### S-201 Describe pass (`port/describe.ts` packet + host loop)
-
-- Order: topological over `uses` (leaves first); break cycles by node ID.
-- Packet: an instruction ("Describe what this function does. Reply with
-  exactly `intent: <one line>` and optionally `contract: <one line>`."), the
-  node code, and for each used node only `signature + intent`. Budget: about
-  600 input and 120 output tokens.
-- Parse: accept the `intent:` and optional `contract:` lines; reject anything
-  multi-line or over 240 characters (retry once, then skip and report).
-- Write `intent`, `contract`, and `describedBy: "llama"`. Skip nodes that
-  already have an intent, which makes runs resumable. Report progress via
-  status messages; support cancel.
-- Tests with `test/support/fake_llama_server.ts`: ordering, skip/resume,
-  malformed reply, timeout, cancel.
-
-### S-202 Compile (`compile/python.ts`, pure; host command `slate.compile`)
-
-- Output `Map<relativePath, text>` under `config.compile.outDir`. Each folder
-  becomes a module (`a/b/` → `<outDir>/a/b.py`, plus `__init__.py` files).
-  Root-level nodes go into `<outDir>/__init__.py`, and root nodes may not
-  use subfolder nodes (diagnostic), which avoids import cycles.
-- Module text: generated header → `from __future__` imports → merged,
-  deduplicated external imports (first-seen order) → relative imports for
-  cross-module node references (`from .operations import add`) → prelude →
-  nodes in `order` (an importer-assigned index, else node ID). Each block is
-  preceded by `# slate: nodes/<id>` and `# intent: …`.
-- **Acceptance:** port `legacy/examples/calculator` and `tic_tac_toe`,
-  compile them, and run their pytest suites against the output (the suites
-  read `SLATE_CALCULATOR_DIR` / `SLATE_TIC_TAC_TOE_FILE`; check how
-  `scripts/verify-baseline.sh` sets them). Golden tests cover import
-  rewriting, collisions, and preludes.
-- Wire it into `verify:baseline` as the new port → compile → pytest gate.
-
-### S-203 Retire project-v2 mode
-
-Delete `project_v2.ts`, `contracts/project-v2.schema.json`, adapter
-`adoptUnit` / `updateAnnotation` / `insertStub` and `## @slate` parsing,
-the `scanWorkspace` command, legacy branches in `harness_panel.ts`,
-`buildSourceMapNodes`, and `?demo` (move Playwright to `?demo=folder`). Update
-the Extension Host tests and fixtures. `HarnessPanel.createOrShow` without a
-`slate/` folder should offer **New Project** / **Port Python Project…**.
+- Module statements split into `_prelude` (`kind: "prelude"`, before the
+  first statement that needs a module definition) and `_epilogue`
+  (`kind: "epilogue"`, from there on, e.g. the `__main__` guard), because a
+  single prelude emitted before the nodes breaks `TABLE = {"f": f}` and the
+  main guard.
+- `uses` also lists same-module references (describe ordering and packets
+  need them); compile skips same-folder ones.
+- Compile emits absolute imports rooted at `outDir`; root-level nodes go into
+  `<project name>.py` instead of `outDir/__init__.py`.
+- Port skips `tests/`, `test/`, virtualenvs, hidden and build folders, and
+  files that start with the Slate generated header.
+- Describe keeps the node's own code whole and drops used-node lines to fit
+  about 600 tokens; a node whose code alone exceeds `contextWindow − 120` is
+  skipped.
 
 ## Phase 3 — one workspace
 
@@ -374,5 +336,15 @@ the Extension Host tests and fixtures. `HarnessPanel.createOrShow` without a
   picker. Tests: Vitest palette ranking; Playwright palette and wiring
   journeys; Extension Host folder `setContext` and a legacy typed-action
   undo. Phase 1 exit is the owner's "an hour without fighting it" check,
-  which is pending. **Next thread: Phase 2** (start at S-200 in the
-  Phase 2 section above).
+  which is pending.
+- **2026-10-13 — Phase 2** ([thread](https://ampcode.com/threads/T-01a13634-1fde-7738-9ca4-8d7eea11e71a)).
+  Port Python Project (`port/python_importer.ts`), Describe nodes
+  (`port/describe.ts`), Compile Project (`compile/python.ts`), host wiring in
+  `port_compile_host.ts`, module-state nodes on the canvas, and the
+  `verify:baseline` gate (calculator 7 and tic-tac-toe 8 pytest cases pass on
+  compiled output). Retired project-v2 mode entirely. Fixed the custom editor
+  webview never enabling scripts. Tests: Vitest port/compile goldens and
+  describe against the fake llama server (ordering, resume, malformed, timeout,
+  cancel); Extension Host port → describe → compile, dirty node buffers,
+  notes in layout.json. **Next thread: Phase 3** (reference nodes,
+  placeholders, library sidebar, Compose/Map).

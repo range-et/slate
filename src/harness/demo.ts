@@ -5,62 +5,6 @@ const range = (line: number) => ({
     end: { line, character: 20 },
 });
 
-function unit(
-    id: string,
-    kind: HarnessUnit['kind'],
-    name: string,
-    qualifiedName: string,
-    line: number,
-    parentId: string | null = null,
-): HarnessUnit {
-    return {
-        id,
-        identity: id.startsWith('durable') ? 'durable' : 'provisional',
-        kind,
-        name,
-        qualifiedName,
-        parentId,
-        ranges: { name: range(line), declaration: range(line), annotation: null, full: range(line) },
-        annotation: null,
-        decorators: [],
-        signature: kind.includes('class') ? undefined : `def ${name}(value: int) -> int`,
-    };
-}
-
-export const demoSnapshot: HarnessSnapshot = {
-    revision: 1,
-    projectName: 'calculator',
-    notes: [{
-        id: 'board-note-review',
-        title: 'Review overflow behavior',
-        body: 'Should run clamp values before calling Operations.add?',
-        attachedTo: 'durable-run',
-    }],
-    layout: { 'board-note-review': { x: 1160, y: 120 } },
-    documents: [
-        {
-            id: 'document:calculator.py', path: 'calculator.py', valid: true, stale: false,
-            sourceHash: 'sha256:demo', version: 1, diagnostics: [],
-            units: [
-                unit('durable-run', 'function', 'run', 'run', 12),
-                {
-                    ...unit('provisional-main', 'function', 'main', 'main', 28),
-                    annotation: { dependencies: ['durable-run'] },
-                },
-            ],
-        },
-        {
-            id: 'document:operations.py', path: 'operations.py', valid: true, stale: false,
-            sourceHash: 'sha256:demo', version: null, diagnostics: [],
-            units: [
-                unit('durable-operations', 'class', 'Operations', 'Operations', 7),
-                unit('durable-add', 'method', 'add', 'Operations.add', 10, 'durable-operations'),
-                unit('provisional-divide', 'method', 'divide', 'Operations.divide', 18, 'durable-operations'),
-            ],
-        },
-    ],
-};
-
 function nodeDocument(
     nodeId: string,
     source: string,
@@ -84,7 +28,7 @@ function nodeUnit(
     return {
         id, identity: parentId ? 'provisional' : 'durable', kind, name,
         qualifiedName: parentId ? `${parentId.split('/').pop()}.${name}` : name,
-        parentId, ranges: { name: range(0), declaration: range(0), annotation: null, full: range(0) },
+        parentId, ranges: { name: range(0), declaration: { start: { line: 0, character: 0 }, end: { line: 50, character: 0 } } },
         annotation, decorators: [], signature: kind.includes('class') ? undefined : signature,
         ...(kind.includes('class') ? {} : { parameters: signature.slice(signature.indexOf('(') + 1, signature.lastIndexOf(')')), returnAnnotation: 'int' }),
     } as HarnessUnit;
@@ -93,10 +37,9 @@ function nodeUnit(
 const clampCode = 'def clamp(value: int, lower: int, upper: int) -> int:\n    return max(lower, min(value, upper))\n';
 const normalizeCode = 'def normalize_score(score: int, maximum: int) -> int:\n    raise NotImplementedError\n';
 
-export const folderDemoSnapshot: HarnessSnapshot = {
+export const demoSnapshot: HarnessSnapshot = {
     revision: 1,
     projectName: 'llama-demo',
-    mode: 'folder',
     notes: [{
         id: 'board-note-port',
         title: 'Port the grading script next',

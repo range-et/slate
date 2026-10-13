@@ -7,7 +7,7 @@
     "prebuild": "npm run clean",
     "build": "vite build",
     "start": "vite",
-    "dev": "vite --open /harness.html?demo=folder",
+    "dev": "vite --open /harness.html?demo",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

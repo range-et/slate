@@ -20,7 +20,7 @@ import { python } from '@codemirror/lang-python';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 
-import { demoSnapshot, folderDemoSnapshot } from './demo';
+import { demoSnapshot } from './demo';
 import { buildGraph, nodeIdOf, SlateNodeData } from './graph';
 import { rankPalette, type Rankable } from './palette';
 import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, PacketPreview } from './types';
@@ -163,8 +163,7 @@ function Inspector({
     const [noteTitle, setNoteTitle] = useState(note?.title ?? '');
     const [noteBody, setNoteBody] = useState(note?.body ?? '');
     const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
-    const folderMode = snapshot.mode === 'folder';
-    const nodeCode = folderMode && (unit?.parentId === null || node.data.kind === 'module') ? document?.source ?? '' : null;
+    const nodeCode = unit?.parentId === null || node.data.kind === 'module' ? document?.source ?? '' : null;
     const [codeDraft, setCodeDraft] = useState(nodeCode ?? '');
     useEffect(() => { setCodeDraft(nodeCode ?? ''); }, [unit?.id, document?.sourceHash]);
     useEffect(() => { setIntentDraft(intent); setContractDraft(contract); }, [unit?.id, intent, contract]);
@@ -175,11 +174,11 @@ function Inspector({
     }, [note?.id, note?.title, note?.body, note?.attachedTo]);
     const availableContext = snapshot.documents.flatMap(item => item.units)
         .filter(candidate => candidate.identity === 'durable' && candidate.id !== unit?.id && !dependencies.includes(candidate.id)
-            && (!folderMode || candidate.parentId === null));
+            && candidate.parentId === null);
     const namedDependency = (id: string) => snapshot.documents.flatMap(item => item.units).find(candidate => candidate.id === id);
     const action = (value: unknown) => vscode?.postMessage({ type: 'action', action: value, revision: snapshot.revision });
     return (
-        <aside className={`harness-inspector ${folderMode ? 'harness-inspector--wide' : ''}`} aria-label="Selected node details">
+        <aside className="harness-inspector harness-inspector--wide" aria-label="Selected node details">
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
             <h2>{node.data.label}</h2>
             <code className="harness-inspector__path">{node.data.path}</code>
@@ -281,7 +280,7 @@ function Inspector({
                     {!generation && (!proposal || proposal.unitId !== unit.id) && <button disabled={!packet} onClick={() => vscode?.postMessage({ type: 'generate', unitId: unit.id })}>Generate with llama.cpp</button>}
                     {accepted && <button className="secondary" onClick={() => vscode?.postMessage({ type: 'undoAccepted' })}>Undo accepted edit</button>}
                     <button className="secondary" onClick={() => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true })}>
-                        {folderMode ? 'Open node file' : 'Edit in code'}
+                        Open node file
                     </button>
                 </>
             )}
@@ -386,10 +385,10 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
             }}>Remove context</button>
         </>}
         {!menu.node && !menu.edge && <>
-            {snapshot.mode === 'folder' && <button role="menuitem" onClick={() => {
+            <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'action', action: { kind: 'createNode', x: menu.flowX, y: menu.flowY }, revision: snapshot.revision });
                 onClose();
-            }}>New node…</button>}
+            }}>New node…</button>
             <button role="menuitem" onClick={() => createNote(null)}>New board note</button>
             <button role="menuitem" onClick={() => { onFit(); onClose(); }}>Fit project to view</button>
             <button role="menuitem" onClick={() => {
@@ -403,7 +402,7 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
             <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true });
                 onClose();
-            }}>{snapshot.mode === 'folder' ? 'Open node file' : 'Edit function in code'}</button>
+            }}>Open node file</button>
             {['function', 'method'].includes(unit.kind) && <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'generate', unitId: unit.id });
                 onClose();
@@ -482,7 +481,7 @@ function HarnessApp() {
     const search = new URLSearchParams(window.location.search);
     const showDemo = import.meta.env.DEV && search.has('demo');
     const [snapshot, setSnapshot] = useState<HarnessSnapshot>(showDemo
-        ? search.get('demo') === 'folder' ? folderDemoSnapshot : demoSnapshot
+        ? demoSnapshot
         : { revision: 0, projectName: 'Slate', documents: [] });
     const [paletteQuery, setPaletteQuery] = useState('');
     const [paletteOpen, setPaletteOpen] = useState(false);
@@ -501,7 +500,7 @@ function HarnessApp() {
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
     const selectedDocument = selected
-        ? snapshot.documents.find(document => (snapshot.mode === 'folder' ? nodeIdOf(document.path) : document.path) === selected.data.path)
+        ? snapshot.documents.find(document => nodeIdOf(document.path) === selected.data.path)
         : undefined;
     const invalidCount = snapshot.documents.filter(document => !document.valid).length;
     const staleCount = snapshot.documents.filter(document => document.stale).length;
@@ -624,7 +623,7 @@ function HarnessApp() {
 
     const isContextEndpoint = (id: string | null) => {
         const unit = id ? snapshot.documents.flatMap(document => document.units).find(candidate => candidate.id === id) : undefined;
-        return Boolean(unit && unit.identity === 'durable' && (snapshot.mode !== 'folder' || unit.parentId === null));
+        return Boolean(unit && unit.identity === 'durable' && unit.parentId === null);
     };
     const post = (action: Record<string, unknown>) => vscode?.postMessage({ type: 'action', action, revision: snapshot.revision });
     const centerOn = (id: string) => {
@@ -677,16 +676,14 @@ function HarnessApp() {
                 }
             }
         }
-        if (snapshot.mode === 'folder') {
-            items.push({ id: 'new-node', group: 'canvas', label: 'New node…', detail: 'Typed signature + intent',
-                run: () => { const point = viewCenter(); post({ kind: 'createNode', x: point.x, y: point.y }); } });
-            items.push(describing
-                ? { id: 'describe-stop', group: 'canvas', label: 'Stop describing', run: () => post({ kind: 'cancelDescribe' }) }
-                : { id: 'describe', group: 'canvas', label: 'Describe nodes with llama.cpp', detail: 'Fills missing intents, leaves first',
-                    run: () => post({ kind: 'describeNodes' }) });
-            items.push({ id: 'compile', group: 'canvas', label: 'Compile project', detail: 'slate/ → Python modules',
-                run: () => post({ kind: 'compile' }) });
-        }
+        items.push({ id: 'new-node', group: 'canvas', label: 'New node…', detail: 'Typed signature + intent',
+            run: () => { const point = viewCenter(); post({ kind: 'createNode', x: point.x, y: point.y }); } });
+        items.push(describing
+            ? { id: 'describe-stop', group: 'canvas', label: 'Stop describing', run: () => post({ kind: 'cancelDescribe' }) }
+            : { id: 'describe', group: 'canvas', label: 'Describe nodes with llama.cpp', detail: 'Fills missing intents, leaves first',
+                run: () => post({ kind: 'describeNodes' }) });
+        items.push({ id: 'compile', group: 'canvas', label: 'Compile project', detail: 'slate/ → Python modules',
+            run: () => post({ kind: 'compile' }) });
         items.push(
             { id: 'new-note', group: 'canvas', label: 'New board note',
                 run: () => { const point = viewCenter(); vscode?.postMessage({ type: 'noteCreate', revision: snapshot.revision, x: point.x, y: point.y, attachedTo: null }); } },
@@ -716,10 +713,7 @@ function HarnessApp() {
             <header className="harness-topbar">
                 <div><strong>SLATE</strong><span>{snapshot.projectName}</span></div>
                 <div className="harness-status">
-                    {snapshot.mode !== 'folder' && <span>{snapshot.documents.length} files</span>}
-                    <span>{snapshot.mode === 'folder'
-                        ? `${snapshot.documents.length} nodes`
-                        : `${graph.nodes.length - snapshot.documents.length - noteCount} units`}</span>
+                    <span>{snapshot.documents.length} nodes</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
                     {contextCount > 0 && <span className="status-context">{contextCount} context</span>}
@@ -728,9 +722,7 @@ function HarnessApp() {
                 </div>
             </header>
             <section className="harness-canvas" aria-label="Python project graph">
-                {graph.nodes.length === 0 && <div className="harness-empty">{snapshot.mode === 'folder'
-                    ? 'Right-click the canvas → New node… to start.'
-                    : 'Open a Python workspace to build its graph.'}</div>}
+                {graph.nodes.length === 0 && <div className="harness-empty">Right-click the canvas → New node… to start.</div>}
                 <ReactFlow
                     nodes={nodes}
                     edges={graph.edges}

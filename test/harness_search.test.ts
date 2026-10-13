@@ -4,26 +4,23 @@ import { demoSnapshot } from '../src/harness/demo';
 import { searchUnits } from '../vscode-extension/src/search';
 
 describe('harness-owned search', () => {
-    const sources = new Map([
-        ['calculator.py', `${'\n'.repeat(12)}    return execute(config)\n`],
-        ['operations.py', ''],
-    ]);
+    const sources = new Map(demoSnapshot.documents.map(document => [document.path, document.source ?? '']));
 
     it('ranks exact names above source matches with stable provenance', () => {
-        const results = searchUnits(demoSnapshot.documents, sources, 'run');
+        const results = searchUnits(demoSnapshot.documents, sources, 'clamp');
         expect(results[0]).toMatchObject({
-            qualifiedName: 'run',
-            path: 'calculator.py',
+            qualifiedName: 'clamp',
+            path: 'slate/nodes/clamp.json',
             reason: 'exact name',
             score: 100,
         });
     });
 
-    it('searches dirty-buffer source text rather than only graph labels', () => {
-        const results = searchUnits(demoSnapshot.documents, sources, 'execute(config)');
+    it('searches node code rather than only graph labels', () => {
+        const results = searchUnits(demoSnapshot.documents, sources, 'min(value');
         expect(results).toHaveLength(1);
-        expect(results[0]).toMatchObject({ qualifiedName: 'run', reason: 'source' });
-        expect(results[0].snippet).toBe('return execute(config)');
+        expect(results[0]).toMatchObject({ qualifiedName: 'clamp', reason: 'source' });
+        expect(results[0].snippet).toBe('return max(lower, min(value, upper))');
     });
 
     it('returns no broad fallback for an empty query', () => {
