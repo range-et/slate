@@ -16,9 +16,11 @@ loader, port/compile/describe, search, llama.cpp transport, proposals).
 - How to build the next phase (code map, conventions, verification, learnings): [BUILD_PLAN.md](BUILD_PLAN.md)
 - Dev loop: [DEV.md](DEV.md); llama.cpp demo: [DEMO.md](DEMO.md)
 
-Projects are a `slate/` folder of JSON: `slate.json`, `layout.json`, and one
-`nodes/**/*.json` per node (code as a list of lines plus intent, contract,
-context, examples). Format and loader: `vscode-extension/src/slate_folder.ts`;
+Projects are a `slate/` folder of JSON: `slate.json`, `layout.json` (canvas
+positions, notes, refs, placeholders), one `nodes/**/*.json` per node (code as
+a list of lines plus intent, contract, context, examples, uses), and
+`flows/**/*.json` (instances and data wires; `flows/main.json` holds the root
+canvas wires). Flow format and edits: `vscode-extension/src/flow.ts`. Format and loader: `vscode-extension/src/slate_folder.ts`;
 host IO: `slate_folder_host.ts`. **Slate: Port Python Project…** splits an
 existing project into nodes (`port/python_importer.ts`), **Describe nodes**
 fills intents with llama.cpp (`port/describe.ts`), and **Slate: Compile

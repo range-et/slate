@@ -73,7 +73,7 @@ test('context packet and confined llama.cpp proposal stay in one workbench', asy
         });
     });
     await page.goto('/harness.html?demo');
-    await page.getByText('normalize_score', { exact: true }).click();
+    await page.locator('.react-flow').getByText('normalize_score', { exact: true }).click();
     const packet = page.locator('.packet-preview');
     await expect(packet.getByRole('heading', { name: 'Exact packet' })).toBeVisible();
     await expect(packet.getByText('slate/nodes/clamp.json · 74 chars')).toBeVisible();
@@ -94,7 +94,7 @@ test('board context menus, board-only notes, and trackpad-style panning work', a
     });
     await page.goto('/harness.html?demo');
 
-    await page.getByText('normalize_score', { exact: true }).click({ button: 'right' });
+    await page.locator('.react-flow').getByText('normalize_score', { exact: true }).click({ button: 'right' });
     await expect(page.getByRole('menu', { name: 'function actions' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: 'Add note attached here' })).toBeVisible();
     await page.keyboard.press('Escape');
@@ -170,8 +170,8 @@ test('inline intent edits, wires, edge menu, and the context picker all post typ
     await editor.press('Enter');
     expect(await actions()).toContainEqual({ kind: 'setAnnotationField', target: 'clamp', field: 'intent', text: 'Clamp into [lower, upper]' });
 
-    const from = await page.locator('.react-flow__node[data-id="scoring/normalize_score"] .react-flow__handle.source').boundingBox();
-    const to = await clamp.locator('.react-flow__handle.target').boundingBox();
+    const from = await page.locator('.react-flow__node[data-id="scoring/normalize_score"] [data-handleid="ctx-out"]').boundingBox();
+    const to = await clamp.locator('[data-handleid="ctx-in"]').boundingBox();
     if (!from || !to) throw new Error('handles did not render');
     await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
     await page.mouse.down();
@@ -190,4 +190,79 @@ test('inline intent edits, wires, edge menu, and the context picker all post typ
     await picker.fill('grad');
     await page.getByRole('listbox', { name: 'Context candidates' }).getByRole('option', { name: /Grader/ }).click();
     expect(await actions()).toContainEqual({ kind: 'setContext', consumer: 'scoring/normalize_score', dependency: 'scoring/Grader', enabled: true });
+});
+
+test('refs, placeholders, data wires, flows, add-node search, and grouping post typed actions', async ({ page }) => {
+    await page.addInitScript(() => {
+        const messages: unknown[] = [];
+        Object.defineProperty(window, '__slateHostMessages', { value: messages });
+        window.acquireVsCodeApi = () => ({ postMessage(message: unknown) { messages.push(message); } });
+    });
+    await page.goto('/harness.html?demo');
+    const actions = async () => (await page.evaluate(() => (window as unknown as { __slateHostMessages: Array<{ type: string; action?: unknown }> }).__slateHostMessages))
+        .filter(message => message.type === 'action').map(message => message.action);
+    const drag = async (from: { x: number; y: number; width: number; height: number } | null, to: { x: number; y: number }) => {
+        if (!from) throw new Error('handle did not render');
+        await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(to.x, to.y, { steps: 12 });
+        await page.mouse.up();
+    };
+
+    // A reference offers navigation and deletion; Find references highlights the target and its refs.
+    await page.locator('.react-flow__node[data-id="ref-clamp"]').click({ button: 'right' });
+    const menu = page.getByRole('menu', { name: 'ref actions' });
+    await expect(menu.getByRole('menuitem', { name: 'Go to definition' })).toBeVisible();
+    await menu.getByRole('menuitem', { name: 'Find references' }).click();
+    await expect(page.locator('.slate-node.is-highlighted')).toHaveCount(2);
+    await expect(page.getByRole('status')).toContainText('clamp: 1 reference on the canvas');
+    await page.locator('.react-flow__node[data-id="ref-clamp"]').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Delete reference' }).click();
+    expect(await actions()).toContainEqual({ kind: 'deleteItems', ids: ['ref-clamp'] });
+
+    await page.locator('.react-flow__node[data-id="placeholder-letter"]').click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: 'Convert to reference' })).toHaveCount(0);
+    await page.getByRole('menuitem', { name: 'Create node…' }).click();
+    expect(await actions()).toContainEqual({ kind: 'placeholderToNode', id: 'placeholder-letter' });
+
+    // Port-to-port data wire on the root canvas.
+    const valueOut = await page.locator('.react-flow__node[data-id="value"] [data-handleid="out"]').boundingBox();
+    const clampIn = await page.locator('.react-flow__node[data-id="clamp"] [data-handleid="in:value"]').boundingBox();
+    await drag(valueOut, { x: clampIn!.x + clampIn!.width / 2, y: clampIn!.y + clampIn!.height / 2 });
+    expect(await actions()).toContainEqual({ kind: 'connectData', from: 'value.out', to: 'clamp.in:value' });
+
+    // Enter a flow; dropping a wire on empty canvas opens add-node search filtered by type and auto-wires.
+    await page.keyboard.press('Control+k');
+    await page.getByLabel('Command palette input').fill('Flow: report');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('navigation', { name: 'Canvas path' }).getByRole('button', { name: 'report' })).toBeVisible();
+    const out = await page.locator('.react-flow__node[data-id="normalize_score"] [data-handleid="out"]').boundingBox();
+    await drag(out, { x: out!.x + 240, y: out!.y + 220 });
+    const add = page.getByRole('dialog', { name: 'Add node' });
+    await expect(add.getByRole('option').filter({ hasText: 'shout' })).toHaveCount(0);
+    await page.getByLabel('Add node input').fill('clamp');
+    await page.keyboard.press('Enter');
+    expect(await actions()).toContainEqual(expect.objectContaining({
+        flow: 'report', kind: 'addInstance', target: 'clamp', connectFrom: 'normalize_score.out', connectPort: 'in:value',
+    }));
+
+    // Tab on empty selection opens add mode; Ctrl+G groups the selection into a flow.
+    await page.locator('.react-flow__pane').click({ position: { x: 40, y: 40 } });
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('dialog', { name: 'Add node' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.locator('.react-flow__node[data-id="hundred"] strong').click();
+    await page.locator('.react-flow__node[data-id="normalize_score"]').click({ modifiers: ['Shift'] });
+    await page.keyboard.press('Control+g');
+    expect(await actions()).toContainEqual({ flow: 'report', kind: 'extractFlow', ids: expect.arrayContaining(['hundred', 'normalize_score']) });
+
+    // Library drag places an instance where it is dropped.
+    await page.getByRole('complementary', { name: 'Library' }).getByText('shout', { exact: true }).dragTo(page.locator('.react-flow__pane'), { targetPosition: { x: 200, y: 500 } });
+    expect(await actions()).toContainEqual(expect.objectContaining({ flow: 'report', kind: 'addInstance', target: 'lib:vendor/textutil.py:shout' }));
+
+    await page.getByRole('navigation', { name: 'Canvas path' }).getByRole('button', { name: 'llama-demo' }).click();
+    await expect(page.locator('.react-flow__node[data-id="flow:report"]')).toBeVisible();
+    await page.getByRole('button', { name: 'Map' }).click();
+    await expect(page.locator('.slate-node--folder')).toHaveCount(2);
+    await expect(page.locator('.react-flow__node[data-id="ref-clamp"]')).toHaveCount(0);
 });

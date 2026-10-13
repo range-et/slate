@@ -21,7 +21,8 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 
 import { demoSnapshot } from './demo';
-import { buildGraph, nodeIdOf, SlateNodeData } from './graph';
+import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, type CanvasScope, type SlateNodeData } from './graph';
+import { inputPorts, outputPorts, type Port } from '../../vscode-extension/src/flow';
 import { rankPalette, type Rankable } from './palette';
 import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, PacketPreview } from './types';
 import './styles.css';
@@ -74,28 +75,81 @@ function InlineIntent({ unitId, intent }: { unitId: string; intent: string }) {
     >{intent || 'add intent…'}</p>;
 }
 
-function SlateNode({ data, selected }: NodeProps<Node<SlateNodeData>>) {
+/** The flow the canvas shows (null = root), for node-local edits such as value literals. */
+const ScopeContext = React.createContext<string | null>(null);
+
+function PortRows({ inputs = [], outputs = [] }: { inputs?: Port[]; outputs?: Port[] }) {
+    if (!inputs.length && !outputs.length) return null;
+    const row = (port: Port, side: 'in' | 'out') => <div key={`${side}:${port.id}`} className={`slate-port slate-port--${side} ${port.name === '+' ? 'slate-port--add' : ''}`}>
+        <Handle
+            type={side === 'in' ? 'target' : 'source'}
+            position={side === 'in' ? Position.Left : Position.Right}
+            id={port.id}
+            className="slate-port__handle"
+            style={{ background: port.name === '+' ? 'transparent' : typeColor(port.annotation), borderColor: typeColor(port.annotation) }}
+        />
+        <span title={port.annotation ?? 'any'}>
+            {port.name === '+' ? '+ new' : port.name}{port.optional && port.name !== '+' ? '?' : ''}
+            {port.annotation && <small>{port.annotation}</small>}
+        </span>
+    </div>;
+    return <div className="slate-ports">
+        <div>{inputs.map(port => row(port, 'in'))}</div>
+        <div>{outputs.map(port => row(port, 'out'))}</div>
+    </div>;
+}
+
+function ValueEditor({ id, value }: { id: string; value: string }) {
+    const flow = React.useContext(ScopeContext);
+    const [draft, setDraft] = useState(value);
+    useEffect(() => setDraft(value), [value]);
+    const save = () => {
+        if (draft !== value) vscode?.postMessage({ type: 'action', action: { kind: 'setValue', flow, id, value: draft } });
+    };
+    return <input
+        className="slate-node__value nodrag nopan"
+        aria-label={`Value of ${id}`}
+        value={draft}
+        spellCheck={false}
+        onChange={event => setDraft(event.target.value)}
+        onBlur={save}
+        onDoubleClick={event => event.stopPropagation()}
+        onKeyDown={event => {
+            event.stopPropagation();
+            if (event.key === 'Enter') { event.preventDefault(); save(); (event.target as HTMLInputElement).blur(); }
+            if (event.key === 'Escape') setDraft(value);
+        }}
+    />;
+}
+
+function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
     const colorStyle = { '--slate-group': data.groupColor } as React.CSSProperties;
+    const plainHandles = data.kind === 'note';
+    const kindLabel = data.kind === 'ref' ? 'reference' : data.kind === 'instance' ? (data.flowId ? 'flow' : 'node') : data.kind.replace('_', ' ');
     return (
         <div
-            className={`slate-node slate-node--${data.kind} ${data.container ? 'slate-node--container' : ''} ${selected ? 'is-selected' : ''} ${data.invalid ? 'is-invalid' : ''} ${data.stale ? 'is-stale' : ''}`}
+            className={`slate-node slate-node--${data.kind} ${data.container ? 'slate-node--container' : ''} ${selected ? 'is-selected' : ''} ${data.invalid || data.broken ? 'is-invalid' : ''} ${data.stale ? 'is-stale' : ''} ${data.highlighted ? 'is-highlighted' : ''}`}
             style={colorStyle}
         >
-            {!data.container && data.kind !== 'module' && <Handle type="target" position={Position.Left} className="slate-node__handle" />}
-            <div className="slate-node__kind">
-                <span>{data.kind.replace('_', ' ')}</span>
+            {data.contextPorts && !data.container && <Handle type="target" position={Position.Top} id="ctx-in" className="slate-node__ctx" title="Context in" />}
+            {plainHandles && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
+            {data.kind !== 'folder' && <div className="slate-node__kind">
+                <span>{kindLabel}</span>
                 <span>
                     {data.problem && <span className="slate-node__problem" title={data.problem}>!&nbsp;</span>}
-                    {data.unit?.annotation?.locked === true && <span title="Generation is locked">LOCKED&nbsp;</span>}
-                    {data.identity === 'provisional' && <span title="Not yet anchored with a Slate ID">◇</span>}
+                    {data.broken && <span className="slate-node__problem" title="The target no longer exists">BROKEN&nbsp;</span>}
+                    {data.unit?.annotation?.locked === true && data.kind !== 'ref' && data.kind !== 'instance' && <span title="Generation is locked">LOCKED&nbsp;</span>}
+                    {data.identity === 'provisional' && <span title="Nested unit">◇</span>}
                 </span>
-            </div>
+            </div>}
             <strong>{data.label}</strong>
-            {!data.container && <code>{data.detail}</code>}
+            {!data.container && data.kind !== 'value' && data.detail && <code>{data.detail}</code>}
+            {data.kind === 'value' && <ValueEditor id={id} value={data.value ?? ''} />}
             {data.editableIntent && data.unit && !data.container
                 ? <InlineIntent unitId={data.unit.id} intent={data.intent ?? ''} />
                 : data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
-            {!data.container && data.kind !== 'module' && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
+            {!data.container && <PortRows inputs={data.inputs} outputs={data.outputs} />}
+            {data.contextPorts && !data.container && <Handle type="source" position={Position.Bottom} id="ctx-out" className="slate-node__ctx" title="Context out: drag to a node's top to give it context" />}
         </div>
     );
 }
@@ -140,8 +194,10 @@ function CodeEditor({ initial, onChange }: { initial: string; onChange(value: st
 }
 
 function Inspector({
-    node, document, snapshot, packet, packetError, generation, proposal, accepted,
+    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo,
 }: {
+    onEnterFlow(flowId: string): void;
+    onGoTo(target: string): void;
     node: Node<SlateNodeData>;
     document?: HarnessDocument;
     snapshot: HarnessSnapshot;
@@ -181,7 +237,23 @@ function Inspector({
         <aside className="harness-inspector harness-inspector--wide" aria-label="Selected node details">
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
             <h2>{node.data.label}</h2>
-            <code className="harness-inspector__path">{node.data.path}</code>
+            {node.data.path && <code className="harness-inspector__path">{node.data.path}</code>}
+            {!['function', 'class', 'method', 'nested_function', 'nested_class', 'note', 'module', 'document'].includes(node.data.kind) && <section className="canvas-item">
+                <p>{node.data.kind === 'ref' ? `Reference to ${node.data.target}. Edits below change the definition.`
+                    : node.data.kind === 'instance' ? `Calls ${node.data.target}.`
+                    : node.data.kind === 'flow' ? `Flow slate/flows/${node.data.flowId}.json — compiles to def ${node.data.label}(…).`
+                    : node.data.kind === 'placeholder' ? (node.data.resolvesTo ? `Resolves to ${node.data.resolvesTo}; right-click → Convert to reference.` : 'Not defined yet; right-click → Create node….')
+                    : node.data.kind === 'value' ? 'A Python literal; edit it on the node.'
+                    : node.data.detail}</p>
+                {Boolean(node.data.inputs?.length || node.data.outputs?.length) && <dl>
+                    {node.data.inputs?.filter(port => port.name !== '+').map(port => <React.Fragment key={port.id}><dt>in</dt><dd><code>{port.name}{port.annotation ? `: ${port.annotation}` : ''}{port.optional ? ' (optional)' : ''}</code></dd></React.Fragment>)}
+                    {node.data.outputs?.filter(port => port.name !== '+').map(port => <React.Fragment key={port.id}><dt>out</dt><dd><code>{port.name}{port.annotation ? `: ${port.annotation}` : ''}</code></dd></React.Fragment>)}
+                </dl>}
+                <div className="harness-inspector__actions">
+                    {node.data.flowId && <button onClick={() => onEnterFlow(node.data.flowId!)}>Open flow</button>}
+                    {node.data.target && !node.data.broken && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => onGoTo(node.data.target!)}>Go to definition</button>}
+                </div>
+            </section>}
             {note && <>
                 <p className="board-note-explainer">Board notes stay in Slate project metadata and never modify Python source.</p>
                 <label className="board-note-field">Title
@@ -351,17 +423,30 @@ type BoardMenuState = {
     node: Node<SlateNodeData> | null;
     /** A right-clicked context edge: dependency → consumer. */
     edge?: { dependency: string; consumer: string };
+    /** A right-clicked data wire (flow endpoints). */
+    wire?: { from: string; to: string };
 };
 
-function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
+function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onEnterFlow, onGoTo, onFindRefs, onAdd }: {
     menu: BoardMenuState;
     snapshot: HarnessSnapshot;
+    scope: CanvasScope;
     onClose(): void;
     onFit(): void;
     onSelect(id: string): void;
+    onEnterFlow(flowId: string): void;
+    onGoTo(target: string): void;
+    onFindRefs(target: string): void;
+    onAdd(x: number, y: number): void;
 }) {
-    const unit = menu.node?.data.unit;
-    const note = menu.node?.data.note;
+    const node = menu.node;
+    const data = node?.data;
+    const unit = data?.kind !== 'ref' && data?.kind !== 'instance' ? data?.unit : undefined;
+    const note = data?.note;
+    const act = (action: Record<string, unknown>) => {
+        vscode?.postMessage({ type: 'action', revision: snapshot.revision, action: { ...(scope.flow ? { flow: scope.flow } : {}), ...action } });
+        onClose();
+    };
     const createNote = (attachedTo: string | null) => {
         vscode?.postMessage({
             type: 'noteCreate', revision: snapshot.revision,
@@ -369,36 +454,38 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
         });
         onClose();
     };
+    const label = menu.edge ? 'Context edge actions' : menu.wire ? 'Wire actions' : node ? `${data!.kind} actions` : 'Board actions';
     return <div
         className="board-context-menu"
         role="menu"
-        aria-label={menu.edge ? 'Context edge actions' : menu.node ? `${menu.node.data.kind} actions` : 'Board actions'}
-        style={{ left: Math.min(menu.screenX, window.innerWidth - 240), top: Math.min(menu.screenY, window.innerHeight - 200) }}
+        aria-label={label}
+        style={{ left: Math.min(menu.screenX, window.innerWidth - 240), top: Math.min(menu.screenY, window.innerHeight - 260) }}
     >
         {menu.edge && <>
             <div className="board-context-menu__label">{menu.edge.dependency} → {menu.edge.consumer}</div>
-            <button role="menuitem" className="danger" onClick={() => {
-                vscode?.postMessage({ type: 'action', revision: snapshot.revision, action: {
-                    kind: 'setContext', consumer: menu.edge!.consumer, dependency: menu.edge!.dependency, enabled: false,
-                } });
-                onClose();
-            }}>Remove context</button>
+            <button role="menuitem" className="danger" onClick={() => act({
+                kind: 'setContext', consumer: menu.edge!.consumer, dependency: menu.edge!.dependency, enabled: false,
+            })}>Remove context</button>
         </>}
-        {!menu.node && !menu.edge && <>
-            <button role="menuitem" onClick={() => {
-                vscode?.postMessage({ type: 'action', action: { kind: 'createNode', x: menu.flowX, y: menu.flowY }, revision: snapshot.revision });
-                onClose();
-            }}>New node…</button>
-            <button role="menuitem" onClick={() => createNote(null)}>New board note</button>
-            <button role="menuitem" onClick={() => { onFit(); onClose(); }}>Fit project to view</button>
-            <button role="menuitem" onClick={() => {
-                vscode?.postMessage({ type: 'action', action: { kind: 'refreshIndex' }, revision: snapshot.revision });
-                onClose();
-            }}>Refresh source index</button>
+        {menu.wire && <>
+            <div className="board-context-menu__label">{menu.wire.from} → {menu.wire.to}</div>
+            <button role="menuitem" className="danger" onClick={() => act({ kind: 'disconnectData', from: menu.wire!.from, to: menu.wire!.to })}>Remove wire</button>
+        </>}
+        {!node && !menu.edge && !menu.wire && <>
+            <button role="menuitem" onClick={() => { onAdd(menu.flowX, menu.flowY); onClose(); }}>Add node…</button>
+            {!scope.flow && <>
+                <button role="menuitem" onClick={() => act({ kind: 'createNode', x: menu.flowX, y: menu.flowY })}>New node file…</button>
+                <button role="menuitem" onClick={() => act({ kind: 'createPlaceholder', x: menu.flowX, y: menu.flowY })}>New placeholder…</button>
+                <button role="menuitem" onClick={() => act({ kind: 'createFlow', x: menu.flowX, y: menu.flowY })}>New flow…</button>
+                <button role="menuitem" onClick={() => createNote(null)}>New board note</button>
+            </>}
+            <button role="menuitem" onClick={() => { onFit(); onClose(); }}>Fit to view</button>
+            {!scope.flow && <button role="menuitem" onClick={() => act({ kind: 'refreshIndex' })}>Refresh source index</button>}
         </>}
         {unit && <>
             <div className="board-context-menu__label">{unit.qualifiedName}</div>
             <button role="menuitem" onClick={() => createNote(unit.id)}>Add note attached here</button>
+            <button role="menuitem" onClick={() => { onFindRefs(unit.id); onClose(); }}>Find references</button>
             <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true });
                 onClose();
@@ -408,6 +495,32 @@ function BoardContextMenu({ menu, snapshot, onClose, onFit, onSelect }: {
                 onClose();
             }}>Generate implementation</button>}
         </>}
+        {(data?.kind === 'ref' || data?.kind === 'instance') && <>
+            <div className="board-context-menu__label">{data.target}</div>
+            {data.flowId && <button role="menuitem" onClick={() => { onEnterFlow(data.flowId!); onClose(); }}>Open flow</button>}
+            {!data.broken && <button role="menuitem" onClick={() => { onGoTo(data.target!); onClose(); }}>Go to definition</button>}
+            {!data.broken && <button role="menuitem" onClick={() => { onFindRefs(data.target!); onClose(); }}>Find references</button>}
+            {data.unit && ['function', 'method'].includes(data.unit.kind) && data.path && <button role="menuitem" onClick={() => {
+                vscode?.postMessage({ type: 'generate', unitId: data.target });
+                onClose();
+            }}>Generate body</button>}
+            <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>
+                {data.kind === 'ref' ? 'Delete reference' : 'Remove from flow'}
+            </button>
+        </>}
+        {data?.kind === 'placeholder' && <>
+            <div className="board-context-menu__label">{data.label}</div>
+            {data.resolvesTo && <button role="menuitem" onClick={() => act({ kind: 'placeholderToRef', id: node!.id })}>Convert to reference</button>}
+            <button role="menuitem" onClick={() => act({ kind: 'placeholderToNode', id: node!.id })}>Create node…</button>
+            <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>Delete placeholder</button>
+        </>}
+        {data?.kind === 'flow' && <>
+            <div className="board-context-menu__label">flows/{data.flowId}</div>
+            <button role="menuitem" onClick={() => { onEnterFlow(data.flowId!); onClose(); }}>Open flow</button>
+            <button role="menuitem" onClick={() => { onFindRefs(data.flowId!); onClose(); }}>Find references</button>
+            <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteFlow', id: data.flowId })}>Delete flow…</button>
+        </>}
+        {data?.kind === 'value' && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>Delete value</button>}
         {note && <>
             <div className="board-context-menu__label">{note.title}</div>
             <button role="menuitem" onClick={() => { onSelect(note.id); onClose(); }}>Edit board note</button>
@@ -425,11 +538,13 @@ const GROUP_LABELS: Record<PaletteEntry['group'], string> = {
     selection: 'Selected', canvas: 'Canvas', node: 'Go to', search: 'Search',
 };
 
-function CommandPalette({ items, query, setQuery, onClose }: {
+function CommandPalette({ items, query, setQuery, onClose, label = 'Command palette', placeholder }: {
     items: PaletteEntry[];
     query: string;
     setQuery(value: string): void;
     onClose(): void;
+    label?: string;
+    placeholder?: string;
 }) {
     const [index, setIndex] = useState(0);
     const ranked = useMemo(() => rankPalette(items, query).slice(0, 60), [items, query]);
@@ -444,11 +559,11 @@ function CommandPalette({ items, query, setQuery, onClose }: {
         entry.run();
     };
     return <div className="palette-backdrop" onMouseDown={onClose}>
-        <div className="palette" role="dialog" aria-label="Command palette" onMouseDown={event => event.stopPropagation()}>
+        <div className="palette" role="dialog" aria-label={label} onMouseDown={event => event.stopPropagation()}>
             <input
                 autoFocus
-                aria-label="Command palette input"
-                placeholder="Type a command, a node name, or text to search code…"
+                aria-label={`${label} input`}
+                placeholder={placeholder ?? 'Type a command, a node name, or text to search code…'}
                 value={query}
                 onChange={event => setQuery(event.target.value)}
                 onKeyDown={event => {
@@ -477,6 +592,54 @@ function CommandPalette({ items, query, setQuery, onClose }: {
     </div>;
 }
 
+/** Left panel: nodes by folder, flows, and read-only library units. Click to find, drag onto the canvas to place. */
+function LibrarySidebar({ snapshot, onPick, onAddLibrary }: { snapshot: HarnessSnapshot; onPick(target: string): void; onAddLibrary(): void }) {
+    const [query, setQuery] = useState('');
+    const entries = useMemo(() => [...callables(snapshot)].map(([id, item]) => ({
+        id,
+        label: item.group === 'library' ? item.signature.name : id,
+        detail: item.detail,
+        keywords: typeof item.unit?.annotation?.intent === 'string' ? item.unit.annotation.intent : undefined,
+        group: 'node' as const,
+        kind: item.group,
+    })), [snapshot]);
+    const shown = query.trim() ? rankPalette(entries, query) : entries;
+    const section = (kind: 'node' | 'flow' | 'library', title: string) => {
+        const items = shown.filter(entry => entry.kind === kind);
+        if (!items.length) return null;
+        let folder: string | null = null;
+        return <section key={kind}>
+            <h3>{title}</h3>
+            <ul>{items.flatMap(entry => {
+                const entryFolder = kind === 'node' && entry.id.includes('/') ? entry.id.slice(0, entry.id.lastIndexOf('/')) : kind === 'library' ? entry.detail.split(' · ')[0] : '';
+                const header = entryFolder !== folder && entryFolder && !query.trim()
+                    ? [<li key={`h:${entryFolder}`} className="library__folder">{kind === 'node' ? `${entryFolder}/` : entryFolder}</li>] : [];
+                folder = entryFolder;
+                return [...header, <li
+                    key={entry.id}
+                    draggable
+                    title={entry.keywords ?? entry.detail}
+                    onDragStart={event => { event.dataTransfer.setData('application/slate-target', entry.id); event.dataTransfer.effectAllowed = 'copy'; }}
+                    onClick={() => onPick(entry.id)}
+                >
+                    <span>{entry.label.split('/').pop()}</span>
+                    <small>{entry.keywords ?? entry.detail}</small>
+                </li>];
+            })}</ul>
+        </section>;
+    };
+    return <aside className="library" aria-label="Library">
+        <input aria-label="Filter library" placeholder="Filter nodes, flows, library…" value={query} onChange={event => setQuery(event.target.value)} spellCheck={false} />
+        {section('node', 'Nodes')}
+        {section('flow', 'Flows')}
+        {section('library', 'Library (read-only)')}
+        {shown.length === 0 && <p className="library__empty">Nothing matches.</p>}
+        <button className="secondary" onClick={onAddLibrary}>Add library file…</button>
+    </aside>;
+}
+
+type AddRequest = { x: number; y: number; connectFrom?: string; connectTo?: string; annotation?: string | null };
+
 function HarnessApp() {
     const search = new URLSearchParams(window.location.search);
     const showDemo = import.meta.env.DEV && search.has('demo');
@@ -494,8 +657,21 @@ function HarnessApp() {
     const [proposal, setProposal] = useState<HarnessProposal | null>(null);
     const [acceptedUnitId, setAcceptedUnitId] = useState<string | null>(null);
     const [boardMenu, setBoardMenu] = useState<BoardMenuState | null>(null);
+    const [view, setView] = useState<'compose' | 'map'>('compose');
+    const [flowStack, setFlowStack] = useState<string[]>([]);
+    const [libraryOpen, setLibraryOpen] = useState(true);
+    const [adding, setAdding] = useState<AddRequest | null>(null);
+    const [highlight, setHighlight] = useState<string | null>(null);
+    const [pendingCenter, setPendingCenter] = useState<string | null>(null);
+    const pointer = useRef<{ x: number; y: number } | null>(null);
+    const scope = useMemo<CanvasScope>(() => ({ view: flowStack.length ? 'compose' : view, flow: flowStack.at(-1) ?? null }), [view, flowStack]);
     const flow = useRef<ReactFlowInstance<Node<SlateNodeData>, Edge> | null>(null);
-    const graph = useMemo(() => buildGraph(snapshot), [snapshot]);
+    const graph = useMemo(() => {
+        const built = buildGraph(snapshot, scope);
+        if (!highlight) return built;
+        return { ...built, nodes: built.nodes.map(node => node.id === highlight || node.data.target === highlight
+            ? { ...node, data: { ...node.data, highlighted: true } } : node) };
+    }, [snapshot, scope, highlight]);
     const [nodes, setNodes, onNodesChange] = useNodesState<Node<SlateNodeData>>(graph.nodes);
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
@@ -621,11 +797,80 @@ function HarnessApp() {
         setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: point.x, flowY: point.y, node });
     };
 
+    useEffect(() => {
+        // Leave a flow that was deleted or renamed underneath us.
+        if (scope.flow && !snapshot.flows?.some(item => item.id === scope.flow)) setFlowStack(stack => stack.slice(0, -1));
+    }, [snapshot, scope.flow]);
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => flow.current?.fitView({ padding: 0.2, duration: 200 }), 30);
+        return () => window.clearTimeout(timer);
+    }, [scope.view, scope.flow]);
+
+    useEffect(() => {
+        if (!pendingCenter || !graph.nodes.some(node => node.id === pendingCenter)) return;
+        const id = pendingCenter;
+        setPendingCenter(null);
+        window.setTimeout(() => centerOn(id), 60);
+    }, [graph.nodes, pendingCenter]);
+
+    const enterFlow = (flowId: string) => {
+        setBoardMenu(null);
+        setHighlight(null);
+        setFlowStack(stack => [...stack, flowId]);
+    };
+    const openAdd = (request?: Partial<AddRequest>) => {
+        if (scope.view === 'map') { setCommandResult('Switch to Compose to add nodes.'); return; }
+        const point = request?.x !== undefined ? { x: request.x, y: request.y! } : pointer.current ?? viewCenter();
+        setPaletteQuery('');
+        setAdding({ ...request, ...point });
+    };
+    const groupSelection = () => {
+        const ids = nodes.filter(node => node.selected && ['ref', 'instance', 'value', 'flow', 'function', 'class'].includes(node.data.kind)).map(node => node.id);
+        if (!ids.length) { setCommandResult('Select nodes, references, flows, or values to group.'); return; }
+        post({ kind: 'extractFlow', ids });
+    };
+    const goTo = (target: string) => {
+        const id = snapshot.flows?.some(item => item.id === target) ? `flow:${target}` : target;
+        if (target.startsWith('lib:')) { setCommandResult(`${target} is read-only library code.`); return; }
+        setFlowStack([]);
+        setView('compose');
+        setPendingCenter(id);
+    };
+    const findReferences = (target: string) => {
+        setHighlight(target);
+        const refs = (snapshot.refs ?? []).filter(ref => ref.target === target).length;
+        const flows = (snapshot.flows ?? []).filter(item => item.flow?.instances.some(instance => instance.node === target)).map(item => item.id);
+        setCommandResult(`${target}: ${refs} reference${refs === 1 ? '' : 's'} on the canvas${flows.length ? `; used in flows ${flows.join(', ')}` : ''}.`);
+    };
+    const endpointOf = (nodeId: string, handle: string | null | undefined) =>
+        nodeId === '__input' || nodeId === '__output' ? handle ?? '' : `${nodeId}.${handle ?? 'out'}`;
+
+    useEffect(() => {
+        const onKey = (event: KeyboardEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor') || paletteOpen || adding) return;
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'g') {
+                event.preventDefault();
+                groupSelection();
+            } else if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                event.preventDefault();
+                if (selected?.data.flowId) enterFlow(selected.data.flowId);
+                else openAdd();
+            } else if (event.key === 'A' && event.shiftKey && !event.metaKey && !event.ctrlKey) {
+                event.preventDefault();
+                openAdd();
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    });
+
     const isContextEndpoint = (id: string | null) => {
         const unit = id ? snapshot.documents.flatMap(document => document.units).find(candidate => candidate.id === id) : undefined;
         return Boolean(unit && unit.identity === 'durable' && unit.parentId === null);
     };
-    const post = (action: Record<string, unknown>) => vscode?.postMessage({ type: 'action', action, revision: snapshot.revision });
+    const post = (action: Record<string, unknown>) => vscode?.postMessage({ type: 'action', action: { ...(scope.flow ? { flow: scope.flow } : {}), ...action }, revision: snapshot.revision });
     const centerOn = (id: string) => {
         selectNode(id);
         flow.current?.fitView({ nodes: [{ id }], duration: 300, maxZoom: 1.2, padding: 0.8 });
@@ -676,8 +921,26 @@ function HarnessApp() {
                 }
             }
         }
-        items.push({ id: 'new-node', group: 'canvas', label: 'New node…', detail: 'Typed signature + intent',
-            run: () => { const point = viewCenter(); post({ kind: 'createNode', x: point.x, y: point.y }); } });
+        const selectedIds = selectedNodes.map(node => node.id);
+        const removable = selectedNodes.filter(node => ['ref', 'instance', 'value', 'placeholder'].includes(node.data.kind)).map(node => node.id);
+        items.push({ id: 'add-node', group: 'canvas', label: 'Add node…', detail: 'Tab · Shift+A · double-click', run: () => openAdd() });
+        if (selectedIds.length) items.push({ id: 'group', group: 'canvas', label: 'Group selection into flow', detail: '⌘G', run: groupSelection });
+        if (removable.length) items.push({ id: 'delete', group: 'canvas', label: `Delete selected (${removable.length})`, run: () => post({ kind: 'deleteItems', ids: removable }) });
+        if (selected?.data.flowId) items.push({ id: 'enter', group: 'selection', label: `Open flow ${selected.data.flowId}`, detail: 'Tab', run: () => enterFlow(selected.data.flowId!) });
+        if (selected?.data.target || selected?.data.unit) {
+            const target = selected.data.target ?? selected.data.unit!.id;
+            items.push({ id: 'refs', group: 'selection', label: `Find references of ${target}`, run: () => findReferences(target) });
+        }
+        if (scope.flow) items.push({ id: 'up', group: 'canvas', label: 'Back to parent canvas', run: () => setFlowStack(stack => stack.slice(0, -1)) });
+        if (!scope.flow) {
+            items.push({ id: 'view', group: 'canvas', label: view === 'map' ? 'Switch to Compose' : 'Switch to Map', detail: 'Map groups nodes by folder', run: () => setView(view === 'map' ? 'compose' : 'map') });
+            items.push({ id: 'new-node', group: 'canvas', label: 'New node file…', detail: 'Typed signature + intent',
+                run: () => { const point = viewCenter(); post({ kind: 'createNode', x: point.x, y: point.y }); } });
+            items.push({ id: 'new-placeholder', group: 'canvas', label: 'New placeholder…', run: () => { const point = viewCenter(); post({ kind: 'createPlaceholder', x: point.x, y: point.y }); } });
+            items.push({ id: 'new-flow', group: 'canvas', label: 'New flow…', run: () => { const point = viewCenter(); post({ kind: 'createFlow', x: point.x, y: point.y }); } });
+        }
+        items.push({ id: 'library', group: 'canvas', label: libraryOpen ? 'Hide library' : 'Show library', run: () => setLibraryOpen(open => !open) });
+        items.push({ id: 'add-library', group: 'canvas', label: 'Add library file…', run: () => post({ kind: 'addLibrary' }) });
         items.push(describing
             ? { id: 'describe-stop', group: 'canvas', label: 'Stop describing', run: () => post({ kind: 'cancelDescribe' }) }
             : { id: 'describe', group: 'canvas', label: 'Describe nodes with llama.cpp', detail: 'Fills missing intents, leaves first',
@@ -703,15 +966,58 @@ function HarnessApp() {
         for (const note of snapshot.notes ?? []) {
             items.push({ id: `goto:${note.id}`, group: 'node', label: `Note: ${note.title}`, detail: note.body, run: () => centerOn(note.id) });
         }
+        for (const item of snapshot.flows ?? []) {
+            if (item.id !== 'main') items.push({ id: `goto-flow:${item.id}`, group: 'node', label: `Flow: ${item.id}`, run: () => enterFlow(item.id) });
+        }
         const text = paletteQuery.trim();
         if (text) items.push({ id: 'search', group: 'search', always: true, label: `Search code for “${text}”`, run: () => runSearch(text) });
         return items;
-    }, [snapshot, selected?.data.unit, paletteQuery, describing]);
+    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, scope, view, libraryOpen]);
+
+    // Add-node search: every callable (minus the open flow), a literal value, and at the root a placeholder.
+    const addItems = useMemo<PaletteEntry[]>(() => {
+        if (!adding) return [];
+        const wantInput = Boolean(adding.connectFrom);
+        const matches = (ports: Port[]) => !adding.annotation || ports.some(port => !port.annotation || port.annotation === adding.annotation);
+        const place = (extra: Record<string, unknown>, ports: Port[]) => {
+            const port = ports.find(item => adding.annotation && item.annotation === adding.annotation) ?? ports[0];
+            post({ kind: 'addInstance', x: adding.x, y: adding.y, connectFrom: adding.connectFrom, connectTo: adding.connectTo, connectPort: port?.id, ...extra });
+        };
+        const items: PaletteEntry[] = [];
+        for (const [id, item] of callables(snapshot)) {
+            if (id === scope.flow) continue;
+            const ports = wantInput ? inputPorts(item.signature) : outputPorts(item.signature);
+            if ((adding.connectFrom || adding.connectTo) && !matches(ports)) continue;
+            items.push({
+                id: `add:${id}`, group: 'node', label: item.group === 'library' ? item.signature.name : id, detail: item.detail,
+                keywords: typeof item.unit?.annotation?.intent === 'string' ? item.unit.annotation.intent : undefined,
+                run: () => place({ target: id }, ports),
+            });
+        }
+        if (!wantInput) items.push({ id: 'add:value', group: 'node', label: 'Value', detail: 'A Python literal', run: () => place({ value: '0' }, [{ id: 'out', name: 'value', annotation: null }]) });
+        const text = paletteQuery.trim();
+        if (!scope.flow && /^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+            items.push({ id: 'add:placeholder', group: 'search', always: true, label: `New placeholder “${text}”`, run: () => post({ kind: 'createPlaceholder', name: text, x: adding.x, y: adding.y }) });
+        }
+        return items;
+    }, [adding, snapshot, scope, paletteQuery]);
 
     return (
         <main className="harness-shell">
             <header className="harness-topbar">
-                <div><strong>SLATE</strong><span>{snapshot.projectName}</span></div>
+                <nav className="harness-crumbs" aria-label="Canvas path">
+                    <strong>SLATE</strong>
+                    <button className={scope.flow ? '' : 'is-current'} onClick={() => setFlowStack([])}>{snapshot.projectName}</button>
+                    {flowStack.map((id, index) => <React.Fragment key={`${id}:${index}`}>
+                        <span>▸</span>
+                        <button className={index === flowStack.length - 1 ? 'is-current' : ''} onClick={() => setFlowStack(stack => stack.slice(0, index + 1))}>{id}</button>
+                    </React.Fragment>)}
+                    {!scope.flow && <span className="harness-toggle" role="group" aria-label="View">
+                        <button aria-pressed={view === 'compose'} onClick={() => setView('compose')}>Compose</button>
+                        <button aria-pressed={view === 'map'} onClick={() => setView('map')}>Map</button>
+                    </span>}
+                    <button className="harness-library-toggle" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(open => !open)}>Library</button>
+                </nav>
                 <div className="harness-status">
                     <span>{snapshot.documents.length} nodes</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
@@ -721,8 +1027,38 @@ function HarnessApp() {
                     {invalidCount > 0 && <span className="status-error">{invalidCount} invalid</span>}
                 </div>
             </header>
-            <section className="harness-canvas" aria-label="Python project graph">
-                {graph.nodes.length === 0 && <div className="harness-empty">Right-click the canvas → New node… to start.</div>}
+            {libraryOpen && <LibrarySidebar
+                snapshot={snapshot}
+                onAddLibrary={() => post({ kind: 'addLibrary' })}
+                onPick={target => {
+                    const id = scope.flow ? nodes.find(node => node.data.target === target)?.id
+                        : nodes.find(node => node.id === target || node.id === `flow:${target}` || node.data.target === target)?.id;
+                    if (id) centerOn(id);
+                    else setCommandResult(`${target} is not on this canvas; drag it in to place it.`);
+                }}
+            />}
+            <ScopeContext.Provider value={scope.flow}>
+            <section
+                className={`harness-canvas ${libraryOpen ? 'harness-canvas--library' : ''}`}
+                aria-label="Python project graph"
+                onMouseMove={event => { pointer.current = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? null; }}
+                onDragOver={event => { if (event.dataTransfer.types.includes('application/slate-target')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
+                onDrop={event => {
+                    const target = event.dataTransfer.getData('application/slate-target');
+                    if (!target || scope.view === 'map') return;
+                    event.preventDefault();
+                    const point = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? { x: 0, y: 0 };
+                    post({ kind: 'addInstance', target, x: point.x, y: point.y });
+                }}
+                onDoubleClick={event => {
+                    if (!(event.target as HTMLElement).classList.contains('react-flow__pane')) return;
+                    const point = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+                    if (point) openAdd(point);
+                }}
+            >
+                {graph.nodes.length === 0 && <div className="harness-empty">{scope.flow
+                    ? 'Empty flow: press Tab or double-click to add a node, then wire it to the group input and output.'
+                    : 'Right-click the canvas → New node file… to start, or drag from the library.'}</div>}
                 <ReactFlow
                     nodes={nodes}
                     edges={graph.edges}
@@ -730,15 +1066,18 @@ function HarnessApp() {
                     onNodesChange={onNodesChange}
                     onInit={instance => { flow.current = instance; instance.fitView({ padding: 0.2 }); }}
                     onNodeDoubleClick={(_, node) => {
-                        if (node.data.unit) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: true });
+                        if (node.data.flowId) enterFlow(node.data.flowId);
+                        else if (node.data.unit && (node.data.path || !node.data.target)) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: true });
                     }}
+                    zoomOnDoubleClick={false}
                     onNodeContextMenu={(event, node) => openBoardMenu(event, node)}
                     onPaneContextMenu={event => openBoardMenu(event, null)}
-                    onPaneClick={() => setBoardMenu(null)}
-                    onNodeDragStop={(_, node) => vscode?.postMessage({
+                    onPaneClick={() => { setBoardMenu(null); setHighlight(null); }}
+                    onNodeDragStop={(_, node, dragged) => vscode?.postMessage({
                         type: 'layout',
                         revision: snapshot.revision,
-                        positions: { [node.id]: node.position },
+                        scope: scope.flow ?? (scope.view === 'map' ? 'map' : undefined),
+                        positions: Object.fromEntries((dragged.length ? dragged : [node]).map(item => [item.id, item.position])),
                     })}
                     fitView
                     minZoom={0.1}
@@ -749,30 +1088,61 @@ function HarnessApp() {
                     zoomOnPinch
                     panOnDrag={[0, 1]}
                     nodesDraggable
-                    nodesConnectable
+                    nodesConnectable={scope.view !== 'map'}
                     connectionLineStyle={{ stroke: 'var(--strata-info, #62d9ff)', strokeDasharray: '4 4' }}
-                    isValidConnection={connection => isContextEndpoint(connection.source) && isContextEndpoint(connection.target)
-                        && connection.source !== connection.target}
+                    isValidConnection={connection => {
+                        const from = connection.sourceHandle ?? '';
+                        const to = connection.targetHandle ?? '';
+                        if (connection.source === connection.target) return false;
+                        if (from === 'ctx-out' || to === 'ctx-in') {
+                            return from === 'ctx-out' && to === 'ctx-in' && isContextEndpoint(connection.source) && isContextEndpoint(connection.target);
+                        }
+                        return (from === 'out' || from.startsWith('out:') || from.startsWith('input:'))
+                            && (to.startsWith('in:') || to.startsWith('output:')) && !(from === 'input:+' && to === 'output:+');
+                    }}
                     onConnect={connection => {
                         if (!connection.source || !connection.target) return;
-                        vscode?.postMessage({ type: 'action', revision: snapshot.revision, action: {
-                            kind: 'setContext', consumer: connection.target, dependency: connection.source, enabled: true,
-                        } });
-                        setCommandResult(`Context: ${connection.source} → ${connection.target}`);
+                        if (connection.sourceHandle === 'ctx-out') {
+                            post({ kind: 'setContext', consumer: connection.target, dependency: connection.source, enabled: true });
+                            setCommandResult(`Context: ${connection.source} → ${connection.target}`);
+                            return;
+                        }
+                        const from = endpointOf(connection.source, connection.sourceHandle);
+                        const to = endpointOf(connection.target, connection.targetHandle);
+                        post({ kind: 'connectData', from, to });
+                        setCommandResult(`Wire: ${from} → ${to}`);
+                    }}
+                    onConnectEnd={(event, state) => {
+                        // Dropping a data wire on empty canvas opens add-node search filtered by the port's type.
+                        const handle = state.fromHandle;
+                        if (state.isValid || state.toNode || !handle?.id || handle.id.startsWith('ctx') || handle.id.endsWith(':+')) return;
+                        const point = 'clientX' in event ? event : event.changedTouches[0];
+                        const position = flow.current?.screenToFlowPosition({ x: point.clientX, y: point.clientY });
+                        const source = nodes.find(node => node.id === handle.nodeId)?.data;
+                        const port = [...(source?.inputs ?? []), ...(source?.outputs ?? [])].find(item => item.id === handle.id);
+                        if (!position) return;
+                        const endpoint = endpointOf(handle.nodeId, handle.id);
+                        openAdd({ ...position, annotation: port?.annotation ?? null, ...(handle.type === 'source' ? { connectFrom: endpoint } : { connectTo: endpoint }) });
                     }}
                     onEdgeContextMenu={(event, edge) => {
-                        if (!edge.id.startsWith('context:')) return;
                         event.preventDefault();
-                        setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: 0, flowY: 0, node: null,
-                            edge: { dependency: edge.source, consumer: edge.target } });
+                        if (edge.id.startsWith('context:')) {
+                            setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: 0, flowY: 0, node: null,
+                                edge: { dependency: edge.source, consumer: edge.target } });
+                        } else if (edge.id.startsWith('data:')) {
+                            const wire = edge.data as { from: string; to: string };
+                            setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: 0, flowY: 0, node: null, wire });
+                        }
                     }}
                     deleteKeyCode={null}
+                    multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
                     elementsSelectable
                 >
                     <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
                     <Controls showInteractive={false} />
                 </ReactFlow>
             </section>
+            </ScopeContext.Provider>
             {searchQuery && (
                 <section className="harness-search-results" aria-label={`Search results for ${searchQuery}`}>
                     <header>
@@ -801,7 +1171,9 @@ function HarnessApp() {
                     </div>
                 </section>
             )}
-            {selected && <Inspector
+            {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
+                onEnterFlow={enterFlow}
+                onGoTo={goTo}
                 node={selected}
                 document={selectedDocument}
                 snapshot={snapshot}
@@ -814,6 +1186,11 @@ function HarnessApp() {
             {boardMenu && <BoardContextMenu
                 menu={boardMenu}
                 snapshot={snapshot}
+                scope={scope}
+                onEnterFlow={enterFlow}
+                onGoTo={goTo}
+                onFindRefs={findReferences}
+                onAdd={(x, y) => openAdd({ x, y })}
                 onClose={() => setBoardMenu(null)}
                 onFit={() => flow.current?.fitView({ padding: 0.2, duration: 300 })}
                 onSelect={selectNode}
@@ -827,6 +1204,14 @@ function HarnessApp() {
                 query={paletteQuery}
                 setQuery={setPaletteQuery}
                 onClose={() => setPaletteOpen(false)}
+            />}
+            {adding && <CommandPalette
+                items={addItems}
+                query={paletteQuery}
+                setQuery={setPaletteQuery}
+                onClose={() => setAdding(null)}
+                label="Add node"
+                placeholder={adding.annotation ? `Add a node that takes or gives ${adding.annotation}…` : 'Add a node, flow, library function, or value…'}
             />}
         </main>
     );

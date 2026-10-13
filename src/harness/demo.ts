@@ -24,13 +24,22 @@ function nodeUnit(
     kind: HarnessUnit['kind'] = 'function',
     parentId: string | null = null,
 ): HarnessUnit {
-    const name = id.split('.').pop()!.split('/').pop()!;
+    const name = id.startsWith('lib:') ? id.split(':').pop()! : id.split('.').pop()!.split('/').pop()!;
     return {
         id, identity: parentId ? 'provisional' : 'durable', kind, name,
         qualifiedName: parentId ? `${parentId.split('/').pop()}.${name}` : name,
         parentId, ranges: { name: range(0), declaration: { start: { line: 0, character: 0 }, end: { line: 50, character: 0 } } },
         annotation, decorators: [], signature: kind.includes('class') ? undefined : signature,
-        ...(kind.includes('class') ? {} : { parameters: signature.slice(signature.indexOf('(') + 1, signature.lastIndexOf(')')), returnAnnotation: 'int' }),
+        ...(kind.includes('class') ? {} : {
+            parameters: signature.slice(signature.indexOf('(') + 1, signature.lastIndexOf(')')),
+            returnAnnotation: signature.split('->')[1]?.trim() ?? null,
+            params: signature.slice(signature.indexOf('(') + 1, signature.lastIndexOf(')')).split(',').map(item => item.trim()).filter(Boolean)
+                .filter(item => item !== 'self').map(item => {
+                    const [head, fallback] = item.split('=').map(part => part.trim());
+                    const [name, annotation] = head.split(':').map(part => part.trim());
+                    return { name, annotation: annotation ?? null, default: fallback ?? null, kind: 'keyword' as const };
+                }),
+        }),
     } as HarnessUnit;
 }
 
@@ -46,7 +55,36 @@ export const demoSnapshot: HarnessSnapshot = {
         body: 'Split grade.py into nodes, then describe each one with llama.',
         attachedTo: null,
     }],
-    layout: { 'board-note-port': { x: 760, y: 60 } },
+    layout: { 'board-note-port': { x: 1400, y: 60 }, 'ref-clamp': { x: 760, y: 380 }, 'placeholder-letter': { x: 760, y: 60 }, 'flow:report': { x: 1080, y: 60 }, value: { x: 100, y: 470 } },
+    refs: [{ id: 'ref-clamp', target: 'clamp' }],
+    placeholders: [{ id: 'placeholder-letter', name: 'letter_grade' }],
+    library: [{
+        path: 'vendor/textutil.py',
+        units: [nodeUnit('lib:vendor/textutil.py:shout', 'def shout(text: str) -> str', null)],
+    }],
+    flows: [
+        {
+            id: 'main',
+            flow: {
+                name: 'main', inputs: [], outputs: [], extra: {},
+                instances: [{ id: 'value', kind: 'value', value: '42' }, { id: 'scoring/normalize_score', node: 'scoring/normalize_score' }],
+                wires: [{ from: 'value.out', to: 'scoring/normalize_score.in:score' }],
+            },
+        },
+        {
+            id: 'report',
+            flow: {
+                name: 'report', extra: {},
+                inputs: [{ name: 'score', annotation: 'int' }],
+                outputs: [{ name: 'text', annotation: 'str' }],
+                instances: [{ id: 'hundred', kind: 'value', value: '100' }, { id: 'normalize_score', node: 'scoring/normalize_score' }, { id: 'shout', node: 'lib:vendor/textutil.py:shout' }],
+                wires: [
+                    { from: 'input:score', to: 'normalize_score.in:score' },
+                    { from: 'hundred.out', to: 'normalize_score.in:maximum' },
+                ],
+            },
+        },
+    ],
     documents: [
         nodeDocument('clamp', clampCode, [nodeUnit('clamp', 'def clamp(value: int, lower: int, upper: int) -> int', {
             intent: 'Clamp an integer to the inclusive lower and upper bounds', contract: 'Raise ValueError when lower > upper',

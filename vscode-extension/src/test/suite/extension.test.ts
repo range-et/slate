@@ -182,6 +182,68 @@ suite('Slate Extension Host', () => {
         }
     });
 
+    test('refs, placeholders, root and flow wires, extraction, and compile go through the folder host', async () => {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        assert.ok(root, 'fixture workspace is open');
+        const project = vscode.Uri.joinPath(root, 'folder_project');
+        const folder = vscode.Uri.joinPath(project, 'slate');
+        const layoutUri = vscode.Uri.joinPath(folder, 'layout.json');
+        const read = async (uri: vscode.Uri) => JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)));
+        const layoutBefore = await vscode.workspace.fs.readFile(layoutUri);
+        const act = (action: Record<string, unknown>) => vscode.commands.executeCommand('slate.test.postMessage', { type: 'action', action });
+        try {
+            await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.joinPath(folder, 'slate.json'), 'slate.editor');
+            await waitForSnapshot(snapshot => snapshot.documents.length === 2);
+
+            await act({ kind: 'createRef', target: 'clamp', x: 10, y: 20 });
+            const [ref] = (await read(layoutUri)).refs;
+            assert.equal(ref.target, 'clamp');
+            assert.deepEqual((await read(layoutUri)).positions[ref.id], { x: 10, y: 20 });
+
+            // A root wire implies main-flow instances for a ref and a definition; unwiring prunes them.
+            await act({ kind: 'connectData', from: `${ref.id}.out`, to: 'normalize.in:score' });
+            const main = await read(vscode.Uri.joinPath(folder, 'flows', 'main.json'));
+            assert.deepEqual(main.instances, [{ id: ref.id, node: 'clamp' }, { id: 'normalize', node: 'normalize' }]);
+            assert.deepEqual(main.wires, [{ from: `${ref.id}.out`, to: 'normalize.in:score' }]);
+            await act({ kind: 'disconnectData', from: `${ref.id}.out`, to: 'normalize.in:score' });
+            assert.deepEqual((await read(vscode.Uri.joinPath(folder, 'flows', 'main.json'))).instances, []);
+
+            await act({ kind: 'createPlaceholder', name: 'clamp', x: 1, y: 2 });
+            const placeholder = (await read(layoutUri)).placeholders[0];
+            await act({ kind: 'placeholderToRef', id: placeholder.id });
+            const converted = await read(layoutUri);
+            assert.equal(converted.placeholders, undefined);
+            assert.deepEqual(converted.refs.map((item: { target: string }) => item.target), ['clamp', 'clamp']);
+
+            // A flow built port by port: dropping on the group's empty slots creates typed inputs and outputs.
+            await act({ kind: 'createFlow', name: 'pipe', x: 0, y: 0 });
+            await act({ flow: 'pipe', kind: 'addInstance', target: 'clamp', x: 300, y: 100 });
+            await act({ flow: 'pipe', kind: 'connectData', from: 'input:+', to: 'clamp.in:value' });
+            await act({ flow: 'pipe', kind: 'connectData', from: 'input:+', to: 'clamp.in:lower' });
+            await act({ flow: 'pipe', kind: 'connectData', from: 'input:+', to: 'clamp.in:upper' });
+            await act({ flow: 'pipe', kind: 'connectData', from: 'clamp.out', to: 'output:+' });
+            const pipe = await read(vscode.Uri.joinPath(folder, 'flows', 'pipe.json'));
+            assert.deepEqual(pipe.inputs, [{ name: 'value', annotation: 'int' }, { name: 'lower', annotation: 'int' }, { name: 'upper', annotation: 'int' }]);
+            assert.deepEqual(pipe.outputs, [{ name: 'clamp', annotation: 'int' }]);
+
+            await act({ flow: 'pipe', kind: 'extractFlow', ids: ['clamp'], name: 'inner' });
+            const inner = await read(vscode.Uri.joinPath(folder, 'flows', 'inner.json'));
+            assert.deepEqual(inner.instances, [{ id: 'clamp', node: 'clamp' }]);
+            assert.deepEqual((await read(vscode.Uri.joinPath(folder, 'flows', 'pipe.json'))).instances, [{ id: 'inner', node: 'inner' }]);
+
+            const result = await vscode.commands.executeCommand<{ files: string[] }>('slate.compile');
+            assert.deepEqual(result?.files, ['folder_fixture.py']);
+            const compiled = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(project, 'src', 'folder_fixture.py')));
+            assert.ok(compiled.includes('def pipe(value: int, lower: int, upper: int) -> int:\n    v_inner = inner(value=value, lower=lower, upper=upper)\n    return v_inner'), compiled);
+        } finally {
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            await vscode.workspace.fs.writeFile(layoutUri, layoutBefore);
+            for (const path of [vscode.Uri.joinPath(folder, 'flows'), vscode.Uri.joinPath(project, 'src')]) {
+                await vscode.workspace.fs.delete(path, { recursive: true, useTrash: false }).then(undefined, () => undefined);
+            }
+        }
+    });
+
     test('ports a Python folder, describes nodes with llama.cpp, and compiles them back', async () => {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         assert.ok(root, 'fixture workspace is open');

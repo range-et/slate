@@ -43,19 +43,20 @@ design per phase.
 | --- | --- | --- |
 | Folder format (pure) | `vscode-extension/src/slate_folder.ts` | parse/serialize slate.json, layout.json, node JSON (`uses`, `order`, `kind`); `indexNode`, `checkNodeCode`, `nodeFromSignature` |
 | Folder IO (VS Code) | `vscode-extension/src/slate_folder_host.ts` | index folder, `readNodes`, read/write nodes (WorkspaceEdit + save), layout (fs write), create node |
-| Panel / webview host | `vscode-extension/src/harness_panel.ts` | ~620 lines, folder only; typed actions incl. `compile`, `describeNodes`, `cancelDescribe` |
+| Panel / webview host | `vscode-extension/src/harness_panel.ts` | ~900 lines, folder only; `handleCanvasAction` (refs, placeholders, flows, wires) then `handleFolderAction` (node edits, compile, describe) |
 | Python parsing | `vscode-extension/src/python_adapter.ts` | Lezer; `parseModule(source, path, nodeId?)`; `replaceUnit`; `splitImport`, `identifierNames`, `topLevelBindings` |
 | Port / describe | `vscode-extension/src/port/python_importer.ts`, `port/describe.ts` | pure; importer `portPythonProject(files)`; describe order/packet/parse/loop |
-| Compile | `vscode-extension/src/compile/python.ts` | pure `compilePython(nodes, config)` → files + diagnostics |
-| Port/compile host | `vscode-extension/src/port_compile_host.ts` | `portPythonFolder`, `compileSlateFolder`, the `Slate` output channel |
+| Compile | `vscode-extension/src/compile/python.ts` | pure `compilePython(nodes, config, flows?, library?)` → files + diagnostics; `flowToNode` codegen |
+| Port/compile host | `vscode-extension/src/port_compile_host.ts` | `portPythonFolder`, `compileSlateFolder` (nodes + flows + library), the `Slate` output channel |
+| Flows (pure) | `vscode-extension/src/flow.ts` | flow JSON, signatures → ports, endpoints, connect/extract; shared with the webview |
 | Protocol types | `vscode-extension/src/harness_protocol.ts` | shared host ↔ webview types (webview re-exports them) |
 | Generation | `vscode-extension/src/generation.ts`, `llama_transport.ts` | packet builder (uses `annotation.intent/contract/dependencies/locked`), SSE transport (optional `system`) |
 | Search | `vscode-extension/src/search.ts` | ranks units over documents + `sources` |
 | Extension entry | `vscode-extension/src/extension.ts` | commands (open, new, port, compile), custom editor (`**/slate/slate.json` only), launcher view, test-only commands |
 | Webview app | `src/harness/main.tsx` | React + XYFlow; Inspector, menus, command UI |
-| Graph building | `src/harness/graph.ts` | `buildGraph` → `buildFolderNodes` (incl. module-state nodes), notes, and edges |
+| Graph building | `src/harness/graph.ts` | `buildGraph(snapshot, scope)` → root Compose, Map, or one flow; `callables`, `typeColor` |
 | Demo snapshot | `src/harness/demo.ts` | `?demo` (any value) loads it; Playwright uses it |
-| Gate script | `scripts/port-compile.js` | port a folder and compile it with the built `vscode-extension/out` modules |
+| Gate scripts | `scripts/port-compile.js`, `scripts/compile-slate.js` | port + compile a Python folder; compile a `slate/` project (flows, library); both use `vscode-extension/out` |
 | Tests | `test/*.test.ts` (Vitest), `test/e2e/*.playwright.ts`, `vscode-extension/src/test/suite/extension.test.ts` (Extension Host) | fixtures in `vscode-extension/test-fixtures/electron/` (`folder_project/`, `port_source/`) |
 | Legacy notebook | `legacy/` | frozen; Pages deploys it; keep `verify:baseline` green |
 
@@ -250,50 +251,41 @@ features.md for behavior. Deviations from the original design:
   about 600 tokens; a node whose code alone exceeds `contextWindow − 120` is
   skipped.
 
-## Phase 3 — one workspace
+## Phase 3 — one workspace and Phase 4 — ports, wires, flows
 
-- **Reference nodes.** `layout.json.refs: [{ id, target }]` with positions in
-  `positions[id]`. They render as compact pills with the target's ports. Menu:
-  Go to definition (select and center the target), Find references
-  (highlight), Generate body. A missing target renders broken.
-- **Placeholders.** `layout.json.placeholders: [{ id, name, signature? }]`.
-  If the name resolves to a node, offer "Convert to reference". **Create
-  node** uses `nodeFromSignature` with the inferred or entered signature.
-- **Library sidebar.** A left panel listing nodes by folder plus read-only
-  library code (`slate.json.library: ["path", ...]` indexed by the Lezer
-  adapter; library units are callable but not editable). Dragging onto the
-  canvas creates a ref.
-- **Compose/Map.** Map lays nodes out by folder grid, using
-  `layout.mapPositions`. Compose uses `positions`.
+**Done 2026-10-13** (both phases in one thread). See features.md for
+behavior. Decisions that differ from or sharpen the original design:
 
-## Phase 4 — ports, wires, flows
-
-- **Structured params.** Add to `ParsedUnit`:
-  `params: Array<{ name, annotation | null, default | null, kind:
-  'positional' | 'keyword' | 'var' | 'kwvar' }>` from the `ParamList` nodes.
-- **Handles.** One per param (`in:<name>`) on the left and `out` on the
-  right, colored by annotation (hash → palette; "any" is grey). A separate
-  small context handle on top.
-- **Flow JSON** (`slate/flows/<name>.json`):
-  ```json
-  { "slate": 3, "name": "score_pipeline",
-    "inputs": [{ "name": "score", "annotation": "int" }],
-    "outputs": [{ "name": "result", "annotation": "int" }],
-    "instances": [{ "id": "n1", "node": "clamp" }, { "id": "v1", "kind": "value", "value": 0 }],
-    "wires": [{ "from": "input:score", "to": "n1.in:value" }, { "from": "n1.out", "to": "output:result" }] }
-  ```
-  The root canvas edits `slate/flows/main.json`. A flow is itself callable as
-  a node in other flows.
-- **Codegen** (in Compile): topological sort over instances;
-  `vN = node(arg=...)`; unwired params use defaults or raise a diagnostic;
-  return a single value or a tuple. Golden tests cover fan-out, multiple
-  outputs, unused inputs, and name collisions.
-- **Ctrl+G** extracts the selection into a new flow (boundary wires become
-  inputs/outputs) and replaces it with one instance. Tab enters a flow;
-  breadcrumbs exit.
-- **Add-node search:** Tab, double-click, or Shift+A opens the palette in
-  "add" mode at the cursor; dropping a wire onto empty space opens it filtered
-  by type.
+- **Root canvas = Compose.** Definitions stay on the root (with ports), plus
+  refs, placeholders, flow nodes (`flow:<id>`), and values. Root data wires
+  are stored in `slate/flows/main.json`; a wired canvas item's instance id is
+  its canvas id (node id, ref id, `flow:<id>`, or value id) and the host adds
+  or prunes those instances as wires change. Flows are separate canvases
+  entered from flow nodes or flow instances.
+- **Handles.** Data handles are `in:<param>` (left) and `out` / `out:<name>`
+  (right); group nodes use `input:<name>` / `output:<name>` plus a `+` slot.
+  Context handles are `ctx-in` (top) and `ctx-out` (bottom).
+- **Positions.** Root: `layout.positions`; Map: `layout.mapPositions`;
+  flows: `layout.flowPositions[flowId][instanceId | __input | __output]`. The
+  `layout` message carries `scope` (`undefined`, `'map'`, or a flow id).
+- **Codegen placement.** A flow compiles into the module of its folder (root
+  flows and `main` into `<project>.py`) as a synthetic locked node, so compile
+  reuses imports, collisions, and cycle checks. Its node id is the flow id;
+  a flow id equal to a node id is an error.
+- **Library ids** are `lib:<path>:<name>`; compile imports them by path as a
+  module, so the project root must be on `sys.path` for those imports.
+- **Keys.** Tab enters a selected flow, otherwise opens add-node search;
+  Shift+A and double-click also open it; Cmd/Ctrl+G groups; Shift-click
+  multi-selects. No other keys are captured on the canvas.
+- **Host actions** (typed, `flow` omitted for the root): `createRef`,
+  `createPlaceholder`, `placeholderToRef`, `placeholderToNode`,
+  `addInstance` (optional `connectFrom`/`connectTo` + `connectPort`),
+  `setValue`, `connectData`, `disconnectData`, `deleteItems`, `createFlow`,
+  `extractFlow` (optional `name`), `deleteFlow`, `addLibrary`. Flow
+  writes are plain fs writes followed by a refresh.
+- Pure pieces: `vscode-extension/src/flow.ts` (format, ports, endpoints,
+  `connect`/`disconnect`/`removeInstances`/`extractFlow`) is imported by the
+  webview's `graph.ts`; keep it free of Node APIs.
 
 ## Phase 5 — live values
 
@@ -346,5 +338,13 @@ features.md for behavior. Deviations from the original design:
   webview never enabling scripts. Tests: Vitest port/compile goldens and
   describe against the fake llama server (ordering, resume, malformed, timeout,
   cancel); Extension Host port → describe → compile, dirty node buffers,
-  notes in layout.json. **Next thread: Phase 3** (reference nodes,
-  placeholders, library sidebar, Compose/Map).
+  notes in layout.json.
+- **2026-10-13 — Phases 3 + 4** (same thread). Typed params on units and
+  ports on the canvas; refs, placeholders, library sidebar and read-only
+  library code, Compose/Map; flows with data wires, group IO, Ctrl+G
+  extraction, Tab/breadcrumbs, add-node search with type-filtered wire drop;
+  flow codegen in compile; `examples/flow_demo` gate (3 pytest cases). Tests:
+  Vitest flow format/extract/codegen goldens and graph scopes; Playwright
+  refs/placeholders/wires/flows/grouping/library drag/Map; Extension Host
+  refs → wires → flows → extract → compile. **Next thread: Phase 5** (live
+  values: runner, viewers, examples).

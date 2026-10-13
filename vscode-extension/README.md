@@ -20,6 +20,25 @@ node…** or a board note. Click selects; double-click opens the node JSON. The
 workbench edits intent, contract, context, and code. Layout and notes live in
 `slate/layout.json` and never touch node files.
 
+## Canvas, references, and flows
+
+Every node shows typed ports (one input per parameter, one output). Wire an
+output to an input to describe dataflow; wires on the main canvas are stored
+in `slate/flows/main.json` and compile to `def main()`. Drag from a node's
+bottom edge to another node's top edge to give it context instead.
+
+The left **Library** lists nodes by folder, flows, and read-only library
+files (`slate.json` → `library`). Drag an item onto the canvas to place a
+reference (an alias with the same ports). Press **Tab**, **Shift+A**, or
+double-click empty canvas to add a node at the cursor; drop a wire on empty
+canvas to add a node of a matching type, already wired. Placeholders are
+names you can later turn into a reference or a new node.
+
+Select some nodes and press **Ctrl/Cmd+G** to group them into a flow
+(`slate/flows/<name>.json`): crossing wires become its inputs and outputs.
+Double-click a flow (or press Tab) to open it; the breadcrumb returns. Flows
+compile to plain Python functions. **Map** shows nodes grouped by folder.
+
 ## Port and compile
 
 **Slate: Port Python Project…** picks a folder and splits it into node files

@@ -25,40 +25,11 @@ Phase 2 (S-200 to S-203) shipped on 2026-10-13; see [features.md](features.md).
 
 ## Phase 3 — one workspace
 
-### S-300 Library sidebar
-- `slate/nodes` folders plus read-only library code, searchable. Dragging an
-  item to the canvas creates a reference.
-
-### S-301 Reference nodes
-- Stored in layout.json as `{ id, target, position }`, many per target. Menu:
-  Go to definition, Find references, Select definition, Generate body.
-  Missing targets render as broken.
-
-### S-302 Placeholders → node files
-- A name-only note resolves to a reference if the node exists; otherwise
-  **Create node** proposes a new node JSON, with its signature from wires or
-  a small form.
-
-### S-303 Compose / Map toggle
-- Map groups nodes by folder (output module); Compose is free. Selection is
-  shared between them.
+Phase 3 (S-300 to S-303) shipped on 2026-10-13; see [features.md](features.md).
 
 ## Phase 4 — ports, wires, flows
 
-### S-400 Typed ports
-- Ports come from parameters and return annotations, colored by type, with
-  "any" for untyped. Context ports are visually separate.
-
-### S-401 Data wires and add-node search
-- Port-to-port wires; Tab, double-click, or Shift+A opens add-node search;
-  dragging into empty space opens it filtered by type and auto-wires.
-
-### S-402 Flows
-- Ctrl+G saves the selection as `slate/flows/<name>.json` with Group
-  Input/Output. Compile generates the flow function deterministically. Tab
-  enters a flow; breadcrumbs exit.
-- **Acceptance:** codegen golden tests (fan-out, multiple outputs, unused
-  inputs, name collisions); the compiled flow runs under pytest.
+Phase 4 (S-400 to S-402) shipped on 2026-10-13; see [features.md](features.md).
 
 ## Phase 5 — live values
 

@@ -644,7 +644,9 @@ export class HarnessPanel implements vscode.Disposable {
             }
             case 'createFlow':
             case 'extractFlow': {
-                const name = (await ask(action.kind === 'createFlow' ? 'New flow' : 'Group selection into flow', '', flowName))?.trim();
+                const given = typeof action.name === 'string' ? action.name.trim() : null;
+                if (given && flowName(given)) throw new Error(flowName(given)!);
+                const name = given ?? (await ask(action.kind === 'createFlow' ? 'New flow' : 'Group selection into flow', '', flowName))?.trim();
                 if (!name) return true;
                 if (action.kind === 'createFlow') {
                     await folder.writeFlow(name, emptyFlow(name));

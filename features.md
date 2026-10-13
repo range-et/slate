@@ -2,7 +2,7 @@
 
 Factual inventory of what exists, what is half-built, and what is not started.
 Direction and reasoning live in [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md);
-executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase 2).
+executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase 4).
 
 ## At a glance
 
@@ -21,10 +21,13 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase
 | Single-function llama.cpp generate → review → accept → undo | ✅ shipped, no edit/regenerate |
 | Cmd+K command palette (actions, go-to-node, search) | ✅ shipped |
 | Context by wire, edge menu, searchable picker; inline intent on nodes | ✅ shipped |
-| Wiring nodes / typed ports / dataflow | ❌ not started (handles are drawn but not connectable) |
-| Reference (alias) nodes, "go to function" from anywhere | ❌ not started |
-| Placeholder nodes (name-only → stub) | ❌ not started |
-| Composite (group) nodes compiled to Python | ❌ not started |
+| Typed ports + data wires (root canvas and flows) | ✅ shipped |
+| Reference (alias) nodes, go to definition, find references | ✅ shipped |
+| Placeholder nodes (→ reference or new node) | ✅ shipped |
+| Flows (`slate/flows/*.json`): Ctrl+G, Tab in, breadcrumbs, compiled to Python | ✅ shipped |
+| Library sidebar + read-only library code (`slate.json` `library`) | ✅ shipped |
+| Compose / Map toggle | ✅ shipped |
+| Add-node search (Tab, Shift+A, double-click, wire drop filtered by type) | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -121,6 +124,61 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase
   and tic-tac-toe examples, compile them, and run their original pytest
   suites against the output.
 
+## Shipped — one workspace and flows (Phases 3–4)
+
+- **Root canvas (Compose).** Definitions (one per node file) with typed
+  ports: one input per parameter (`*args`/`**kwargs` excluded, `?` marks a
+  default), one `out` per return, colored by annotation (untyped is grey).
+  Context handles moved to the node's top (in) and bottom (out). The root
+  also holds references, placeholders, flow nodes, value literals, and notes.
+- **References** (`layout.json` `refs`). Pills that mirror their target's
+  ports (node, flow, or library unit). Menu: Go to definition, Find
+  references (highlights the target and its refs, and lists the flows that use
+  it), Generate body, Delete reference. Missing targets render BROKEN.
+  Selecting a ref shows the target in the Inspector.
+- **Placeholders** (`layout.json` `placeholders`). Name-only stand-ins.
+  When exactly one node has the name: **Convert to reference**; otherwise
+  **Create node…** (signature prompt) puts the new node where the placeholder
+  was. Created from the canvas menu, the palette, or by typing a name in
+  add-node search.
+- **Data wires.** Port-to-port; an input takes one wire (a new one replaces
+  it). Root wires live in `slate/flows/main.json`, whose instances are implied
+  by the wired canvas items and pruned when unwired; `main` compiles to
+  `def main() -> None`. Right-click a wire → Remove wire.
+- **Flows** (`slate/flows/<id>.json`): inputs, outputs, instances (node,
+  flow, library unit, or a Python literal value), and wires. Flow nodes on the
+  root show the flow's ports; double-click, Tab, or **Open flow** enters, and
+  breadcrumbs exit. Inside, Group input/output nodes have a "+ new" slot:
+  wiring to it creates a typed input or output named after the other end.
+  **Ctrl/Cmd+G** groups the selection into a new flow; wires crossing the
+  selection become its inputs (one per outside source) and outputs (one per
+  inside source).
+- **Flow codegen** (in compile). One function per flow in its folder's
+  module (root flows in the project module), stamped `# slate: flows/<id>`:
+  instances in dependency order as `v_<id> = target(param=…)`, positional for
+  positional-only parameters, defaults for unwired optional inputs, a tuple
+  return (and unpacking at call sites) for several outputs, and only the
+  target nodes' imports the body uses. Diagnostics: missing targets, unknown
+  endpoints, unwired required inputs or outputs, cycles, variable collisions,
+  flow/node id clashes (errors), unused inputs (warning).
+- **Library.** `slate.json` `library` lists files or folders (palette **Add
+  library file…**). Units are indexed read-only as `lib:<path>:<name>`,
+  callable from refs and flows, and compile to `from <path as module> import
+  <name>` (the project root must be importable for those imports).
+- **Sidebar.** Nodes by folder, flows, and library units, filterable by
+  name, signature, or intent. Click centers the item; drag places a reference
+  (root) or an instance (flow).
+- **Add-node search.** Tab (nothing selected), Shift+A, or double-click
+  empty canvas opens the palette in add mode at the cursor. Dropping a wire on
+  empty canvas opens it filtered to nodes with a matching port type and wires
+  the new node in.
+- **Map.** Definitions grouped in folder columns under folder headers,
+  positions in `layout.json` `mapPositions`; no ports, refs, or wires.
+- **Gate.** `examples/flow_demo` (nodes in two folders, flows with fan-out,
+  tuple outputs, a flow calling a flow, a library call, and a root `main`) is
+  compiled by `scripts/compile-slate.js` in `verify:baseline`, and its pytest
+  suite runs against the output.
+
 ## Shipped — shared platform
 
 ### Indexing
@@ -179,6 +237,13 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase
 
 - **Context entry points.** Wire, palette, and picker are shipped; `@`
   completion inside intent text is not.
+- **Flows editing.** Flow and wire edits are plain file writes (no
+  VS Code undo). Flow inputs/outputs can't be renamed or removed from the
+  canvas (edit the JSON). Type colors don't block mismatched wires. Node files
+  can't be deleted from the canvas. Instances in a flow can't yet show values
+  (Phase 5).
+- **Inspector overlap.** The Inspector panel covers nodes near the right
+  edge while a node is selected.
 - **Proposal lifecycle.** Generated code is reviewed, but intent/contract/
   context/lock edits apply immediately without review. Candidates cannot be
   edited or regenerated with feedback.
@@ -197,14 +262,8 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase
 
 ## Not started
 
-- Connectable ports derived from parameters/return types; dataflow wires.
-- Reference nodes (many canvas instances of one function) with go-to-definition
-  and find-references.
-- Placeholder notes that turn into typed stubs.
-- Composite/group nodes that generate a Python function body.
 - Input, viewer, and example nodes; executing code; showing values.
 - Repeat / for-each / branch zones.
-- Add-node search on the canvas (Tab, double-click, drag from port).
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
 - Dependency-ordered queue / generate-all for the harness.
