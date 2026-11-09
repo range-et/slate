@@ -194,3 +194,8 @@ Undo/Save claims continue to come from the real host/workbench suites.
 - Narrow 320/480px panes → Map → Compose → Library: browser regression checks
   header hit targets and resulting pressed state. This targets the Linux CI
   workbench failure where status text intercepted the Compose button.
+
+Linux CI prompt follow-up: workbench creation QA now waits for a complete native
+invalid-signature → validation error → valid-signature → cleared error cycle
+before Enter. Both cancel-at-intent and successful creation retain their original
+assertions; dialog visibility alone is no longer treated as readiness.

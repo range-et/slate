@@ -257,3 +257,11 @@ Final review-fix launch gate: `npm run verify:launch` exited 0 on 2026-11-09
 Extension Host tests and real workbench Generate/Accept/Undo/Save plus native
 creation/cancellation QA. Static checks, palette mutation gate, frozen legacy
 checks/builds and Python round trips passed. `git diff --check` passed.
+
+Linux CI run 42715629258 passed the three review regressions, browser/native
+suites, and the previously failing Compose click. It then exposed a workbench
+prompt synchronization failure: Enter immediately after filling a newly opened
+signature prompt did not advance to the intent prompt. The test now observes an
+explicit invalid-to-valid validation cycle before Enter, retaining all intent
+cancellation and file-creation assertions. This adds synchronization evidence
+rather than retries, forced input, skipped checks, or fixed delays.
