@@ -83,6 +83,20 @@ async function main() {
             await harnessFrame.getByRole('option').filter({ has: harnessFrame.getByText(label, { exact: true }) }).click();
         };
         const prompt = page.locator('.quick-input-widget:visible input');
+        const promptMessage = page.locator('.quick-input-message');
+        const enterSignature = async () => {
+            // Observe a complete validation cycle before accepting the prompt.
+            // Visibility alone does not prove that the native prompt has
+            // processed the current value. Keep error-to-valid checks explicit.
+            await expect(promptMessage).toContainText('Typed function signature');
+            await prompt.fill('not a function');
+            await expect(promptMessage).toContainText('enter one function signature');
+            await prompt.fill('def qa_native(value: int) -> int');
+            await expect(promptMessage).toContainText('Typed function signature');
+            await expect(prompt).toHaveValue('def qa_native(value: int) -> int');
+            await prompt.press('Enter');
+            await expect(promptMessage).toContainText('Intent (what it should do)');
+        };
         const project = path.join(workspace, 'folder_project');
         const nodeFile = path.join(project, 'slate', 'nodes', 'qa_native.json');
         const beforeNodes = fs.readdirSync(path.dirname(nodeFile)).sort();
@@ -119,18 +133,14 @@ async function main() {
 
         // Cancelling the intent prompt must also leave the project unchanged.
         await command('New node file…');
-        await prompt.fill('def qa_native(value: int) -> int');
-        await prompt.press('Enter');
-        await expect(page.locator('.quick-input-message')).toContainText('Intent (what it should do)');
+        await enterSignature();
         await prompt.press('Escape');
         await expect(prompt).toHaveCount(0);
         expect(fs.existsSync(nodeFile)).toBe(false);
 
         // Confirm both prompts, then assert the visible node and saved source file.
         await command('New node file…');
-        await prompt.fill('def qa_native(value: int) -> int');
-        await prompt.press('Enter');
-        await expect(page.locator('.quick-input-message')).toContainText('Intent (what it should do)');
+        await enterSignature();
         await prompt.fill('Return the supplied value');
         await prompt.press('Enter');
         await expect(harnessFrame.locator('.react-flow__node[data-id="qa_native"]')).toBeVisible();
