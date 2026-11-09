@@ -98,3 +98,11 @@ counted; the branch/score/group-order reasoning is in `VERIFICATION.md`.
 | `parseModule` multiline signature normalization | `python_adapter.test.ts`: first parameter on opening line, common/unequal indentation, tab indentation, empty multiline list, CRLF, and closing-parenthesis placement; exact signatures and structured names | Remaining mutation survivors still require audit |
 | `closeTestApplication` QA cleanup | `native_shutdown.test.ts`: normal/already-finished exit, bounded graceful shutdown, owned-child termination, no-exit and thrown/emitted failures, timer/listener cleanup, invalid grace | Only QA process cleanup; application assertions still run unchanged |
 | `parseModule`, `PythonAdapter.replaceUnit` contract details | `python_adapter.test.ts`: exact positional/default/variadic parameter records; class, nested-function and duplicate-ID rejection; padded replacement normalization, exact edit range, before/after hashes and reparsed result | Targeted mutation audit includes these paths; equivalent and defensive survivors remain counted |
+
+## PR #1 review regressions
+
+| Surface | Automated evidence | Boundary |
+| --- | --- | --- |
+| `SlateFolderHost.writeNode`, `HarnessPanel.acceptFolderProposal` / `undoAccepted` | Native `persistence.test.ts` holds Save, applies a later real WorkspaceEdit, resumes Save, and verifies Slate Undo rejects without changing buffer version/text or disk. Existing acceptance, normal Undo, rejected edit and failed-save tests remain | Capture the applied document version before awaiting Save |
+| `Inspector` visibility | Browser `interaction_chains.playwright.ts` checks code/intent/contract and note title/body/attachment survive hide/reopen with no implicit writes; explicit Save dispatches retained drafts | Changing selection still replaces details; only hiding the same selection preserves its local state |
+| Extension coverage build plugin | `extension_build.test.ts` runs the build script with esbuild's loader boundary: POSIX/Windows source paths instrument, test/dependency paths skip, normal builds remain uninstrumented, read errors propagate | Windows path syntax is exercised on the current OS; this is not a full Windows Extension Host run |

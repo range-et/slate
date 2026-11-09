@@ -223,3 +223,37 @@ Do not classify all 42 survivors as equivalent: several normalization mutations
 still need these distinguishing cases. Parser-guaranteed and locked-annotation
 branches also need an explicit reachability audit; no coverage suppression has
 been added.
+
+## PR #1 review fixes
+
+- Undo/save race: `writeNode()` now returns the document version captured after
+  WorkspaceEdit applies and before Save is awaited. Acceptance uses that version.
+  The real Extension Host regression holds Save, applies later user text, resumes
+  Save and requests Undo; it failed on the old implementation and passes with the
+  fix, preserving buffer text/version and disk. Normal Undo, rejected apply and
+  failed-save cases remain in the same suite (33 native tests passed focused run).
+- Inspector drafts: hide the selected inspector without unmounting it; key it by
+  selection so switching nodes still resets details. Browser regressions cover
+  code, intent, contract, note title/body/attachment, no implicit writes and
+  explicit Save. The code/metadata case failed against the old implementation;
+  both cases pass after the fix. Inspected the retained-draft screenshot.
+- Windows coverage loader: normalize separators for both source inclusion and
+  test exclusion, retaining the original filename for reading/instrumentation.
+  Eight build-loader tests cover POSIX/Windows paths, exclusions, ordinary builds
+  and read errors. The Windows source case failed before the fix; all eight now
+  pass. This verifies Windows-shaped loader inputs, not a Windows OS host run.
+- Existing CI failure: the Linux workbench log showed status text intercepting
+  Compose after Undo opened a split editor. Header children no longer shrink into
+  each other; horizontal overflow remains scrollable. A real 320px browser click
+  regression failed before the fix, then 320px and 480px Map/Compose/Library chains
+  passed. Inspected the narrow-pane screenshot. No forced clicks or QA assertion
+  weakening were used.
+
+Earlier combined coverage percentages describe the pre-review source revision;
+a fresh collection is required before attributing those totals to these fixes.
+
+Final review-fix launch gate: `npm run verify:launch` exited 0 on 2026-11-09
+(`/tmp/slate-pr1-final-launch.log`): 463 unit tests, 88 browser cases, 33 real
+Extension Host tests and real workbench Generate/Accept/Undo/Save plus native
+creation/cancellation QA. Static checks, palette mutation gate, frozen legacy
+checks/builds and Python round trips passed. `git diff --check` passed.

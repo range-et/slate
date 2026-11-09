@@ -508,3 +508,61 @@ test('palette switches canvas views and returns from a flow while preserving nav
     await expect(node(page, 'clamp')).toBeVisible();
     await expect(node(page, '__input')).toHaveCount(0);
 });
+
+test('source double-click preserves unsaved inspector code and metadata drafts', async ({ page }) => {
+    const target = node(page, 'clamp').locator('strong').first();
+    await target.click();
+    await page.getByLabel('Function intent').fill('Unsaved intent');
+    await page.getByLabel('Function contract').fill('Unsaved contract');
+    const code = 'def clamp(value: int, lower: int, upper: int) -> int:\n    return 123';
+    await page.locator('.node-code-editor .cm-content').fill(code);
+    await clear(page);
+    await target.dblclick();
+    await expect(page.getByRole('complementary', { name: 'Selected node details' })).toHaveCount(0);
+    expect(await messages(page)).toContainEqual({ type: 'reveal', unitId: 'clamp', focus: true });
+    await target.click();
+    await expect(page.getByLabel('Function intent')).toHaveValue('Unsaved intent');
+    await expect(page.getByLabel('Function contract')).toHaveValue('Unsaved contract');
+    await expect(page.locator('.node-code-editor .cm-content')).toHaveText(code);
+    await expect(page.getByRole('button', { name: 'Save code', exact: true })).toBeEnabled();
+    expect((await messages(page)).filter(message => message.type === 'action')).toEqual([]);
+    await page.getByRole('button', { name: 'Save code', exact: true }).click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({ type: 'action', action: expect.objectContaining({ kind: 'setNodeCode', code }) }));
+    await page.screenshot({ path: 'test-results/qa-preserved-drafts.png' });
+});
+
+test('double-click preserves unsaved note fields and attachment until explicit Save', async ({ page }) => {
+    await snapshot(page, value => { value.layout!['board-note-port'] = { x: 100, y: 650 }; });
+    const target = node(page, 'board-note-port').locator('strong').first();
+    await target.click();
+    await page.getByLabel('Note title').fill('Unsaved title');
+    await page.getByLabel('Note body').fill('Unsaved body');
+    await page.getByLabel('Attach note to function').selectOption('clamp');
+    await clear(page);
+    await target.dblclick();
+    await expect(page.getByRole('complementary', { name: 'Selected node details' })).toHaveCount(0);
+    await target.click();
+    await expect(page.getByLabel('Note title')).toHaveValue('Unsaved title');
+    await expect(page.getByLabel('Note body')).toHaveValue('Unsaved body');
+    await expect(page.getByLabel('Attach note to function')).toHaveValue('clamp');
+    expect((await messages(page)).filter(message => message.type === 'noteUpdate')).toEqual([]);
+    await page.getByRole('button', { name: 'Save board note', exact: true }).click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({ type: 'noteUpdate', title: 'Unsaved title', body: 'Unsaved body', attachedTo: 'clamp' }));
+});
+
+for (const width of [320, 480]) {
+    test(`narrow ${width}px pane keeps view controls clear of status text`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        const path = page.getByRole('navigation', { name: 'Canvas path' });
+        const bounds = await path.boundingBox();
+        const status = await page.locator('.harness-status').boundingBox();
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(status!.x);
+        await page.getByRole('button', { name: 'Map', exact: true }).click();
+        await expect(page.getByRole('button', { name: 'Map', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await page.getByRole('button', { name: 'Compose', exact: true }).click();
+        await expect(page.getByRole('button', { name: 'Compose', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await page.getByRole('button', { name: 'Library', exact: true }).click();
+        await expect(page.getByRole('button', { name: 'Library', exact: true })).toHaveAttribute('aria-pressed', 'false');
+        await page.screenshot({ path: `test-results/qa-narrow-${width}.png` });
+    });
+}

@@ -197,15 +197,17 @@ export class SlateFolderHost {
         return parseNode(file.text);
     }
 
-    /** Rewrite one node file as a single undoable WorkspaceEdit, then save it. */
-    async writeNode(nodeId: string, node: SlateNode): Promise<void> {
+    /** Rewrite and save one undoable edit; return its version before Save can admit later edits. */
+    async writeNode(nodeId: string, node: SlateNode): Promise<number> {
         const document = await vscode.workspace.openTextDocument(this.uri(pathForNodeId(nodeId)));
         const replacement = serializeNode(node);
-        if (replacement === document.getText()) return;
+        if (replacement === document.getText()) return document.version;
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), replacement);
         if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the node edit.');
+        const appliedVersion = document.version;
         if (!await document.save()) throw new Error('VS Code could not save the node. The edited buffer is still available.');
+        return appliedVersion;
     }
 
     async createNode(node: SlateNode, position: { x: number; y: number }): Promise<string> {

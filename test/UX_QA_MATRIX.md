@@ -180,3 +180,17 @@ Python replacement validation now also checks ambiguous duplicate declarations a
 unsupported class/nested-function targets at the adapter boundary. Exact edit
 ranges, hashes and padding normalization have unit coverage; persistence and
 Undo/Save claims continue to come from the real host/workbench suites.
+
+## PR #1 review follow-up
+
+- Pending proposal Save → later real buffer edit → Save completion → Slate Undo:
+  native `persistence.test.ts` asserts refusal and preservation of buffer and disk.
+  Normal accepted-edit Undo/Save and failed-save recovery remain covered.
+- Selected node → edit code/intent/contract drafts → source double-click → hidden
+  inspector → single-click reopen → explicit Save: browser tests preserve drafts,
+  source reveal, disabled/visibility boundaries and emitted save contents.
+- Selected note → edit title/body/attachment → double-click hide → reopen → Save:
+  browser tests prove no implicit note write and retention of every draft field.
+- Narrow 320/480px panes → Map → Compose → Library: browser regression checks
+  header hit targets and resulting pressed state. This targets the Linux CI
+  workbench failure where status text intercepted the Compose button.

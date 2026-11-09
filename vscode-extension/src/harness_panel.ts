@@ -429,9 +429,9 @@ export class HarnessPanel implements vscode.Disposable {
         const node = await folder.readNode(nodeId);
         if (node.locked) throw new Error('This function is locked. Unlock it before accepting a proposal.');
         node.code = codeLines(pending.proposal.proposedSource);
-        await folder.writeNode(nodeId, node);
+        const appliedVersion = await folder.writeNode(nodeId, node);
         this.lastAcceptedUnitId = pending.packet.targetId;
-        this.lastAcceptedVersion = (await vscode.workspace.openTextDocument(folder.uri(pending.path))).version;
+        this.lastAcceptedVersion = appliedVersion;
         this.pendingProposal = undefined;
         await this.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
         this.postCommandResult(true, `Wrote the candidate into ${pending.path}. Use Undo to revert it.`);

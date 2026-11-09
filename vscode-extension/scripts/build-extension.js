@@ -7,7 +7,8 @@ esbuild.build({
         name: 'slate-source-coverage',
         setup(build) {
             build.onLoad({ filter: /\.ts$/ }, args => {
-                if (!args.path.includes('/vscode-extension/src/') || args.path.includes('/src/test/')) return;
+                const sourcePath = args.path.replace(/\\/g, '/');
+                if (!sourcePath.includes('/vscode-extension/src/') || sourcePath.includes('/src/test/')) return;
                 const result = instrumentSource(fs.readFileSync(args.path, 'utf8'), args.path);
                 return { contents: result.code, loader: 'ts' };
             });

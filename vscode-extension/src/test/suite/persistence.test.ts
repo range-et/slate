@@ -290,6 +290,42 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(await read(...nodePath('normalize')), before);
     });
 
+    test('Undo preserves edits made while proposal Save is pending', async () => {
+        const proposalId = await propose();
+        const document = await vscode.workspace.openTextDocument(uri(...nodePath('normalize')));
+        const originalOpen = vscode.workspace.openTextDocument;
+        let enteredSave = false;
+        let release!: () => void;
+        const held = new Promise<void>(resolve => { release = resolve; });
+        replaceMethod(vscode.workspace, 'openTextDocument', async (requested: vscode.Uri) => {
+            const opened = await originalOpen(requested);
+            if (opened.uri.toString() !== document.uri.toString()) return opened;
+            return Object.create(opened, { save: { value: async () => {
+                enteredSave = true;
+                await held;
+                return opened.save();
+            } } });
+        });
+        const accepting = post({ type: 'acceptProposal', proposalId });
+        try {
+            await eventually(async () => enteredSave, 'proposal reached Save');
+            assert.deepEqual(JSON.parse(document.getText()).code, candidate.split('\n'));
+            await editBuffer('normalize', value => { value.code.push('# later user edit'); });
+        } finally {
+            release();
+            await accepting;
+        }
+        assert.ok((await messages()).some(message => message.type === 'proposalAccepted'));
+        const text = document.getText();
+        const version = document.version;
+        const disk = await read(...nodePath('normalize'));
+        await post({ type: 'undoAccepted' });
+        assert.ok((await messages()).some(message => message.ok === false && message.message?.includes('changed since')));
+        assert.equal(document.getText(), text, 'Undo must preserve subsequent typing');
+        assert.equal(document.version, version, 'Undo must not alter the buffer');
+        assert.deepEqual(await read(...nodePath('normalize')), disk);
+    });
+
     test('does not report acceptance when VS Code cannot save the edited node', async () => {
         const before = await read(...nodePath('normalize'));
         const proposalId = await propose();

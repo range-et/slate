@@ -194,8 +194,9 @@ function CodeEditor({ initial, onChange }: { initial: string; onChange(value: st
 }
 
 function Inspector({
-    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo,
+    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, visible,
 }: {
+    visible: boolean;
     onEnterFlow(flowId: string): void;
     onGoTo(target: string): void;
     node: Node<SlateNodeData>;
@@ -234,7 +235,7 @@ function Inspector({
     const namedDependency = (id: string) => snapshot.documents.flatMap(item => item.units).find(candidate => candidate.id === id);
     const action = (value: unknown) => vscode?.postMessage({ type: 'action', action: value, revision: snapshot.revision });
     return (
-        <aside className="harness-inspector harness-inspector--wide" aria-label="Selected node details">
+        <aside className="harness-inspector harness-inspector--wide" aria-label="Selected node details" hidden={!visible} style={{ display: visible ? undefined : 'none' }}>
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
             <h2>{node.data.label}</h2>
             {node.data.path && <code className="harness-inspector__path">{node.data.path}</code>}
@@ -1199,7 +1200,9 @@ function HarnessApp() {
                     </div>
                 </section>
             )}
-            {selected && inspectorNodeId === selected.id && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
+            {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
+                key={selected.id}
+                visible={inspectorNodeId === selected.id}
                 onEnterFlow={enterFlow}
                 onGoTo={goTo}
                 node={selected}
