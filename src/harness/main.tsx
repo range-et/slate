@@ -116,7 +116,7 @@ function ValueEditor({ id, value }: { id: string; value: string }) {
         onDoubleClick={event => event.stopPropagation()}
         onKeyDown={event => {
             event.stopPropagation();
-            if (event.key === 'Enter') { event.preventDefault(); save(); (event.target as HTMLInputElement).blur(); }
+            if (event.key === 'Enter') { event.preventDefault(); (event.target as HTMLInputElement).blur(); }
             if (event.key === 'Escape') setDraft(value);
         }}
     />;
@@ -652,6 +652,8 @@ function HarnessApp() {
     const [describing, setDescribing] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState<HarnessSearchResult[]>([]);
+    const latestSearch = useRef<string | null>(null);
+    const activeGeneration = useRef<string | null>(null);
     const [packets, setPackets] = useState<Record<string, { packet?: PacketPreview; error?: string }>>({});
     const [generation, setGeneration] = useState<{ unitId: string; message: string } | null>(null);
     const [proposal, setProposal] = useState<HarnessProposal | null>(null);
@@ -675,6 +677,14 @@ function HarnessApp() {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node<SlateNodeData>>(graph.nodes);
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
+    // Let a second click reach a node before its inspector can cover it.
+    const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
+    const inspectorTimer = useRef<number | null>(null);
+    useEffect(() => {
+        setInspectorNodeId(null);
+        if (selected) inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(selected.id), 400);
+        return () => { if (inspectorTimer.current !== null) window.clearTimeout(inspectorTimer.current); };
+    }, [selected?.id, scope.flow, scope.view]);
     const selectedDocument = selected
         ? snapshot.documents.find(document => nodeIdOf(document.path) === selected.data.path)
         : undefined;
@@ -696,6 +706,7 @@ function HarnessApp() {
             }
             if (data.type === 'commandResult') setCommandResult(data.message);
             if (data.type === 'searchResults') {
+                if (latestSearch.current !== null && data.query !== latestSearch.current) return;
                 setSearchQuery(data.query);
                 setSearchResults(data.results);
                 setCommandResult(data.stale
@@ -706,6 +717,7 @@ function HarnessApp() {
                 setPackets(current => ({ ...current, [data.unitId]: { packet: data.packet, error: data.error } }));
             }
             if (data.type === 'generationStarted') {
+                activeGeneration.current = data.unitId;
                 setProposal(null);
                 setAcceptedUnitId(null);
                 setGeneration({ unitId: data.unitId, message: data.message });
@@ -716,10 +728,16 @@ function HarnessApp() {
                     : current);
             }
             if (data.type === 'generationFailed') {
+                if (activeGeneration.current && data.unitId && data.unitId !== activeGeneration.current) return;
+                activeGeneration.current = null;
                 setGeneration(null);
                 setCommandResult(`Generate: ${data.message}`);
             }
-            if (data.type === 'proposalReady') { setGeneration(null); setProposal(data.proposal); }
+            if (data.type === 'proposalReady') {
+                if (activeGeneration.current && data.proposal.unitId !== activeGeneration.current) return;
+                activeGeneration.current = null;
+                setGeneration(null); setProposal(data.proposal);
+            }
             if (data.type === 'proposalStale') {
                 setProposal(current => current?.id === data.proposalId ? { ...current, staleMessage: data.message } : current);
             }
@@ -883,6 +901,7 @@ function HarnessApp() {
     };
     const runSearch = (text: string) => {
         if (!vscode) { setCommandResult('Search needs the VS Code extension.'); return; }
+        latestSearch.current = text;
         vscode.postMessage({ type: 'search', query: text, revision: snapshot.revision });
         setCommandResult(`Search: scanning for “${text}”…`);
     };
@@ -1065,7 +1084,16 @@ function HarnessApp() {
                     nodeTypes={nodeTypes}
                     onNodesChange={onNodesChange}
                     onInit={instance => { flow.current = instance; instance.fitView({ padding: 0.2 }); }}
+                    onNodeClick={(_, node) => {
+                        // A later single click can reopen details after a source double-click.
+                        if (selected?.id === node.id && inspectorNodeId !== node.id) {
+                            if (inspectorTimer.current !== null) window.clearTimeout(inspectorTimer.current);
+                            inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(node.id), 400);
+                        }
+                    }}
                     onNodeDoubleClick={(_, node) => {
+                        if (inspectorTimer.current !== null) window.clearTimeout(inspectorTimer.current);
+                        setInspectorNodeId(null);
                         if (node.data.flowId) enterFlow(node.data.flowId);
                         else if (node.data.unit && (node.data.path || !node.data.target)) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: true });
                     }}
@@ -1147,7 +1175,7 @@ function HarnessApp() {
                 <section className="harness-search-results" aria-label={`Search results for ${searchQuery}`}>
                     <header>
                         <strong>Results for “{searchQuery}”</strong>
-                        <button aria-label="Close search results" onClick={() => { setSearchQuery(''); setSearchResults([]); }}>×</button>
+                        <button aria-label="Close search results" onClick={() => { latestSearch.current = ''; setSearchQuery(''); setSearchResults([]); }}>×</button>
                     </header>
                     {searchResults.length === 0 && <p className="harness-search-results__empty">No indexed code matched.</p>}
                     <div className="harness-search-results__list">
@@ -1171,7 +1199,7 @@ function HarnessApp() {
                     </div>
                 </section>
             )}
-            {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
+            {selected && inspectorNodeId === selected.id && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
                 onEnterFlow={enterFlow}
                 onGoTo={goTo}
                 node={selected}

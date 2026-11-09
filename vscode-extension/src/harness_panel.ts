@@ -14,7 +14,7 @@ import {
     connect, disconnect, emptyFlow, extractFlow, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
     removeInstances, uniqueName, unitSignature, type Port,
 } from './flow';
-import { checkNodeCode, codeLines, CONFIG_PATH, nodeFromSignature, nodeIdForPath } from './slate_folder';
+import { checkNodeCode, codeLines, CONFIG_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 
 function nonce(): string {
@@ -81,6 +81,8 @@ export class HarnessPanel implements vscode.Disposable {
         path: string;
     } | undefined;
     private lastAcceptedUnitId: string | undefined;
+    private lastAcceptedVersion: number | undefined;
+    private readonly testMessages: unknown[] | undefined;
 
     static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
@@ -130,6 +132,7 @@ export class HarnessPanel implements vscode.Disposable {
         private readonly panel: vscode.WebviewPanel,
         private readonly folder: SlateFolderHost,
     ) {
+        this.testMessages = context.extensionMode === vscode.ExtensionMode.Test ? [] : undefined;
         // Custom editor panels arrive without options; createWebviewPanel ones already match.
         panel.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')] };
         panel.webview.html = buildHtml(context, panel.webview);
@@ -193,7 +196,7 @@ export class HarnessPanel implements vscode.Disposable {
                 flows: index.flows,
                 library: index.library,
             };
-            await this.panel.webview.postMessage({ type: 'snapshot', snapshot: this.snapshot });
+            await this.postMessage({ type: 'snapshot', snapshot: this.snapshot });
         } catch (error) {
             if (generation !== this.refreshGeneration) return;
             this.postCommandResult(false, `Slate folder: ${error instanceof Error ? error.message : String(error)}`);
@@ -204,7 +207,7 @@ export class HarnessPanel implements vscode.Disposable {
     private handleMessage(message: unknown): Promise<void> {
         const value = (message && typeof message === 'object' ? message : {}) as Record<string, unknown>;
         const kind = (value.action as Record<string, unknown> | undefined)?.kind;
-        const queued = ['layout', 'noteCreate', 'noteUpdate', 'noteDelete', 'acceptProposal'].includes(value.type as string)
+        const queued = ['layout', 'noteCreate', 'noteUpdate', 'noteDelete', 'acceptProposal', 'undoAccepted'].includes(value.type as string)
             || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe');
         if (!queued) return this.handleMessageNow(message);
         this.mutations = this.mutations.then(() => this.handleMessageNow(message), () => this.handleMessageNow(message));
@@ -228,10 +231,10 @@ export class HarnessPanel implements vscode.Disposable {
         }
         if (value.type === 'search' && typeof value.query === 'string') {
             if (!this.snapshot || value.revision !== this.snapshot.revision) {
-                await this.panel.webview.postMessage({ type: 'searchResults', query: value.query, results: [], stale: true });
+                await this.postMessage({ type: 'searchResults', query: value.query, results: [], stale: true });
                 return;
             }
-            await this.panel.webview.postMessage({
+            await this.postMessage({
                 type: 'searchResults',
                 query: value.query,
                 results: searchUnits(this.snapshot.documents, this.sources, value.query),
@@ -272,12 +275,25 @@ export class HarnessPanel implements vscode.Disposable {
         await this.handleMessage(message);
     }
 
+    /** Observe the actual outbound protocol in Extension Host tests, not private proposal state. */
+    takeMessagesForTest(): unknown[] {
+        return this.testMessages?.splice(0) ?? [];
+    }
+
+    private postMessage(message: unknown): Thenable<boolean> {
+        if (this.testMessages) {
+            this.testMessages.push(message);
+            if (this.testMessages.length > 200) this.testMessages.shift();
+        }
+        return this.panel.webview.postMessage(message);
+    }
+
     private validUnitId(id: string): boolean {
         return this.snapshot?.documents.some(document => document.units.some(unit => unit.id === id)) ?? false;
     }
 
     private postCommandResult(ok: boolean, message: string): void {
-        void this.panel.webview.postMessage({ type: 'commandResult', ok, message });
+        void this.postMessage({ type: 'commandResult', ok, message });
     }
 
     private generationSettings(): {
@@ -312,7 +328,7 @@ export class HarnessPanel implements vscode.Disposable {
     private postPacketPreview(unitId: string): void {
         try {
             const packet = this.packet(unitId);
-            void this.panel.webview.postMessage({
+            void this.postMessage({
                 type: 'packetPreview',
                 unitId,
                 packet: {
@@ -323,7 +339,7 @@ export class HarnessPanel implements vscode.Disposable {
                 },
             });
         } catch (error) {
-            void this.panel.webview.postMessage({
+            void this.postMessage({
                 type: 'packetPreview', unitId, error: error instanceof Error ? error.message : String(error),
             });
         }
@@ -341,14 +357,14 @@ export class HarnessPanel implements vscode.Disposable {
             const controller = new AbortController();
             this.generation = controller;
             this.pendingProposal = undefined;
-            await this.panel.webview.postMessage({
+            await this.postMessage({
                 type: 'generationStarted', unitId,
                 message: `Sent ${packet.items.length} exact source unit${packet.items.length === 1 ? '' : 's'} (${packet.estimatedInputTokens}/${packet.inputBudgetTokens} estimated input tokens) to ${settings.endpoint}.`,
             });
             let received = 0;
             const raw = await streamLlamaCompletion(packet.prompt, settings, controller.signal, token => {
                 received += token.length;
-                void this.panel.webview.postMessage({ type: 'generationProgress', unitId, receivedCharacters: received });
+                void this.postMessage({ type: 'generationProgress', unitId, receivedCharacters: received });
             });
             const candidate = stripModelEnvelope(raw);
             const proposal = await this.adapter.replaceUnit({
@@ -361,7 +377,7 @@ export class HarnessPanel implements vscode.Disposable {
             });
             const id = randomUUID();
             this.pendingProposal = { id, packet, proposal, candidate, path: target.document.path };
-            await this.panel.webview.postMessage({
+            await this.postMessage({
                 type: 'proposalReady',
                 proposal: {
                     id, unitId, path: target.document.path, candidate,
@@ -369,7 +385,7 @@ export class HarnessPanel implements vscode.Disposable {
                 },
             });
         } catch (error) {
-            await this.panel.webview.postMessage({
+            await this.postMessage({
                 type: 'generationFailed', unitId,
                 message: error instanceof Error ? error.message : String(error),
             });
@@ -387,7 +403,7 @@ export class HarnessPanel implements vscode.Disposable {
         try {
             await this.acceptFolderProposal(this.folder, pending);
         } catch (error) {
-            await this.panel.webview.postMessage({
+            await this.postMessage({
                 type: 'proposalStale', proposalId,
                 message: error instanceof Error ? error.message : String(error),
             });
@@ -406,11 +422,13 @@ export class HarnessPanel implements vscode.Disposable {
         }
         const nodeId = nodeIdForPath(pending.path)!;
         const node = await folder.readNode(nodeId);
+        if (node.locked) throw new Error('This function is locked. Unlock it before accepting a proposal.');
         node.code = codeLines(pending.proposal.proposedSource);
         await folder.writeNode(nodeId, node);
         this.lastAcceptedUnitId = pending.packet.targetId;
+        this.lastAcceptedVersion = (await vscode.workspace.openTextDocument(folder.uri(pending.path))).version;
         this.pendingProposal = undefined;
-        await this.panel.webview.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
+        await this.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
         this.postCommandResult(true, `Wrote the candidate into ${pending.path}. Use Undo to revert it.`);
     }
 
@@ -516,7 +534,7 @@ export class HarnessPanel implements vscode.Disposable {
         const finish = async (message: string, select?: string) => {
             await folder.writeLayout();
             await this.refresh();
-            if (select) await this.panel.webview.postMessage({ type: 'selectUnit', unitId: select });
+            if (select) await this.postMessage({ type: 'selectUnit', unitId: select });
             this.postCommandResult(true, message);
         };
         const saveFlow = async (id: string, flow: SlateFlow) => {
@@ -767,7 +785,7 @@ export class HarnessPanel implements vscode.Disposable {
             }
             await folder.writeLayout();
             await this.refresh();
-            if (select) await this.panel.webview.postMessage({ type: 'selectUnit', unitId: select });
+            if (select) await this.postMessage({ type: 'selectUnit', unitId: select });
             this.postCommandResult(true, 'NOTE: saved to slate/layout.json');
         } catch (error) {
             this.postCommandResult(false, `NOTE: ${error instanceof Error ? error.message : String(error)}`);
@@ -814,10 +832,11 @@ export class HarnessPanel implements vscode.Disposable {
                     },
                 });
                 if (!signature) return;
-                const intent = await vscode.window.showInputBox({ title: 'New Slate node', prompt: 'Intent (what it should do)' }) ?? '';
+                const intent = await vscode.window.showInputBox({ title: 'New Slate node', prompt: 'Intent (what it should do)' });
+                if (intent === undefined) return;
                 const nodeId = await folder.createNode(nodeFromSignature(signature, intent), { x: action.x as number, y: action.y as number });
                 await this.refresh();
-                await this.panel.webview.postMessage({ type: 'selectUnit', unitId: nodeId });
+                await this.postMessage({ type: 'selectUnit', unitId: nodeId });
                 this.postCommandResult(true, `Created slate/nodes/${nodeId}.json`);
                 return;
             }
@@ -861,7 +880,7 @@ export class HarnessPanel implements vscode.Disposable {
         }
         const controller = new AbortController();
         this.describeRun = controller;
-        void this.panel.webview.postMessage({ type: 'describeState', running: true });
+        void this.postMessage({ type: 'describeState', running: true });
         try {
             const settings = this.generationSettings();
             const { nodes } = await folder.readNodes();
@@ -892,7 +911,7 @@ export class HarnessPanel implements vscode.Disposable {
             this.postCommandResult(false, `Describe: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
             this.describeRun = undefined;
-            void this.panel.webview.postMessage({ type: 'describeState', running: false });
+            void this.postMessage({ type: 'describeState', running: false });
         }
     }
 
@@ -901,9 +920,15 @@ export class HarnessPanel implements vscode.Disposable {
             this.postCommandResult(false, 'There is no accepted Slate proposal to undo.');
             return;
         }
+        const document = await vscode.workspace.openTextDocument(this.folder.uri(pathForNodeId(this.lastAcceptedUnitId)));
+        if (document.version !== this.lastAcceptedVersion) {
+            this.postCommandResult(false, 'The node changed since the accepted edit. Use native Undo in its editor to review subsequent edits first.');
+            return;
+        }
         await this.revealUnit(this.lastAcceptedUnitId, true);
         await vscode.commands.executeCommand('undo');
         this.lastAcceptedUnitId = undefined;
+        this.lastAcceptedVersion = undefined;
         this.postCommandResult(true, 'UNDO: reverted the last accepted WorkspaceEdit');
         this.scheduleRefresh(0);
     }
@@ -944,7 +969,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     private selectFromEditor(editor: vscode.TextEditor): void {
         const nodeId = this.folder.nodeId(editor.document.uri);
-        if (nodeId && this.validUnitId(nodeId)) void this.panel.webview.postMessage({ type: 'selectUnit', unitId: nodeId });
+        if (nodeId && this.validUnitId(nodeId)) void this.postMessage({ type: 'selectUnit', unitId: nodeId });
     }
 
     dispose(): void {

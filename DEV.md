@@ -1,5 +1,27 @@
 # Dev workflow — slate-code v0.2
 
+## Required launch gate
+
+Run `npm run verify:launch` before handing off code as launch-ready. It runs the
+unit matrices, builds, legacy and Python round-trip checks, browser interaction
+QA, real VS Code Extension Host tests, and workbench generation/undo/save and
+native-dialog tests. Any failed
+stage stops the gate. `npm run package-extension` runs this gate before packaging;
+Pages deployment also depends on the CI launch gate.
+
+For a focused iteration use `npm test -- test/<file>.test.ts` or
+`npm run test:webview -- --grep '<scenario>'`. Run all UI/host QA with
+`npm run test:qa`. Install Chromium with `npx playwright install chromium`; on
+Linux use `npx playwright install --with-deps chromium` and run the launch gate
+under `xvfb-run -a`. Python/pytest and extension dependencies are also required.
+
+Every behavior change must update unit tests and affected interaction-chain
+tests in the same change. See [AGENTS.md](AGENTS.md), the
+[unit coverage matrix](test/UNIT_TEST_MATRIX.md), and the
+[UX/QA interaction matrix](test/UX_QA_MATRIX.md) for the required coverage and
+remaining gaps. Repository administrators should require the `Launch gate` CI
+check in branch protection.
+
 This guide gets you running the **VS Code extension** (the v0.2 code-mode
 surface) with hot-reload of both the slate webview and the extension TS,
 so you can iterate on issues from [issues.md](issues.md) and see changes

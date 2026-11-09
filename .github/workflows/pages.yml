@@ -30,7 +30,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

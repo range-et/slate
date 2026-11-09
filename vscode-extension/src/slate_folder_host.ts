@@ -205,7 +205,7 @@ export class SlateFolderHost {
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), replacement);
         if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the node edit.');
-        await document.save();
+        if (!await document.save()) throw new Error('VS Code could not save the node. The edited buffer is still available.');
     }
 
     async createNode(node: SlateNode, position: { x: number; y: number }): Promise<string> {
