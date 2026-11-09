@@ -141,3 +141,10 @@ vscode-extension/*.vsix
 
 # VS Code downloaded by @vscode/test-electron
 vscode-extension/.vscode-test/
+
+# Mutation reports and isolated runner copies
+reports/mutation/
+.stryker-tmp/
+
+# Source coverage reports
+coverage/

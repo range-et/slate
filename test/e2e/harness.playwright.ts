@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './coverage-fixture';
 
 test('guided search returns provenance and reveals by durable unit id', async ({ page }) => {
     await page.addInitScript(() => {

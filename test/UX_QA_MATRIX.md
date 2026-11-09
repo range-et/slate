@@ -108,3 +108,75 @@ All previously listed functional gaps now have the automated evidence shown abov
 - Cancelling the second new-node intent prompt now aborts creation instead of creating a node with empty intent.
 - Proposal acceptance checks the current lock and refuses to claim success if VS Code cannot save the node.
 - Undo accepted edit checks the accepted document version, so it cannot undo a subsequent human edit instead. Normal native Undo restores the buffer; Save persists that restored content.
+
+## Additional verification layers
+
+Palette ranking now also has generated conservation/immutability checks and an
+80% mutation gate (`test/invariants.property.test.ts`, `stryker.config.json`).
+Persisted node JSON has a reviewed snapshot and generated schema round trips.
+These are pure-function evidence only: they do not expand browser gesture,
+cancellation, native save/undo or dirty-buffer coverage. B/Q/C/H/P/W remain
+required by `verify:launch`; existing UX gaps above remain open.
+
+Palette ranking follow-up: pure tests now verify that weak matches in additional
+fields cannot demote an entry below an intermediate competitor, with each field
+acting as the strongest match. This strengthens the ranking behind the palette
+and context picker; it does not claim new keyboard/pointer or host coverage.
+
+Full-source measurement now has an opt-in coverage fixture for B/Q/C and native
+collection for H/P, merged with unit execution using the same source counters.
+The combined report does not count browser dispatch as native persistence.
+`verify:coverage` targets 100% lines/statements/functions/branches; it is not yet
+passing. W remains required by the ordinary launch gate. Full-source mutation
+execution currently uses unit tests only, so native/UI mutation detection is
+still a gap even where browser/host line coverage exists.
+
+Additional automated chains: `interaction_chains.playwright.ts` covers context-menu
+generation, board creation/refresh dispatch, and double-click editing with Escape
+cancellation. `offline.playwright.ts` covers demo search feedback and empty-canvas
+add/dismiss without a host. These browser assertions prove UI behavior, not native
+persistence. Real Host `persistence.test.ts` now closes the canvas during an
+in-flight refresh with another refresh queued, verifies both commands settle,
+and checks unchanged disk data and cleared panel state. This regression failed
+with “Webview is disposed” before the lifecycle fix.
+
+Palette entry coverage additionally exercises creation, library, compile and Save
+commands with exactly one typed dispatch and palette dismissal; Map → Compose →
+flow → parent navigation verifies resulting controls and canvas nodes in
+`interaction_chains.playwright.ts`. Host persistence remains covered separately.
+
+`vscode-extension/src/test/suite/project.test.ts` exercises registered commands
+in the real Extension Host: New Project → create files → open canvas → close →
+reopen existing project without overwriting; invalid names/cancel; missing-project
+Compile; Port cancellation, no Python sources and occupied destination; and
+filesystem failure before creation. Prompts are simulated at their VS Code API
+boundary; this is not an additional claim of native dialog gesture coverage.
+The suite refuses to touch an unexpected pre-existing fixture-root project.
+
+System mutation infrastructure is being validated separately from code coverage.
+The Vite bridge initializes the selected Stryker mutant before browser modules
+execute; Node/Extension Host uses Stryker's inherited environment variable.
+`stryker.system.config.json` runs unit → browser → native → workbench in a copied
+sandbox with one worker and no reused Vite server. A successful dry run proves
+setup only; selected-mutant smoke checks must demonstrate real assertion failures
+before claiming this route detects UI or host defects. No whole-app mutation
+score is yet established by this runner.
+
+The system mutation baseline exposed a lost-layout race before any mutant ran.
+Background indexing now joins the edit queue rather than reloading layout during
+an in-progress canvas write. Native regressions cover prompt-held edit → ready
+refresh → commit, and failed layout write → restore filesystem → background
+refresh → successful edit. The ordering regression failed on the old build and
+both regressions passed on the fixed build. Focused development runs filter only
+generated test output; `verify:launch` recompiles the unfiltered checked-in suite.
+
+Workbench QA now bounds shutdown of its own Electron child after assertions.
+It first requests normal close, then logs and force-closes only that owned child
+if shutdown stalls. Failure to terminate is still an error; failed assertions
+remain failures. Unit tests cover normal exit, timeout, termination errors and
+cleanup. This does not substitute for any browser/native/workbench assertion.
+
+Python replacement validation now also checks ambiguous duplicate declarations and
+unsupported class/nested-function targets at the adapter boundary. Exact edit
+ranges, hashes and padding normalization have unit coverage; persistence and
+Undo/Save claims continue to come from the real host/workbench suites.

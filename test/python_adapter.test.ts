@@ -72,3 +72,61 @@ describe('TypeScript Python adapter', () => {
         })).rejects.toBeInstanceOf(AdapterError);
     });
 });
+
+it.each([
+    ['a: int,\n    b: str', 'a: int,\n    b: str'],
+    ['\n    a: int,\n    b: str,\n', 'a: int,\nb: str,\n'],
+    ['\n    a: int,\n      b: str', 'a: int,\n  b: str'],
+    [' \n\ta: int,\n\t', 'a: int,\n'],
+    ['\n\n', '\n'],
+    ['\r\n    a: int,\r\n    b: str,\r\n', 'a: int,\nb: str,\n'],
+])('preserves multiline parameter content and meaningful closing-line shape for %j', (parameters, expected) => {
+    const parsed = parseModule(`def run(${parameters}) -> int:\n    return 1\n`, 'run.py');
+    expect(parsed.valid).toBe(true);
+    expect(parsed.units).toHaveLength(1);
+    expect(parsed.units[0].parameters).toBe(expected);
+    expect(parsed.units[0].signature).toBe(`def run(${expected}) -> int`);
+    expect(parsed.units[0].params?.map(param => param.name)).toEqual(parameters.includes('b:') ? ['a', 'b'] : parameters.includes('a:') ? ['a'] : []);
+});
+
+it('preserves structured parameter defaults, annotations, positional and variadic kinds', () => {
+    const parsed = parseModule('def run(a: int = 1, /, b = (2, 3), *args: str, flag: bool = True, **kwargs: object):\n    pass\n');
+    expect(parsed.valid).toBe(true);
+    expect(parsed.path).toBe('<memory>');
+    expect(parsed.units[0].params).toEqual([
+        { name: 'a', annotation: 'int', default: '1', kind: 'positional' },
+        { name: 'b', annotation: null, default: '(2, 3)', kind: 'keyword' },
+        { name: 'args', annotation: 'str', default: null, kind: 'var' },
+        { name: 'flag', annotation: 'bool', default: 'True', kind: 'keyword' },
+        { name: 'kwargs', annotation: 'object', default: null, kind: 'kwvar' },
+    ]);
+});
+
+it.each([
+    ['class', 'class Box:\n    pass\n', 'Box', /only top-level functions and methods/],
+    ['nested function', 'def outer():\n    def inner():\n        pass\n', 'outer.inner', /only top-level functions and methods/],
+    ['duplicate declarations', 'def run():\n    pass\ndef run():\n    return 1\n', 'run', /resolved to 2 declarations/],
+] as const)('refuses replacement of %s', async (_label, source, qualifiedName, message) => {
+    const parsed = parseModule(source, 'source.py');
+    const unit = parsed.units.find(item => item.qualifiedName === qualifiedName)!;
+    await expect(new PythonAdapter().replaceUnit({
+        source, path: 'source.py', expectedHash: parsed.sourceHash, unitId: unit.id,
+        replacement: 'def run():\n    return 2',
+    })).rejects.toThrow(message);
+});
+
+it('trims replacement padding and returns the exact edit range and hashes', async () => {
+    const source = '# prefix\ndef run():\n    return 1\n\n# suffix\n';
+    const replacement = 'def run():\n    return 2';
+    const parsed = parseModule(source, 'run.py', 'run');
+    const result = await new PythonAdapter().replaceUnit({
+        source, path: 'run.py', nodeId: 'run', expectedHash: parsed.sourceHash,
+        unitId: 'run', replacement: `\n  ${replacement}\n\n`,
+    });
+    const expected = '# prefix\ndef run():\n    return 2\n\n# suffix\n';
+    expect(result.proposedSource).toBe(expected);
+    expect(result.edits).toEqual([{ range: { start: { line: 1, character: 0 }, end: { line: 2, character: 12 } }, newText: replacement }]);
+    expect(result.baseSourceHash).toBe(parsed.sourceHash);
+    expect(result.proposedSourceHash).toBe(parseModule(expected).sourceHash);
+    expect(result.parsed).toEqual(parseModule(expected, 'run.py'));
+});

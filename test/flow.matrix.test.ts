@@ -117,3 +117,61 @@ describe('flow helpers and edit matrix', () => {
         expect(result.child.wires).toEqual([{ from: 'a.out', to: 'ab.in:x' }, { from: 'input:x', to: 'a.in:x' }, { from: 'ab.out', to: 'output:add' }]);
     });
 });
+
+it('round-trips named ports and wires while stripping unexpected wire properties', () => {
+    const parsed = parseFlow(JSON.stringify({ slate: 3, name: 'pipeline',
+        inputs: [{ name: 'plain' }, { name: 'nullable', annotation: null }, { name: 'typed', annotation: 'int' }],
+        outputs: [{ name: 'result', annotation: 'float' }],
+        instances: [{ id: 'worker', node: 'calculate' }],
+        wires: [{ from: 'input:typed', to: 'worker.in:value', ignored: 'not persisted' },
+            { from: 'worker.out', to: 'output:result' }],
+    }));
+    expect(parsed.inputs).toEqual([{ name: 'plain', annotation: null }, { name: 'nullable', annotation: null }, { name: 'typed', annotation: 'int' }]);
+    expect(parsed.wires).toEqual([{ from: 'input:typed', to: 'worker.in:value' }, { from: 'worker.out', to: 'output:result' }]);
+    expect(parseFlow(serializeFlow(parsed))).toEqual(parsed);
+});
+
+it('uses empty optional signature metadata when a callable supplies none', () => {
+    const unit = parseModule('def f():\n    pass\n', 'test.py').units[0];
+    expect(unitSignature({ ...unit, params: undefined, returnAnnotation: undefined }, [unit]))
+        .toEqual({ name: 'f', params: [], returns: null });
+});
+
+it('extracts value and named-output boundaries without inventing unavailable port annotations', () => {
+    const parent = { ...emptyFlow('parent'),
+        instances: [{ id: 'value', kind: 'value' as const, value: '1' }, { id: 'worker', node: 'worker' }, { id: 'sink', node: 'sink' }],
+        wires: [{ from: 'input:external', to: 'worker.in:unknown' }, { from: 'value.out', to: 'sink.in:x' },
+            { from: 'worker.out:result', to: 'sink.in:y' }],
+    };
+    const before = structuredClone(parent);
+    const result = extractFlow(parent, ['value', 'worker'], { id: 'child', instanceId: 'group', name: 'child' }, () => ({ inputs: [], outputs: [] }));
+    expect(result.child.inputs).toEqual([{ name: 'unknown', annotation: null }]);
+    expect(result.child.outputs).toEqual([{ name: 'value', annotation: null }, { name: 'result', annotation: null }]);
+    expect(result.parent.wires).toEqual(expect.arrayContaining([
+        { from: 'input:external', to: 'group.in:unknown' }, { from: 'group.out:value', to: 'sink.in:x' }, { from: 'group.out:result', to: 'sink.in:y' },
+    ]));
+    expect(parent).toEqual(before);
+});
+
+describe('flow identifier type boundaries', () => {
+    it.each([undefined, null, false, 1, [], ['valid_name'], {}])('rejects flow name %j as a format error', name => {
+        const read = () => parseFlow(JSON.stringify({ slate: 3, name }));
+        expect(read).toThrow(FlowFormatError);
+        expect(read).toThrow('name must be an identifier');
+    });
+    it.each(['inputs', 'outputs'])('rejects non-string %s names before coercing to identifiers', field => {
+        for (const name of [undefined, null, false, 1, [], ['valid_name'], {}]) {
+            const read = () => parseFlow(JSON.stringify({ slate: 3, name: 'run', [field]: [{ name }] }));
+            expect(read).toThrow(FlowFormatError);
+            expect(read).toThrow(`${field} entries need an identifier name`);
+        }
+    });
+    it('identifies malformed JSON and rejects non-string instance IDs', () => {
+        expect(() => parseFlow('{')).toThrow(/^not valid JSON:/);
+        for (const id of [undefined, null, false, 1, [], ['valid_id'], {}]) {
+            const read = () => parseFlow(JSON.stringify({ slate: 3, name: 'run', instances: [{ id, node: 'run' }] }));
+            expect(read).toThrow(FlowFormatError);
+            expect(read).toThrow('instances need an id without dots');
+        }
+    });
+});

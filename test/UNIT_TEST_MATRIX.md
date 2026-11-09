@@ -58,3 +58,43 @@ prove generated programs behave correctly.
 When adding a function or changing behavior, update its row and tests, including
 affected interaction chains. Constants and TypeScript-only interfaces are covered
 by their consumers; no meaningless existence assertions are required.
+
+## Layered verification additions
+
+| Surface | Automated evidence | Remaining gaps |
+| --- | --- | --- |
+| Node runtime contracts and persistence format | `invariants.property.test.ts`: valid metadata/code round trips, extension metadata, mixed/scalar list rejection; reviewed serialized JSON snapshot | Not all boundary fields generated; existing schema matrices remain required |
+| `codeLines`, `codeText` | Generated text normalization idempotence, no embedded CR/LF, no trailing blank lines | Bounded random strings |
+| `rankPalette`, `scoreMatch` | Generated conservation, identity, immutability, always-last, stable reranking, score bounds; Stryker mutates palette with 80% minimum | No mutation gate yet on other modules |
+| Static correctness gates | `verification.test.ts` probes lint rejection/acceptance; strict webview + extension `tsc` | Existing `any` and unchecked casts not prohibited |
+
+See [VERIFICATION.md](VERIFICATION.md) for commands, seed replay and exact scope.
+
+Palette survivor follow-up: `harness_palette.test.ts` covers competing entries
+with multiple matching fields, independently making label/keywords/detail the
+strongest match, reversed input order, and no-match queries. Stryker verifies
+that selecting the weakest field is rejected. Five equivalent mutations remain
+counted; the branch/score/group-order reasoning is in `VERIFICATION.md`.
+
+## Full-source coverage work
+
+| Surface | Added evidence | Remaining gaps |
+| --- | --- | --- |
+| `instrumentSource`, `sourcePath`, `isActiveSource`, `activeSources`, `sourceFingerprint`, `requireCompleteCoverage`, `mergeRunnerCoverage`, `generateCoverage` | `coverage_tools.test.ts`: TS/JSX instrumentation, invalid syntax, source inventory, missing/stale/malformed input, complementary branches, unexecuted-file denominator and strict 100% rejection | Full report depends on all three runner suites passing |
+| `parseFlow`, `serializeFlow` | `flow.matrix.test.ts`: omitted/null/typed port annotations, wire preservation and unexpected wire fields | See generated branch report |
+| `compilePython` | `flow.test.ts`: duplicate drivers rejected; unaffected node module still emitted | See generated branch/mutation reports |
+| `portPythonProject` | `port_compile.test.ts`: star and unresolved imports retained with explicit warnings | See generated branch/mutation reports |
+| `buildGraph` | `harness_graph.test.ts`: explicit context-edge deduplication, attached note, missing endpoint omission | See generated branch report |
+| `searchUnits` | `harness_search.test.ts`: score ties resolved by name/path/ID, limit after sorting, fallback snippets, immutability | See generated branch report |
+| `buildDescribePacket` | `generation.matrix.test.ts`: dependencies with renamed/missing definitions and async signature fallback | See generated branch report |
+| `withTestProfile` | `native_profile.test.ts`: unique temporary VS Code profiles, deterministic startup settings, cleanup on success/failure and concurrent isolation | OS desktop must remain unlocked for native input |
+| `HarnessPanel.refreshNow`, `postMessage`, `dispose` | Real Host `persistence.test.ts`: pause filesystem refresh, queue a second refresh, close panel, release both; commands settle, no disk mutation, no surviving snapshot. Regression failed before disposal guard | Other asynchronous operations still require their existing cancellation tests |
+| `buildGraph` malformed flows | `harness_graph.test.ts`: unreadable flow remains visible, missing value defaults empty, dangling source/target wires omitted, unreadable child canvas empty | Defensive fallbacks and remaining branches remain visible in the report |
+| `createNewSlateProject`, `portProject`, `compileProject` command handlers | Real Host `project.test.ts`: project-name validation/cancel, persisted empty project and reopen without overwrite, missing-project compile, port chooser cancel, empty source/occupied destination, filesystem failure | No-workspace activation and launcher gestures remain uncovered here |
+| `mutationBridgePlugin` | `mutation_bridge.test.ts`: real Stryker instrumentation executes original vs selected arithmetic mutation without Node globals, preserves namespace, rejects malformed IDs, normal/dry-run pages unchanged | Full browser/native mutation score still pending |
+| `prepareSystemSandbox` | `mutation_bridge.test.ts`: tool/cache links, idempotent setup, reject original repository, missing tools, conflicting directories retained | System runner additionally requires a successful real dry run |
+| `parseConfig`, `parseLayout`, `parseNode`, `parseFlow` schema guards | `slate_format.matrix.test.ts`, `flow.matrix.test.ts`: non-string names/IDs (including coercible arrays), field-by-field invalid notes/refs/placeholders, attachment/signature boundaries, specific format-error diagnostics | Targeted mutation audit remains strict; equivalent guards are not excluded |
+| `HarnessPanel.scheduleRefresh` serialization | Real Host `persistence.test.ts`: pause a canvas edit at a native prompt, request background refresh, assert indexing waits; real filesystem write failure followed by background refresh and successful retry | Queue-order regression fails on old build and passes on fixed build; final 455-unit/84-browser/32-host launch gate passed |
+| `parseModule` multiline signature normalization | `python_adapter.test.ts`: first parameter on opening line, common/unequal indentation, tab indentation, empty multiline list, CRLF, and closing-parenthesis placement; exact signatures and structured names | Remaining mutation survivors still require audit |
+| `closeTestApplication` QA cleanup | `native_shutdown.test.ts`: normal/already-finished exit, bounded graceful shutdown, owned-child termination, no-exit and thrown/emitted failures, timer/listener cleanup, invalid grace | Only QA process cleanup; application assertions still run unchanged |
+| `parseModule`, `PythonAdapter.replaceUnit` contract details | `python_adapter.test.ts`: exact positional/default/variadic parameter records; class, nested-function and duplicate-ID rejection; padded replacement normalization, exact edit range, before/after hashes and reparsed result | Targeted mutation audit includes these paths; equivalent and defensive survivors remain counted |

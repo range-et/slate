@@ -18,7 +18,9 @@ fi
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/slate-baseline.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
+npm run verify:static
 npm test
+npm run test:mutation
 npm run build
 npm --prefix vscode-extension run compile
 

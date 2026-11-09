@@ -111,3 +111,45 @@ describe('describe matrix', () => {
         expect(node.intent).toBe('');
     });
 });
+
+it('describes dependencies with fallback signatures when their named definition is unavailable', () => {
+    const make = (name: string, code: string[], uses: string[] = []) => parseNode(JSON.stringify({ slate: 3, name, code, uses }));
+    const nodes = new Map([
+        ['target', make('target', ['def target():', '    pass'], ['renamed', 'stub', 'async_stub'])],
+        ['renamed', make('renamed', ['def old_name(value):', '    pass'])],
+        ['stub', make('stub', ['# pending implementation'])],
+        ['async_stub', make('async_stub', ['async def old_async(value):', '    pass'])],
+    ]);
+    const packet = buildDescribePacket('target', nodes, 4096);
+    expect(packet).toContain('- def old_name(value)');
+    expect(packet).toContain('- stub');
+    expect(packet).toContain('- async def old_async(value)');
+    expect(packet).toContain('def target():\n    pass');
+});
+
+it('normalizes absent or nonstring optional metadata and clamps ranges to the available source', () => {
+    const { snapshot, sources, target } = fixture();
+    const unit = target.document.units[0];
+    unit.annotation!.contract = 123;
+    unit.annotation!.dependencies = null;
+    sources.set(target.document.path, 'def run(x: int) -> int: return x');
+    const packet = buildGenerationPacket(snapshot, sources, 'run', 4096, 512);
+    expect(packet.contract).toBe('');
+    expect(packet.items).toHaveLength(1);
+    expect(packet.items[0].source).toBe('def run(x: int) -> int: return x');
+    unit.annotation!.intent = null;
+    expect(() => buildGenerationPacket(snapshot, sources, 'run', 4096, 512)).toThrow(/intent/);
+});
+
+it('reports non-Error model failures without writing or describing the node', async () => {
+    const node = parseNode('{"slate":3,"name":"run","code":["def run():","    pass"]}');
+    const write = vi.fn(async () => {});
+    const report = await describeNodes({ nodes: new Map([['run', node]]),
+        complete: async () => { throw 'connection rejected'; }, write,
+        onProgress: () => {}, signal: new AbortController().signal, hardLimitTokens: 4096 });
+    expect(report.skipped).toEqual([{ nodeId: 'run', reason: 'connection rejected' }]);
+    expect(report.described).toEqual([]);
+    expect(report.cancelled).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+    expect(node.intent).toBe('');
+});

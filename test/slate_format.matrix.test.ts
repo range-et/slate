@@ -131,3 +131,42 @@ describe('config, layout, and path matrix', () => {
         expect(codeText({ code: lines })).toBe(lines.join('\n') + '\n');
     });
 });
+
+describe('schema boundaries exposed by surviving mutations', () => {
+    it.each([undefined, null, false, 0, [], ['valid_name'], {}, ''])('rejects non-name config value %j with a format error', name => {
+        const read = () => parseConfig(JSON.stringify({ slate: 3, name }));
+        expect(read).toThrow(SlateFormatError);
+        expect(read).toThrow('slate.json needs a name');
+    });
+    it('keeps JSON parse failures identifiable instead of reporting an unrelated object error', () => {
+        expect(() => parseConfig('{')).toThrow(/^slate.json is not valid JSON:/);
+        expect(() => parseNode('{')).toThrow(/^not valid JSON:/);
+    });
+    it.each(['id', 'title', 'body'])('filters notes with invalid %s independently of other valid fields', field => {
+        const valid = { id: 'n', title: '', body: '', attachedTo: null };
+        const invalid = [undefined, null, 1, false, [], {}].map(value => ({ ...valid, [field]: value }));
+        expect(parseLayout(JSON.stringify({ notes: [...invalid, valid] })).notes).toEqual([valid]);
+    });
+    it('requires note attachments to be null or an identifier string', () => {
+        const base = { id: 'n', title: 'Title', body: 'Body' };
+        const values = [undefined, 0, false, [], {}, null, 'target'];
+        expect(parseLayout(JSON.stringify({ notes: values.map(attachedTo => ({ ...base, attachedTo })) })).notes)
+            .toEqual([{ ...base, attachedTo: null }, { ...base, attachedTo: 'target' }]);
+    });
+    it.each(['id', 'target'])('filters references with invalid %s', field => {
+        const valid = { id: 'r', target: 'run' };
+        const invalid = [undefined, null, 1, false, [], {}].map(value => ({ ...valid, [field]: value }));
+        expect(parseLayout(JSON.stringify({ refs: [...invalid, valid] })).refs).toEqual([valid]);
+    });
+    it.each(['id', 'name'])('filters placeholders with invalid %s', field => {
+        const valid = { id: 'p', name: 'future' };
+        const invalid = [undefined, null, 1, false, [], {}].map(value => ({ ...valid, [field]: value }));
+        expect(parseLayout(JSON.stringify({ placeholders: [...invalid, valid] })).placeholders).toEqual([valid]);
+    });
+    it('filters non-string placeholder signatures but preserves omitted and empty signatures', () => {
+        const base = { id: 'p', name: 'future' };
+        const signatures = [null, 1, false, [], {}, undefined, '', 'def future()'];
+        expect(parseLayout(JSON.stringify({ placeholders: signatures.map(signature => ({ ...base, signature })) })).placeholders)
+            .toEqual([base, base, { ...base, signature: 'def future()' }]);
+    });
+});

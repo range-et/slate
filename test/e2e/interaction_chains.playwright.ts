@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Locator } from '@playwright/test';
+import { expect, test, type Page, type Locator } from './coverage-fixture';
 import { demoSnapshot } from '../../src/harness/demo';
 
 async function send(page: Page, message: unknown) {
@@ -429,4 +429,82 @@ test('chain single selection opens inspector and quick reselection cancels the o
     await page.screenshot({ path: 'test-results/qa-selected-inspector.png' });
     await command(page, 'Clear selection');
     await expect(inspector).toHaveCount(0);
+});
+
+for (const [id, label, expected] of [
+    ['clamp', 'Generate implementation', { type: 'generate', unitId: 'clamp' }],
+    ['ref-clamp', 'Generate body', { type: 'generate', unitId: 'clamp' }],
+] as const) {
+    test(`chain ${label} from ${id} context menu`, async ({ page }) => {
+        await node(page, id).click({ button: 'right' });
+        await clear(page);
+        await page.getByRole('menuitem', { name: label, exact: true }).click();
+        await expect(page.getByRole('menu')).toHaveCount(0);
+        await expect.poll(() => messages(page)).toContainEqual(expected);
+    });
+}
+
+for (const [label, kind] of [
+    ['New node file…', 'createNode'], ['New placeholder…', 'createPlaceholder'],
+    ['New flow…', 'createFlow'], ['Refresh source index', 'refreshIndex'],
+] as const) {
+    test(`chain board menu ${label}`, async ({ page }) => {
+        await blank(page, 'right');
+        await clear(page);
+        await page.getByRole('menuitem', { name: label, exact: true }).click();
+        await expect(page.getByRole('menu')).toHaveCount(0);
+        await expect.poll(() => messages(page)).toContainEqual(expect.objectContaining({
+            type: 'action', action: expect.objectContaining({ kind }),
+        }));
+    });
+}
+
+test('chain double-click editing controls stays local and value Escape cancels', async ({ page }) => {
+    const intent = node(page, 'clamp').locator('.slate-node__intent');
+    await intent.dblclick();
+    await expect(page.getByLabel('Edit intent')).toBeVisible();
+    await clear(page);
+    await page.getByLabel('Edit intent').dblclick();
+    await page.getByLabel('Edit intent').press('Escape');
+    expect((await messages(page)).some(message => message.type === 'reveal')).toBe(false);
+    const value = page.getByLabel('Value of value');
+    const original = await value.inputValue();
+    await value.dblclick();
+    await value.fill('999');
+    await value.press('Escape');
+    await expect(value).toHaveValue(original);
+    await value.press('Tab');
+    expect((await messages(page)).some(message => message.action?.kind === 'setValue')).toBe(false);
+});
+
+for (const [label, kind] of [
+    ['New node file…', 'createNode'], ['New placeholder…', 'createPlaceholder'],
+    ['New flow…', 'createFlow'], ['Add library file…', 'addLibrary'],
+    ['Compile project', 'compile'], ['Save all files', 'saveWorkspace'],
+]) {
+    test(`palette dispatches ${label} once and closes`, async ({ page }) => {
+        await clear(page);
+        await command(page, label);
+        await expect(page.getByLabel('Command palette input')).toHaveCount(0);
+        const actions = (await messages(page)).filter(message => message.type === 'action');
+        expect(actions).toHaveLength(1);
+        expect(actions[0].action).toMatchObject({ kind });
+        if (kind.startsWith('create')) {
+            expect(Number.isFinite(actions[0].action.x)).toBe(true);
+            expect(Number.isFinite(actions[0].action.y)).toBe(true);
+        }
+    });
+}
+
+test('palette switches canvas views and returns from a flow while preserving navigation controls', async ({ page }) => {
+    await command(page, 'Switch to Map');
+    await expect(page.getByRole('button', { name: 'Map', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(node(page, 'ref-clamp')).toHaveCount(0);
+    await command(page, 'Switch to Compose');
+    await expect(node(page, 'ref-clamp')).toBeVisible();
+    await command(page, 'Flow: report');
+    await expect(node(page, '__input')).toBeVisible();
+    await command(page, 'Back to parent canvas');
+    await expect(node(page, 'clamp')).toBeVisible();
+    await expect(node(page, '__input')).toHaveCount(0);
 });

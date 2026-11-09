@@ -181,3 +181,16 @@ describe('Python compile', () => {
         expect(messages).toContain('c.py: name collision on "ping" (node c/ping vs "from b import ping"');
     });
 });
+
+it('preserves unresolved exports and star imports from a ported module with explicit warnings', () => {
+    const result = portPythonProject(new Map([
+        ['util.py', 'def useful():\n    return 1\n'],
+        ['consumer.py', 'from util import *\nfrom util import missing\ndef consume():\n    return useful() + missing\n'],
+    ]));
+    expect(result.nodes.get('consumer/consume')?.imports).toEqual(['from util import *', 'from util import missing']);
+    expect(result.report.warnings).toEqual(expect.arrayContaining([
+        'consumer.py: star import from ported module util kept as is.',
+        'consumer.py: "from util import missing" names something in util.py that is not a node; kept as is.',
+        'consumer.py: star import copied to every node in the module.',
+    ]));
+});

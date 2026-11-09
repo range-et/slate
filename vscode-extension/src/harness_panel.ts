@@ -68,6 +68,7 @@ export class HarnessPanel implements vscode.Disposable {
     private refreshTimer: NodeJS.Timeout | undefined;
     /** Bumped on dispose so in-flight refreshes stop posting. */
     private refreshGeneration = 0;
+    private disposed = false;
     private refreshChain: Promise<void> = Promise.resolve();
     private mutations: Promise<void> = Promise.resolve();
     private revision = 0;
@@ -162,7 +163,9 @@ export class HarnessPanel implements vscode.Disposable {
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.refreshTimer = setTimeout(() => {
             this.refreshTimer = undefined;
-            void this.refresh();
+            // Background indexing reloads layout; serialize it with writes so a
+            // delayed read cannot replace layout while an edit is saving it.
+            this.mutations = this.mutations.then(() => this.refresh(), () => this.refresh());
         }, delay);
     }
 
@@ -176,6 +179,7 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private async refreshNow(): Promise<void> {
+        if (this.disposed) return;
         const folder = this.folder;
         const generation = this.refreshGeneration;
         try {
@@ -281,6 +285,7 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private postMessage(message: unknown): Thenable<boolean> {
+        if (this.disposed) return Promise.resolve(false);
         if (this.testMessages) {
             this.testMessages.push(message);
             if (this.testMessages.length > 200) this.testMessages.shift();
@@ -974,6 +979,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     dispose(): void {
         if (HarnessPanel.current !== this) return;
+        this.disposed = true;
         HarnessPanel.current = undefined;
         this.panel.dispose();
         if (this.refreshTimer) clearTimeout(this.refreshTimer);

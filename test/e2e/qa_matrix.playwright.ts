@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './coverage-fixture';
 
 // Browser contract tests: a recording host makes assertions deterministic. Host
 // persistence and native Undo are exercised by the Extension Host gate.

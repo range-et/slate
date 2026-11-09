@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const { closeTestApplication } = require('./close-test-application.cjs');
 
 const { _electron: electron } = require('playwright');
 const { expect } = require('@playwright/test');
@@ -160,7 +161,7 @@ async function main() {
         }
         throw error;
     } finally {
-        if (app) await app.close();
+        if (app) await closeTestApplication(app);
         await new Promise(resolve => server.close(resolve));
         fs.rmSync(userData, { recursive: true, force: true });
     }

@@ -114,19 +114,10 @@ npm run verify:baseline                # CI gate incl. legacy, port → compile 
 npm run package-extension              # VSIX smoke (needs network for npx vsce)
 ```
 
-Webview type-check (there is no root `tsc`; borrow the extension's). Put
-this config in `.amp/in/tsc.json` and run
-`vscode-extension/node_modules/.bin/tsc -p .amp/in/tsc.json`:
-
-```json
-{ "compilerOptions": { "jsx": "react-jsx", "strict": true, "noEmit": true, "module": "esnext",
-  "moduleResolution": "bundler", "target": "es2022", "lib": ["es2022", "dom"], "skipLibCheck": true,
-  "typeRoots": ["<repo>/node_modules/@types"], "types": [] },
-  "files": ["<repo>/src/harness/main.tsx", "<repo>/.amp/in/env.d.ts"] }
-```
-
-`env.d.ts`: `interface ImportMeta { env: { DEV: boolean } }` and
-`declare module '*.css';`. The baseline is **0 errors**; keep it there.
+Static verification is now checked in: `npm run verify:static` runs strict
+TypeScript checks for both active products and targeted ESLint correctness rules.
+`verify:baseline` also runs the property/snapshot tests and the scoped Stryker
+mutation gate. See [test/VERIFICATION.md](test/VERIFICATION.md) for scope and replay.
 
 Visual checks: start `npx vite --port 5199`, then use a Playwright script that
 stubs `window.acquireVsCodeApi` (record `postMessage` calls in

@@ -309,4 +309,98 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(await read(...nodePath('normalize')), before, 'failed save leaves disk untouched');
         assert.ok(document.isDirty, 'unsaved buffer remains available for recovery');
     });
+
+    test('closing the canvas cancels queued refresh replies without rejecting pending host commands', async () => {
+        const before = await read(...nodePath('normalize'));
+        const original = vscode.workspace.findFiles;
+        let release!: () => void;
+        const waiting = new Promise<void>(resolve => { release = resolve; });
+        let intercepted = false;
+        replaceMethod(vscode.workspace, 'findFiles', async (...args: Parameters<typeof original>) => {
+            if (!intercepted) {
+                intercepted = true;
+                await waiting;
+            }
+            return original(...args);
+        });
+        const first = act({ kind: 'refreshIndex' });
+        const second = act({ kind: 'refreshIndex' });
+        // Attach handlers immediately so the regression cannot leak an unhandled rejection.
+        const results = Promise.allSettled([first, second]);
+        try {
+            await eventually(async () => intercepted, 'refresh paused at filesystem boundary');
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        } finally {
+            release();
+        }
+        const settled = await results;
+        assert.deepEqual(settled.map(result => result.status), ['fulfilled', 'fulfilled'],
+            settled.map(result => result.status === 'rejected' ? String(result.reason) : result.status).join('; '));
+        assert.deepEqual(await read(...nodePath('normalize')), before, 'cancelled refresh cannot change node data');
+        assert.equal(await vscode.commands.executeCommand('slate.test.getSnapshot'), undefined);
+    });
+
+
+    test('background refresh waits for an in-progress canvas edit before reloading layout', async () => {
+        let release!: () => void;
+        const waiting = new Promise<void>(resolve => { release = resolve; });
+        let prompted = false;
+        let released = false;
+        const indexedAfterRelease: boolean[] = [];
+        const original = vscode.workspace.findFiles;
+        replaceMethod(vscode.workspace, 'findFiles', async (...args: Parameters<typeof original>) => {
+            // Ignore indexing that legitimately completed before the edit began,
+            // and searches belonging to other extensions or fixture roots.
+            if (prompted && typeof args[0] !== 'string' && args[0].baseUri.toString() === root.toString()) {
+                indexedAfterRelease.push(released);
+            }
+            return original(...args);
+        });
+        replaceMethod(vscode.window, 'showInputBox', async () => {
+            prompted = true;
+            await waiting;
+            return 'queued_placeholder';
+        });
+        const pending = act({ kind: 'createPlaceholder', x: 123, y: 456 });
+        try {
+            await eventually(async () => prompted, 'edit paused at native prompt');
+            // A ready message schedules an immediate background refresh outside the edit queue.
+            await post({ type: 'ready' });
+            await new Promise(resolve => setTimeout(resolve, 100));
+            assert.deepEqual((await read('slate', 'layout.json')).placeholders ?? [], []);
+        } finally {
+            released = true;
+            release();
+            await pending;
+        }
+        await act({ kind: 'refreshIndex' });
+        assert.ok(indexedAfterRelease.length > 0, 'refreshes actually indexed the folder');
+        assert.ok(indexedAfterRelease.every(Boolean), 'background indexing must not reload layout while an edit owns the queue');
+        const layout = await read('slate', 'layout.json');
+        assert.equal(layout.placeholders.length, 1);
+        assert.equal(layout.placeholders[0].name, 'queued_placeholder');
+        assert.deepEqual(layout.positions[layout.placeholders[0].id], { x: 123, y: 456 });
+    });
+
+
+    test('background refresh and subsequent layout edits recover after a filesystem write failure', async () => {
+        const before = await read('slate', 'layout.json');
+        const layout = uri('slate', 'layout.json');
+        const backup = uri('slate', 'layout.backup.json');
+        await vscode.workspace.fs.rename(layout, backup);
+        try {
+            await vscode.workspace.fs.createDirectory(layout);
+            await assert.rejects(Promise.resolve(post({ type: 'layout', positions: { normalize: { x: 7, y: 8 } } })));
+        } finally {
+            await vscode.workspace.fs.delete(layout, { recursive: true, useTrash: false });
+            await vscode.workspace.fs.rename(backup, layout);
+        }
+        const revision = (await snapshot()).revision;
+        await post({ type: 'ready' });
+        await eventually(async () => (await snapshot()).revision > revision, 'background refresh recovered after rejection');
+        assert.deepEqual(await read('slate', 'layout.json'), before);
+        await post({ type: 'layout', positions: { normalize: { x: 9, y: 10 } } });
+        assert.deepEqual((await read('slate', 'layout.json')).positions.normalize, { x: 9, y: 10 });
+    });
+
 });
