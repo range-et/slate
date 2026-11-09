@@ -11,7 +11,7 @@ llama.cpp loop. Wiring, reference nodes, groups, and live values are planned.
 
 - What exists: [features.md](features.md)
 - Where it's going and why: [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)
-- Tasks: [issues.md](issues.md)
+- Tasks: [GitHub Issues](https://github.com/range-et/slate/issues)
 - Philosophy: [legacy/motivation.md](legacy/motivation.md)
 
 ## Try it

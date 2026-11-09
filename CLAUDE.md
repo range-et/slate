@@ -12,7 +12,9 @@ loader, port/compile/describe, search, llama.cpp transport, proposals).
 
 - Direction: [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)
 - Inventory: [features.md](features.md)
-- Backlog: [issues.md](issues.md)
+- Backlog and triage: [GitHub Issues](https://github.com/range-et/slate/issues)
+- Standing workflow: [AGENTS.md](AGENTS.md) — finish and verify GitHub issues,
+  then record the shipped result in `features.md`; no local issue backlog.
 - How to build the next phase (code map, conventions, verification, learnings): [BUILD_PLAN.md](BUILD_PLAN.md)
 - Dev loop: [DEV.md](DEV.md); llama.cpp demo: [DEMO.md](DEMO.md)
 

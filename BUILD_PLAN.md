@@ -2,7 +2,7 @@
 
 The implementation playbook for whoever builds the next phase (human or
 agent). [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md) says *what and why*,
-[issues.md](issues.md) lists tasks with acceptance criteria, and
+[GitHub Issues](https://github.com/range-et/slate/issues) lists tasks with acceptance criteria, and
 [features.md](features.md) is the shipped inventory. This file says *how*: the
 code map, conventions, verification recipe, learnings, and a step-by-step
 design per phase.
@@ -16,9 +16,10 @@ design per phase.
    publish, or deploy without the owner's explicit approval.
 3. **Verify** with the recipe below. Every UI change needs a rendered
    screenshot inspected with `view_media`.
-4. **Close the phase:** move shipped items from issues.md to features.md,
-   update this file's design for later phases if anything changed, append a
-   **Phase log** entry (bottom of this file), and commit.
+4. **Close the phase:** complete and verify the GitHub issues, record shipped
+   behavior in `features.md` with issue/PR links and validation evidence, update
+   this file's design if needed, append a **Phase log** entry, and commit. Close
+   issues when their acceptance criteria are met and the work is merged.
 
 ## Owner intent (keep this front of mind)
 
