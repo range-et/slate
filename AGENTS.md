@@ -7,6 +7,27 @@ extension in `vscode-extension/src/`. Read `CLAUDE.md`, `BUILD_PLAN.md`, and the
 relevant source before changing behavior. `legacy/` is frozen but still deployed;
 keep its existing tests and builds passing. Preserve unrelated user changes.
 
+## Standing issue workflow
+
+[GitHub Issues](https://github.com/range-et/slate/issues) is the only source of
+truth for bugs, feature requests, priorities, dependencies and unfinished work.
+Do not create or maintain `issues.md` or a second local backlog.
+
+When choosing work, triage the open GitHub issues and their comments/linked PRs:
+reproduce reported bugs, check for duplicates, establish acceptance criteria and
+prerequisites, and prioritize owner requests and blockers before the next planned
+slice. Record scope and unresolved dependencies on the GitHub issue. Read the
+relevant design documents and source, then carry the selected issue through
+implementation, regression tests and the required launch gate.
+
+When the work is complete and verified, update `features.md` in the same change
+with the shipped behavior, completion date, GitHub issue/PR link, verification
+and any material limitations. `features.md` is the factual product inventory,
+not the task queue. Do not list unfinished targets as completed features.
+Reference the issue in the PR (`Closes #N` only when it is fully addressed), and
+close it once acceptance criteria are met and the work is merged. Keep partial
+work and follow-ups open on GitHub.
+
 ## Required regression coverage for every code change
 
 Every added or changed function/behavior must have meaningful automated tests.

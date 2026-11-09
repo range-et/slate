@@ -3,7 +3,7 @@
 Status: active — revised 2026-10-13 (Phases 0–4 shipped; Phases 5–9
 refined after an oracle review of plan and code).
 Replaces the 2026-09-23 "source-first harness" plan. Shipped work is in
-[features.md](features.md); tasks are in [issues.md](issues.md).
+[features.md](features.md); tasks are in [GitHub Issues](https://github.com/range-et/slate/issues).
 
 ## North star
 

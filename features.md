@@ -2,7 +2,10 @@
 
 Factual inventory of what exists, what is half-built, and what is not started.
 Direction and reasoning live in [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md);
-executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase 4).
+executable tasks and triage live only in [GitHub Issues](https://github.com/range-et/slate/issues).
+Product inventory audited 2026-10-13 (after Phase 4); verification and safety fixes
+updated 2026-11-09. Add completed, verified behavior here with issue/PR links;
+keep outstanding tasks on GitHub.
 
 ## At a glance
 
@@ -232,6 +235,37 @@ executable tasks live in [issues.md](issues.md). Audited 2026-10-13 (after Phase
   Playwright/Electron workbench smoke test that renders the custom editor.
 - `npm run verify:baseline` and `npm run test:harness` compose the suites; CI
   runs both.
+
+## Shipped — verification and editing safety (2026-11-09)
+
+Completed in [PR #1](https://github.com/range-et/slate/pull/1):
+
+- **Verification gates.** Strict TypeScript/ESLint checks, property tests,
+  regression matrices, browser action chains, real Extension Host persistence
+  and Undo/Save checks, and native workbench/dialog QA. `verify:launch` gates
+  packaging and CI; Pages deployment depends on the gate. Coverage instrumentation
+  combines active app and extension results, and Stryker runners support unit and
+  browser/native mutation testing.
+- **Refresh safety.** Background indexing joins the edit queue so a delayed read
+  cannot overwrite layout during a write. Closing a panel safely settles queued
+  refreshes without posting to a disposed webview.
+- **Undo safety.** Accepted proposals retain the version captured immediately
+  after the WorkspaceEdit, before Save. Slate Undo refuses to overwrite later
+  typing, including edits made while Save was pending.
+- **Draft retention.** Opening source by double-click hides the selected
+  inspector without destroying its unsaved code, intent, contract or note fields.
+- **Portable coverage and narrow panes.** Extension coverage filtering supports
+  Windows and POSIX paths. Narrow headers scroll without status text covering
+  Compose/Map/Library controls.
+- **Validation.** The local launch gate passed with 463 unit tests, 88 browser
+  cases, 33 Extension Host cases and workbench QA for the review fixes. Regressions
+  reproduced the defects before the fixes. See [verification evidence](test/VERIFICATION.md).
+  The Linux run subsequently exposed a native-prompt test synchronization issue;
+  its unmerged follow-up is tracked in [issue #21](https://github.com/range-et/slate/issues/21).
+  These local results do not assert that remote CI is green.
+- **Remaining testing target.** Whole-app 100% code coverage and mutation
+  detection are not complete; track that work in [issue #20](https://github.com/range-et/slate/issues/20).
+  Shipping measurement tools is not completion of that target.
 
 ## Partially done
 

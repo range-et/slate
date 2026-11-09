@@ -24,7 +24,7 @@ check in branch protection.
 
 This guide gets you running the **VS Code extension** (the v0.2 code-mode
 surface) with hot-reload of both the slate webview and the extension TS,
-so you can iterate on issues from [issues.md](issues.md) and see changes
+so you can iterate on issues from [GitHub Issues](https://github.com/range-et/slate/issues) and see changes
 immediately.
 
 ## One-time setup
@@ -157,7 +157,7 @@ The frozen legacy notebook lives in `legacy/` and runs with
 | Folder format + loader | `vscode-extension/src/slate_folder.ts` | pure; host side in `slate_folder_host.ts` |
 | Legacy notebook | `legacy/` | frozen; GitHub Pages only |
 | Spec | `SLATE_HARNESS_PLAN.md` | source of truth |
-| Open work | `issues.md` | active ordered slices |
+| Open work | [GitHub Issues](https://github.com/range-et/slate/issues) | triage, priorities, dependencies and acceptance criteria |
 | Inventory | `features.md` | shipped / partial / not started |
 
 ---
@@ -175,16 +175,22 @@ The frozen legacy notebook lives in `legacy/` and runs with
 
 ## Suggested loop while implementing an issue
 
-1. Open [issues.md](issues.md) → pick the next unblocked issue.
-2. In a new branch: `git checkout -b issue-N-short-name`
-3. Read its `Files` list, make changes.
-4. Vite + tsc auto-rebuild; reload host window to verify.
-5. When acceptance criteria pass: move the issue's block to
-   [features.md](features.md) with the `**Resolved:**` line.
-6. Commit with a message that references the issue number, e.g.
-   `#1 add kind field to Card with migration shim`.
+1. Triage [GitHub Issues](https://github.com/range-et/slate/issues), including
+   comments and linked PRs. Reproduce bugs, establish acceptance criteria and
+   dependencies, then choose the next unblocked item aligned with owner priorities.
+2. Work on a `codex/issue-N-short-name` branch (or the branch requested by the owner).
+3. Implement the issue completely, with meaningful regression tests and updated
+   unit/UX coverage matrices. Use the relevant design and source files.
+4. Run focused tests during development and `npm run verify:launch` before handoff.
+5. Add the completed behavior to [features.md](features.md), with the date,
+   GitHub issue/PR links, validation and any limitations. Keep remaining work on
+   GitHub rather than presenting it as shipped.
+6. Reference the issue in the commit/PR; use `Closes #N` when the PR satisfies it.
+   Close the issue after acceptance criteria are met and the work is merged.
+
+GitHub Issues is the sole backlog. Do not recreate a local issue list.
 
 ---
 
-*Related: [issues.md](issues.md) · [features.md](features.md) ·
+*Related: [GitHub Issues](https://github.com/range-et/slate/issues) · [features.md](features.md) ·
 [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)*
