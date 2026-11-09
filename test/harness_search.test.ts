@@ -27,3 +27,20 @@ describe('harness-owned search', () => {
         expect(searchUnits(demoSnapshot.documents, sources, '  ')).toEqual([]);
     });
 });
+
+it('uses name, path, and durable ID to order tied search results before applying a limit', () => {
+    const document = structuredClone(demoSnapshot.documents[0]);
+    const unit = document.units[0];
+    const make = (path: string, id: string, qualifiedName: string) => ({
+        ...document, path, units: [{ ...unit, id, name: 'same', qualifiedName, signature: null, annotation: null }],
+    });
+    const documents = [make('b.json', 'z', 'Zulu'), make('b.json', 'b', 'Alpha'),
+        make('a.json', 'z', 'Alpha'), make('b.json', 'a', 'Alpha')];
+    const before = structuredClone(documents);
+    expect(searchUnits(documents, new Map(), 'same').map(hit => [hit.qualifiedName, hit.path, hit.unitId, hit.snippet])).toEqual([
+        ['Alpha', 'a.json', 'z', 'Alpha'], ['Alpha', 'b.json', 'a', 'Alpha'],
+        ['Alpha', 'b.json', 'b', 'Alpha'], ['Zulu', 'b.json', 'z', 'Zulu'],
+    ]);
+    expect(searchUnits(documents, new Map(), 'same', 2).map(hit => hit.unitId)).toEqual(['z', 'a']);
+    expect(documents).toEqual(before);
+});

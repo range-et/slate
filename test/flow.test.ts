@@ -161,3 +161,14 @@ describe('flow codegen', () => {
         expect(messages).toMatch(/error: math\.py: name collision on "add" \(node math\/(add|clash) vs node math\/(add|clash)/);
     });
 });
+
+it('rejects multiple drivers for the same flow input rather than silently picking a value', () => {
+    const result = compile([['duplicate_driver', flow({ name: 'duplicate_driver',
+        instances: [{ id: 'left', kind: 'value', value: '1' }, { id: 'right', kind: 'value', value: '2' }, { id: 'call', node: 'math/double' }],
+        wires: [{ from: 'left.out', to: 'call.in:x' }, { from: 'right.out', to: 'call.in:x' }],
+    })]]);
+    expect(result.diagnostics).toContainEqual({ severity: 'error', message: expect.stringContaining('call.in:x has more than one wire') });
+    const output = [...result.files.values()].join('\n');
+    expect(output).not.toContain('def duplicate_driver(');
+    expect(output).toContain('def double(');
+});

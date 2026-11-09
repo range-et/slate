@@ -111,3 +111,86 @@ describe('Python harness graph', () => {
         expect(nodes.some(node => ['ref', 'placeholder', 'flow', 'note'].includes(node.data.kind))).toBe(false);
     });
 });
+
+it('merges explicit context edges and attaches notes only to existing nodes', () => {
+    const snapshot = structuredClone(demoSnapshot);
+    snapshot.contextEdges = [{ kind: 'context', sourceId: 'clamp', targetId: 'scoring/normalize_score' },
+        { kind: 'context', sourceId: 'missing', targetId: 'clamp' }];
+    snapshot.notes = [{ id: 'attached', title: 'Explain', body: 'Details', attachedTo: 'clamp' },
+        { id: 'orphan', title: '', body: '', attachedTo: 'missing' }];
+    const graph = buildGraph(snapshot);
+    expect(graph.edges.filter(edge => edge.id === 'context:clamp:scoring/normalize_score')).toHaveLength(1);
+    expect(graph.edges).toContainEqual(expect.objectContaining({ id: 'note:attached:clamp', source: 'attached', target: 'clamp', selectable: false }));
+    expect(graph.edges.some(edge => edge.source === 'missing' || edge.target === 'missing')).toBe(false);
+});
+
+it('renders unreadable definitions and comment-only module tails without invented metadata', () => {
+    const base = structuredClone(demoSnapshot.documents[0]);
+    const snapshot = { revision: 1, projectName: 'partial', documents: [
+        { ...base, id: 'empty', path: 'slate/nodes/empty.json', units: [], source: undefined, valid: false, diagnostics: [{ code: 'bad', message: 'Broken file', range: base.units[0].ranges.declaration }] },
+        { ...base, id: 'tail', path: 'slate/nodes/tail.json', units: [], nodeKind: 'epilogue' as const, source: '# comment only' },
+        { ...base, id: 'state', path: 'slate/nodes/state.json', units: [], nodeKind: 'prelude' as const, source: undefined },
+    ] };
+    const graph = buildGraph(snapshot);
+    expect(graph.nodes.find(node => node.id === 'empty')?.data).toMatchObject({ label: 'empty', detail: 'unreadable node', kind: 'document', invalid: true, problem: 'Broken file', inputs: [], outputs: [], editableIntent: false });
+    expect(graph.nodes.find(node => node.id === 'tail')?.data).toMatchObject({ label: 'module tail', detail: '' });
+    expect(graph.nodes.find(node => node.id === 'state')?.data).toMatchObject({ label: 'module state', detail: '' });
+    expect(buildGraph(snapshot, { view: 'map', flow: null }).nodes.filter(node => node.data.kind === 'folder')).toHaveLength(1);
+});
+
+it('uses saved positions and resolves references to flows and library classes', () => {
+    const snapshot = structuredClone(demoSnapshot);
+    const library = snapshot.library![0];
+    const libraryUnit = library.units[0];
+    libraryUnit.kind = 'class';
+    libraryUnit.signature = undefined;
+    snapshot.refs = [{ id: 'library-call', target: libraryUnit.id }, { id: 'flow-call', target: 'report' }];
+    snapshot.layout = { 'library-call': { x: 15, y: 25 }, 'flow-call': { x: 35, y: 45 }, 'scoring/Grader.grade': { x: 7, y: 9 } };
+    const method = snapshot.documents.flatMap(document => document.units).find(unit => unit.id === 'scoring/Grader.grade')!;
+    method.signature = undefined;
+    const graph = buildGraph(snapshot);
+    expect(graph.nodes.find(node => node.id === 'library-call')).toMatchObject({ position: { x: 15, y: 25 }, data: { broken: false, path: '', groupColor: '#9da5ad' } });
+    expect(graph.nodes.find(node => node.id === 'flow-call')).toMatchObject({ position: { x: 35, y: 45 }, data: { broken: false, flowId: 'report', groupColor: '#f6c453' } });
+    expect(graph.nodes.find(node => node.id === method.id)).toMatchObject({ position: { x: 7, y: 9 }, data: { detail: method.qualifiedName } });
+});
+
+it('keeps nested flow values and untyped named wires usable when optional layout and values are absent', () => {
+    const snapshot = structuredClone(demoSnapshot);
+    snapshot.flowPositions = undefined;
+    snapshot.flows = [{ id: 'child', flow: { name: 'child', inputs: [{ name: 'input', annotation: null }], outputs: [{ name: 'result', annotation: null }], extra: {},
+        instances: [{ id: 'literal', kind: 'value' }, { id: 'nested', node: 'grandchild' }],
+        wires: [{ from: 'input:input', to: 'nested.in:x' }, { from: 'literal.out', to: 'output:result' }],
+    } }, { id: 'grandchild', flow: { name: 'grandchild', inputs: [{ name: 'x', annotation: null }], outputs: [], instances: [], wires: [], extra: {} } }];
+    const graph = buildGraph(snapshot, { view: 'compose', flow: 'child' });
+    expect(graph.nodes.find(node => node.id === 'literal')?.data).toMatchObject({ kind: 'value', value: '' });
+    expect(graph.nodes.find(node => node.id === 'nested')?.data).toMatchObject({ kind: 'instance', flowId: 'grandchild', detail: 'grandchild' });
+    expect(graph.edges).toHaveLength(2);
+    expect(graph.edges.every(edge => edge.style?.stroke === '#7d8590')).toBe(true);
+});
+
+it('keeps unreadable flows visible and omits dangling data wires on the root canvas', () => {
+    const snapshot = structuredClone(demoSnapshot);
+    snapshot.layout = {};
+    snapshot.flows = [
+        { id: 'broken', flow: null, problem: 'Invalid JSON' },
+        { id: 'main', flow: { name: 'main', inputs: [], outputs: [], extra: {},
+            instances: [{ id: 'literal', kind: 'value' }],
+            wires: [
+                { from: 'literal.out', to: 'clamp.in:value' },
+                { from: 'missing.out', to: 'clamp.in:lower' },
+                { from: 'literal.out', to: 'missing.in:value' },
+            ],
+        } },
+    ];
+    const graph = buildGraph(snapshot);
+    expect(graph.nodes.find(node => node.id === 'flow:broken')?.data).toMatchObject({
+        label: 'broken', detail: 'unreadable: Invalid JSON', invalid: true,
+        inputs: [], outputs: [],
+    });
+    expect(graph.nodes.find(node => node.id === 'literal')).toMatchObject({
+        position: { x: 760, y: 600 }, data: { kind: 'value', value: '' },
+    });
+    expect(graph.edges.filter(edge => edge.id.startsWith('data:')).map(edge => edge.id))
+        .toEqual(['data:literal.out->clamp.in:value']);
+    expect(buildGraph(snapshot, { view: 'compose', flow: 'broken' })).toEqual({ nodes: [], edges: [] });
+});

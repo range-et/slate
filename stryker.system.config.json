@@ -1,0 +1,57 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": [
+    "src/harness/**/*.{ts,tsx}",
+    "vscode-extension/src/**/*.ts",
+    "!vscode-extension/src/test/**"
+  ],
+  "testRunner": "command",
+  "coverageAnalysis": "off",
+  "concurrency": 1,
+  "reporters": [
+    "clear-text",
+    "html",
+    "json"
+  ],
+  "thresholds": {
+    "high": 100,
+    "low": 100,
+    "break": 100
+  },
+  "ignorePatterns": [
+    "**",
+    "!src/**/*",
+    "!test/**/*",
+    "!scripts/**/*",
+    "!vscode-extension/**/*",
+    "vscode-extension/node_modules",
+    "vscode-extension/node_modules/**",
+    "vscode-extension/out",
+    "vscode-extension/out/**",
+    "vscode-extension/dist",
+    "vscode-extension/dist/**",
+    "vscode-extension/.vscode-test",
+    "vscode-extension/.vscode-test/**",
+    "vscode-extension/*.vsix",
+    "!design-tokens/build/**/*",
+    "!vitest.config.js",
+    "!vite.config.js",
+    "!playwright.config.ts",
+    "!package.json",
+    "!tsconfig.json",
+    "!eslint.config.mjs"
+  ],
+  "jsonReporter": {
+    "fileName": "reports/mutation/system.json"
+  },
+  "htmlReporter": {
+    "fileName": "reports/mutation/system.html"
+  },
+  "tempDirName": ".stryker-tmp/system",
+  "commandRunner": {
+    "command": "bash scripts/system-mutation-tests.sh"
+  },
+  "timeoutMS": 60000,
+  "dryRunTimeoutMinutes": 10,
+  "symlinkNodeModules": false
+}

@@ -13,7 +13,7 @@ export default defineConfig({
     webServer: {
         command: 'npm run start -- --host 127.0.0.1 --port 4178',
         url: 'http://127.0.0.1:4178/harness.html?demo',
-        reuseExistingServer: !process.env.CI,
+        reuseExistingServer: !process.env.CI && !process.env.SLATE_SOURCE_COVERAGE,
         timeout: 60_000,
     },
 });

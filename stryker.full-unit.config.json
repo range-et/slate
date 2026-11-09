@@ -1,0 +1,44 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": [
+    "src/harness/**/*.{ts,tsx}",
+    "vscode-extension/src/**/*.ts",
+    "!vscode-extension/src/test/**"
+  ],
+  "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vitest.config.js"
+  },
+  "coverageAnalysis": "perTest",
+  "concurrency": 2,
+  "reporters": [
+    "clear-text",
+    "html",
+    "json"
+  ],
+  "thresholds": {
+    "high": 100,
+    "low": 100,
+    "break": 100
+  },
+  "ignorePatterns": [
+    "**",
+    "!src/**/*",
+    "!test/**/*",
+    "!vscode-extension/src/**/*",
+    "!vscode-extension/scripts/**/*",
+    "!vitest.config.js",
+    "!package.json",
+    "!scripts/**/*",
+    "!eslint.config.mjs",
+    "!tsconfig.json"
+  ],
+  "jsonReporter": {
+    "fileName": "reports/mutation/full-unit.json"
+  },
+  "htmlReporter": {
+    "fileName": "reports/mutation/full-unit.html"
+  },
+  "incrementalFile": "reports/mutation/full-unit-incremental.json",
+  "tempDirName": ".stryker-tmp/full-unit"
+}

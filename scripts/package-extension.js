@@ -3,6 +3,7 @@
  * Package the Slate Code VS Code extension as a VSIX.
  *
  * Flow:
+ *   0. Pass the unit, Python round-trip, and UX/QA launch gate.
  *   1. Build the harness webview -> dist/.
  *   2. Sync dist/ into vscode-extension/dist/.
  *   3. vsce package -> vscode-extension/slate-code-<ver>.vsix.
@@ -27,6 +28,8 @@ function run(cmd, opts = {}) {
 
 const shouldInstall = process.argv.includes('--install');
 
+// Gate the script itself so direct invocation also cannot package failed tests.
+run('npm run verify:launch');
 run('npm run build');
 run('npm run sync-dist', { cwd: extensionDir });
 

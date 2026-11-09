@@ -354,7 +354,9 @@ function proposal(source: string, documentPath: string, from: number, to: number
 }
 
 function indentBlock(value: string, indent: string): string {
-    return value.split('\n').map(line => `${indent}${line}`).join('\n');
+    // The edit starts at the declaration token; its existing leading whitespace
+    // is outside the replacement range. Only subsequent lines need the prefix.
+    return value.split('\n').map((line, index) => index === 0 ? line : `${indent}${line}`).join('\n');
 }
 
 export class PythonAdapter {
