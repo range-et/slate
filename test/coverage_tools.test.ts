@@ -21,6 +21,9 @@ describe('coverage source inventory', () => {
         ['C:\\repo\\scripts\\coverage-scope.mjs', 'C:\\repo\\', 'scripts/coverage-scope.mjs'],
         ['C:\\repo\\src\\harness\\palette.ts', '/repo', 'src/harness/palette.ts'],
     ])('normalizes %s against %s', (value, root, expected) => expect(sourcePath(value, root)).toBe(expected));
+    it('normalizes Windows file URLs with drive letters', () => {
+        expect(sourcePath('file:///C:/repo/vscode-extension/src/flow.ts', 'C:/repo/')).toBe('vscode-extension/src/flow.ts');
+    });
     it.each([
         ['src/harness/main.tsx', true], ['vscode-extension/src/extension.ts', true],
         ['vscode-extension/src/test/runTest.ts', false], ['src/harness/types.d.ts', false],
