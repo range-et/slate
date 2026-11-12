@@ -329,6 +329,18 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
     expect(inspectorBoxDragged.width).toBeLessThan(inspectorBoxWider.width);
     expect(canvasBoxDragged.x + canvasBoxDragged.width).toBeLessThanOrEqual(inspectorBoxDragged.x);
 
+    // At an 800px viewport with the 240px library open, resizing the inspector clamps so the canvas keeps >= 260px width.
+    await page.setViewportSize({ width: 800, height: 800 });
+    await resizer.focus();
+    for (let i = 0; i < 15; i++) {
+        await resizer.press('ArrowLeft');
+    }
+    const narrowCanvasBox = (await page.locator('.harness-canvas').boundingBox())!;
+    const narrowInspectorBox = (await inspector.boundingBox())!;
+    expect(narrowCanvasBox.width).toBeGreaterThanOrEqual(260);
+    expect(narrowCanvasBox.x + narrowCanvasBox.width).toBeLessThanOrEqual(narrowInspectorBox.x);
+    await page.setViewportSize({ width: 1280, height: 800 });
+
     // Clicking the pane clears selection and hides on-demand context links; toggle shows all context links.
     await page.locator('.react-flow__pane').click({ position: { x: 15, y: 15 } });
     await expect(page.locator('.slate-edge--context')).toHaveCount(0);
@@ -373,6 +385,14 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
     nextSnapshot.flows!.find(f => f.id === 'report')!.flow!.wires.push({
         from: 'shout.out', to: 'normalize_score.in:maximum',
     });
+    nextSnapshot.flowPositions = {
+        ...nextSnapshot.flowPositions,
+        report: {
+            hundred: { x: 40, y: 40 },
+            shout: { x: 40, y: 260 },
+            normalize_score: { x: 420, y: 180 },
+        },
+    };
     const exactCopy = structuredClone(nextSnapshot.documents[0]);
     exactCopy.id = 'node:clamp_copy';
     exactCopy.path = 'slate/nodes/clamp_copy.json';
@@ -391,7 +411,12 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
 
     await expect(page.locator('.slate-edge--mismatch')).toHaveCount(1);
     await expect(page.locator('.harness-status')).toContainText('1 type mismatch');
-    await page.locator('.slate-edge--mismatch .react-flow__edge-interaction').click({ button: 'right', force: true });
+    const mismatchEdgeBox = await settledBox('.slate-edge--mismatch .react-flow__edge-interaction');
+    await page.mouse.click(
+        mismatchEdgeBox.x + mismatchEdgeBox.width / 2,
+        mismatchEdgeBox.y + mismatchEdgeBox.height / 2,
+        { button: 'right' },
+    );
     const wireMenu = page.getByRole('menu', { name: 'Wire actions' });
     await expect(wireMenu).toContainText('⚠ Type mismatch: str → int');
     await page.keyboard.press('Escape');
@@ -400,6 +425,12 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
     await page.getByRole('button', { name: 'Health', exact: true }).click();
     const health = page.getByRole('dialog', { name: 'Node health report' });
     await expect(health).toBeVisible();
+    await expect(health.getByRole('button', { name: 'Close health report' })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('dialog', { name: 'Add node' })).toHaveCount(0);
+    expect(await health.evaluate(el => el.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Control+g');
+    expect((await actions()).some(a => a.kind === 'extractFlow')).toBe(false);
     await expect(health.getByText('Read-only', { exact: true })).toBeVisible();
     const caveats = health.getByRole('note', { name: 'Analysis coverage caveats' });
     await expect(caveats).toContainText('never safe to delete automatically');

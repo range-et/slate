@@ -276,23 +276,28 @@ Completed for [issue #7](https://github.com/range-et/slate/issues/7):
 - **Read-only Node Health Report** (`src/harness/health.ts`, topbar **Health**
   button and palette **Node health report**). Lists unreferenced definition
   candidates (no flow instance, canvas reference, placeholder match, `uses`
-  entry, or resolved bare-name call, while noting nodes referenced only as
-  prompt `context`), exact duplicates (identical normalized Python code after
-  stripping comments, docstrings, whitespace, and alpha-renaming definition and
-  parameter names), and near duplicates (heuristic token-trigram similarity on
-  non-stub definitions). Includes one-click **Go to** canvas navigation and a
-  read-only line-by-line diff viewer. Explicitly displays coverage caveats
-  (dynamic imports/reflection, `import module` attribute calls, external
-  entrypoints) and never labels "no known references" safe to delete.
+  entry, or resolved free-variable Python reference, while noting nodes
+  referenced only as prompt `context`), exact duplicates (identical normalized
+  Python code after stripping comments, docstrings, whitespace outside string
+  literals, and alpha-renaming definition and parameter names), and near
+  duplicates (heuristic token-trigram similarity on non-stub definitions).
+  Includes one-click **Go to** canvas navigation, a read-only line-by-line diff
+  viewer, modal focus trapping, and canvas-shortcut suppression while open.
+  Explicitly displays coverage caveats (dynamic imports/reflection, `import
+  module` attribute calls, external entrypoints) and never labels "no known
+  references" safe to delete.
 - **Docked, resizable Inspector.** The Inspector docks to the right of
   `.harness-canvas` with a drag and keyboard (`ArrowLeft`/`ArrowRight`) resize
-  separator instead of floating over canvas nodes, removing the 400 ms
-  selection-to-inspector delay while preserving draft retention on double-click.
+  separator (`280px–640px`, clamped so `.harness-canvas` retains at least
+  `260px` width before switching to overlay on narrow viewports) instead of
+  floating over canvas nodes, while preserving the 400 ms single-click selection
+  debounce that protects unsaved inspector drafts on double-click.
 - **Type-mismatch warnings on wires.** Data wires between incompatible port
-  annotations render with warning styling (`slate-edge--mismatch`), a `⚠
-  <source> → <target>` label, a status-bar mismatch count and connect notice,
-  and a warning banner in the wire context menu. Mismatched connections are
-  warned, never blocked.
+  annotations (supporting quoted forward references and recursive generic type
+  arguments such as `list[T]`, `dict[K, V]`, `tuple[...]`, and `set[T]`) render
+  with warning styling (`slate-edge--mismatch`), a `⚠ <source> → <target>`
+  label, a status-bar mismatch count and connect notice, and a warning banner in
+  the wire context menu. Mismatched connections are warned, never blocked.
 - **Context links on demand.** Context edges (`slate-edge--context`) are hidden
   by default so ordinary wires read as dataflow, revealed automatically for the
   selected or actively wired node, and toggleable globally via the topbar

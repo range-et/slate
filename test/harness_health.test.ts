@@ -27,6 +27,14 @@ describe('Node health report and code normalization', () => {
         const withStringHash = 'def tag(self, label: str) -> str:\n    return f"# {label}" # comment';
         expect(normalizeNodeCode(withStringHash, 'tag', ['self', 'label'])).toContain('"# {_p1}"');
         expect(normalizeNodeCode(withStringHash, 'tag', ['self', 'label'])).toContain('def _fn(self,_p1:str)->str:');
+
+        // Preserves string literal whitespace and words matching parameter/function names
+        const strSpacesA = 'def msg(x: str) -> str:\n    return "a  b x msg"';
+        const strSpacesB = 'def msg(x: str) -> str:\n    return "a b x msg"';
+        expect(normalizeNodeCode(strSpacesA, 'msg', ['x'])).toContain('"a  b x msg"');
+        expect(normalizeNodeCode(strSpacesB, 'msg', ['x'])).toContain('"a b x msg"');
+        expect(normalizeNodeCode(strSpacesA, 'msg', ['x']))
+            .not.toBe(normalizeNodeCode(strSpacesB, 'msg', ['x']));
     });
 
     it('computes line-by-line LCS diffs with 1-based line numbers for unchanged, removed, and added lines', () => {
@@ -73,6 +81,75 @@ describe('Node health report and code normalization', () => {
         const orphanEntry = report.unreferenced.find(item => item.nodeId === 'orphan')!;
         expect(orphanEntry.contextOnlyBy).toEqual(['clamp']);
         expect(report.caveats.some(text => /does not mean safe to delete/i.test(text))).toBe(true);
+    });
+
+    it('does not treat strings, comments, parameters, locals, attributes, kwargs, or imports as node references', () => {
+        const orphan = indexNode('slate/nodes/orphan.json', JSON.stringify({
+            slate: 3,
+            name: 'orphan',
+            intent: 'Unused node whose name appears in unrelated places',
+            code: ['def orphan(value: int) -> int:', '    return value * 2'],
+        }), 'python', null).document;
+
+        const lookalikeCaller = indexNode('slate/nodes/caller.json', JSON.stringify({
+            slate: 3,
+            name: 'caller',
+            imports: ['from external_pkg import shadowed_helper'],
+            code: [
+                'def caller(param_node: int) -> str:',
+                '    # orphan and clamp mentioned in comment',
+                '    label = "orphan"',
+                '    orphan = param_node + 1',
+                '    for loop_node in [orphan]:',
+                '        _ = [comp_node for comp_node in (loop_node,)]',
+                '    other.attr_node(kw_node=orphan)',
+                '    shadowed_helper(orphan)',
+                '    return label',
+            ],
+        }), 'python', null).document;
+
+        const makeUnused = (name: string) => indexNode(`slate/nodes/${name}.json`, JSON.stringify({
+            slate: 3,
+            name,
+            code: [`def ${name}(x: int) -> int:`, '    return x + 1'],
+        }), 'python', null).document;
+
+        const report = buildNodeHealthReport({
+            revision: 1,
+            projectName: 'unrelated-words',
+            documents: [
+                orphan,
+                lookalikeCaller,
+                makeUnused('param_node'),
+                makeUnused('loop_node'),
+                makeUnused('comp_node'),
+                makeUnused('attr_node'),
+                makeUnused('kw_node'),
+                makeUnused('shadowed_helper'),
+            ],
+            flows: [{
+                id: 'main',
+                flow: {
+                    name: 'main',
+                    inputs: [],
+                    outputs: [],
+                    instances: [{ id: 'call-1', node: 'caller' }],
+                    wires: [],
+                    extra: {},
+                },
+            }],
+        });
+
+        const unrefIds = report.unreferenced.map(item => item.nodeId);
+        expect(unrefIds).toEqual([
+            'attr_node',
+            'comp_node',
+            'kw_node',
+            'loop_node',
+            'orphan',
+            'param_node',
+            'shadowed_helper',
+        ]);
     });
 
     it('detects exact duplicates, near duplicates, and dynamic/module import coverage caveats', () => {

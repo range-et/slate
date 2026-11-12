@@ -1,3 +1,6 @@
+import type { SyntaxNode } from '@lezer/common';
+import { parser } from '@lezer/python';
+
 import { unitSignature } from '../../vscode-extension/src/flow';
 import { nodeIdOf } from './graph';
 import type { HarnessDocument, HarnessSnapshot, HarnessUnit } from './types';
@@ -108,13 +111,61 @@ function stripLeadingDocstring(lines: string[]): string[] {
     return result;
 }
 
+function directChildren(node: SyntaxNode): SyntaxNode[] {
+    const children: SyntaxNode[] = [];
+    for (let child = node.firstChild; child; child = child.nextSibling) children.push(child);
+    return children;
+}
+
+function formatLiteralNode(node: SyntaxNode, text: string, renameMap: ReadonlyMap<string, string>): string {
+    if (node.name === 'String') return text.slice(node.from, node.to);
+    if (node.name !== 'FormatString') return text.slice(node.from, node.to);
+    const replacements: Array<{ from: number; to: number; value: string }> = [];
+    const visitFormat = (current: SyntaxNode) => {
+        for (const child of directChildren(current)) {
+            if (child.name === 'FormatReplacement') {
+                const innerEdits: Array<{ from: number; to: number; value: string }> = [];
+                const visitInner = (expr: SyntaxNode) => {
+                    if (expr.name === 'String' || expr.name === 'FormatString') {
+                        innerEdits.push({ from: expr.from, to: expr.to, value: formatLiteralNode(expr, text, renameMap) });
+                        return;
+                    }
+                    if (expr.name === 'VariableName') {
+                        const raw = text.slice(expr.from, expr.to);
+                        const renamed = renameMap.get(raw);
+                        if (renamed) innerEdits.push({ from: expr.from, to: expr.to, value: renamed });
+                        return;
+                    }
+                    for (const sub of directChildren(expr)) visitInner(sub);
+                };
+                visitInner(child);
+                innerEdits.sort((a, b) => b.from - a.from);
+                let replaced = text.slice(child.from, child.to);
+                for (const edit of innerEdits) {
+                    replaced = replaced.slice(0, edit.from - child.from) + edit.value + replaced.slice(edit.to - child.from);
+                }
+                replacements.push({ from: child.from, to: child.to, value: replaced });
+            } else {
+                visitFormat(child);
+            }
+        }
+    };
+    visitFormat(node);
+    replacements.sort((a, b) => b.from - a.from);
+    let result = text.slice(node.from, node.to);
+    for (const rep of replacements) {
+        result = result.slice(0, rep.from - node.from) + rep.value + result.slice(rep.to - node.from);
+    }
+    return result;
+}
+
 /**
  * Normalize a node's Python code for structural comparison:
  * - Strip comments and blank lines
  * - Strip leading module/function docstring
  * - Replace the top-level definition name with `_fn`
- * - Alpha-rename parameter names to `_p0`, `_p1`, ... across the definition
- * - Normalize internal whitespace outside string literals
+ * - Alpha-rename parameter names to `_p0`, `_p1`, ... across the definition (outside string literals)
+ * - Normalize internal whitespace outside string literals while preserving exact string contents
  */
 export function normalizeNodeCode(source: string, definitionName?: string, paramNames: string[] = []): string {
     const rawLines = source.replace(/\r\n?/g, '\n').split('\n')
@@ -127,18 +178,37 @@ export function normalizeNodeCode(source: string, definitionName?: string, param
     paramNames.forEach((param, index) => {
         if (param && param !== 'self' && param !== 'cls') renameMap.set(param, `_p${index}`);
     });
-    return lines.map(line => {
+    const joined = lines.join('\n');
+    const literals: string[] = [];
+    const literalSpans: Array<{ from: number; to: number; placeholder: string }> = [];
+    const collectTopLiterals = (node: SyntaxNode) => {
+        if (node.name === 'String' || node.name === 'FormatString') {
+            const index = literals.length;
+            literals.push(formatLiteralNode(node, joined, renameMap));
+            literalSpans.push({ from: node.from, to: node.to, placeholder: `__SLATE_STR_${index}__` });
+            return;
+        }
+        for (const child of directChildren(node)) collectTopLiterals(child);
+    };
+    collectTopLiterals(parser.parse(joined).topNode);
+    literalSpans.sort((a, b) => b.from - a.from);
+    let masked = joined;
+    for (const span of literalSpans) {
+        masked = masked.slice(0, span.from) + span.placeholder + masked.slice(span.to);
+    }
+    return masked.split('\n').map(line => {
         const indent = line.match(/^[ \t]*/)?.[0].replace(/\t/g, '    ') ?? '';
         const body = line.trim()
-            .replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, token => renameMap.get(token) ?? token)
+            .replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, token => /^__SLATE_STR_\d+__$/.test(token) ? token : (renameMap.get(token) ?? token))
             .replace(/\s+/g, ' ')
-            .replace(/\s*(->|[(),:[\]])\s*/g, '$1');
+            .replace(/\s*(->|[(),:[\]])\s*/g, '$1')
+            .replace(/__SLATE_STR_(\d+)__/g, (_, idx) => literals[Number(idx)] ?? '');
         return `${indent}${body}`;
     }).join('\n');
 }
 
 function tokenizeNormalized(normalized: string): string[] {
-    return (normalized.match(/[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|==|!=|<=|>=|->|\/\/|\*\*|[+\-*/%<>()[\]{}.,:=]/g) ?? [])
+    return (normalized.match(/"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|==|!=|<=|>=|->|\/\/|\*\*|[+\-*/%<>()[\]{}.,:=]/g) ?? [])
         .filter(token => !PYTHON_KEYWORDS.has(token) || ['return', 'if', 'else', 'elif', 'for', 'while', 'raise', 'try', 'except', 'with', 'yield'].includes(token));
 }
 
@@ -163,9 +233,166 @@ function tokenSimilarity(leftTokens: string[], rightTokens: string[]): number {
     return total === 0 ? 0 : (2 * intersection) / total;
 }
 
-function codeIdentities(source: string): Set<string> {
-    const cleaned = source.replace(/\r\n?/g, '\n').split('\n').map(stripLineComment).join('\n');
-    return new Set(cleaned.match(/\b[A-Za-z_][A-Za-z0-9_]*\b/g) ?? []);
+function importBoundNames(statement: string): Set<string> {
+    const names = new Set<string>();
+    const visit = (node: SyntaxNode) => {
+        if (node.name === 'ImportStatement') {
+            const tokens = directChildren(node)
+                .filter(child => !['(', ')'].includes(child.name))
+                .map(child => ({ name: child.name, text: statement.slice(child.from, child.to) }));
+            if (tokens[0]?.name === 'from') {
+                const importAt = tokens.findIndex(token => token.name === 'import');
+                const rest = importAt >= 0 ? tokens.slice(importAt + 1) : [];
+                for (let index = 0; index < rest.length; index++) {
+                    const token = rest[index];
+                    if (token.name !== 'VariableName') continue;
+                    const alias = rest[index + 1]?.name === 'as' ? rest[index + 2]?.text : undefined;
+                    names.add(alias ?? token.text);
+                    if (alias) index += 2;
+                }
+            } else {
+                let dotted: string[] = [];
+                const flush = (alias?: string) => {
+                    if (!dotted.length) return;
+                    names.add(alias ?? dotted[0]);
+                    dotted = [];
+                };
+                for (let index = 1; index < tokens.length; index++) {
+                    const token = tokens[index];
+                    if (token.name === 'VariableName') dotted.push(token.text);
+                    else if (token.name === 'as') { flush(tokens[index + 1]?.text); index++; }
+                    else if (token.name === ',') flush();
+                }
+                flush();
+            }
+            return;
+        }
+        for (const child of directChildren(node)) visit(child);
+    };
+    visit(parser.parse(statement).topNode);
+    return names;
+}
+
+/**
+ * Collect free variable references from Python syntax, excluding:
+ * - String literals and comments
+ * - Property accesses (`obj.attr`) and keyword-argument labels (`fn(kw=1)`)
+ * - The node's own definition/nested definitions, parameters, local assignments, loop/comprehension/with/except bindings, and imported names
+ */
+function freeCodeReferences(source: string, imports: string[] = []): Set<string> {
+    const boundNames = new Set<string>();
+    for (const line of imports) {
+        for (const bound of importBoundNames(line)) boundNames.add(bound);
+    }
+    const nonRefRanges = new Set<string>();
+    const tree = parser.parse(source);
+
+    const markAllVariablesNonRef = (node: SyntaxNode) => {
+        if (node.name === 'VariableName') nonRefRanges.add(`${node.from}:${node.to}`);
+        for (const child of directChildren(node)) markAllVariablesNonRef(child);
+    };
+
+    const collectTargetVariables = (node: SyntaxNode) => {
+        if (node.name === 'VariableName') {
+            boundNames.add(source.slice(node.from, node.to));
+            nonRefRanges.add(`${node.from}:${node.to}`);
+            return;
+        }
+        if (['TupleExpression', 'ArrayExpression', 'ParenthesizedExpression'].includes(node.name)) {
+            for (const child of directChildren(node)) collectTargetVariables(child);
+        }
+    };
+
+    const visit = (node: SyntaxNode) => {
+        const children = directChildren(node);
+        if (node.name === 'FunctionDefinition' || node.name === 'ClassDefinition') {
+            const nameNode = children.find(child => child.name === 'VariableName');
+            if (nameNode) collectTargetVariables(nameNode);
+        } else if (node.name === 'ParamList') {
+            let group: SyntaxNode[] = [];
+            const flush = () => {
+                const assignAt = group.findIndex(child => child.name === 'AssignOp');
+                const head = assignAt >= 0 ? group.slice(0, assignAt) : group;
+                const paramName = head.find(child => child.name === 'VariableName');
+                if (paramName) collectTargetVariables(paramName);
+                group = [];
+            };
+            for (const child of children) {
+                if (child.name === '(' || child.name === ')') continue;
+                if (child.name === ',') flush();
+                else group.push(child);
+            }
+            flush();
+        } else if (node.name === 'AssignStatement') {
+            let lastAssign = -1;
+            for (let idx = 0; idx < children.length; idx++) {
+                if (children[idx].name === 'AssignOp') lastAssign = idx;
+            }
+            if (lastAssign >= 0) {
+                for (const child of children.slice(0, lastAssign)) {
+                    if (child.name !== 'TypeDef' && child.name !== 'AssignOp') collectTargetVariables(child);
+                }
+            } else {
+                const typeDefAt = children.findIndex(child => child.name === 'TypeDef');
+                if (typeDefAt > 0) {
+                    for (const child of children.slice(0, typeDefAt)) collectTargetVariables(child);
+                }
+            }
+        } else if (node.name === 'UpdateStatement') {
+            const updateAt = children.findIndex(child => child.name === 'UpdateOp');
+            if (updateAt > 0) {
+                for (const child of children.slice(0, updateAt)) collectTargetVariables(child);
+            }
+        } else if (node.name === 'NamedExpression') {
+            const assignAt = children.findIndex(child => child.name === 'AssignOp');
+            if (assignAt > 0) {
+                for (const child of children.slice(0, assignAt)) collectTargetVariables(child);
+            }
+        } else if (['ForStatement', 'ArrayComprehensionExpression', 'SetComprehensionExpression', 'DictionaryComprehensionExpression', 'GeneratorExpression', 'ComprehensionExpression'].includes(node.name)) {
+            for (let idx = 0; idx < children.length; idx++) {
+                if (children[idx].name === 'for') {
+                    for (let cursor = idx + 1; cursor < children.length && children[cursor].name !== 'in'; cursor++) {
+                        collectTargetVariables(children[cursor]);
+                    }
+                }
+            }
+        } else if (node.name === 'WithStatement' || node.name === 'TryStatement') {
+            for (let idx = 0; idx < children.length; idx++) {
+                if (children[idx].name === 'as' && children[idx + 1]) {
+                    collectTargetVariables(children[idx + 1]);
+                }
+            }
+        } else if (node.name === 'ImportStatement') {
+            for (const bound of importBoundNames(source.slice(node.from, node.to))) boundNames.add(bound);
+            markAllVariablesNonRef(node);
+            return;
+        } else if (node.name === 'GlobalStatement' || node.name === 'NonlocalStatement') {
+            markAllVariablesNonRef(node);
+            return;
+        } else if (node.name === 'ArgList') {
+            for (let idx = 0; idx < children.length; idx++) {
+                if (children[idx].name === 'VariableName' && children[idx + 1]?.name === 'AssignOp') {
+                    nonRefRanges.add(`${children[idx].from}:${children[idx].to}`);
+                }
+            }
+        }
+        for (const child of children) visit(child);
+    };
+    visit(tree.topNode);
+
+    const references = new Set<string>();
+    const collectRefs = (node: SyntaxNode) => {
+        if (node.name === 'VariableName') {
+            if (!nonRefRanges.has(`${node.from}:${node.to}`)) {
+                const name = source.slice(node.from, node.to);
+                if (!boundNames.has(name) && !PYTHON_KEYWORDS.has(name)) references.add(name);
+            }
+            return;
+        }
+        for (const child of directChildren(node)) collectRefs(child);
+    };
+    collectRefs(tree.topNode);
+    return references;
 }
 
 /**
@@ -284,7 +511,7 @@ export function buildNodeHealthReport(snapshot: HarnessSnapshot): NodeHealthRepo
                 caveats.add(`Module-style import "${line.trim()}" in ${callerId}: attribute calls (module.fn) are not tracked as node uses.`);
             }
         }
-        const identifiers = codeIdentities(source);
+        const identifiers = freeCodeReferences(source, document.imports ?? []);
         for (const name of identifiers) {
             if (top && name === top.name) continue;
             // Same-folder node with this name, or unique node across the project.

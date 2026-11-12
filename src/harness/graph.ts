@@ -66,9 +66,18 @@ export type SlateNodeData = {
     highlighted?: boolean;
 };
 
+function unquoteAnnotation(raw: string): string {
+    let text = raw.trim();
+    while (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"') && !text.slice(1, -1).includes('"'))
+        || (text.startsWith("'") && text.endsWith("'") && !text.slice(1, -1).includes("'")))) {
+        text = text.slice(1, -1).trim();
+    }
+    return text.replace(/(?<!Literal\[)"([^"\\]+)"|'([^'\\]+)'/g, (_, dq, sq) => (dq ?? sq ?? '').trim());
+}
+
 /** Stable color per annotation; untyped ("any") is grey. */
 export function typeColor(annotation: string | null | undefined): string {
-    const type = (annotation ?? '').replace(/\s+/g, '');
+    const type = unquoteAnnotation(annotation ?? '').replace(/\s+/g, '');
     if (!type || type === 'Any' || type === 'any') return '#7d8590';
     let hash = 0;
     for (const character of type) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
@@ -76,45 +85,54 @@ export function typeColor(annotation: string | null | undefined): string {
 }
 
 function normalizeType(annotation: string | null | undefined): string | null {
-    const compact = (annotation ?? '').replace(/\s+/g, '');
+    const compact = unquoteAnnotation(annotation ?? '').replace(/\s+/g, '');
     if (!compact || compact === 'Any' || compact === 'any') return null;
     return compact;
 }
 
-function splitTopLevelUnion(type: string): string[] {
+function splitTopLevelComma(text: string): string[] {
     const parts: string[] = [];
     let depth = 0;
     let start = 0;
-    for (let index = 0; index < type.length; index++) {
-        const ch = type[index];
+    for (let index = 0; index < text.length; index++) {
+        const ch = text[index];
         if (ch === '[' || ch === '(' || ch === '{') depth++;
         else if (ch === ']' || ch === ')' || ch === '}') depth--;
-        else if (ch === '|' && depth === 0) {
-            parts.push(type.slice(start, index));
+        else if (ch === ',' && depth === 0) {
+            parts.push(text.slice(start, index));
             start = index + 1;
         }
     }
-    parts.push(type.slice(start));
+    parts.push(text.slice(start));
+    return parts.filter(Boolean);
+}
+
+function splitTopLevelUnion(type: string): string[] {
+    const unwrapped = unquoteAnnotation(type);
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < unwrapped.length; index++) {
+        const ch = unwrapped[index];
+        if (ch === '[' || ch === '(' || ch === '{') depth++;
+        else if (ch === ']' || ch === ')' || ch === '}') depth--;
+        else if (ch === '|' && depth === 0) {
+            parts.push(unwrapped.slice(start, index));
+            start = index + 1;
+        }
+    }
+    parts.push(unwrapped.slice(start));
     const expanded: string[] = [];
-    for (const part of parts) {
-        const opt = part.match(/^(?:typing\.)?Optional\[(.+)\]$/);
+    for (const rawPart of parts) {
+        const part = unquoteAnnotation(rawPart);
+        const opt = part.match(/^(?:typing\.|typing_extensions\.)?Optional\[(.+)\]$/);
         if (opt) expanded.push(...splitTopLevelUnion(opt[1]), 'None');
         else {
-            const union = part.match(/^(?:typing\.)?Union\[(.+)\]$/);
+            const union = part.match(/^(?:typing\.|typing_extensions\.)?Union\[(.+)\]$/);
             if (union) {
-                let innerDepth = 0;
-                let innerStart = 0;
-                const inner = union[1];
-                for (let index = 0; index < inner.length; index++) {
-                    const ch = inner[index];
-                    if (ch === '[' || ch === '(' || ch === '{') innerDepth++;
-                    else if (ch === ']' || ch === ')' || ch === '}') innerDepth--;
-                    else if (ch === ',' && innerDepth === 0) {
-                        expanded.push(...splitTopLevelUnion(inner.slice(innerStart, index)));
-                        innerStart = index + 1;
-                    }
+                for (const member of splitTopLevelComma(union[1])) {
+                    expanded.push(...splitTopLevelUnion(member));
                 }
-                expanded.push(...splitTopLevelUnion(inner.slice(innerStart)));
             } else expanded.push(part);
         }
     }
@@ -122,13 +140,26 @@ function splitTopLevelUnion(type: string): string[] {
 }
 
 function canonicalAtom(atom: string): string {
-    const stripped = atom.replace(/^(?:typing|collections\.abc|builtins)\./, '');
+    const stripped = unquoteAnnotation(atom).replace(/\b(?:typing|typing_extensions|collections\.abc|builtins)\./g, '');
     if (stripped === 'List') return 'list';
     if (stripped === 'Dict') return 'dict';
     if (stripped === 'Tuple') return 'tuple';
     if (stripped === 'Set') return 'set';
     if (stripped === 'FrozenSet') return 'frozenset';
-    return stripped.replace(/\bList\[/g, 'list[').replace(/\bDict\[/g, 'dict[').replace(/\bTuple\[/g, 'tuple[').replace(/\bSet\[/g, 'set[');
+    return stripped
+        .replace(/\bList\[/g, 'list[')
+        .replace(/\bDict\[/g, 'dict[')
+        .replace(/\bTuple\[/g, 'tuple[')
+        .replace(/\bSet\[/g, 'set[')
+        .replace(/\bFrozenSet\[/g, 'frozenset[');
+}
+
+function baseCompatible(sourceBase: string, targetBase: string): boolean {
+    if (sourceBase === targetBase) return true;
+    if (targetBase === 'Sequence' && (sourceBase === 'list' || sourceBase === 'tuple')) return true;
+    if ((targetBase === 'Iterable' || targetBase === 'Collection') && ['list', 'tuple', 'set', 'frozenset', 'dict', 'Sequence'].includes(sourceBase)) return true;
+    if ((targetBase === 'Mapping' || targetBase === 'MutableMapping') && sourceBase === 'dict') return true;
+    return false;
 }
 
 function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
@@ -142,10 +173,25 @@ function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
     const argsOf = (value: string) => value.includes('[') && value.endsWith(']') ? value.slice(value.indexOf('[') + 1, -1) : null;
     const sourceBase = baseOf(source);
     const targetBase = baseOf(target);
+    if (!baseCompatible(sourceBase, targetBase)) return false;
     const sourceArgs = argsOf(source);
     const targetArgs = argsOf(target);
-    if (sourceBase === targetBase && (sourceArgs === null || targetArgs === null)) return true;
-    return false;
+    if (sourceArgs === null || targetArgs === null) return true;
+    const sList = splitTopLevelComma(sourceArgs);
+    const tList = splitTopLevelComma(targetArgs);
+    if (sourceBase === 'tuple' && targetBase === 'tuple') {
+        if (tList.length === 2 && tList[1] === '...') {
+            return sList.filter(item => item !== '...').every(item => !typesMismatch(item, tList[0]));
+        }
+        if (sList.length === 2 && sList[1] === '...') {
+            return tList.filter(item => item !== '...').every(item => !typesMismatch(sList[0], item));
+        }
+    }
+    if ((targetBase === 'Iterable' || targetBase === 'Collection') && sourceBase === 'dict' && tList.length === 1 && sList.length === 2) {
+        return !typesMismatch(sList[0], tList[0]);
+    }
+    if (sList.length !== tList.length) return false;
+    return sList.every((sArg, idx) => !typesMismatch(sArg, tList[idx]));
 }
 
 /**
@@ -343,9 +389,9 @@ function dataEdges(
             source: from.node, sourceHandle: from.handle, target: to.node, targetHandle: to.handle,
             className: `slate-edge slate-edge--data${mismatch ? ' slate-edge--mismatch' : ''}`,
             style: mismatch
-                ? { stroke: 'var(--strata-warning, #f6c453)', strokeWidth: 2, strokeDasharray: '6 4' }
+                ? { stroke: 'var(--strata-warning)', strokeWidth: 2, strokeDasharray: '6 4' }
                 : { stroke: typeColor(sourceAnnotation), strokeWidth: 2 },
-            ...(warning ? { label: `⚠ ${warning}`, labelStyle: { fill: 'var(--strata-warning, #f6c453)', fontSize: 10, fontWeight: 600 }, labelShowBg: true, labelBgStyle: { fill: 'var(--strata-layer-01, #191d21)', fillOpacity: 0.9 } } : {}),
+            ...(warning ? { label: `⚠ ${warning}`, labelStyle: { fill: 'var(--strata-warning)', fontSize: 10, fontWeight: 600 }, labelShowBg: true, labelBgStyle: { fill: 'var(--strata-layer-01)', fillOpacity: 0.9 } } : {}),
             data: { from: wire.from, to: wire.to, sourceAnnotation, targetAnnotation, mismatch, ...(warning ? { warning } : {}) } satisfies SlateEdgeData,
         }];
     });

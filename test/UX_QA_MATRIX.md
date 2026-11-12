@@ -46,7 +46,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Add | Value adds a Python literal; valid free-text name adds placeholder; open flow excludes itself | U callable/codegen; C add literal/placeholder and current-flow exclusion |
 | Creation | New node, placeholder, flow dispatch with revision and canvas coordinates | Q command matrix; H creation/round-trip |
 | Creation | Native signature/name prompts validate and cancel without writes | P validators/cancel for node, placeholder and flow, including second intent prompt; W actual invalid signature Enter/Escape, intent cancellation, valid node and invalid/valid flow prompts with disk assertions |
-|Inspector | Docked right-hand layout keeps `.harness-canvas` unobstructed; drag/keyboard separator resizes inspector and canvas | B docked/resizable inspector; C draft preservation on double-click hide |
+| Inspector | Docked right-hand layout (`280px–640px`, clamped so `.harness-canvas` keeps `>= 260px` width) keeps `.harness-canvas` unobstructed; drag/keyboard separator resizes inspector and canvas while preserving the 400 ms click debounce for double-click draft retention | B docked/resizable inspector + 800px viewport clamp; C draft preservation on double-click hide |
 | Inspector | Intent and contract save separately against selected target | Q inspector metadata/code/lock; H JSON edits |
 | Inline intent | Enter commits, Escape cancels; unchanged text avoids write | B Enter commit; Q Escape; C unchanged, blur and Shift+Enter |
 | Code | Initial Save disabled; editing enables Save with code and base source hash | Q inspector code; H valid/invalid edits; U adapter/node validation |
@@ -56,7 +56,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Context | Chip removes dependency; keyboard picker selection; self/duplicate/non-durable candidates excluded | B picker; C chip removal, keyboard add/dismiss and self/existing/non-durable exclusions |
 | Data wires | Port drag creates root/flow endpoint action; one incoming wire replaces previous; mismatched port types warn on wire, status bar, and wire menu without blocking connection | B data wire + type-mismatch warning; H root/flow wiring; U connect & `typesMismatch` matrix |
 | Data wires | Edge Remove wire disconnects; reject self/mixed context-data/invalid direction/group-plus to group-plus | H disconnect; U validation; C data-wire removal and self/mixed/reverse/group-plus negative gestures |
-| Health report | Topbar `Health` button and palette `Node health report` open read-only report with coverage caveats ("never safe to delete automatically"), unreferenced candidates, exact/near duplicates, LCS diff viewer, and `Go to` node navigation | B health report dialog, caveats, diff and navigation; H `uses`/`imports` indexing; U `harness_health.test.ts` |
+| Health report | Topbar `Health` button and palette `Node health report` open read-only report with modal focus trap and canvas-shortcut suppression, coverage caveats ("never safe to delete automatically"), unreferenced candidates, exact/near duplicates, LCS diff viewer, and `Go to` node navigation | B health report dialog, focus trap, shortcut guard, caveats, diff and navigation; H `uses`/`imports` indexing; U `harness_health.test.ts` |
 | Group ports | Wire to `+ new` automatically creates typed, uniquely named group input/output | H persisted ports and compile; U flow ports; C group-plus dispatch (there is no native naming prompt for this action) |
 | Values | Escape restores literal; blur saves changed value scoped to root or flow | Q literal cancel/blur (root); C flow literal Enter commits once; P root/flow values persisted and reindexed after reopen; U codegen |
 | References | Find references highlights definition and refs and reports usage; Delete reference targets ref only | B refs; Q context menu deletion; H delete persistence |
@@ -106,7 +106,7 @@ All previously listed functional gaps now have the automated evidence shown abov
 - Enter on a value editor previously saved twice (once directly and once on blur); it now commits once through blur.
 - Late results from an older or dismissed search no longer replace the latest search UI.
 - An unrelated generation failure or proposal no longer terminates another active generation.
-- Selecting a node opens the docked inspector immediately without covering the canvas; double-clicking a node hides the inspector while preserving unsaved drafts.
+- Selecting a node opens the docked inspector (with a 400 ms single-click debounce so double-clicking a node hides the inspector while preserving unsaved drafts) without covering `.harness-canvas`, and resizing clamps the inspector so at least 260px of canvas width remains.
 - Cancelling the second new-node intent prompt now aborts creation instead of creating a node with empty intent.
 - Proposal acceptance checks the current lock and refuses to claim success if VS Code cannot save the node.
 - Undo accepted edit checks the accepted document version, so it cannot undo a subsequent human edit instead. Normal native Undo restores the buffer; Save persists that restored content.

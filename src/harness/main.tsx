@@ -195,14 +195,20 @@ function CodeEditor({ initial, onChange }: { initial: string; onChange(value: st
 }
 
 const MIN_INSPECTOR_WIDTH = 280;
-const MAX_INSPECTOR_WIDTH = 720;
-const clampInspectorWidth = (value: number) => Math.max(MIN_INSPECTOR_WIDTH, Math.min(MAX_INSPECTOR_WIDTH, Math.round(value)));
+const MAX_INSPECTOR_WIDTH = 640;
+const MIN_CANVAS_WIDTH = 260;
+const LIBRARY_WIDTH = 240;
+const maxInspectorWidthForViewport = (viewportWidth: number, libraryOpen: boolean) =>
+    Math.max(MIN_INSPECTOR_WIDTH, Math.min(MAX_INSPECTOR_WIDTH, viewportWidth - (libraryOpen ? LIBRARY_WIDTH : 0) - MIN_CANVAS_WIDTH));
+const clampInspectorWidth = (value: number, viewportWidth = window.innerWidth, libraryOpen = false) =>
+    Math.max(MIN_INSPECTOR_WIDTH, Math.min(maxInspectorWidthForViewport(viewportWidth, libraryOpen), Math.round(value)));
 
 function Inspector({
-    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, visible, width, onResize,
+    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, visible, width, maxWidth, onResize,
 }: {
     visible: boolean;
     width: number;
+    maxWidth: number;
     onResize(width: number): void;
     onEnterFlow(flowId: string): void;
     onGoTo(target: string): void;
@@ -250,14 +256,14 @@ function Inspector({
                 aria-label="Resize inspector"
                 aria-orientation="vertical"
                 aria-valuemin={MIN_INSPECTOR_WIDTH}
-                aria-valuemax={MAX_INSPECTOR_WIDTH}
+                aria-valuemax={maxWidth}
                 aria-valuenow={width}
                 onMouseDown={event => {
                     event.preventDefault();
                     const startX = event.clientX;
                     const startWidth = width;
                     const onMove = (moveEvent: MouseEvent) => {
-                        onResize(clampInspectorWidth(startWidth + (startX - moveEvent.clientX)));
+                        onResize(startWidth + (startX - moveEvent.clientX));
                     };
                     const onUp = () => {
                         window.removeEventListener('mousemove', onMove);
@@ -267,8 +273,8 @@ function Inspector({
                     window.addEventListener('mouseup', onUp);
                 }}
                 onKeyDown={event => {
-                    if (event.key === 'ArrowLeft') { event.preventDefault(); onResize(clampInspectorWidth(width + 24)); }
-                    if (event.key === 'ArrowRight') { event.preventDefault(); onResize(clampInspectorWidth(width - 24)); }
+                    if (event.key === 'ArrowLeft') { event.preventDefault(); onResize(width + 24); }
+                    if (event.key === 'ArrowRight') { event.preventDefault(); onResize(width - 24); }
                 }}
             />
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
@@ -682,21 +688,43 @@ function NodeHealthReport({ snapshot, onNavigate, onClose }: {
 }) {
     const report = useMemo(() => buildNodeHealthReport(snapshot), [snapshot]);
     const [diffPair, setDiffPair] = useState<{ leftId: string; rightId: string } | null>(null);
+    const dialogRef = useRef<HTMLElement | null>(null);
+    useEffect(() => {
+        const firstButton = dialogRef.current?.querySelector<HTMLElement>('button');
+        (firstButton ?? dialogRef.current)?.focus();
+    }, []);
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
             if (event.key === 'Escape') {
                 event.preventDefault();
+                event.stopPropagation();
                 onClose();
+                return;
+            }
+            if (event.key === 'Tab') {
+                const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? []);
+                event.preventDefault();
+                event.stopPropagation();
+                if (focusable.length === 0) {
+                    dialogRef.current?.focus();
+                    return;
+                }
+                const active = document.activeElement as HTMLElement | null;
+                const index = active ? focusable.indexOf(active) : -1;
+                const nextIndex = event.shiftKey
+                    ? (index <= 0 ? focusable.length - 1 : index - 1)
+                    : (index === -1 || index === focusable.length - 1 ? 0 : index + 1);
+                focusable[nextIndex].focus();
             }
         };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
     }, [onClose]);
     const sourceOf = (id: string) => snapshot.documents.find(doc => nodeIdOf(doc.path) === id)?.source ?? '';
     const diffLines = useMemo(() => diffPair ? diffNodeCode(sourceOf(diffPair.leftId), sourceOf(diffPair.rightId)) : [], [diffPair, snapshot]);
     return (
         <div className="health-backdrop" onMouseDown={onClose}>
-            <section className="health-report" role="dialog" aria-label="Node health report" onMouseDown={event => event.stopPropagation()}>
+            <section ref={dialogRef} tabIndex={-1} className="health-report" role="dialog" aria-modal="true" aria-label="Node health report" onMouseDown={event => event.stopPropagation()}>
                 <header className="health-report__header">
                     <div>
                         <h2>Node health report</h2>
@@ -830,6 +858,7 @@ function HarnessApp() {
     const [showAllContext, setShowAllContext] = useState(false);
     const [activeContextNodes, setActiveContextNodes] = useState<string[]>([]);
     const [inspectorWidth, setInspectorWidth] = useState(360);
+    const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
     const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
     const inspectorTimer = useRef<number | null>(null);
     const [adding, setAdding] = useState<AddRequest | null>(null);
@@ -848,6 +877,11 @@ function HarnessApp() {
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
     useEffect(() => {
+        const onResize = () => setViewportWidth(window.innerWidth);
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, []);
+    useEffect(() => {
         if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current);
         setInspectorNodeId(null);
         if (!selected || selected.data.kind === 'group' || selected.data.kind === 'folder') return;
@@ -856,6 +890,9 @@ function HarnessApp() {
         return () => { if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current); };
     }, [selected?.id, selected?.data.kind, scope.flow, scope.view]);
     const inspectorVisible = Boolean(selected && inspectorNodeId === selected.id && selected.data.kind !== 'group' && selected.data.kind !== 'folder');
+    const maxInspectorWidth = maxInspectorWidthForViewport(viewportWidth, libraryOpen);
+    const effectiveInspectorWidth = clampInspectorWidth(inspectorWidth, viewportWidth, libraryOpen);
+    const inspectorDocked = inspectorVisible && viewportWidth >= (libraryOpen ? LIBRARY_WIDTH : 0) + MIN_INSPECTOR_WIDTH + MIN_CANVAS_WIDTH;
     const selectedDocument = selected
         ? snapshot.documents.find(document => nodeIdOf(document.path) === selected.data.path)
         : undefined;
@@ -948,6 +985,7 @@ function HarnessApp() {
 
     useEffect(() => {
         const openPalette = (event: KeyboardEvent) => {
+            if (healthOpen) return;
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
                 event.preventDefault();
                 event.stopPropagation();
@@ -965,10 +1003,11 @@ function HarnessApp() {
         };
         window.addEventListener('keydown', openPalette, true);
         return () => window.removeEventListener('keydown', openPalette, true);
-    }, []);
+    }, [healthOpen]);
 
     useEffect(() => {
         const focusSelectedUnit = (event: KeyboardEvent) => {
+            if (healthOpen) return;
             const target = event.target as HTMLElement | null;
             if (event.key !== 'Enter' || target?.matches('input, textarea, button, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
             if (!selected?.data.unit) return;
@@ -977,7 +1016,7 @@ function HarnessApp() {
         };
         window.addEventListener('keydown', focusSelectedUnit);
         return () => window.removeEventListener('keydown', focusSelectedUnit);
-    }, [selected?.data.unit]);
+    }, [selected?.data.unit, healthOpen]);
 
     useEffect(() => {
         if (!boardMenu) return;
@@ -1051,7 +1090,7 @@ function HarnessApp() {
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
             const target = event.target as HTMLElement | null;
-            if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor') || paletteOpen || adding) return;
+            if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor') || paletteOpen || adding || healthOpen) return;
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'g') {
                 event.preventDefault();
                 groupSelection();
@@ -1211,7 +1250,7 @@ function HarnessApp() {
     }, [adding, snapshot, scope, paletteQuery]);
 
     return (
-        <main className="harness-shell" style={{ '--inspector-width': `${inspectorWidth}px` } as React.CSSProperties}>
+        <main className="harness-shell" style={{ '--inspector-width': `${effectiveInspectorWidth}px` } as React.CSSProperties}>
             <header className="harness-topbar">
                 <nav className="harness-crumbs" aria-label="Canvas path">
                     <strong>SLATE</strong>
@@ -1256,7 +1295,7 @@ function HarnessApp() {
             />}
             <ScopeContext.Provider value={scope.flow}>
             <section
-                className={`harness-canvas ${libraryOpen ? 'harness-canvas--library' : ''} ${inspectorVisible ? 'harness-canvas--inspector' : ''}`}
+                className={`harness-canvas ${libraryOpen ? 'harness-canvas--library' : ''} ${inspectorDocked ? 'harness-canvas--inspector' : ''}`}
                 aria-label="Python project graph"
                 onMouseMove={event => { pointer.current = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? null; }}
                 onDragOver={event => { if (event.dataTransfer.types.includes('application/slate-target')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
@@ -1414,8 +1453,9 @@ function HarnessApp() {
             {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
                 key={selected.id}
                 visible={inspectorVisible}
-                width={inspectorWidth}
-                onResize={setInspectorWidth}
+                width={effectiveInspectorWidth}
+                maxWidth={maxInspectorWidth}
+                onResize={next => setInspectorWidth(clampInspectorWidth(next, viewportWidth, libraryOpen))}
                 onEnterFlow={enterFlow}
                 onGoTo={goTo}
                 node={selected}
