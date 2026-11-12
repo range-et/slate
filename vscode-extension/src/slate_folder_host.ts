@@ -22,6 +22,7 @@ export interface FolderIndex {
 export class SlateFolderHost {
     layout: SlateLayout = emptyLayout();
     private deferredRefs: CanvasRef[] = [];
+    private readonly flowVersions = new Map<string, number | null>();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
     constructor(readonly root: vscode.Uri) {}
@@ -59,10 +60,12 @@ export class SlateFolderHost {
     /** Parsed flows by id; unreadable flow files are reported with a problem. */
     async readFlows(): Promise<HarnessFlow[]> {
         const flows: HarnessFlow[] = [];
+        this.flowVersions.clear();
         for (const uri of await vscode.workspace.findFiles(this.flowPattern())) {
             const id = flowIdForPath(this.relative(uri));
             const file = id ? await this.read(pathForFlowId(id)) : undefined;
             if (!id || !file) continue;
+            this.flowVersions.set(id, file.version);
             try {
                 flows.push({ id, flow: parseFlow(file.text) });
             } catch (error) {
@@ -234,6 +237,23 @@ export class SlateFolderHost {
         return file.text;
     }
 
+    hasUnsyncedDirtyFlow(): boolean {
+        return vscode.workspace.textDocuments.some(document => {
+            if (!document.isDirty) return false;
+            const id = flowIdForPath(this.relative(document.uri));
+            return id !== null && this.flowVersions.get(id) !== document.version;
+        });
+    }
+
+    async syncDirtyLayout(): Promise<void> {
+        if (!this.isDirty(LAYOUT_PATH)) return;
+        const latest = await this.readLayout();
+        Object.assign(this.layout, {
+            ...latest,
+            positions: { ...this.layout.positions, ...latest.positions },
+        });
+    }
+
     async writeLayout(): Promise<void> {
         const refs = [...this.deferredRefs, ...this.layout.refs.filter(ref => !this.deferredRefs.some(item => item.id === ref.id))];
         await this.writeText(this.uri(LAYOUT_PATH), serializeLayout({ ...this.layout, refs }));
@@ -247,11 +267,8 @@ export class SlateFolderHost {
                 edit.replace(open.uri, new vscode.Range(open.positionAt(0), open.positionAt(open.getText().length)), text);
                 if (!await vscode.workspace.applyEdit(edit)) throw new Error(`VS Code rejected the edit to ${this.relative(uri)}.`);
             }
-            try {
-                if (await open.save()) return;
-            } catch {
-                // Fall back to direct write if the open document's disk timestamp is stale.
-            }
+            if (!await open.save()) throw new Error(`VS Code could not save ${this.relative(uri)}.`);
+            return;
         }
         await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
     }
@@ -290,6 +307,7 @@ export class SlateFolderHost {
         edit.insert(uri, new vscode.Position(0, 0), serializeNode(node));
         if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the new node.');
         await (await vscode.workspace.openTextDocument(uri)).save();
+        await this.syncDirtyLayout();
         this.layout.positions[nodeId] = position;
         await this.writeLayout();
         return nodeId;

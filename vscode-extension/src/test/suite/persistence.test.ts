@@ -501,6 +501,26 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(snapInstancesAfterDirtyCreate.some(item => item.id === 'ref-legacy' && item.node === 'clamp'));
         assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, snapInstancesAfterDirtyCreate);
 
+        // Moving a card on the canvas while layout.json has unsaved editor changes merges and preserves the unsaved edits.
+        const layoutEditorDoc = await vscode.workspace.openTextDocument(layoutUri);
+        const unsavedLayoutEdit = new vscode.WorkspaceEdit();
+        unsavedLayoutEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                positions: { clamp: { x: 77, y: 88 }, normalize: { x: 110, y: 130 } },
+                notes: [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across drag', attachedTo: null }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(unsavedLayoutEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await post({ type: 'layout', positions: { normalize: { x: 140, y: 160 } } });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        const mergedLayout = await read('slate', 'layout.json');
+        assert.deepEqual(mergedLayout.positions.clamp, { x: 77, y: 88 });
+        assert.deepEqual(mergedLayout.positions.normalize, { x: 140, y: 160 });
+        assert.deepEqual(mergedLayout.notes, [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across drag', attachedTo: null }]);
+
         // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await vscode.workspace.fs.writeFile(layoutUri, encode({

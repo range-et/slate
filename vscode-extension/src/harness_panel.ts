@@ -149,7 +149,8 @@ export class HarnessPanel implements vscode.Disposable {
         }
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (this.folder.nodeId(event.document.uri) !== null) this.scheduleRefresh();
+                const relative = this.folder.relative(event.document.uri);
+                if (this.folder.nodeId(event.document.uri) !== null || flowIdForPath(relative) !== null) this.scheduleRefresh();
             }),
             vscode.window.onDidChangeTextEditorSelection(event => this.selectFromEditor(event.textEditor)),
             vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -449,6 +450,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     private async updateFolderLayout(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
         if (!this.snapshot || !message.positions || typeof message.positions !== 'object') return;
+        await folder.syncDirtyLayout();
         // scope: undefined = root canvas, 'map' = Map view, otherwise a flow id.
         const scope = typeof message.scope === 'string' ? message.scope : null;
         const flow = scope && scope !== 'map' ? this.flow(scope) : null;
@@ -549,7 +551,16 @@ export class HarnessPanel implements vscode.Disposable {
 
     /** Canvas actions for refs, placeholders, flows, and data wires. Returns false when not one of them. */
     private async handleCanvasAction(action: Record<string, unknown>): Promise<boolean> {
+        if (![
+            'createRef', 'createPlaceholder', 'placeholderToRef', 'placeholderToNode',
+            'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
+            'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
+        ].includes(String(action.kind))) {
+            return false;
+        }
         const folder = this.folder;
+        if (folder.hasUnsyncedDirtyFlow()) await this.refresh();
+        await folder.syncDirtyLayout();
         const layout = folder.layout;
         const scope = typeof action.flow === 'string' && action.flow !== MAIN_FLOW ? action.flow : null;
         const flowId = scope ?? MAIN_FLOW;
@@ -798,6 +809,7 @@ export class HarnessPanel implements vscode.Disposable {
             ? null
             : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo) ? message.attachedTo : null;
         try {
+            await folder.syncDirtyLayout();
             let select: string | null = null;
             if (message.type === 'noteCreate') {
                 if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) throw new Error('invalid board position');
