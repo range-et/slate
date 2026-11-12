@@ -31,6 +31,8 @@ keep outstanding tasks on GitHub.
 | Library sidebar + read-only library code (`slate.json` `library`) | ✅ shipped |
 | Compose / Map toggle | ✅ shipped |
 | Add-node search (Tab, Shift+A, double-click, wire drop filtered by type) | ✅ shipped |
+| Read-only Node Health Report (unreferenced candidates, exact/near duplicates, diff, caveats) | ✅ shipped |
+| Docked & resizable Inspector, on-demand context links, wire type-mismatch warnings | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -315,17 +317,50 @@ Completed for [issue #3](https://github.com/range-et/slate/issues/3):
   persistence and migration tests (`vscode-extension/src/test/suite/extension.test.ts`),
   verified through `npm run verify:launch`.
 
+## Shipped — Node health report and canvas fixes (2026-11-11, S-504)
+
+Completed for [issue #7](https://github.com/range-et/slate/issues/7):
+
+- **Read-only Node Health Report** (`src/harness/health.ts`, topbar **Health**
+  button and palette **Node health report**). Lists unreferenced definition
+  candidates (no flow instance, canvas reference, placeholder match, `uses`
+  entry, or resolved free-variable Python reference, while noting nodes
+  referenced only as prompt `context`), exact duplicates (identical normalized
+  Python code after stripping comments, docstrings, whitespace outside string
+  literals, and alpha-renaming definition and parameter names), and near
+  duplicates (heuristic token-trigram similarity on non-stub definitions).
+  Includes one-click **Go to** canvas navigation, a read-only line-by-line diff
+  viewer, modal focus trapping, and canvas-shortcut suppression while open.
+  Explicitly displays coverage caveats (dynamic imports/reflection, `import
+  module` attribute calls, external entrypoints) and never labels "no known
+  references" safe to delete.
+- **Docked, resizable Inspector.** The Inspector docks to the right of
+  `.harness-canvas` with a drag and keyboard (`ArrowLeft`/`ArrowRight`) resize
+  separator (`280px–640px`, clamped so `.harness-canvas` retains at least
+  `260px` width before switching to overlay on narrow viewports) instead of
+  floating over canvas nodes, while preserving the 400 ms single-click selection
+  debounce that protects unsaved inspector drafts on double-click.
+- **Type-mismatch warnings on wires.** Data wires between incompatible port
+  annotations (supporting quoted forward references and recursive generic type
+  arguments such as `list[T]`, `dict[K, V]`, `tuple[...]`, and `set[T]`) render
+  with warning styling (`slate-edge--mismatch`), a `⚠ <source> → <target>`
+  label, a status-bar mismatch count and connect notice, and a warning banner in
+  the wire context menu. Mismatched connections are warned, never blocked.
+- **Context links on demand.** Context edges (`slate-edge--context`) are hidden
+  by default so ordinary wires read as dataflow, revealed automatically for the
+  selected or actively wired node, and toggleable globally via the topbar
+  `context` button or Command Palette (**Show all context links** / **Show
+  context links on demand**).
+
 ## Partially done
 
 - **Context entry points.** Wire, palette, and picker are shipped; `@`
   completion inside intent text is not.
 - **Flows editing.** Flow and wire edits are plain file writes (no
   VS Code undo). Flow inputs/outputs can't be renamed or removed from the
-  canvas (edit the JSON). Type colors don't block mismatched wires. Node files
-  can't be deleted from the canvas. Instances in a flow can't yet show values
-  (Phase 5).
-- **Inspector overlap.** The Inspector panel covers nodes near the right
-  edge while a node is selected.
+  canvas (edit the JSON). Type mismatches on wires are warned (not blocked).
+  Node files can't be deleted from the canvas. Instances in a flow can't yet
+  show values (Phase 5).
 - **Proposal lifecycle.** Generated code is reviewed, but intent/contract/
   context/lock edits apply immediately without review. Candidates cannot be
   edited or regenerated with feedback.

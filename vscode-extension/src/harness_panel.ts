@@ -11,7 +11,7 @@ import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
 import { searchUnits } from './search';
 import {
-    connect, disconnect, emptyFlow, extractFlow, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
+    connect, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
     removeInstances, uniqueName, unitSignature, type Port,
 } from './flow';
 import { checkNodeCode, codeLines, CONFIG_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId } from './slate_folder';

@@ -277,7 +277,7 @@ export function indexNode(
     const diagnostics = [...parsed.diagnostics];
     if (node.kind) {
         // Module state: any statements; conditional definitions inside it are not separate nodes.
-        return { document: { ...parsed, ...base, nodeKind: node.kind, units: [], diagnostics }, node, code };
+        return { document: { ...parsed, ...base, source: code, nodeKind: node.kind, imports: node.imports, uses: node.uses, units: [], diagnostics }, node, code };
     }
     if (parsed.valid) {
         const topLevel = parsed.units.filter(unit => unit.parentId === null);
@@ -304,7 +304,7 @@ export function indexNode(
             diagnostics.push({ code: 'node-name-mismatch', message: `File name must match name "${node.name}".`, range: ZERO_RANGE });
         }
     }
-    return { document: { ...parsed, ...base, diagnostics }, node, code };
+    return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, diagnostics }, node, code };
 }
 
 /** Validate replacement code for a node: one definition with the node's name (any statements for module state). */
