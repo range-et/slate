@@ -4,11 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Slate is a node canvas for composing Python with a local LLM. The active
-product is the **XYFlow harness**: a React/TypeScript webview in `src/harness/`
-(entry `src/harness.html`) hosted by the VS Code extension in
-`vscode-extension/src/` (TypeScript Python adapter on Lezer, `slate/` folder
-loader, port/compile/describe, search, llama.cpp transport, proposals).
+Slate is a visual node canvas for composing software (Python first, then Prose /
+Grant & Research mode) — **"Grasshopper where you forge the atomic components as
+you build the software."** The active product is the **XYFlow harness**: a
+React/TypeScript webview in `src/harness/` (entry `src/harness.html`) hosted by
+the VS Code extension in `vscode-extension/src/` (TypeScript Python adapter on
+Lezer, `slate/` folder loader, port/compile/describe, search, `llama.cpp`
+transport, proposals, and the planned Frontier Architect MCP server).
+
+- **Atomic Library Units (`slate/nodes/**/*.json`):** The per-project component
+  library and the *only* place where raw code (or atomic text-transform
+  operators in Prose mode) lives. Bounded by **JPL-60** (`≤60` lines per
+  function node, explicit parameter/return type annotations, bounded control
+  flow, `Pydantic` contract validation, `pytest` checks, and `mutmut` mutation
+  testing).
+- **Compositions / Flows (`slate/flows/**/*.json`):** Everything above the
+  60-line atomic level is a Flow — a wired graph of atomic library instances
+  compiled deterministically (`flowToNode`) without any LLM writing glue code.
+- **Two-Tier AI Division of Labor:**
+  - **Tier 1 — Frontier Architect (Slate MCP Server, zero function bodies):**
+    Connects frontier models (Claude, Gemini, Antigravity) to the live workspace
+    to search/place spatial notes (`slate_find`, `slate_place_notes`), pan/zoom
+    the live canvas camera (`slate_focus`), define typed atomic stubs +
+    contracts + cases (`slate_define_stub`, refusing arbitrary body code), wire
+    flows (`slate_wire_flow`), and split oversized (`>60`-line) nodes (`S-510`).
+  - **Tier 2 — Local LLM Component Forge (`llama.cpp`):** Takes a single forge
+    input micro-packet (`≤600` tokens total across the target atomic stub's
+    signature/intent/contract, selected cases, any bounded retry feedback, and
+    bounded neighbor signatures + intents; trimming neighbor context first and
+    refusing oversized targets whose stub + cases + retry feedback alone exceed
+    `600` tokens) and forges the `≤60`-line function body + its unit check
+    (`S-512`), verified by `Pydantic` + `pytest` + `mutmut` (`S-511`, `S-513`).
 
 - Direction: [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)
 - Inventory: [features.md](features.md)

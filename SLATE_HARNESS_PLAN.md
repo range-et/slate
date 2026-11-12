@@ -1,21 +1,54 @@
-# Slate Plan — a node canvas for composing Python
+# Slate Plan — a node canvas for composing Python (and Prose)
 
-Status: active — revised 2026-10-13 (Phases 0–4 shipped; Phases 5–9
-refined after an oracle review of plan and code).
+Status: active — revised 2026-11-11 (Phases 0–4 shipped; architecture and
+critical path updated for the Two-Tier AI Division of Labor, JPL-60 atomic
+component library, and Usability-First Python → Prose Mode sequence).
 Replaces the 2026-09-23 "source-first harness" plan. Shipped work is in
 [features.md](features.md); tasks are in [GitHub Issues](https://github.com/range-et/slate/issues).
 
 ## North star
 
-One large canvas per project where Python functions are nodes with typed
-ports, wires carry values, and you compose freely — the way Grasshopper,
-Blender Geometry/Shader Nodes, or Unreal Blueprints feel. You (or a local
-llama.cpp model) write the small leaf functions; you wire them together by
-hand; groups of wired nodes become real Python functions; values flow through
-the graph live so you can see what every node does.
+**Grasshopper where you forge the atomic components as you build the software.**
+One large canvas per project where atomic library units have typed ports, wires
+carry values, and you compose freely — the way Grasshopper, Blender
+Geometry/Shader Nodes, or Unreal Blueprints feel:
 
-The local model is a helper for writing one node's body. It is never the
-driver.
+- **Atomic Library Units (`slate/nodes/**/*.json`):** The per-project component
+  library — the *only* place where raw code (or atomic text-transform operators
+  in Prose mode) lives. Strictly bounded by **JPL-60** (a relaxed NASA JPL Rule
+  of 10: `≤60` lines per function node, explicit parameter and return type
+  annotations, bounded control flow, `Pydantic` contract validation, `pytest`
+  checks, and `mutmut` mutation testing). Once verified, atomic units live in
+  the project's Node Library as trusted, reusable building blocks.
+- **Compositions / Flows (`slate/flows/**/*.json`):** Everything above the
+  60-line atomic level is a Flow — a wired graph of atomic library instances
+  that compiles deterministically (`flowToNode`) without any LLM writing glue
+  code.
+
+### Two-Tier AI Division of Labor
+
+Instead of a blanket "no cloud anywhere" rule, Slate enforces a strict
+**architectural boundary** between system design and implementation:
+
+1. **Tier 1 — Frontier Architect (via the Slate MCP Server, zero function bodies):**
+   Connects any frontier model (Claude, Gemini, Antigravity) to the live Slate
+   workspace to co-architect with the user:
+   - Search and inspect the graph (`slate_find`) and place spatial notes
+     (`slate_place_notes`).
+   - Control the live canvas camera (`slate_focus`) to pan/zoom the user's
+     viewport directly to the nodes, flows, or notes under discussion.
+   - Define typed atomic stubs + contracts + structured test cases
+     (`slate_define_stub`, which strictly refuses arbitrary function body code).
+   - Wire flows (`slate_wire_flow`) and split oversized (`>60`-line) nodes into
+     smaller stubs.
+2. **Tier 2 — Local LLM Component Forge (`llama.cpp`):**
+   Takes a single forge input micro-packet (`≤600` tokens total: the target
+   atomic stub's signature/intent/contract, selected cases, any bounded retry
+   feedback, and bounded neighbor signatures + intents, trimming neighbor
+   context first and refusing oversized targets whose stub + cases + retry
+   feedback alone exceed `600` tokens) and generates or debugs the `≤60`-line
+   function body and its unit check locally, verified by `Pydantic` + `pytest` +
+   `mutmut`.
 
 ### Reuse by identity
 
@@ -281,35 +314,59 @@ confirm the expected result. Cases run for hand edits and model candidates
 alike, and editing a shared node shows its cases and the affected flows'
 cases.
 
-### The local model's role
+### Two-tier model workflow and verification
 
-Phase 7. "Generate body" works on a definition reached through one of its
-uses. The packet is the target's code and signature, intent and contract, a
-bounded summary of what it uses and its immediate neighbors (signature +
-intent only), explicit context summaries, and selected cases. It never
-aggregates every linked use's neighborhood. The exact packet and anything
-omitted are shown; oversized targets are refused, not truncated. Candidates
-compile in a scratch overlay and run the cases before review. **Try up to
-three revisions** is an explicit action that shows every attempt and never
-accepts automatically; "no cases" means untested, not passed. Acceptance is
-bound to everything the packet used (code, imports, intent, contract, lock,
-cases, graph context), not just code hashes.
+1. **Frontier Architect via MCP (`S-510`):** Co-designs the graph structure
+   with the user — placing spatial notes, panning/zooming the live canvas
+   camera (`slate_focus`), defining typed stubs + contracts + cases
+   (`slate_define_stub`, zero function bodies), wiring flows
+   (`slate_wire_flow`), and decomposing nodes that exceed the JPL-60 limit.
+2. **JPL-60 Node Hygiene (`S-511`):** Every atomic function node in
+   `slate/nodes/**/*.json` is checked for `≤60` lines, explicit parameter and
+   return type annotations, bounded control flow, and contract/check readiness
+   in `slate_folder.ts` (`checkNodeCode`), compile diagnostics, and canvas
+   badges.
+3. **Local Component Forge (`S-512`):** `llama.cpp` works on a single atomic
+   definition reached through one of its uses. The forge input micro-packet is
+   capped at `≤600` tokens total across all inputs: the target stub's signature,
+   intent, contract, selected structured cases, any bounded retry feedback, and
+   bounded neighbor signatures + intents (never aggregating every linked use's
+   neighborhood). Neighbor context is trimmed first to fit the `≤600`-token
+   total packet budget; oversized targets whose stub, cases, and retry feedback
+   alone exceed `600` tokens are refused rather than truncated. It generates
+   both the `≤60`-line Python implementation and its corresponding
+   `Pydantic`/`pytest` check, and shows the exact packet and any omitted
+   neighbor context.
+4. **Per-Node Verification & Mutation Gate (`S-513`):** Candidates compile in a
+   scratch overlay and run `pytest` + `Pydantic` contract validation + scoped
+   `mutmut` mutation testing per atomic node. Live verification badges appear
+   on canvas nodes, and an explicit **Try up to three revisions** action feeds
+   failing tests or surviving mutants back to the local model without ever
+   auto-accepting ("no cases" = untested, not passed). Acceptance is bound to
+   all packet inputs (code, imports, intent, contract, lock, cases, graph
+   context).
 
 ## Safety contract
 
 1. Node JSON files and their dirty buffers are authoritative. The webview never
    writes files; it sends typed intent to the extension host.
 2. The extension host owns filesystem access, indexing, Compile, the runner,
-   llama.cpp transport, proposals, and `WorkspaceEdit` application.
+   the MCP server endpoint, `llama.cpp` transport, proposals, and
+   `WorkspaceEdit` application.
 3. Every node mutation (new node, metadata edit, code edit, generated body)
    is bound to the target node's code hash, applied as one `WorkspaceEdit`,
    and undoable. Structural edits (wires, flows, copies, forks, ports,
    deletion) become undoable multi-file transactions in Phase 5; until then
    they are plain file writes. Layout writes are plain file writes.
 4. Staleness is checked per affected node file, not per global revision.
-5. Code runs only in trusted workspaces, only on Run or with Live on, with a
-   timeout and Stop. A child process is not a sandbox. There is no cloud
-   fallback, and cloud or autonomous model behavior is out of scope.
+5. **Two-tier AI architectural boundary:** Frontier models connect exclusively
+   through the Slate MCP Server (`S-510`) to operate on spatial notes, camera
+   focus, typed stubs/contracts/cases, and flow wiring — `slate_define_stub`
+   refuses arbitrary function body code. Function bodies (`≤60` lines) and unit
+   checks are forged exclusively by the local `llama.cpp` helper (`S-512`) or
+   written by the user, and verified via `Pydantic` + `pytest` + `mutmut`
+   (`S-513`). Code runs only in trusted workspaces, only on Run or with Live
+   on, with a timeout and Stop. A child process is not a sandbox.
 
 ## Phases
 
@@ -356,12 +413,39 @@ Tab into flows.
 **Exit:** build a four-node pipeline from existing nodes without typing
 Python and get a real Python function out of Compile.
 
-Order from here: reuse is made safe first, because running code and model
-edits multiply the effect of changing a shared node. Execution and cases come
-next because they make composition tangible without a model. The model then
-uses that verification. Control flow extends it. Self-hosting comes last to
-prove the format is language-agnostic; swap Phases 8 and 9 only if dogfooding
-on TypeScript becomes the priority.
+Order from here (Usability First — Python, then Prose Mode): reuse and the
+Usability-First Python critical path (`S-510` Frontier Architect MCP + camera
+sync, `S-511` JPL-60 hygiene guardrails, `S-512` local `llama.cpp` stub-to-body
+and check forge, `S-513` per-node `Pydantic` + `pytest` + `mutmut` verification
+runner and badges) make day-to-day Python authoring and verification immediate
+alongside Phase 5–8 graph capabilities. Next, **Prose / Grant & Research Mode**
+(`S-850`, `language: "prose"`) ships as the second adapter on the same `slate/`
+JSON spine and MCP Architect ("ComfyUI for text"). TypeScript self-hosting
+(Phase 9) stays deferred behind Python and Prose usability.
+
+### Usability-First Critical Path (S-510–S-513)
+
+- **S-510 Frontier Architect MCP server and live canvas camera sync:** Expose
+  MCP tools (`slate_find`, `slate_focus`, `slate_place_notes`,
+  `slate_define_stub`, `slate_wire_flow`) so a frontier architect model can
+  search the graph, pan/zoom the live canvas camera to features or notes under
+  discussion, author spatial notes, define typed stubs + contracts + cases
+  (refusing body code), wire flows, and split oversized (`>60`-line) nodes into
+  smaller stubs.
+- **S-511 JPL-60 node hygiene guardrails:** Enforce `≤60` lines per function
+  node (with warning/refactor prompts when exceeded), mandatory parameter and
+  return type annotations, and contract/check readiness in `slate_folder.ts`
+  (`checkNodeCode`), compile diagnostics, and canvas badges.
+- **S-512 Local llama.cpp stub-to-body and check forge:** Generate both the
+  `≤60`-line Python implementation and its corresponding `Pydantic`/`pytest`
+  check from an atomic stub in a bounded forge input micro-packet (`≤600` tokens
+  total across target stub, cases, retry feedback, and neighbor signatures +
+  intents, trimming neighbor context first and refusing oversized targets).
+- **S-513 Per-node Pydantic + pytest + mutmut verification runner and canvas
+  badges:** Run `pytest` + `Pydantic` contract checks + scoped `mutmut`
+  mutation testing per atomic node; surface live verification badges on canvas
+  nodes and support bounded local retry (up to 3 revisions) using failing test
+  or surviving mutant feedback.
 
 ### Phase 5 — linked building blocks and trustworthy editing
 
@@ -409,7 +493,25 @@ bound.
 **Exit:** a list-processing graph and a bounded state update, with an
 inspected iteration and proof that an unselected branch never ran.
 
-### Phase 9 — TypeScript and staged self-hosting
+### Phase 8.5 (S-850) — Prose / Grant & Research mode ("ComfyUI for text", `language: "prose"`)
+
+Sequenced immediately after the Python usability critical path (and before
+TypeScript self-hosting). Implements a second adapter on the same `slate/` JSON
+spine and MCP Architect:
+- Data wires carry raw text passages, claims, evidence snippets, and structured
+  citations.
+- Atomic library nodes (`slate/nodes/**/*.json`) are reusable text-modification
+  operators and rhetorical transforms bounded by explicit input/output
+  contracts.
+- Deterministic checks enforce word budgets, required citations, section
+  constraints, and agency rubrics.
+- **Compile** emits assembled Markdown or LaTeX documents.
+**Exit:** author a multi-section grant or research narrative by wiring source
+passages and citation nodes through reusable prose operators, verify word
+budgets and required citations deterministically, and compile to clean
+Markdown/LaTeX.
+
+### Phase 9 — TypeScript and staged self-hosting (deferred behind Python & Prose usability)
 
 A real adapter boundary (index, ports, stubs, validation, prompts, imports,
 compile); TS/TSX with module paths and extensions preserved; class methods as
