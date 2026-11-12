@@ -3,7 +3,7 @@ import type { Edge, Node } from '@xyflow/react';
 import {
     flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature, type Port,
 } from '../../vscode-extension/src/flow';
-import type { BoardNote, HarnessSnapshot, HarnessUnit, NodeUsageInfo, NodeVerificationResult, Placeholder, SlateFlow } from './types';
+import type { BoardNote, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
@@ -68,6 +68,10 @@ export type SlateNodeData = {
     verification?: NodeVerificationResult;
     /** Derived usage info across instances and dependencies (S-502). */
     usage?: NodeUsageInfo;
+    /** Execution observation for this instance/node (S-600). */
+    execution?: InstanceRunObservation;
+    /** Output values observed during flow execution (S-600). */
+    observedOutputs?: Record<string, ObservedValue>;
 };
 
 function compactOutsideStrings(text: string): string {
@@ -394,6 +398,8 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
                 problem: document.diagnostics[0]?.message,
                 verification: snapshot.verifications?.[nodeId] ?? document.verification,
                 usage: snapshot.usages?.[nodeId] ?? document.usage,
+                execution: snapshot.execution?.observations.find(obs => obs.instanceId === nodeId || obs.instanceId === id),
+                observedOutputs: snapshot.execution?.observations.find(obs => obs.instanceId === nodeId || obs.instanceId === id)?.outputs,
                 ...ports,
                 contextPorts: Boolean(top) && !map,
             },
@@ -429,6 +435,7 @@ function callerNode(
 ): Node<SlateNodeData> {
     const callable = targets.get(target);
     const flowId = callable?.group === 'flow' ? target : undefined;
+    const execution = snapshot.execution?.observations.find(obs => obs.instanceId === id);
     return {
         id, type: 'slate', position,
         data: {
@@ -437,15 +444,23 @@ function callerNode(
             kind, broken: !callable, path: callable?.group === 'node' ? target : '', unit: callable?.group === 'node' ? callable.unit : undefined,
             target, flowId, groupColor: flowId ? '#f6c453' : callable?.group === 'library' ? '#9da5ad' : undefined,
             usage: callable?.group === 'node' ? snapshot.usages?.[target] : undefined,
+            execution,
+            observedOutputs: execution?.outputs,
             ...portsOf(callable?.signature),
         },
     };
 }
 
-function valueNode(id: string, value: string, position: { x: number; y: number }): Node<SlateNodeData> {
+function valueNode(snapshot: HarnessSnapshot, id: string, value: string, position: { x: number; y: number }): Node<SlateNodeData> {
+    const execution = snapshot.execution?.observations.find(obs => obs.instanceId === id);
     return {
         id, type: 'slate', position,
-        data: { label: 'value', detail: value, kind: 'value', value, path: '', outputs: [{ id: 'out', name: 'value', annotation: null }] },
+        data: {
+            label: 'value', detail: value, kind: 'value', value, path: '',
+            outputs: [{ id: 'out', name: 'value', annotation: null }],
+            execution,
+            observedOutputs: execution?.outputs,
+        },
     };
 }
 
@@ -529,7 +544,7 @@ function buildRoot(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edge
     });
     if (main) {
         main.instances.filter(instance => instance.kind === 'value')
-            .forEach((instance, index) => nodes.push(valueNode(instance.id, instance.value ?? '', layout[instance.id] ?? { x: 760, y: 600 + index * 90 })));
+            .forEach((instance, index) => nodes.push(valueNode(snapshot, instance.id, instance.value ?? '', layout[instance.id] ?? { x: 760, y: 600 + index * 90 })));
         const byId = new Map(nodes.map(node => [node.id, node]));
         edges.push(...dataEdges(main, byId));
     }
@@ -553,7 +568,7 @@ function buildFlow(snapshot: HarnessSnapshot, flowId: string, nodes: Node<SlateN
     flow.instances.forEach((instance, index) => {
         const position = positions[instance.id] ?? { x: 340 + Math.floor(index / 3) * 300, y: 40 + (index % 3) * 190 };
         nodes.push(instance.kind === 'value'
-            ? valueNode(instance.id, instance.value ?? '', position)
+            ? valueNode(snapshot, instance.id, instance.value ?? '', position)
             : callerNode(snapshot, targets, instance.id, instance.node!, 'instance', position));
     });
     const byId = new Map(nodes.map(node => [node.id, node]));

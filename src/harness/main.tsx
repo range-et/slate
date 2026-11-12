@@ -183,6 +183,15 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                             {verificationBadgeLabel(data.verification.state)}
                         </span>
                     )}
+                    {data.execution && (
+                        <span
+                            className={`slate-node__ebadge slate-node__ebadge--${data.execution.status}`}
+                            data-testid={`execution-badge-${data.execution.status}`}
+                            title={data.execution.error ? `Execution error: ${data.execution.error}` : `Execution: ${data.execution.status}`}
+                        >
+                            {data.execution.status === 'executed' ? '● run' : data.execution.status === 'failed' ? '✖ err' : '○ skip'}
+                        </span>
+                    )}
                 </span>
             </div>}
             <strong>{data.label}</strong>
@@ -192,6 +201,20 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                 ? <InlineIntent unitId={data.unit.id} intent={data.intent ?? ''} />
                 : data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
             {!data.container && <PortRows inputs={data.inputs} outputs={data.outputs} />}
+            {data.observedOutputs && Object.keys(data.observedOutputs).length > 0 && !data.container && (
+                <div className="slate-node__observed-values" data-testid="node-observed-values">
+                    {Object.entries(data.observedOutputs).map(([port, val]) => (
+                        <span key={port} className="slate-node__observed-value" title={`${port}: ${val.type} = ${val.repr}`}>
+                            {val.repr}
+                        </span>
+                    ))}
+                </div>
+            )}
+            {data.execution?.status === 'failed' && data.execution.error && !data.container && (
+                <div className="slate-node__execution-error" data-testid="node-execution-error" title={data.execution.error}>
+                    {data.execution.error}
+                </div>
+            )}
             {data.contextPorts && !data.container && <Handle type="source" position={Position.Bottom} id="ctx-out" className="slate-node__ctx" title="Context out: drag to a node's top to give it context" />}
         </div>
     );
@@ -569,6 +592,52 @@ function Inspector({
                 <div className="harness-inspector__diagnostic">
                     {document.diagnostics.map(item => <p key={`${item.code}:${item.message}`}>{item.message}</p>)}
                 </div>
+            )}
+            {node.data.execution && (
+                <section className="harness-inspector__execution" data-testid="inspector-execution-section">
+                    <h3>Execution & Values</h3>
+                    <div className={`execution-summary execution-summary--${node.data.execution.status}`}>
+                        <div className="execution-summary__header">
+                            <span className={`execution-badge execution-badge--${node.data.execution.status}`} data-testid="inspector-execution-badge">
+                                {node.data.execution.status}
+                            </span>
+                            {node.data.execution.path && node.data.execution.path.length > 0 && (
+                                <span className="execution-summary__path">
+                                    Path: [{node.data.execution.path.join(' → ')}]
+                                </span>
+                            )}
+                        </div>
+                        {node.data.execution.error && (
+                            <div className="execution-summary__error" data-testid="inspector-execution-error">
+                                <strong>Error:</strong> {node.data.execution.error}
+                            </div>
+                        )}
+                        {node.data.execution.inputs && Object.keys(node.data.execution.inputs).length > 0 && (
+                            <div className="execution-summary__ports">
+                                <strong>Inputs:</strong>
+                                <ul className="execution-summary__port-list">
+                                    {Object.entries(node.data.execution.inputs).map(([port, val]) => (
+                                        <li key={port}>
+                                            <code>{port}</code>: <span className="val-type">{val.type}</span> = <code className="val-repr">{val.repr}</code>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                        {node.data.execution.outputs && Object.keys(node.data.execution.outputs).length > 0 && (
+                            <div className="execution-summary__ports">
+                                <strong>Outputs:</strong>
+                                <ul className="execution-summary__port-list">
+                                    {Object.entries(node.data.execution.outputs).map(([port, val]) => (
+                                        <li key={port}>
+                                            <code>{port}</code>: <span className="val-type">{val.type}</span> = <code className="val-repr">{val.repr}</code>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                    </div>
+                </section>
             )}
         </aside>
     );
@@ -1230,6 +1299,16 @@ function HarnessApp() {
                     };
                 });
             }
+            if (data.type === 'executionStatus') {
+                const exec = data.execution;
+                setSnapshot(current => {
+                    if (!current) return current;
+                    return {
+                        ...current,
+                        execution: exec,
+                    };
+                });
+            }
         };
         window.addEventListener('message', onMessage);
         vscode?.postMessage({ type: 'ready' });
@@ -1289,6 +1368,26 @@ function HarnessApp() {
         window.addEventListener('keydown', focusSelectedUnit);
         return () => window.removeEventListener('keydown', focusSelectedUnit);
     }, [selected?.data.unit, healthOpen]);
+
+    const postRunFlow = (flowId?: string) => {
+        vscode?.postMessage({ type: 'runFlow', flowId: flowId ?? (scope.flow || 'main') });
+    };
+    const postStopFlow = () => {
+        vscode?.postMessage({ type: 'stopFlow' });
+    };
+
+    useEffect(() => {
+        const handleRunShortcut = (event: KeyboardEvent) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                const target = event.target as HTMLElement | null;
+                if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
+                event.preventDefault();
+                postRunFlow(scope.flow ?? 'main');
+            }
+        };
+        window.addEventListener('keydown', handleRunShortcut);
+        return () => window.removeEventListener('keydown', handleRunShortcut);
+    }, [scope.flow]);
 
     useEffect(() => {
         if (!boardMenu) return;
@@ -1588,6 +1687,18 @@ function HarnessApp() {
                 run: () => post({ kind: 'describeNodes' }) });
         items.push({ id: 'compile', group: 'canvas', label: 'Compile project', detail: 'slate/ → Python modules',
             run: () => post({ kind: 'compile' }) });
+        items.push({
+            id: 'run-flow', group: 'canvas', label: `Run ${scope.flow ? scope.flow : 'main'} flow`,
+            detail: 'Compile + run with live trace (Ctrl/Cmd+Enter)',
+            run: () => postRunFlow(scope.flow ?? 'main'),
+        });
+        if (snapshot.execution?.status === 'running') {
+            items.push({
+                id: 'stop-flow', group: 'canvas', label: 'Stop running flow',
+                detail: 'Kill running flow process tree',
+                run: () => postStopFlow(),
+            });
+        }
         items.push(
             { id: 'new-note', group: 'canvas', label: 'New board note',
                 run: () => { const point = viewCenter(); vscode?.postMessage({ type: 'noteCreate', revision: snapshot.revision, x: point.x, y: point.y, attachedTo: null }); } },
@@ -1662,11 +1773,47 @@ function HarnessApp() {
                     </span>}
                     <button className="harness-library-toggle" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(open => !open)}>Library</button>
                     <button className="harness-health-toggle" aria-pressed={healthOpen} onClick={() => setHealthOpen(open => !open)}>Health</button>
+                    <div className="harness-flow-controls">
+                        <button
+                            type="button"
+                            className="harness-run-button"
+                            data-testid="flow-run-button"
+                            disabled={snapshot.execution?.status === 'running'}
+                            title={`Run ${scope.flow ? scope.flow : 'main'} flow (Ctrl/Cmd+Enter)`}
+                            onClick={() => postRunFlow(scope.flow ?? 'main')}
+                        >
+                            ▶ Run
+                        </button>
+                        {snapshot.execution?.status === 'running' && (
+                            <button
+                                type="button"
+                                className="harness-stop-button"
+                                data-testid="flow-stop-button"
+                                title="Stop running flow"
+                                onClick={() => postStopFlow()}
+                            >
+                                ⏹ Stop
+                            </button>
+                        )}
+                    </div>
                 </nav>
                 <div className="harness-status">
                     <span>{snapshot.documents.length} nodes</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
+                    {snapshot.execution && (
+                        <span
+                            className={`status-execution status-execution--${snapshot.execution.status}`}
+                            data-testid="status-execution-badge"
+                            title={snapshot.execution.error ? `Error: ${snapshot.execution.error}` : `Flow: ${snapshot.execution.flowId}`}
+                        >
+                            {snapshot.execution.status === 'running' ? '● Running…'
+                                : snapshot.execution.status === 'completed' ? `✓ Run ${snapshot.execution.durationMs !== undefined ? `${(snapshot.execution.durationMs / 1000).toFixed(2)}s` : 'done'}`
+                                : snapshot.execution.status === 'stopped' ? '⏹ Stopped'
+                                : snapshot.execution.status === 'timeout' ? '⏱ Timeout'
+                                : '✖ Failed'}
+                        </span>
+                    )}
                     {totalContextCount > 0 && <button
                         type="button"
                         className="status-context status-toggle"

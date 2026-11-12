@@ -39,7 +39,8 @@ keep outstanding tasks on GitHub.
 | Local llama.cpp component forge & dual body+check generator (S-512, Issue #25) | ✅ shipped |
 | Per-node Pydantic + pytest + mutmut verification runner & canvas badges (S-513, Issue #26) | ✅ shipped |
 | Used by N and shared-edit awareness (S-502, Issue #5) | ✅ shipped |
-| Running code / live values on wires | ❌ not started |
+| Trusted flow runner on real compiler (S-600, Issue #8) | ✅ shipped |
+| Running code / live values on wires (S-601, Issue #9) | 🟡 next |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -425,6 +426,18 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   port…**). Renaming a port updates all internal wires and automatically repairs
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
+
+## Shipped — Trusted Flow Runner on Real Compiler (2026-11-12, S-600)
+
+Completed for [issue #8](https://github.com/range-et/slate/issues/8):
+
+- **Trace-Mode Compilation (`compilePython(..., { trace: true })`).** The existing compiler instruments flows with `with _slate_trace.scope(...)` context managers, port input/output tracing, error capture, and final flow output recording without maintaining a separate evaluator or runtime. Untraced code generation remains 100% byte-for-byte identical.
+- **Immutable Run Directory & Protocol Separation.** Runs execute in isolated `.slate/build/<runId>/` directories containing compiled modules, runtime tracer (`_slate_trace.py`), and runner entrypoint (`_slate_run.py`). Structured events are written exclusively to `trace.jsonl`, keeping protocol events strictly isolated from user `stdout`/`stderr` prints.
+- **Execution Safeguards & Process Lifetime.** Configurable timeouts and stdout/stderr byte limits prevent runaway execution or memory exhaustion. Clean process tree termination (`taskkill /pid <pid> /T /F` on Windows and POSIX `SIGKILL`) ensures Stop completely terminates child processes.
+- **Security & Integrity Gates.** Untrusted workspaces (`isTrusted === false`) and broken/invalid graphs refuse execution with clear diagnostics. Last-good runs are strictly disallowed.
+- **Isolated Per-Use Values.** Observed values are keyed by `${invocationPath.join('/')}::${instanceId}::${portId}` so nested flow calls and multiple call instances of the same definition maintain isolated, non-colliding observations.
+- **Failure Cascading.** When a node raises an exception, downstream unexecuted nodes in the dataflow DAG are marked `not_executed` rather than missing or successful.
+- **Canvas Badges & Inspector Execution.** Canvas cards show execution badges (`run`, `err`, `skip`) and formatted observed port outputs. The Inspector displays an Execution & Values section detailing status, duration, inputs, outputs, and traceback on error. Topbar provides ▶ **Run** and ⏹ **Stop** controls, keyboard shortcut `Ctrl/Cmd+Enter`, and execution status feedback in the status bar.
 
 ## Shipped — Used by N & Shared-Edit Awareness (2026-11-12, S-502)
 

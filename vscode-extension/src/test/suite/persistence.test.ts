@@ -1247,4 +1247,68 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(updatedSnap.usages?.normalize_copy, 'normalize_copy has usage entry');
     });
 
+    test('trusted runner compiles and executes flow, producing immutable build trace and per-use values (S-600)', async () => {
+        await open();
+
+        // 1. Create a test flow with clamp and values
+        const flowUri = uri('slate', 'flows', 'exec_flow.json');
+        await vscode.workspace.fs.writeFile(flowUri, encode({
+            slate: 3,
+            name: 'exec_flow',
+            inputs: [],
+            outputs: [{ id: 'out:val', name: 'val', annotation: 'int' }],
+            instances: [
+                { id: 'v_val', kind: 'value', value: '42' },
+                { id: 'v_lo', kind: 'value', value: '0' },
+                { id: 'v_hi', kind: 'value', value: '100' },
+                { id: 'inst_clamp', node: 'clamp' },
+            ],
+            wires: [
+                { from: 'v_val.out', to: 'inst_clamp.in:value' },
+                { from: 'v_lo.out', to: 'inst_clamp.in:lower' },
+                { from: 'v_hi.out', to: 'inst_clamp.in:upper' },
+                { from: 'inst_clamp.out', to: 'output:val' },
+            ],
+            extra: {},
+        }));
+
+        await post({ type: 'ready' });
+        await messages();
+
+        // 2. Run the flow
+        await post({ type: 'runFlow', flowId: 'exec_flow' });
+
+        // 3. Poll for completion
+        let execSnap = (await snapshot()).execution;
+        const deadline = Date.now() + 15000;
+        while ((!execSnap || execSnap.status === 'running' || execSnap.status === 'idle') && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 200));
+            execSnap = (await snapshot()).execution;
+        }
+
+        assert.ok(execSnap, 'execution snapshot exists');
+        assert.equal(execSnap.status, 'completed');
+        assert.equal(execSnap.exitCode, 0);
+
+        // 4. Assert observations and valuesByUse
+        const clampObs = execSnap.observations.find(o => o.instanceId === 'inst_clamp');
+        assert.ok(clampObs, 'inst_clamp has observation');
+        assert.equal(clampObs.status, 'executed');
+        assert.equal(clampObs.outputs.out?.json, 42);
+
+        assert.equal(execSnap.valuesByUse['::inst_clamp::out']?.json, 42);
+        assert.equal(execSnap.valuesByUse['::v_val::out']?.json, 42);
+
+        // 5. Verify immutable build directory created on disk
+        const buildDirUri = vscode.Uri.joinPath(root, '.slate', 'build', execSnap.runId);
+        const buildStat = await vscode.workspace.fs.stat(buildDirUri);
+        assert.equal(buildStat.type, vscode.FileType.Directory);
+
+        // 6. Test stopFlow when idle reports clean message
+        await messages();
+        await post({ type: 'stopFlow' });
+        const stopMsgs = await messages();
+        assert.ok(stopMsgs.some(m => m.ok === false || m.ok === true));
+    });
+
 });
