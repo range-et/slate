@@ -32,4 +32,9 @@ GitHub Pages keeps deploying it until the harness replaces it.
 
 ## License
 
-CC BY-NC-ND 4.0 (Indrajeet Haldar)
+Slate uses a dual-license model:
+
+- **Software & Source Code**: [PolyForm Noncommercial License 1.0.0](LICENSE.md#1-software-code--polyform-noncommercial-license-100) (free for personal, educational, research, and noncommercial development).
+- **Graphics, Branding & Documentation**: [Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](LICENSE.md#2-graphics-branding--documentation--cc-by-nc-40) (Indrajeet Haldar).
+
+See [LICENSE.md](LICENSE.md) for full terms.

@@ -35,7 +35,7 @@
   },
   "keywords": [],
   "author": "Indrajeet Haldar",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@stryker-mutator/core": "^9.6.1",
