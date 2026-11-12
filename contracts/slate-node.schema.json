@@ -50,6 +50,13 @@
         "type": ["object", "string"]
       }
     },
+    "check": {
+      "type": "array",
+      "description": "Pytest unit check / contract validator lines for the node",
+      "items": {
+        "type": "string"
+      }
+    },
     "context": {
       "type": "array",
       "description": "Node IDs referenced for background context/readiness",

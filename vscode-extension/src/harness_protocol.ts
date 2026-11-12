@@ -190,6 +190,7 @@ export interface PacketPreview {
     estimatedInputTokens: number;
     inputBudgetTokens: number;
     outputBudgetTokens: number;
+    omittedNeighbors?: string[];
 }
 
 export interface HarnessProposal {
@@ -197,6 +198,8 @@ export interface HarnessProposal {
     unitId: string;
     path: string;
     candidate: string;
+    implementation?: string;
+    check?: string;
     checks: string[];
     staleMessage?: string;
 }

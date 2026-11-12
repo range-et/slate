@@ -246,4 +246,7 @@ readiness.
   selection, flow self-containment and self-wire guards, self-context rejection,
   concurrent `generate` and `describeNodes` guards and `cancelGeneration`/`cancelDescribe`,
   `describeNodes` write-failure reporting, stale `lastGood` graph retention when a
-  node buffer becomes invalid, and malformed `layout.json` error reporting.
+  node buffer becomes invalid, malformed `layout.json` error reporting, and S-512
+  local llama.cpp component forge dual body and pytest unit check generation,
+  JPL-60 60-line candidate rejection, signature mismatch rejection, generation
+  cancellation, and boundInputs proposal staleness verification.

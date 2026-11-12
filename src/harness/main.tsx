@@ -387,6 +387,9 @@ function Inspector({
                         {packet && <>
                             <p>{packet.estimatedInputTokens} / {packet.inputBudgetTokens} estimated input tokens · {packet.outputBudgetTokens} reserved output</p>
                             <ul>{packet.items.map(item => <li key={`${item.role}:${item.id}`}><strong>{item.role === 'target' ? 'TARGET' : 'CONTEXT'}</strong> {item.qualifiedName} <small>{item.path} · {item.characters} chars</small></li>)}</ul>
+                            {packet.omittedNeighbors && packet.omittedNeighbors.length > 0 && (
+                                <p className="omissions">Omitted context (budget): {packet.omittedNeighbors.join(', ')}</p>
+                            )}
                         </>}
                     </section>
                     {generation && <div className="generation-activity"><span className="spinner" />{generation}<button className="secondary" onClick={() => vscode?.postMessage({ type: 'cancelGeneration' })}>Cancel</button></div>}

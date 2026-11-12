@@ -25,6 +25,8 @@ suite('Slate native persistence and proposal QA', () => {
     let oldEndpoint: string | undefined;
     let requests: string[];
     let restores: Array<() => void>;
+    let serverResponseContent: string | undefined;
+    let serverResponseDelayMs = 0;
     const uri = (...parts: string[]) => vscode.Uri.joinPath(root, ...parts);
     const read = async (...parts: string[]) => JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri(...parts))));
     const nodePath = (name: string) => ['slate', 'nodes', `${name}.json`];
@@ -63,6 +65,8 @@ suite('Slate native persistence and proposal QA', () => {
     setup(async () => {
         restores = [];
         requests = [];
+        serverResponseContent = undefined;
+        serverResponseDelayMs = 0;
         const workspace = vscode.workspace.workspaceFolders![0].uri;
         root = vscode.Uri.joinPath(workspace, `qa-persistence-${Date.now()}`);
         await vscode.workspace.fs.createDirectory(uri('slate', 'nodes'));
@@ -77,9 +81,16 @@ suite('Slate native persistence and proposal QA', () => {
             request.on('data', chunk => { body += chunk; });
             request.on('end', () => {
                 requests.push(JSON.parse(body).messages[1].content);
-                response.writeHead(200, { 'content-type': 'text/event-stream' });
-                response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: candidate } }] })}\n\n`);
-                response.end('data: [DONE]\n\n');
+                const send = () => {
+                    response.writeHead(200, { 'content-type': 'text/event-stream' });
+                    response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: serverResponseContent ?? candidate } }] })}\n\n`);
+                    response.end('data: [DONE]\n\n');
+                };
+                if (serverResponseDelayMs > 0) {
+                    setTimeout(send, serverResponseDelayMs);
+                } else {
+                    send();
+                }
             });
         });
         await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -197,6 +208,104 @@ suite('Slate native persistence and proposal QA', () => {
         await post({ type: 'acceptProposal', proposalId });
         assert.deepEqual(await read(...nodePath('normalize')), before);
         assert.ok((await messages()).some(message => message.type === 'proposalStale' && message.message?.includes('locked')));
+    });
+
+    test('S-512: generates both implementation and unit check, persisting both to node file', async () => {
+        const dualReply = [
+            '### Implementation',
+            '```python',
+            'def normalize(score: int, maximum: int) -> int:',
+            '    return score * 100 // maximum',
+            '```',
+            '',
+            '### Unit Check',
+            '```python',
+            'def test_normalize():',
+            '    assert normalize(50, 100) == 50',
+            '```',
+        ].join('\n');
+        serverResponseContent = dualReply;
+
+        await messages();
+        await post({ type: 'generate', unitId: 'normalize' });
+        const msgs = await messages();
+        const ready = msgs.find(m => m.type === 'proposalReady');
+        assert.ok(ready?.proposal, JSON.stringify(msgs));
+        assert.ok(ready.proposal.candidate.includes('def normalize'));
+        assert.ok(ready.proposal.candidate.includes('def test_normalize'));
+        assert.ok((ready.proposal as any).checks.some((c: string) => c.includes('JPL-60 compliant')));
+        assert.ok((ready.proposal as any).checks.some((c: string) => c.includes('Pytest unit check generated')));
+
+        await post({ type: 'acceptProposal', proposalId: ready.proposal.id });
+        assert.ok((await messages()).some(m => m.type === 'proposalAccepted' && m.unitId === 'normalize'));
+
+        const updated = await read(...nodePath('normalize'));
+        assert.deepEqual(updated.code, [
+            'def normalize(score: int, maximum: int) -> int:',
+            '    return score * 100 // maximum',
+        ]);
+        assert.deepEqual(updated.check, [
+            'def test_normalize():',
+            '    assert normalize(50, 100) == 50',
+        ]);
+    });
+
+    test('S-512: rejects candidate exceeding JPL-60 limit of 60 lines with generationFailed', async () => {
+        const lines65 = ['def normalize(score: int, maximum: int) -> int:'];
+        for (let i = 0; i < 64; i++) lines65.push(`    val_${i} = ${i}`);
+        lines65.push('    return score');
+        serverResponseContent = lines65.join('\n');
+
+        await messages();
+        await post({ type: 'generate', unitId: 'normalize' });
+        const msgs = await messages();
+        const failed = msgs.find(m => m.type === 'generationFailed');
+        assert.ok(failed, JSON.stringify(msgs));
+        assert.ok(failed.message?.includes('exceeds JPL-60 limit of 60 lines'), failed.message);
+    });
+
+    test('S-512: rejects candidate with signature mismatch with generationFailed', async () => {
+        serverResponseContent = 'def normalize(val: str) -> str:\n    return val';
+
+        await messages();
+        await post({ type: 'generate', unitId: 'normalize' });
+        const msgs = await messages();
+        const failed = msgs.find(m => m.type === 'generationFailed');
+        assert.ok(failed, JSON.stringify(msgs));
+        assert.ok(failed.message?.includes('does not match target') || failed.message?.includes('parameter'), failed.message);
+    });
+
+    test('S-512: cancels in-flight llama.cpp generation on cancelGeneration', async () => {
+        serverResponseDelayMs = 1500;
+
+        await messages();
+        const genPromise = post({ type: 'generate', unitId: 'normalize' });
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await post({ type: 'cancelGeneration' });
+        await genPromise;
+
+        const msgs = await messages();
+        const failed = msgs.find(m => m.type === 'generationFailed');
+        assert.ok(failed, JSON.stringify(msgs));
+        assert.ok(failed.message?.includes('cancelled'), failed.message);
+    });
+
+    test('S-512: proposal with boundInputs rejects when intent, contract, or cases change after generation', async () => {
+        await messages();
+        await post({ type: 'generate', unitId: 'normalize', boundInputs: true });
+        const msgs = await messages();
+        const ready = msgs.find(m => m.type === 'proposalReady');
+        assert.ok(ready?.proposal);
+
+        await editBuffer('normalize', node => {
+            node.intent = 'Changed intent after generation';
+        });
+
+        await post({ type: 'acceptProposal', proposalId: ready.proposal.id });
+        const afterMsgs = await messages();
+        const stale = afterMsgs.find(m => m.type === 'proposalStale');
+        assert.ok(stale, JSON.stringify(afterMsgs));
+        assert.ok(stale.message?.includes('intent changed after generation'), stale.message);
     });
 
     test('adds library files through the chooser boundary and preserves them across reopen without duplicates', async () => {

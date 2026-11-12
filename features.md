@@ -36,6 +36,7 @@ keep outstanding tasks on GitHub.
 | Canvas ergonomics: Delete confirmation, linked & duplicate paste, flow ports | ✅ shipped |
 | Frontier Architect MCP Server & Live Camera Sync (S-510, Issue #23) | ✅ shipped |
 | Python Contract Schema & CI Enforcement (JPL-60, parity, drift) | ✅ shipped |
+| Local llama.cpp component forge & dual body+check generator (S-512, Issue #25) | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -246,6 +247,17 @@ keep outstanding tasks on GitHub.
 - **Live webview bridge:** `HarnessPanel` provides direct in-process camera focus and an ephemeral local bridge (`.slate/live_bridge.json`) allowing standalone MCP server processes to smoothly pan/zoom the active XYFlow canvas in real time.
 - **Packaging and safety:** The standalone server is esbuild-bundled to `out/mcp/slate_mcp_server.js` so the installed VSIX can launch it without `node_modules`; invalid or unreadable `layout.json`/flow/node files are rejected instead of being overwritten; position-only flow updates preserve instance `node`/value fields.
 - **Verification:** Unit tests in `test/mcp_server.test.ts`, live camera focus webview tests in `test/e2e/harness.playwright.ts`, Extension Host integration tests in `vscode-extension/src/test/suite/mcp.test.ts`, and full launch gate (`npm run verify:launch`).
+
+### Local llama.cpp Stub-to-Body and Check Forge (S-512, Issue #25, 2026-11-12)
+
+- **Two-Tier AI division of labor (Tier 2 Local Component Forge):** Extends `vscode-extension/src/generation.ts` and `harness_panel.ts` to forge atomic library units using a local `llama.cpp` model via bounded micro-packets:
+  - **Forge input micro-packet (`≤600` tokens total):** Caps total packet budget across target stub signature/docstring, intent, contract, selected structured cases, retry feedback, and neighbor signatures + intents.
+  - **Neighbor context trimming & refusal:** Trims neighbor context first and refuses oversized targets whose stub + cases + retry feedback alone exceed 600 tokens rather than truncating context. Shows exact packet items and any omitted neighbor IDs (`omittedNeighbors`).
+  - **Dual body and check generation:** Generates both the `≤60`-line JPL-60 compliant Python implementation body and its corresponding `Pydantic`/`pytest` unit check.
+  - **Envelope parsing & validation:** `parseForgeCandidate` extracts implementation and unit check across section headers, code fences, or function boundaries; `validateForgeCandidate` rejects `>60`-line candidates, untyped parameters, missing return annotations, and signature mismatches before proposal presentation.
+  - **Proposal input staleness binding:** `acceptFolderProposal` verifies that target code, intent, contract, cases, imports, uses, lock, and neighbor signatures have not changed after generation before applying the `WorkspaceEdit`.
+  - **Node persistence:** Persists both `node.code` and `node.check` into `slate/nodes/**/*.json` and validates schema.
+- **Verification:** 54 Vitest unit tests in `test/generation.matrix.test.ts`, Extension Host tests covering dual body+check persistence, `>60`-line candidate rejection, signature mismatch rejection, generation cancellation, and bound input staleness in `vscode-extension/src/test/suite/persistence.test.ts`, and full launch gate (`npm run verify:launch`).
 
 ### Test platform
 
