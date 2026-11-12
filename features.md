@@ -257,19 +257,25 @@ Completed in [PR #1](https://github.com/range-et/slate/pull/1):
 - **Portable coverage and narrow panes.** Extension coverage filtering supports
   Windows and POSIX paths. Narrow headers scroll without status text covering
   Compose/Map/Library controls.
-- **Cross-platform coverage and mutation expansion (2026-11-11, [issue #20](https://github.com/range-et/slate/issues/20)).**
+- **Workbench native-prompt synchronization (2026-11-11, [issue #21](https://github.com/range-et/slate/issues/21), [PR #29](https://github.com/range-et/slate/pull/29)).**
+  Stops `Cmd/Ctrl+K` and `/` command-palette keydowns in capture phase so VS Code's
+  webview host does not enter a `Ctrl+K` multi-chord wait that swallows `Enter` on
+  native QuickInput prompts, synchronizes signature prompt QA with an explicit
+  invalid-to-valid validation pass before confirming, and syncs webview assets into
+  `vscode-extension/dist` before standalone `npm run test:workbench` runs.
+- **Cross-platform coverage and mutation expansion (2026-11-11, [issue #20](https://github.com/range-et/slate/issues/20), [PR #32](https://github.com/range-et/slate/pull/32)).**
   Fixed Windows `file:///repo/...` URL normalization in `scripts/coverage-scope.mjs`,
   POSIX/Windows instrumentation path resolution in `scripts/source-instrumentation.cjs`,
   and Windows junction creation in `scripts/prepare-system-mutation.mjs` (linked into
   `stryker.full-unit.config.json`). Expanded unit, Playwright browser, and real
-  Extension Host regression suites to 477 unit tests, 89 browser tests, and 41
+  Extension Host regression suites to 480 unit tests, 89 browser tests, and 41
   Extension Host tests, raising combined 3-runner active-source coverage to
-  99.92% lines (2566/2568), 98.71% statements (3298/3341), 98.42% functions
-  (812/825), and 94.53% branches (2473/2616), with 16 of 17 executable product
+  99.96% lines (2569/2570), 98.77% statements (3302/3343), 98.78% functions
+  (815/825), and 94.45% branches (2471/2616), with 16 of 17 executable product
   modules at 100% line and function coverage and 7 modules (`palette.ts`,
   `extension.ts`, `flow.ts`, `generation.ts`, `search.ts`, `slate_folder.ts`,
   `port/describe.ts`) at 100% across all four metrics.
-- **Validation.** The local launch gate passed with 477 unit tests, 89 browser
+- **Validation.** The local launch gate passed with 480 unit tests, 89 browser
   cases, 41 Extension Host cases and workbench QA. Regressions reproduced the
   defects before the fixes. See [verification evidence](test/VERIFICATION.md).
 - **Remaining testing target.** Whole-app strict 100% branch/mutation completion

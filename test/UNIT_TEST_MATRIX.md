@@ -80,7 +80,7 @@ counted; the branch/score/group-order reasoning is in `VERIFICATION.md`.
 
 | Surface | Added evidence | Remaining gaps |
 | --- | --- | --- |
-| `instrumentSource`, `sourcePath`, `isActiveSource`, `activeSources`, `sourceFingerprint`, `requireCompleteCoverage`, `mergeRunnerCoverage`, `generateCoverage` | `coverage_tools.test.ts`: TS/JSX instrumentation, invalid syntax, source inventory, missing/stale/malformed input, complementary branches, unexecuted-file denominator and strict 100% rejection | Full report depends on all three runner suites passing |
+| `instrumentSource`, `sourcePath`, `isActiveSource`, `activeSources`, `sourceFingerprint`, `requireCompleteCoverage`, `mergeRunnerCoverage`, `generateCoverage` | `coverage_tools.test.ts`: TS/JSX instrumentation, invalid syntax, source inventory (including trailing-slash roots, Windows/POSIX `file:` URLs and fallback decoding), missing/stale/malformed input, complementary branches, unexecuted-file denominator and strict 100% rejection | Full report depends on all three runner suites passing |
 | `parseFlow`, `serializeFlow` | `flow.matrix.test.ts`: omitted/null/typed port annotations, wire preservation and unexpected wire fields | See generated branch report |
 | `compilePython` | `flow.test.ts`: duplicate drivers rejected; unaffected node module still emitted | See generated branch/mutation reports |
 | `portPythonProject` | `port_compile.test.ts`: star and unresolved imports retained with explicit warnings | See generated branch/mutation reports |

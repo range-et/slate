@@ -258,6 +258,20 @@ Extension Host tests and real workbench Generate/Accept/Undo/Save plus native
 creation/cancellation QA. Static checks, palette mutation gate, frozen legacy
 checks/builds and Python round trips passed. `git diff --check` passed.
 
+Linux CI run 42715629258 passed the three review regressions, browser/native
+suites, and the previously failing Compose click. It then exposed a workbench
+prompt synchronization failure: Enter immediately after filling a newly opened
+signature prompt did not advance to the intent prompt. Tracing VS Code's
+`KeybindingService#dispatch` in the workbench revealed that pressing `Ctrl+K` in
+the webview to open the Slate palette bubbled to VS Code's `pre/index.html`
+`handleInnerKeydown` listener, placing the workbench into its 5-second `Ctrl+K`
+chord wait so the next `Enter` inside the native QuickInput prompt dispatched
+`workbench.action.keepEditor` (`Ctrl+K Enter`) instead of `quickInput.accept`.
+`src/harness/main.tsx` now handles `Cmd/Ctrl+K` and `/` in the capture phase with
+`stopPropagation()`, and `test-workbench.js` observes an explicit invalid-to-valid
+validation cycle before Enter, retaining all intent cancellation and file-creation
+assertions without retries, forced input, skipped checks, or fixed delays.
+
 ## Issue #20 cross-platform coverage and mutation expansion (2026-11-11)
 
 Refreshed full-scope three-runner combined coverage (`unit` + `browser` +
@@ -368,7 +382,7 @@ Audit of the 1 remaining uncovered line in `vscode-extension/src/harness_panel.t
 ### Final launch gate verification
 
 `npm run verify:launch` in `c:\Users\range\Desktop\slate-wt-issue-20`:
-- `477` unit tests across `24` Vitest files (`0` failures)
+- `480` unit tests across `24` Vitest files (`0` failures)
 - `94.44%` Stryker palette mutation gate (`>= 85%` threshold)
 - `89` Playwright browser tests (`0` failures)
 - `41` real VS Code Extension Host integration tests (`0` failures)
