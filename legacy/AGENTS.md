@@ -1,9 +1,9 @@
-# CLAUDE.md — legacy notebook
+# AGENTS.md — legacy notebook
 
 Frozen. This folder holds the original browser notebook, kept only because
 GitHub Pages still deploys it (`.github/workflows/pages.yml`). Do not add
 features here; the active product is the harness described in
-[../CLAUDE.md](../CLAUDE.md). Delete this folder once the harness replaces the
+[../AGENTS.md](../AGENTS.md). Delete this folder once the harness replaces the
 site.
 
 ## Project Overview
