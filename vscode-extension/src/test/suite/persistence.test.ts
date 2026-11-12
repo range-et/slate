@@ -1392,4 +1392,68 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(!cleanedFlow.wires.some((w: any) => w.to === `${viewerInst.id}.in`), 'viewer wire removed');
     });
 
+    test('cases as guardrails: running guardrails for shared nodes and rejecting breaking edits (S-602)', async () => {
+        await open();
+
+        // 1. Create a flow with clamp and a test case
+        const guardrailFlowUri = uri('slate', 'flows', 'clamp_guardrail_flow.json');
+        await vscode.workspace.fs.writeFile(guardrailFlowUri, encode({
+            slate: 3,
+            name: 'clamp_guardrail_flow',
+            inputs: [],
+            outputs: [{ id: 'out:val', name: 'val', annotation: 'int' }],
+            instances: [
+                { id: 'v_val', kind: 'value', value: '50' },
+                { id: 'v_lo', kind: 'value', value: '10' },
+                { id: 'v_hi', kind: 'value', value: '90' },
+                { id: 'inst_clamp', node: 'clamp' },
+            ],
+            wires: [
+                { from: 'v_val.out', to: 'inst_clamp.in:value' },
+                { from: 'v_lo.out', to: 'inst_clamp.in:lower' },
+                { from: 'v_hi.out', to: 'inst_clamp.in:upper' },
+                { from: 'inst_clamp.out', to: 'output:val' },
+            ],
+            cases: [
+                { id: 'c_clamp_pos', description: 'clamps 50 between 10 and 90 to 50', inputs: {}, expected: 50 },
+            ],
+            extra: {},
+        }));
+
+        // 2. Add a structured test case to clamp node file
+        const clampUri = uri('slate', 'nodes', 'clamp.json');
+        const clampData = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(clampUri)));
+        clampData.cases = [
+            { id: 'c_unit', description: 'clamp above max', inputs: { value: 120, lower: 0, upper: 100 }, expected: 100 },
+        ];
+        await vscode.workspace.fs.writeFile(clampUri, encode(clampData));
+
+        await act({ kind: 'refreshIndex' });
+        await eventually(async () => Boolean((await snapshot())?.flows?.some(f => f.id === 'clamp_guardrail_flow')), 'flow indexed');
+        await messages();
+
+        // 3. Run guardrails for clamp
+        await act({ kind: 'runGuardrails', targetNodeId: 'clamp' });
+        const guardrailMsgs = await messages();
+        assert.ok(guardrailMsgs.some(m => m.ok === true && (m.message ?? '').includes('Guardrails passed')));
+
+        const snap = await snapshot();
+        assert.ok(snap.guardrails?.clamp, 'guardrails report present in snapshot');
+        assert.equal(snap.guardrails?.clamp?.passed, true);
+        assert.ok(snap.guardrails?.clamp?.affectedFlows.some(f => f.flowId === 'clamp_guardrail_flow'));
+
+        // 4. Attempt a breaking edit: returning -999 breaks the flow case (which expects 50)
+        const clampDoc = snap.documents.find(d => d.path === 'slate/nodes/clamp.json')!;
+        const baseHash = clampDoc.sourceHash;
+        const badCode = 'def clamp(value: int, lower: int, upper: int) -> int:\n    return -999\n';
+
+        await act({ kind: 'setNodeCode', target: 'clamp', code: badCode, baseHash });
+        const badEditMsgs = await messages();
+        assert.ok(badEditMsgs.some(m => m.ok === false && (m.message ?? '').includes('Guardrail failure')), 'bad edit was rejected by guardrails');
+
+        // 5. Verify clamp on disk still has the original valid code
+        const diskClamp = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(clampUri)));
+        assert.ok(!diskClamp.code.join('\n').includes('-999'), 'clamp code was not replaced on disk');
+    });
+
 });

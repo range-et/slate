@@ -825,3 +825,116 @@ test('surfaces structured values, editable inputs, wire previews, and pinned vie
         }),
     }));
 });
+
+test('surfaces guardrails, cases list, affected flows, and run-guardrails action in Inspector (S-602)', async ({ page }) => {
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 12,
+                projectName: 'guardrails_e2e_proj',
+                layout: {
+                    clamp: { x: 300, y: 100 },
+                },
+                documents: [
+                    {
+                        id: 'node:clamp',
+                        path: 'slate/nodes/clamp.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:clamp',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def clamp(value: int, lower: int, upper: int) -> int:\n    return max(lower, min(value, upper))\n',
+                        units: [{
+                            id: 'clamp', identity: 'durable', kind: 'function', name: 'clamp', qualifiedName: 'clamp', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 40 } } },
+                            annotation: { intent: 'Clamp value', contract: 'Test', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def clamp(value: int, lower: int, upper: int) -> int', parameters: 'value: int, lower: int, upper: int', returnAnnotation: 'int',
+                            params: [{ name: 'value', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                        cases: [
+                            { id: 'case_pos', description: 'clamps positive values', inputs: { value: 50, lower: 0, upper: 100 }, expected: 50 },
+                        ],
+                    },
+                ],
+                flows: [
+                    {
+                        id: 'demo_flow',
+                        flow: {
+                            slate: 3,
+                            name: 'demo_flow',
+                            inputs: [],
+                            outputs: [],
+                            instances: [{ id: 'inst_c', node: 'clamp' }],
+                            wires: [],
+                            cases: [{ id: 'fc_1', inputs: {}, expected: 50 }],
+                            extra: {},
+                        },
+                    },
+                ],
+                usages: {
+                    clamp: {
+                        nodeId: 'clamp',
+                        totalUses: 1,
+                        instanceCount: 1,
+                        dependencyCount: 0,
+                        contextCount: 0,
+                        callSites: [
+                            { kind: 'flow_instance', flowId: 'demo_flow', instanceId: 'inst_c', label: 'Flow "demo_flow" (inst_c)' },
+                        ],
+                        contextUsers: [],
+                    },
+                },
+                guardrails: {
+                    clamp: {
+                        nodeId: 'clamp',
+                        passed: true,
+                        timestamp: Date.now(),
+                        nodeCases: { total: 1, passed: 1, failed: 0, failures: [] },
+                        affectedFlows: [
+                            { flowId: 'demo_flow', flowName: 'demo_flow', totalCases: 1, passedCases: 1, failedCases: 0, failures: [] },
+                        ],
+                    },
+                },
+            },
+        }, '*');
+    });
+
+    // 1. Check canvas node displays guardrails badge
+    const clampNode = page.locator('.react-flow__node[data-id="clamp"]');
+    await expect(clampNode).toBeVisible();
+    await expect(clampNode.locator('[data-testid="guardrail-badge-passed"]')).toBeVisible();
+
+    // 2. Select clamp and check Inspector sections
+    await select(page, 'clamp');
+    const guardrailsSection = page.locator('[data-testid="inspector-guardrails-section"]');
+    await expect(guardrailsSection).toBeVisible();
+    await expect(guardrailsSection).toContainText('Guardrails & Cases');
+
+    // 3. Check banner
+    const banner = page.locator('[data-testid="guardrails-banner"]');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('All Guardrails Pass');
+
+    // 4. Check node cases list
+    const caseList = page.locator('[data-testid="node-case-list"]');
+    await expect(caseList).toBeVisible();
+    await expect(caseList).toContainText('clamps positive values');
+
+    // 5. Check affected flows
+    const affectedFlows = page.locator('[data-testid="guardrails-affected-flows"]');
+    await expect(affectedFlows).toBeVisible();
+    await expect(affectedFlows).toContainText('Affected Flows');
+    await expect(affectedFlows).toContainText('demo_flow');
+
+    // 6. Click "Run Guardrails" button
+    await page.locator('[data-testid="btn-run-guardrails"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({
+            kind: 'runGuardrails',
+            targetNodeId: 'clamp',
+        }),
+    }));
+});

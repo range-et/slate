@@ -1006,4 +1006,143 @@ button, input, textarea, select { font: inherit; }
     margin-bottom: 4px;
 }
 
+/* Guardrails and Cases (S-602) */
+.slate-node__gbadge {
+    font-size: 8.5px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.slate-node__gbadge--passed {
+    background: rgba(46, 160, 67, 0.2);
+    color: #3fb950;
+    border: 1px solid rgba(46, 160, 67, 0.4);
+}
+.slate-node__gbadge--failed {
+    background: rgba(248, 81, 73, 0.2);
+    color: #f85149;
+    border: 1px solid rgba(248, 81, 73, 0.4);
+}
+
+.harness-inspector__guardrails {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--strata-border, #30363d);
+}
+
+.guardrails-banner {
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    margin-bottom: 10px;
+}
+.guardrails-banner--passed {
+    background: rgba(46, 160, 67, 0.12);
+    border: 1px solid rgba(46, 160, 67, 0.3);
+    color: #3fb950;
+}
+.guardrails-banner--failed {
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+    color: #f85149;
+}
+.guardrails-failures {
+    margin: 6px 0 0;
+    padding-left: 16px;
+    font-size: 10.5px;
+    color: #f85149;
+}
+
+.guardrails-case-list {
+    list-style: none;
+    margin: 4px 0 8px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.guardrails-case-item {
+    background: var(--strata-bg-subtle, #161b22);
+    border: 1px solid var(--strata-border, #30363d);
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+.guardrails-case-item__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.guardrails-case-item .case-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 10px;
+    color: var(--strata-text-secondary, #9da5ad);
+}
+
+.guardrails-case-item .case-detail code {
+    background: rgba(0, 0, 0, 0.2);
+    padding: 1px 3px;
+    border-radius: 3px;
+    word-break: break-all;
+}
+
+.guardrails-case-item .case-detail .case-error {
+    color: #f85149;
+}
+
+.affected-flow-list {
+    list-style: none;
+    margin: 4px 0 8px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.affected-flow-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px;
+    background: var(--strata-bg-subtle, #161b22);
+    border: 1px solid var(--strata-border, #30363d);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    transition: background 0.15s ease;
+}
+
+.affected-flow-item:hover {
+    background: var(--strata-bg-hover, #21262d);
+}
+
+.affected-flow-item .flow-name {
+    font-weight: 600;
+    color: var(--strata-accent, #58a6ff);
+}
+
+.affected-flow-item .flow-case-count {
+    color: var(--strata-text-secondary, #9da5ad);
+    font-size: 10px;
+}
+
+.affected-flow-item .flow-status--passed {
+    color: #3fb950;
+    font-weight: 700;
+}
+
+.affected-flow-item .flow-status--failed {
+    color: #f85149;
+    font-weight: 700;
+}
+
 

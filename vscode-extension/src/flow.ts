@@ -1,4 +1,4 @@
-import type { CanvasRef, FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow, UnitParam } from './harness_protocol';
+import type { CanvasRef, FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow, TestCase, UnitParam } from './harness_protocol';
 
 // Flows (slate/flows/<id>.json): instances of nodes, flows, library units, or
 // literal values, connected by data wires, with named inputs and outputs.
@@ -7,7 +7,7 @@ import type { CanvasRef, FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow
 export const FLOWS_DIR = 'slate/flows';
 /** The root canvas's data wires live in this flow. */
 export const MAIN_FLOW = 'main';
-const FLOW_KEYS = ['slate', 'name', 'inputs', 'outputs', 'instances', 'wires'];
+const FLOW_KEYS = ['slate', 'name', 'inputs', 'outputs', 'instances', 'wires', 'cases'];
 
 export class FlowFormatError extends Error {}
 
@@ -64,26 +64,42 @@ export function parseFlow(text: string): SlateFlow {
     }
     const extra: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) if (!FLOW_KEYS.includes(key)) extra[key] = item;
+    const rawCases = value.cases ?? (isRecord(value.extra) ? value.extra.cases : undefined);
+    const parsedCases: TestCase[] | undefined = Array.isArray(rawCases) ? rawCases.map((c, i) => {
+        if (!isRecord(c)) return { id: `case_${i + 1}`, inputs: {} };
+        return {
+            id: typeof c.id === 'string' ? c.id : `case_${i + 1}`,
+            description: typeof c.description === 'string' ? c.description : undefined,
+            inputs: isRecord(c.inputs) ? c.inputs as Record<string, unknown> : {},
+            expected: c.expected ?? c.output,
+            error: typeof c.error === 'string' ? c.error : undefined,
+        };
+    }) : undefined;
     return {
         name: value.name,
         inputs: ports(value.inputs, 'inputs'),
         outputs: ports(value.outputs, 'outputs'),
         instances: parsedInstances,
         wires: (wires as FlowWire[]).map(wire => ({ from: wire.from, to: wire.to })),
+        cases: parsedCases,
         extra,
     };
 }
 
 export function serializeFlow(flow: SlateFlow): string {
-    return `${JSON.stringify({
+    const obj: Record<string, unknown> = {
         slate: 3,
         name: flow.name,
         inputs: flow.inputs,
         outputs: flow.outputs,
         instances: flow.instances,
         wires: flow.wires,
-        ...flow.extra,
-    }, null, 2)}\n`;
+    };
+    if (flow.cases && flow.cases.length > 0) {
+        obj.cases = flow.cases;
+    }
+    Object.assign(obj, flow.extra);
+    return `${JSON.stringify(obj, null, 2)}\n`;
 }
 
 // Signatures and ports
