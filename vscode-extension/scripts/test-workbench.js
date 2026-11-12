@@ -83,12 +83,30 @@ async function main() {
             await harnessFrame.getByRole('option').filter({ has: harnessFrame.getByText(label, { exact: true }) }).click();
         };
         const prompt = page.locator('.quick-input-widget:visible input');
+        const promptMessage = page.locator('.quick-input-message');
+        const enterSignature = async () => {
+            // Observe a complete validation cycle before accepting the prompt.
+            // Visibility alone does not prove that the native prompt has
+            // processed the current value. Keep error-to-valid checks explicit.
+            await expect(promptMessage).toContainText('Typed function signature');
+            await prompt.fill('not a function');
+            await expect(promptMessage).toContainText('enter one function signature');
+            await prompt.fill('def qa_native(value: int) -> int');
+            await expect(promptMessage).toContainText('Typed function signature');
+            await expect(prompt).toHaveValue('def qa_native(value: int) -> int');
+            await prompt.press('Enter');
+            await expect(promptMessage).toContainText('Intent (what it should do)');
+        };
         const project = path.join(workspace, 'folder_project');
         const nodeFile = path.join(project, 'slate', 'nodes', 'qa_native.json');
         const beforeNodes = fs.readdirSync(path.dirname(nodeFile)).sort();
 
         // End-to-end: real webview buttons -> Extension Host -> fake HTTP model ->
         // WorkspaceEdit/save -> native Undo -> Save. No injected host messages.
+        const readJson = file => {
+            try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+            catch { return null; }
+        };
         const normalizeFile = path.join(project, 'slate', 'nodes', 'normalize.json');
         const normalizeBefore = JSON.parse(fs.readFileSync(normalizeFile, 'utf8'));
         await command('normalize');
@@ -98,13 +116,13 @@ async function main() {
         await expect(harnessFrame.getByRole('button', { name: 'Accept WorkspaceEdit', exact: true })).toBeEnabled();
         expect(JSON.parse(fs.readFileSync(normalizeFile, 'utf8'))).toEqual(normalizeBefore);
         await harnessFrame.getByRole('button', { name: 'Accept WorkspaceEdit', exact: true }).click();
-        await expect.poll(() => JSON.parse(fs.readFileSync(normalizeFile, 'utf8')).code).toEqual(candidate.split('\n'));
+        await expect.poll(() => readJson(normalizeFile)?.code).toEqual(candidate.split('\n'));
         expect(requests).toHaveLength(1);
         expect(requests[0].messages[1].content).toContain('def clamp(');
         await harnessFrame.getByRole('button', { name: 'Undo accepted edit', exact: true }).click();
         await expect(harnessFrame.getByRole('status')).toContainText('UNDO: reverted');
         await command('Save all files');
-        await expect.poll(() => JSON.parse(fs.readFileSync(normalizeFile, 'utf8'))).toEqual(normalizeBefore);
+        await expect.poll(() => readJson(normalizeFile)).toEqual(normalizeBefore);
 
         // Exercise VS Code's actual validation UI and Escape, not a mocked input box.
         await command('New node file…');
@@ -119,18 +137,14 @@ async function main() {
 
         // Cancelling the intent prompt must also leave the project unchanged.
         await command('New node file…');
-        await prompt.fill('def qa_native(value: int) -> int');
-        await prompt.press('Enter');
-        await expect(page.locator('.quick-input-message')).toContainText('Intent (what it should do)');
+        await enterSignature();
         await prompt.press('Escape');
         await expect(prompt).toHaveCount(0);
         expect(fs.existsSync(nodeFile)).toBe(false);
 
         // Confirm both prompts, then assert the visible node and saved source file.
         await command('New node file…');
-        await prompt.fill('def qa_native(value: int) -> int');
-        await prompt.press('Enter');
-        await expect(page.locator('.quick-input-message')).toContainText('Intent (what it should do)');
+        await enterSignature();
         await prompt.fill('Return the supplied value');
         await prompt.press('Enter');
         await expect(harnessFrame.locator('.react-flow__node[data-id="qa_native"]')).toBeVisible();
