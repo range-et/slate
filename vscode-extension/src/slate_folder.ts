@@ -296,6 +296,10 @@ export function indexNode(
                 intent: node.intent,
                 contract: node.contract,
                 dependencies: node.context,
+                context: node.context,
+                cases: node.cases,
+                imports: node.imports,
+                uses: node.uses,
                 examples: node.examples,
                 locked: node.locked,
             };

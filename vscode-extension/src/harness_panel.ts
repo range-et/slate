@@ -498,10 +498,13 @@ export class HarnessPanel implements vscode.Disposable {
             if (JSON.stringify(currentNode.cases ?? []) !== JSON.stringify(fp.cases ?? [])) {
                 throw new Error(`${targetNodeId} cases changed after generation. The draft was preserved; regenerate against current code.`);
             }
-            if (JSON.stringify(currentNode.uses) !== JSON.stringify(fp.uses)) {
+            if (JSON.stringify(currentNode.context ?? []) !== JSON.stringify(fp.context ?? [])) {
+                throw new Error(`${targetNodeId} context changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            if (JSON.stringify(currentNode.uses ?? []) !== JSON.stringify(fp.uses ?? [])) {
                 throw new Error(`${targetNodeId} uses changed after generation. The draft was preserved; regenerate against current code.`);
             }
-            if (JSON.stringify(currentNode.imports) !== JSON.stringify(fp.imports)) {
+            if (JSON.stringify(currentNode.imports ?? []) !== JSON.stringify(fp.imports ?? [])) {
                 throw new Error(`${targetNodeId} imports changed after generation. The draft was preserved; regenerate against current code.`);
             }
             for (const [neighborId, expected] of Object.entries(fp.neighborSignatures)) {
@@ -509,8 +512,10 @@ export class HarnessPanel implements vscode.Disposable {
                     const neighborNode = await folder.readNode(neighborId);
                     const neighborCode = neighborNode.code.join('\n');
                     const parsed = await this.adapter.parseModule(neighborCode + '\n', neighborId);
-                    const currentSig = parsed.units[0]?.signature ?? neighborNode.code[0];
-                    if (currentSig !== expected.signature) {
+                    const rawCurrentSig = parsed.units[0]?.signature ?? neighborNode.code[0] ?? '';
+                    const currentSig = rawCurrentSig.endsWith(':') ? rawCurrentSig.slice(0, -1).trimEnd() : rawCurrentSig.trim();
+                    const expectedSig = expected.signature.endsWith(':') ? expected.signature.slice(0, -1).trimEnd() : expected.signature.trim();
+                    if (currentSig !== expectedSig) {
                         throw new Error(`Neighbor ${neighborId} signature changed after generation. The draft was preserved; regenerate against current code.`);
                     }
                 } catch (e) {
@@ -529,7 +534,7 @@ export class HarnessPanel implements vscode.Disposable {
         const nodeId = nodeIdForPath(pending.path)!;
         const node = await folder.readNode(nodeId);
         if (node.locked) throw new Error('This function is locked. Unlock it before accepting a proposal.');
-        node.code = codeLines(pending.implementation ?? pending.proposal.proposedSource);
+        node.code = codeLines(pending.proposal.proposedSource);
         if (pending.check) {
             node.check = codeLines(pending.check);
         }

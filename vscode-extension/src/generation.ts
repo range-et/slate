@@ -31,6 +31,7 @@ export interface TargetFingerprint {
     locked: boolean;
     cases?: unknown[];
     imports: string[];
+    context: string[];
     uses: string[];
     neighborSignatures: Record<string, { signature: string; sourceHash: string }>;
 }
@@ -157,6 +158,15 @@ export function buildGenerationPacket(
     const contract = textField(target.unit, 'contract');
     const cases = options?.cases ?? (Array.isArray(target.unit.annotation.cases) ? target.unit.annotation.cases : undefined);
     const retryFeedback = typeof options?.retryFeedback === 'string' ? options.retryFeedback.trim() : undefined;
+    const targetImports = Array.isArray(target.unit.annotation.imports)
+        ? (target.unit.annotation.imports as string[])
+        : [];
+    const targetContext = Array.isArray(target.unit.annotation.context)
+        ? (target.unit.annotation.context as string[])
+        : dependencies;
+    const targetUses = Array.isArray(target.unit.annotation.uses)
+        ? (target.unit.annotation.uses as string[])
+        : [];
 
     const items: PacketItem[] = [{
         id: target.unit.id,
@@ -188,38 +198,48 @@ export function buildGenerationPacket(
         const casesFormatted = cases && cases.length > 0 ? formatCases(cases) : '';
         const feedbackFormatted = retryFeedback ? `### Bounded Retry Feedback (revised code must fix these issues):\n${retryFeedback}` : '';
 
-        // Core target prompt to calculate minimum required budget for target alone
-        const corePromptParts = [
-            `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
-            `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
-            `Intent: ${intent}`,
-            contract ? `Contract: ${contract}` : '',
-            casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
-            feedbackFormatted,
-            `Rules:`,
-            `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
-            `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
-            `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases.`,
-            `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`python\n${items[0].source}\n\`\`\``,
-            `Output format (use these exact section headers):`,
-            `### Implementation`,
-            `\`\`\`python`,
-            `def ${target.unit.name}(...):`,
-            `    ...`,
-            `\`\`\``,
-            `### Unit Check`,
-            `\`\`\`python`,
-            `def test_${target.unit.name}():`,
-            `    ...`,
-            `\`\`\``,
-        ].filter(Boolean);
+        const formatForgePrompt = (neighborList: NeighborSignatureContext[]): string => {
+            const neighborSection = neighborList.length > 0
+                ? `### Reference neighbor signatures:\n${neighborList.map(n =>
+                    `### Dependency: ${n.qualifiedName} (${n.path})\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}`
+                ).join('\n\n')}`
+                : '';
 
-        const coreTokens = Math.ceil(corePromptParts.join('\n\n').length / 4);
+            const promptParts = [
+                `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
+                `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
+                `Intent: ${intent}`,
+                contract ? `Contract: ${contract}` : '',
+                casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
+                feedbackFormatted,
+                `Rules:`,
+                `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
+                `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
+                `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases.`,
+                neighborSection,
+                `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`python\n${items[0].source}\n\`\`\``,
+                `Output format (use these exact section headers):`,
+                `### Implementation`,
+                `\`\`\`python`,
+                `def ${target.unit.name}(...):`,
+                `    ...`,
+                `\`\`\``,
+                `### Unit Check`,
+                `\`\`\`python`,
+                `def test_${target.unit.name}():`,
+                `    ...`,
+                `\`\`\``,
+            ].filter(Boolean);
+
+            return promptParts.join('\n\n');
+        };
+
+        const basePrompt = formatForgePrompt([]);
+        const coreTokens = Math.ceil(basePrompt.length / 4);
         if (coreTokens > inputBudgetTokens) {
             throw new PacketError(`Target stub, cases, and feedback require about ${coreTokens} tokens, which exceeds the micro-packet budget of ${inputBudgetTokens}. Refusing oversized target.`);
         }
 
-        let remainingTokens = inputBudgetTokens - coreTokens;
         const neighbors: NeighborSignatureContext[] = [];
         const omittedNeighbors: string[] = [];
         const neighborSignatures: Record<string, { signature: string; sourceHash: string }> = {};
@@ -235,58 +255,29 @@ export function buildGenerationPacket(
                 const ret = depUnit.returnAnnotation ? ` -> ${depUnit.returnAnnotation}` : '';
                 sig = `def ${depUnit.name}(${params})${ret}`;
             }
-            if (!sig.endsWith(':')) sig += ':';
+            if (sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
+            const promptSig = `${sig}:`;
             const depIntent = textField(depUnit, 'intent');
             neighborSignatures[dependencyId] = { signature: sig, sourceHash: dependency.document.sourceHash };
-            const neighborBlock = `### Dependency: ${depUnit.qualifiedName} (${dependency.document.path})\nSignature: ${sig}${depIntent ? `\nIntent: ${depIntent}` : ''}`;
-            const neighborTokens = Math.ceil(neighborBlock.length / 4);
 
-            if (neighborTokens <= remainingTokens) {
-                neighbors.push({
-                    id: dependency.unit.id,
-                    path: dependency.document.path,
-                    qualifiedName: depUnit.qualifiedName,
-                    signature: sig,
-                    intent: depIntent,
-                    sourceHash: dependency.document.sourceHash,
-                });
-                remainingTokens -= neighborTokens;
+            const candidateNeighbor: NeighborSignatureContext = {
+                id: dependency.unit.id,
+                path: dependency.document.path,
+                qualifiedName: depUnit.qualifiedName,
+                signature: promptSig,
+                intent: depIntent,
+                sourceHash: dependency.document.sourceHash,
+            };
+
+            const testPrompt = formatForgePrompt([...neighbors, candidateNeighbor]);
+            if (Math.ceil(testPrompt.length / 4) <= inputBudgetTokens) {
+                neighbors.push(candidateNeighbor);
             } else {
                 omittedNeighbors.push(depUnit.qualifiedName);
             }
         }
 
-        const neighborSection = neighbors.map(n =>
-            `### Dependency: ${n.qualifiedName} (${n.path})\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}`
-        ).join('\n\n');
-
-        const promptParts = [
-            `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
-            `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
-            `Intent: ${intent}`,
-            contract ? `Contract: ${contract}` : '',
-            casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
-            feedbackFormatted,
-            `Rules:`,
-            `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
-            `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
-            `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases.`,
-            neighborSection ? `### Reference neighbor signatures:\n${neighborSection}` : '',
-            `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`python\n${items[0].source}\n\`\`\``,
-            `Output format (use these exact section headers):`,
-            `### Implementation`,
-            `\`\`\`python`,
-            `def ${target.unit.name}(...):`,
-            `    ...`,
-            `\`\`\``,
-            `### Unit Check`,
-            `\`\`\`python`,
-            `def test_${target.unit.name}():`,
-            `    ...`,
-            `\`\`\``,
-        ].filter(Boolean);
-
-        const prompt = promptParts.join('\n\n');
+        const prompt = formatForgePrompt(neighbors);
         const estimatedInputTokens = Math.ceil(prompt.length / 4);
 
         const fingerprint: TargetFingerprint = {
@@ -297,8 +288,9 @@ export function buildGenerationPacket(
             contract,
             locked: target.unit.annotation.locked === true,
             cases,
-            imports: Array.isArray(target.unit.annotation.imports) ? (target.unit.annotation.imports as string[]) : [],
-            uses: dependencies,
+            imports: targetImports,
+            context: targetContext,
+            uses: targetUses,
             neighborSignatures,
         };
 
@@ -343,7 +335,9 @@ export function buildGenerationPacket(
 
     const neighborSignatures: Record<string, { signature: string; sourceHash: string }> = {};
     for (const item of items.slice(1)) {
-        neighborSignatures[item.id] = { signature: item.source.split('\n')[0] ?? '', sourceHash: item.sourceHash };
+        let sig = item.source.split('\n')[0] ?? '';
+        if (sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
+        neighborSignatures[item.id] = { signature: sig, sourceHash: item.sourceHash };
     }
 
     const fingerprint: TargetFingerprint = {
@@ -354,8 +348,9 @@ export function buildGenerationPacket(
         contract,
         locked: target.unit.annotation.locked === true,
         cases,
-        imports: Array.isArray(target.unit.annotation.imports) ? (target.unit.annotation.imports as string[]) : [],
-        uses: dependencies,
+        imports: targetImports,
+        context: targetContext,
+        uses: targetUses,
         neighborSignatures,
     };
 
@@ -510,6 +505,14 @@ export function validateForgeCandidate(
         const parsedCheck = parseModule(checkText, '<check>');
         if (!parsedCheck.valid) {
             diagnostics.push('Candidate unit check is not valid Python.');
+        } else {
+            const hasTestFunction = parsedCheck.units.some(u =>
+                (u.parentId === null && (u.kind === 'function' || u.kind === 'method') && (u.name.startsWith('test_') || u.name.startsWith('test')))
+                || (u.kind === 'class' && u.name.startsWith('Test'))
+            );
+            if (!hasTestFunction) {
+                diagnostics.push('Candidate unit check must define at least one top-level pytest test function (e.g. def test_...(): ...).');
+            }
         }
 
         const checkLines = candidate.check.replace(/\r\n?/g, '\n').split('\n');

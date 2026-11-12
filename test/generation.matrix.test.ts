@@ -292,4 +292,23 @@ describe('S-512 local llama.cpp component forge matrix', () => {
         expect(res.valid).toBe(false);
         expect(res.diagnostics.some(d => d.includes('not valid Python'))).toBe(true);
     });
+
+    it('rejects candidate unit check that does not define a top-level pytest function', () => {
+        const { target } = fixture();
+        const candidate1 = {
+            implementation: 'def run(x: int) -> int:\n    return x',
+            check: 'pass',
+        };
+        const res1 = validateForgeCandidate(target.document.units[0], candidate1);
+        expect(res1.valid).toBe(false);
+        expect(res1.diagnostics.some(d => d.includes('must define at least one top-level pytest test function'))).toBe(true);
+
+        const candidate2 = {
+            implementation: 'def run(x: int) -> int:\n    return x',
+            check: 'helper_val = 42\ndef helper():\n    return helper_val',
+        };
+        const res2 = validateForgeCandidate(target.document.units[0], candidate2);
+        expect(res2.valid).toBe(false);
+        expect(res2.diagnostics.some(d => d.includes('must define at least one top-level pytest test function'))).toBe(true);
+    });
 });
