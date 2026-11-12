@@ -22,6 +22,7 @@ export interface FolderIndex {
 export class SlateFolderHost {
     layout: SlateLayout = emptyLayout();
     private deferredRefs: CanvasRef[] = [];
+    private pendingUnindexedRefs = false;
     private layoutVersion: number | null = null;
     private readonly flowVersions = new Map<string, number | null>();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
@@ -77,6 +78,12 @@ export class SlateFolderHost {
     }
 
     async writeFlow(flowId: string, flow: SlateFlow): Promise<void> {
+        if (flowId === MAIN_FLOW && this.pendingUnindexedRefs && this.deferredRefs.length > 0) {
+            const migrated = migrateRootOccurrences(flow, this.deferredRefs, this.layout.positions, [], []);
+            if (migrated.main) flow = migrated.main;
+            this.layout.positions = migrated.positions;
+            this.pendingUnindexedRefs = false;
+        }
         const uri = this.uri(pathForFlowId(flowId));
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
         await this.writeText(uri, serializeFlow(flow));
@@ -130,9 +137,7 @@ export class SlateFolderHost {
     }
 
     async readLayout(): Promise<SlateLayout> {
-        const file = await this.read(LAYOUT_PATH);
-        this.layoutVersion = file?.version ?? null;
-        return parseLayout(file?.text);
+        return parseLayout((await this.read(LAYOUT_PATH))?.text);
     }
 
     private isDirty(relativePath: string): boolean {
@@ -176,8 +181,11 @@ export class SlateFolderHost {
         documents.sort((left, right) => left.path.localeCompare(right.path));
         const flows = await this.readFlows();
         try {
+            const layoutFile = await this.read(LAYOUT_PATH);
+            this.layoutVersion = layoutFile?.version ?? null;
+            this.pendingUnindexedRefs = false;
             // In place, so actions holding `layout` keep writing the live object.
-            Object.assign(this.layout, await this.readLayout());
+            Object.assign(this.layout, parseLayout(layoutFile?.text));
         } catch (error) {
             throw new Error(`${LAYOUT_PATH}: ${(error as Error).message}`);
         }
@@ -242,6 +250,7 @@ export class SlateFolderHost {
     }
 
     hasUnsyncedDirtyFlow(): boolean {
+        if (this.pendingUnindexedRefs) return true;
         return vscode.workspace.textDocuments.some(document => {
             if (!document.isDirty) return false;
             const relative = this.relative(document.uri);
@@ -253,7 +262,11 @@ export class SlateFolderHost {
 
     async syncDirtyLayout(): Promise<void> {
         if (!this.isDirty(LAYOUT_PATH)) return;
-        const latest = await this.readLayout();
+        const file = await this.read(LAYOUT_PATH);
+        const latest = parseLayout(file?.text);
+        if (latest.refs.length > 0 && file?.version !== this.layoutVersion) {
+            this.pendingUnindexedRefs = true;
+        }
         this.deferredRefs = latest.refs;
         Object.assign(this.layout, {
             ...latest,

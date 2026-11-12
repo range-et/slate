@@ -547,6 +547,25 @@ suite('Slate native persistence and proposal QA', () => {
         ]);
         await vscode.workspace.fs.delete(uri('slate', 'flows', 'grouped_legacy.json'));
 
+        // Editing legacy refs in dirty layout.json, dragging a card (saving layout), and then running createRef migrates the edited ref into main.json.
+        const dirtyRefThenDragEdit = new vscode.WorkspaceEdit();
+        dirtyRefThenDragEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                positions: { 'ref-after-drag': { x: 20, y: 30 }, normalize: { x: 140, y: 160 } },
+                notes: [],
+                refs: [{ id: 'ref-after-drag', target: 'clamp' }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyRefThenDragEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await post({ type: 'layout', positions: { normalize: { x: 150, y: 170 } } });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        await act({ kind: 'createRef', target: 'normalize', x: 60, y: 70 });
+        assert.equal((await read('slate', 'layout.json')).refs, undefined);
+        assert.ok((await read('slate', 'flows', 'main.json')).instances.some((item: any) => item.id === 'ref-after-drag' && item.node === 'clamp'));
+
         // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await vscode.workspace.fs.writeFile(layoutUri, encode({
