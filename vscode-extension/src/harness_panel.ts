@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as http from 'http';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
@@ -84,6 +85,8 @@ export class HarnessPanel implements vscode.Disposable {
     private lastAcceptedUnitId: string | undefined;
     private lastAcceptedVersion: number | undefined;
     private readonly testMessages: unknown[] | undefined;
+    private bridgeServer: http.Server | undefined;
+    private bridgePort: number | undefined;
 
     static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
@@ -157,10 +160,11 @@ export class HarnessPanel implements vscode.Disposable {
                 if (editor) this.selectFromEditor(editor);
             }),
         );
+        this.startBridgeServer();
         this.scheduleRefresh(0);
     }
 
-    private scheduleRefresh(delay = 250): void {
+    scheduleRefresh(delay = 250): void {
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.refreshTimer = setTimeout(() => {
             this.refreshTimer = undefined;
@@ -1331,11 +1335,87 @@ export class HarnessPanel implements vscode.Disposable {
         if (nodeId && this.validUnitId(nodeId)) void this.postMessage({ type: 'selectUnit', unitId: nodeId });
     }
 
+    async focusCamera(options: {
+        target?: string;
+        region?: { x: number; y: number; width?: number; height?: number };
+        zoom?: number;
+        duration?: number;
+    }): Promise<boolean> {
+        if (this.disposed) return false;
+        return (await this.postMessage({
+            type: 'focus',
+            target: options.target,
+            region: options.region,
+            zoom: options.zoom,
+            duration: options.duration,
+        })) ?? false;
+    }
+
+    private startBridgeServer(): void {
+        try {
+            const server = http.createServer((req, res) => {
+                if (req.method === 'POST' && req.url === '/focus') {
+                    let body = '';
+                    let bodyLength = 0;
+                    const MAX_BODY_BYTES = 64 * 1024; // 64KB
+                    req.on('data', chunk => {
+                        bodyLength += chunk.length;
+                        if (bodyLength > MAX_BODY_BYTES) {
+                            res.writeHead(413, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: false, error: 'Payload Too Large' }));
+                            req.destroy();
+                            return;
+                        }
+                        body += chunk;
+                    });
+                    req.on('end', async () => {
+                        if (bodyLength > MAX_BODY_BYTES) return;
+                        try {
+                            const parsed = JSON.parse(body || '{}');
+                            await this.focusCamera(parsed);
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: true }));
+                        } catch (err) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: false, error: String(err) }));
+                        }
+                    });
+                    return;
+                }
+                res.writeHead(404);
+                res.end();
+            });
+            server.listen(0, '127.0.0.1', () => {
+                const addr = server.address();
+                if (addr && typeof addr === 'object') {
+                    this.bridgePort = addr.port;
+                    const bridgeFile = vscode.Uri.joinPath(this.folder.root, '.slate', 'live_bridge.json');
+                    const info = JSON.stringify({ port: this.bridgePort, pid: process.pid });
+                    void vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.folder.root, '.slate'))
+                        .then(() => vscode.workspace.fs.writeFile(bridgeFile, new TextEncoder().encode(info)))
+                        .then(undefined, () => {});
+                }
+            });
+            server.on('error', () => {
+                this.bridgeServer = undefined;
+            });
+            this.bridgeServer = server;
+        } catch {
+            this.bridgeServer = undefined;
+        }
+    }
+
     dispose(): void {
         if (HarnessPanel.current !== this) return;
         this.disposed = true;
         HarnessPanel.current = undefined;
         this.panel.dispose();
+        if (this.bridgeServer) {
+            this.bridgeServer.close();
+            this.bridgeServer = undefined;
+            const bridgeFile = vscode.Uri.joinPath(this.folder.root, '.slate', 'live_bridge.json');
+            void vscode.workspace.fs.delete(bridgeFile).then(undefined, () => {});
+        }
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.generation?.abort();
         this.describeRun?.abort();

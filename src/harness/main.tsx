@@ -909,6 +909,8 @@ function HarnessApp() {
             ? { ...node, data: { ...node.data, highlighted: true } } : node) };
     }, [snapshot, scope, highlight]);
     const [nodes, setNodes, onNodesChange] = useNodesState<Node<SlateNodeData>>(graph.nodes);
+    const latestNodes = useRef(nodes);
+    latestNodes.current = nodes;
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
     useEffect(() => {
@@ -960,6 +962,50 @@ function HarnessApp() {
                     ...node,
                     selected: node.id === data.unitId,
                 })));
+            }
+            if (data.type === 'focus') {
+                if (data.target) {
+                    const target = data.target;
+                    const matchesTarget = (node: Node<SlateNodeData>) =>
+                        node.id === target ||
+                        node.data?.unit?.id === target ||
+                        node.data?.unit?.name === target ||
+                        (node.data as any)?.name === target ||
+                        (node.data as any)?.label === target ||
+                        (node.data as any)?.target === target;
+
+                    // Use the latest rendered nodes (this listener is registered once, so a
+                    // closed-over `nodes` would be the first render's stale list).
+                    const allNodes = flow.current?.getNodes() ?? latestNodes.current;
+                    const exact = allNodes.find(node => node.id === target);
+                    const targetNode = exact ?? allNodes.find(matchesTarget);
+                    const focusId = targetNode?.id ?? target;
+                    setNodes(current => current.map(node => ({
+                        ...node,
+                        selected: targetNode ? node.id === targetNode.id : matchesTarget(node),
+                    })));
+                    flow.current?.fitView({
+                        nodes: [{ id: focusId }],
+                        duration: data.duration ?? 300,
+                        maxZoom: data.zoom ?? 1.2,
+                        padding: 0.8,
+                    });
+                } else if (data.region) {
+                    const r = data.region;
+                    if (typeof r.width === 'number' && typeof r.height === 'number' && r.width > 0 && r.height > 0) {
+                        flow.current?.fitBounds({ x: r.x, y: r.y, width: r.width, height: r.height }, {
+                            duration: data.duration ?? 300,
+                            padding: 0.2,
+                        });
+                    } else {
+                        flow.current?.setCenter(r.x, r.y, {
+                            zoom: data.zoom ?? 1.0,
+                            duration: data.duration ?? 300,
+                        });
+                    }
+                } else {
+                    flow.current?.fitView({ duration: data.duration ?? 300, padding: 0.2 });
+                }
             }
             if (data.type === 'commandResult') setCommandResult(data.message);
             if (data.type === 'searchResults') {
