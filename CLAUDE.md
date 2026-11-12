@@ -72,4 +72,4 @@ npm run demo:llama        # Start the local llama.cpp demo server
 
 ## License
 
-CC BY-NC-ND 4.0 (Indrajeet Haldar)
+Dual-licensed: [PolyForm Noncommercial License 1.0.0](LICENSE.md#1-software-code--polyform-noncommercial-license-100) for source code and [CC BY-NC 4.0](LICENSE.md#2-graphics-branding--documentation--cc-by-nc-40) for graphics, media, and documentation (Indrajeet Haldar). See [LICENSE.md](LICENSE.md).

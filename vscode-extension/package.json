@@ -4,6 +4,8 @@
   "description": "A source-linked XYFlow harness for planning, navigating, and generating typed Python units with local LLMs.",
   "version": "0.1.0",
   "publisher": "indrajeet-haldar",
+  "author": "Indrajeet Haldar",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -118,6 +120,7 @@
   },
   "dependencies": {
     "@lezer/common": "^1.5.2",
-    "@lezer/python": "^1.1.19"
+    "@lezer/python": "^1.1.19",
+    "slate": "file:.."
   }
 }

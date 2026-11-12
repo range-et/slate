@@ -541,7 +541,7 @@ Contributions welcome! Areas for improvement:
 
 ## License
 
-slate notebook editor © 2025 by Indrajeet Haldar is licensed under CC BY-NC-ND 4.0. To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+slate notebook editor © 2025 by Indrajeet Haldar is licensed under PolyForm Noncommercial License 1.0.0 (code) and CC BY-NC 4.0 (visual assets and documentation). See [LICENSE.md](../LICENSE.md).
 
 ## Acknowledgments
 
