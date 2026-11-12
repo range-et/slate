@@ -42,7 +42,8 @@ keep outstanding tasks on GitHub.
 | Trusted flow runner on real compiler (S-600, Issue #8) | ✅ shipped |
 | Running code / live values on wires (S-601, Issue #9) | ✅ shipped |
 | Cases as guardrails (S-602, Issue #10) | ✅ shipped |
-| Live mode (S-603, Issue #11) | 🟡 next |
+| Live mode (S-603, Issue #11) | ✅ shipped |
+| Occurrence-aware micro packets (S-700, Issue #12) | 🟡 next |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -429,6 +430,17 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
 
+## Shipped — Live Mode (2026-11-13, S-603)
+
+Completed for [issue #11](https://github.com/range-et/slate/issues/11):
+
+- **Opt-in Live Toggle & Side-Effect Consent.** The canvas topbar features a dedicated `⚡ Live` toggle button and Command Palette action (**Toggle Live mode** / **Enable Live mode**). Enabling Live requires explicit user confirmation via an un-sandboxed execution and side-effect consent modal, affirming that Python code runs with local environment permissions and executes real side effects on every edit. Refuses execution in untrusted workspaces.
+- **Continuous Semantic Rerun.** Automatically watches for committed semantic edits (value changes, wire connections/disconnections, code modifications, node/instance creations/deletions, proposal acceptance, and undo) and debounces re-execution to 300ms.
+- **Non-Semantic Exclusion.** Pure canvas layout positioning (moving nodes), panning, zooming, node selection, search, and board notes strictly never trigger re-execution.
+- **No Purity Caching.** Each live run compiles and executes freshly in an isolated `.slate/build/<runId>/` workspace directory without caching intermediate nodes or assuming purity.
+- **Active Run Cancellation.** Starting a fresh live run cleanly aborts any active in-flight execution process tree before launching the latest graph.
+- **Canvas & Status Indicators.** Active live mode displays an illuminated `⚡ Live` toggle button and status bar badge (`⚡ Live: <flowId>`), alongside real-time value updates across data wires and viewers.
+
 ## Shipped — Cases as Guardrails (2026-11-13, S-602)
 
 Completed for [issue #10](https://github.com/range-et/slate/issues/10):
@@ -517,8 +529,8 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 
 ## Not started
 
-- Live mode (continuous re-execution of chosen flow on committed edits).
 - Repeat / for-each / branch zones.
+- Occurrence-aware micro packets (S-700).
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
 - Dependency-ordered queue / generate-all for the harness.

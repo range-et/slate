@@ -78,6 +78,7 @@ by their consumers; no meaningless existence assertions are required.
 | `codeLines`, `codeText` | Generated text normalization idempotence, no embedded CR/LF, no trailing blank lines | Bounded random strings |
 | `rankPalette`, `scoreMatch` | Generated conservation, identity, immutability, always-last, stable reranking, score bounds; Stryker mutates palette with 80% minimum | No mutation gate yet on other modules |
 | Static correctness gates | `verification.test.ts` probes lint rejection/acceptance; strict webview + extension `tsc` | Existing `any` and unchecked casts not prohibited |
+| Live mode & Side-Effect Consent (S-603) | `live_mode.matrix.test.ts`: consent requirement, untrusted workspace rejection, semantic vs layout edit triggers, debounced re-execution, abort controller concurrency, no purity caching, broken graph failure. `persistence.test.ts`: real Extension Host live mode activation with consent, rerun on setValue, layout exclusion, disable. | OS desktop and Python execution environment required |
 
 See [VERIFICATION.md](VERIFICATION.md) for commands, seed replay and exact scope.
 

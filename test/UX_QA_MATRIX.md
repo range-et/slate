@@ -254,4 +254,9 @@ readiness.
   node buffer becomes invalid, malformed `layout.json` error reporting, and S-512
   local llama.cpp component forge dual body and pytest unit check generation,
   JPL-60 60-line candidate rejection, signature mismatch rejection, generation
-  cancellation, and boundInputs proposal staleness verification.
+  cancellation, boundInputs proposal staleness verification, and S-603 Live mode
+  side-effect consent authorization, re-execution on semantic edits, layout exclusion,
+  and deactivation.
+- Browser `qa_matrix.playwright.ts` now also covers Live mode (S-603): topbar `⚡ Live`
+  toggle, side-effect warning & consent modal with cancellation and authorization,
+  `liveModeStatus` reflection, active indicators, status-bar badge, and disabling.

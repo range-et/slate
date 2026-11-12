@@ -1416,6 +1416,7 @@ function HarnessApp() {
     const [flowStack, setFlowStack] = useState<string[]>([]);
     const [libraryOpen, setLibraryOpen] = useState(true);
     const [healthOpen, setHealthOpen] = useState(false);
+    const [liveConsentOpen, setLiveConsentOpen] = useState(false);
     const [showAllContext, setShowAllContext] = useState(false);
     const [activeContextNodes, setActiveContextNodes] = useState<string[]>([]);
     const [inspectorWidth, setInspectorWidth] = useState(360);
@@ -1615,6 +1616,16 @@ function HarnessApp() {
                     };
                 });
             }
+            if (data.type === 'liveModeStatus') {
+                const live = data.liveMode;
+                setSnapshot(current => {
+                    if (!current) return current;
+                    return {
+                        ...current,
+                        liveMode: live,
+                    };
+                });
+            }
         };
         window.addEventListener('message', onMessage);
         vscode?.postMessage({ type: 'ready' });
@@ -1680,6 +1691,33 @@ function HarnessApp() {
     };
     const postStopFlow = () => {
         vscode?.postMessage({ type: 'stopFlow' });
+    };
+
+    const liveMode = snapshot?.liveMode;
+    const isLiveActive = Boolean(liveMode?.enabled);
+    const isLiveConsented = Boolean(liveMode?.consented);
+
+    const toggleLiveMode = (flowId?: string) => {
+        const targetFlow = flowId ?? (scope.flow || 'main');
+        if (isLiveActive) {
+            vscode?.postMessage({ type: 'setLiveMode', enabled: false });
+        } else {
+            if (!isLiveConsented) {
+                setLiveConsentOpen(true);
+            } else {
+                vscode?.postMessage({ type: 'setLiveMode', enabled: true, consented: true, flowId: targetFlow });
+            }
+        }
+    };
+
+    const confirmLiveConsent = () => {
+        setLiveConsentOpen(false);
+        const targetFlow = scope.flow || 'main';
+        vscode?.postMessage({ type: 'setLiveMode', enabled: true, consented: true, flowId: targetFlow });
+    };
+
+    const cancelLiveConsent = () => {
+        setLiveConsentOpen(false);
     };
 
     useEffect(() => {
@@ -2010,6 +2048,12 @@ function HarnessApp() {
                 run: () => postStopFlow(),
             });
         }
+        items.push({
+            id: 'toggle-live', group: 'canvas',
+            label: isLiveActive ? 'Disable Live mode' : `Enable Live mode (${scope.flow ? scope.flow : 'main'})`,
+            detail: isLiveActive ? 'Stop automatic continuous rerun on edits' : 'Rerun chosen flow on committed edits (requires side-effect consent)',
+            run: () => toggleLiveMode(),
+        });
         items.push(
             { id: 'new-note', group: 'canvas', label: 'New board note',
                 run: () => { const point = viewCenter(); vscode?.postMessage({ type: 'noteCreate', revision: snapshot.revision, x: point.x, y: point.y, attachedTo: null }); } },
@@ -2106,12 +2150,33 @@ function HarnessApp() {
                                 ⏹ Stop
                             </button>
                         )}
+                        <button
+                            type="button"
+                            className={`harness-live-toggle ${isLiveActive ? 'harness-live-toggle--active' : ''}`}
+                            data-testid="flow-live-toggle"
+                            aria-pressed={isLiveActive}
+                            title={isLiveActive
+                                ? `Live mode ON for "${liveMode?.flowId || 'main'}". Click to disable.`
+                                : `Live mode OFF. Click to enable continuous rerun on edits (requires side-effect consent).`}
+                            onClick={() => toggleLiveMode()}
+                        >
+                            ⚡ Live
+                        </button>
                     </div>
                 </nav>
                 <div className="harness-status">
                     <span>{snapshot.documents.length} nodes</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
+                    {isLiveActive && (
+                        <span
+                            className="status-live status-live--active"
+                            data-testid="status-live-badge"
+                            title={`Live mode active: rerunning flow "${liveMode?.flowId || 'main'}" after committed edits`}
+                        >
+                            ⚡ Live: {liveMode?.flowId || 'main'}
+                        </span>
+                    )}
                     {snapshot.execution && (
                         <span
                             className={`status-execution status-execution--${snapshot.execution.status}`}
@@ -2357,6 +2422,50 @@ function HarnessApp() {
                 onNavigate={goTo}
                 onClose={() => setHealthOpen(false)}
             />}
+            {liveConsentOpen && (
+                <div className="live-consent-modal-backdrop" data-testid="live-consent-modal-backdrop" onClick={cancelLiveConsent}>
+                    <div className="live-consent-modal" data-testid="live-consent-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
+                        <div className="live-consent-modal__header">
+                            <span className="live-consent-modal__icon">⚠️</span>
+                            <h3>Enable Live Execution Mode</h3>
+                        </div>
+                        <div className="live-consent-modal__body">
+                            <p className="live-consent-modal__lead">
+                                Live mode automatically re-executes the chosen flow (<strong>{scope.flow || 'main'}</strong>) on your system's Python interpreter whenever you commit an edit.
+                            </p>
+                            <div className="live-consent-modal__callout">
+                                <strong>Execution & Side-Effect Notice:</strong>
+                                <ul>
+                                    <li><strong>Un-sandboxed Execution:</strong> Flow code executes as a normal Python process with your environment permissions.</li>
+                                    <li><strong>No Purity Caching:</strong> Intermediate nodes and side effects (file modifications, network requests, database writes, OS calls) are not cached and will re-run freshly on every edit.</li>
+                                    <li><strong>Continuous Trigger:</strong> Changing values, wires, instances, or code immediately triggers a fresh execution.</li>
+                                </ul>
+                            </div>
+                            <p className="live-consent-modal__subtext">
+                                Do you authorize Slate to automatically execute Python code and its side effects on your machine upon committed edits?
+                            </p>
+                        </div>
+                        <div className="live-consent-modal__actions">
+                            <button
+                                type="button"
+                                className="live-consent-modal__btn-cancel"
+                                data-testid="live-consent-cancel-button"
+                                onClick={cancelLiveConsent}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                className="live-consent-modal__btn-confirm"
+                                data-testid="live-consent-confirm-button"
+                                onClick={confirmLiveConsent}
+                            >
+                                Authorize & Enable Live Mode
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </main>
     );
 }
