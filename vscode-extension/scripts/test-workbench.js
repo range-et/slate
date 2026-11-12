@@ -97,19 +97,16 @@ async function main() {
             await prompt.press('Enter');
             await expect(promptMessage).toContainText('Intent (what it should do)');
         };
-        const readJson = file => {
-            try {
-                return JSON.parse(fs.readFileSync(file, 'utf8'));
-            } catch {
-                return null;
-            }
-        };
         const project = path.join(workspace, 'folder_project');
         const nodeFile = path.join(project, 'slate', 'nodes', 'qa_native.json');
         const beforeNodes = fs.readdirSync(path.dirname(nodeFile)).sort();
 
         // End-to-end: real webview buttons -> Extension Host -> fake HTTP model ->
         // WorkspaceEdit/save -> native Undo -> Save. No injected host messages.
+        const readJson = file => {
+            try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+            catch { return null; }
+        };
         const normalizeFile = path.join(project, 'slate', 'nodes', 'normalize.json');
         const normalizeBefore = JSON.parse(fs.readFileSync(normalizeFile, 'utf8'));
         await command('normalize');

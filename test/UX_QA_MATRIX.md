@@ -194,3 +194,14 @@ Undo/Save claims continue to come from the real host/workbench suites.
 - Narrow 320/480px panes → Map → Compose → Library: browser regression checks
   header hit targets and resulting pressed state. This targets the Linux CI
   workbench failure where status text intercepted the Compose button.
+
+Linux CI prompt follow-up: workbench creation QA now waits for a complete native
+invalid-signature → validation error → valid-signature → cleared error cycle
+before Enter, and `src/harness/main.tsx` stops propagation of `Cmd/Ctrl+K` and `/`
+in the capture phase so VS Code's webview host does not forward `Ctrl+K` into
+workbench chord mode (`Ctrl+K Enter` → `workbench.action.keepEditor`) and swallow
+subsequent native prompt `Enter` presses. Browser regression in
+`interaction_chains.playwright.ts` verifies pre-registered bubble listeners do not
+receive `Ctrl+K` or canvas `/`. Both cancel-at-intent and successful creation
+retain their original assertions; dialog visibility alone is no longer treated as
+readiness.
