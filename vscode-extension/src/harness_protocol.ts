@@ -139,6 +139,7 @@ export interface FlowExecutionSnapshot {
     stderr?: string;
     observations: InstanceRunObservation[];
     valuesByUse: Record<string, ObservedValue>;
+    flowOutputs?: Record<string, ObservedValue>;
 }
 
 export interface HarnessSnapshot {
@@ -183,12 +184,13 @@ export interface FlowPort {
     annotation: string | null;
 }
 
-/** An instance calls a node, flow, or library unit (`node`), or is a literal value (`kind: 'value'`, Python expression). */
+/** An instance calls a node, flow, or library unit (`node`), is a literal value (`kind: 'value'`), or is a pinned viewer (`kind: 'viewer'`). */
 export interface FlowInstance {
     id: string;
     node?: string;
-    kind?: 'value';
-    value?: string;
+    kind?: 'value' | 'viewer';
+    value?: unknown;
+    pinned?: boolean;
 }
 
 /** Endpoints: `<instance>.out`, `<instance>.out:<name>`, `<instance>.in:<param>`, `input:<name>`, `output:<name>`. */

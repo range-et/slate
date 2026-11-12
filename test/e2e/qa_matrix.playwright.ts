@@ -695,3 +695,133 @@ test('surfaces Run/Stop flow controls, execution status badge, node execution ba
     await expect(inspectorSection).toContainText('out');
     await expect(inspectorSection).toContainText('42');
 });
+
+test('surfaces structured values, editable inputs, wire previews, and pinned viewers (S-601)', async ({ page }) => {
+    await host(page, null);
+
+    // 1. Post snapshot with a flow containing value, node, viewer, and wires
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 11,
+                projectName: 'viewer_e2e_proj',
+                layout: {
+                    v_val: { x: 50, y: 100 },
+                    clamp: { x: 300, y: 100 },
+                    viewer_1: { x: 550, y: 100 },
+                },
+                documents: [
+                    {
+                        id: 'node:clamp',
+                        path: 'slate/nodes/clamp.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:clamp',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def clamp(value: int, lower: int, upper: int) -> int:\n    return max(lower, min(value, upper))\n',
+                        units: [{
+                            id: 'clamp', identity: 'durable', kind: 'function', name: 'clamp', qualifiedName: 'clamp', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 40 } } },
+                            annotation: { intent: 'Clamp value', contract: 'Test', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def clamp(value: int, lower: int, upper: int) -> int', parameters: 'value: int, lower: int, upper: int', returnAnnotation: 'int',
+                            params: [{ name: 'value', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                    },
+                ],
+                flows: [
+                    {
+                        id: 'main',
+                        flow: {
+                            slate: 3,
+                            name: 'main',
+                            inputs: [],
+                            outputs: [],
+                            instances: [
+                                { id: 'v_val', kind: 'value', value: '42' },
+                                { id: 'clamp', node: 'clamp' },
+                                { id: 'viewer_1', kind: 'viewer', pinned: true },
+                            ],
+                            wires: [
+                                { from: 'v_val.out', to: 'clamp.in:value' },
+                                { from: 'clamp.out', to: 'viewer_1.in' },
+                            ],
+                            extra: {},
+                        },
+                    },
+                ],
+                execution: {
+                    runId: 'run-viewer-1',
+                    flowId: 'main',
+                    status: 'completed',
+                    durationMs: 85,
+                    exitCode: 0,
+                    observations: [
+                        {
+                            path: [],
+                            instanceId: 'v_val',
+                            status: 'executed',
+                            outputs: { out: { type: 'int', repr: '42', json: 42 } },
+                        },
+                        {
+                            path: [],
+                            instanceId: 'clamp',
+                            status: 'executed',
+                            inputs: { 'in:value': { type: 'int', repr: '42', json: 42 } },
+                            outputs: { out: { type: 'int', repr: '42', json: 42 } },
+                        },
+                        {
+                            path: [],
+                            instanceId: 'viewer_1',
+                            status: 'executed',
+                            inputs: { in: { type: 'int', repr: '42', json: 42 } },
+                        },
+                    ],
+                    valuesByUse: {
+                        '::clamp::out': { type: 'int', repr: '42', json: 42 },
+                        '::v_val::out': { type: 'int', repr: '42', json: 42 },
+                        '::viewer_1::in': { type: 'int', repr: '42', json: 42 },
+                    },
+                },
+            },
+        }, '*');
+    });
+
+    // 2. Verify Value editor on v_val card
+    const valueEditor = page.locator('[data-testid="value-editor"]');
+    await expect(valueEditor).toBeVisible();
+    await expect(valueEditor).toContainText('number');
+
+    // 3. Verify Pinned Viewer node card
+    const viewerNode = page.locator('[data-testid="viewer-node"]');
+    await expect(viewerNode).toBeVisible();
+    await expect(viewerNode).toContainText('int');
+    await expect(viewerNode).toContainText('42');
+    await expect(viewerNode.locator('.slate-viewer__btn', { hasText: 'Copy' })).toBeVisible();
+    await expect(viewerNode.locator('.slate-viewer__btn', { hasText: 'Unpin' })).toBeVisible();
+
+    // 4. Verify Inspector sections for value and viewer
+    await select(page, 'v_val');
+    const valInspector = page.locator('[data-testid="inspector-value-section"]');
+    await expect(valInspector).toBeVisible();
+    await expect(valInspector).toContainText('Input Value');
+    await expect(valInspector).toContainText('number');
+
+    await select(page, 'viewer_1');
+    const viewerInspector = page.locator('[data-testid="inspector-viewer-section"]');
+    await expect(viewerInspector).toBeVisible();
+    await expect(viewerInspector).toContainText('Viewer');
+    await expect(viewerInspector).toContainText('clamp.out');
+    await expect(viewerInspector).toContainText('42');
+
+    // 5. Unpin viewer via button
+    await viewerNode.locator('.slate-viewer__btn', { hasText: 'Unpin' }).click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({
+            kind: 'deleteItems',
+            ids: ['viewer_1'],
+        }),
+    }));
+});

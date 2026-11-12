@@ -1,4 +1,4 @@
-import { flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature } from '../flow';
+import { compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature } from '../flow';
 import type { SlateFlow } from '../harness_protocol';
 import { identifierNames, parseModule, splitImport, topLevelBindings } from '../python_adapter';
 import { checkJpl60, type SlateConfig, type SlateNode } from '../slate_folder';
@@ -100,6 +100,10 @@ export function flowToNode(
     const signatures = new Map<string, CallableSignature | null>();
     for (const instance of flow.instances) {
         if (instance.kind === 'value') { signatures.set(instance.id, null); continue; }
+        if (instance.kind === 'viewer') {
+            signatures.set(instance.id, { name: 'viewer', params: [{ name: 'in', annotation: null, default: null, kind: 'positional' }], returns: null });
+            continue;
+        }
         const resolved = resolve(instance.node!);
         if (!resolved) errors.push(`instance ${instance.id} calls ${instance.node}, which does not exist`);
         signatures.set(instance.id, resolved?.signature ?? null);
@@ -121,9 +125,13 @@ export function flowToNode(
         const fromOk = from.instance === null
             ? from.port.startsWith('input:') && flow.inputs.some(input => `input:${input.name}` === from.port)
             : signatures.has(from.instance) && outputsOf(from.instance).some(port => port.id === from.port);
+        const isViewerTo = flow.instances.find(i => i.id === to.instance)?.kind === 'viewer';
         const toOk = to.instance === null
             ? to.port.startsWith('output:') && flow.outputs.some(output => `output:${output.name}` === to.port)
-            : signatures.has(to.instance) && (signatures.get(to.instance)?.params ?? []).some(param => `in:${param.name}` === to.port);
+            : signatures.has(to.instance) && (
+                (signatures.get(to.instance)?.params ?? []).some(param => `in:${param.name}` === to.port) ||
+                (isViewerTo && (to.port === 'in' || to.port === 'in:in'))
+            );
         if (!fromOk || !toOk) errors.push(`wire ${wire.from} → ${wire.to} has an unknown endpoint`);
         else if (incoming.has(wire.to)) errors.push(`${wire.to} has more than one wire`);
         else incoming.set(wire.to, wire.from);
@@ -149,12 +157,22 @@ export function flowToNode(
     for (const id of order) {
         const instance = flow.instances.find(item => item.id === id)!;
         if (instance.kind === 'value') {
+            const pyVal = compileValueToPython(instance.value);
             if (options?.trace) {
                 body.push(`    with _slate_trace.scope("${id}"):`);
-                body.push(`        ${variable(id)} = ${instance.value ?? 'None'}`);
+                body.push(`        ${variable(id)} = ${pyVal}`);
                 body.push(`        _slate_trace.trace_output("${id}", "out", ${variable(id)})`);
             } else {
-                body.push(`    ${variable(id)} = ${instance.value ?? 'None'}`);
+                body.push(`    ${variable(id)} = ${pyVal}`);
+            }
+            continue;
+        }
+        if (instance.kind === 'viewer') {
+            const source = incoming.get(`${id}.in`) ?? incoming.get(`${id}.in:in`);
+            const sourceExpr = source ? expression(source) : 'None';
+            if (options?.trace) {
+                body.push(`    with _slate_trace.scope("${id}"):`);
+                body.push(`        _slate_trace.trace_input("${id}", "in", ${sourceExpr})`);
             }
             continue;
         }
@@ -387,7 +405,7 @@ export function compilePython(
             [...mergeImports(external.filter(line => !future.includes(line))), ...mergeImports(crossModule)],
         ].filter(section => section.length).map(section => section.join('\n'));
         const blocks = members.map(([nodeId, node]) => [
-            `# slate: ${node.extra.flow ? 'flows' : 'nodes'}/${nodeId}`,
+            `# slate: ${node.extra?.flow ? 'flows' : 'nodes'}/${nodeId}`,
             ...comment('intent', node.intent),
             ...comment('contract', node.contract),
             ...node.code,

@@ -40,7 +40,8 @@ keep outstanding tasks on GitHub.
 | Per-node Pydantic + pytest + mutmut verification runner & canvas badges (S-513, Issue #26) | ✅ shipped |
 | Used by N and shared-edit awareness (S-502, Issue #5) | ✅ shipped |
 | Trusted flow runner on real compiler (S-600, Issue #8) | ✅ shipped |
-| Running code / live values on wires (S-601, Issue #9) | 🟡 next |
+| Running code / live values on wires (S-601, Issue #9) | ✅ shipped |
+| Cases as guardrails (S-602, Issue #10) | 🟡 next |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -427,6 +428,17 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
 
+## Shipped — Values, Inputs & Pinned Viewers (2026-11-13, S-601)
+
+Completed for [issue #9](https://github.com/range-et/slate/issues/9):
+
+- **Structured JSON Value Literals.** Flow value instances store JSON values (numbers, booleans, strings, arrays, objects, null, and raw expressions) in `FlowInstance.value`. `contracts/slate-flow.schema.json` formalizes the schema. Compiler converts structured values to canonical Python literals (`compileValueToPython`).
+- **Editable Inputs & Type Validation.** The canvas value node and Inspector feature an interactive type-aware editor with type badges (`num`, `bool`, `str`, `json`, `expr`, `null`), cycle button (`⚙`), interactive boolean toggle (`True`/`False`), and real-time syntax error validation.
+- **Data Wire Previews.** Wires dynamically show carried runtime values observed during flow runs, execution status indicators, and offer a **Pin viewer to this wire** context menu action.
+- **Pinned Viewers (`kind: 'viewer'`).** Pinned viewer instances act as non-intrusive observation sinks. In untraced mode, they are completely omitted from compiled production modules (zero overhead); in trace mode, they instrument `_slate_trace.trace_input(...)`. Viewer cards render execution status (`RUN`, `ERR`, `SKIP`), type badge, expandable monospace representations, **Copy value**, **Capture case**, and **Unpin**.
+- **Downstream Failure & Skip Cascading.** When upstream nodes fail or are skipped, connected downstream wires and viewers visually cascade unreached/skipped status.
+- **Case Capture Foundation.** Prepares observed runtime inputs and outputs on viewers and instances for direct promotion to test cases (`captureCase` host action).
+
 ## Shipped — Trusted Flow Runner on Real Compiler (2026-11-12, S-600)
 
 Completed for [issue #8](https://github.com/range-et/slate/issues/8):
@@ -490,7 +502,7 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 
 ## Not started
 
-- Input, viewer, and example nodes; executing code; showing values.
+- Cases as guardrails (flow/node regression assertions captured from live runs).
 - Repeat / for-each / branch zones.
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.

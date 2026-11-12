@@ -1311,4 +1311,85 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(stopMsgs.some(m => m.ok === false || m.ok === true));
     });
 
+    test('structured values, editable inputs, pinning viewers, and capturing cases (S-601)', async () => {
+        await open();
+
+        // 1. Create a flow with structured values and clamp
+        const flowUri = uri('slate', 'flows', 'viewer_flow.json');
+        await vscode.workspace.fs.writeFile(flowUri, encode({
+            slate: 3,
+            name: 'viewer_flow',
+            inputs: [],
+            outputs: [{ id: 'out:val', name: 'val', annotation: 'int' }],
+            instances: [
+                { id: 'v_in', kind: 'value', value: '50' },
+                { id: 'v_min', kind: 'value', value: '10' },
+                { id: 'v_max', kind: 'value', value: '90' },
+                { id: 'inst_clamp', node: 'clamp' },
+            ],
+            wires: [
+                { from: 'v_in.out', to: 'inst_clamp.in:value' },
+                { from: 'v_min.out', to: 'inst_clamp.in:lower' },
+                { from: 'v_max.out', to: 'inst_clamp.in:upper' },
+                { from: 'inst_clamp.out', to: 'output:val' },
+            ],
+            extra: {},
+        }));
+
+        await act({ kind: 'refreshIndex' });
+        await eventually(async () => (await snapshot())?.flows?.some(f => f.id === 'viewer_flow') ?? false, 'viewer_flow indexed');
+        await messages();
+
+        // 2. Set structured value via action
+        await act({ kind: 'setValue', flow: 'viewer_flow', id: 'v_in', value: '75' });
+        const setValMsgs = await messages();
+        assert.ok(setValMsgs.some(m => m.ok === true && (m.message ?? '').includes('Saved value')));
+
+        // 3. Pin a viewer to inst_clamp.out
+        await act({ kind: 'addViewer', flow: 'viewer_flow', from: 'inst_clamp.out', x: 400, y: 250 });
+        const addViewerMsgs = await messages();
+        assert.ok(addViewerMsgs.some(m => m.ok === true && (m.message ?? '').includes('Pinned viewer')));
+
+        // Verify flow file on disk has viewer instance and connected wire
+        const flowContent = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(flowUri)));
+        const viewerInst = flowContent.instances.find((i: any) => i.kind === 'viewer');
+        assert.ok(viewerInst, 'viewer instance was created in flow');
+        assert.ok(flowContent.wires.some((w: any) => w.from === 'inst_clamp.out' && w.to === `${viewerInst.id}.in`), 'wire to viewer exists');
+
+        // 4. Run the flow and assert viewer captures observed input
+        await post({ type: 'runFlow', flowId: 'viewer_flow' });
+
+        let execSnap = (await snapshot()).execution;
+        const deadline = Date.now() + 15000;
+        while ((!execSnap || execSnap.status === 'running' || execSnap.status === 'idle') && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 200));
+            execSnap = (await snapshot()).execution;
+        }
+
+        assert.ok(execSnap, 'execution snapshot exists');
+        assert.equal(execSnap.status, 'completed');
+
+        const viewerObs = execSnap.observations.find(o => o.instanceId === viewerInst.id);
+        assert.ok(viewerObs, 'viewer has observation');
+        assert.equal(viewerObs.status, 'executed');
+        assert.equal(viewerObs.inputs.in?.repr, '75');
+
+        // 5. Capture case from observed viewer
+        await act({ kind: 'captureCase', flow: 'viewer_flow', output: 75 });
+        const captureMsgs = await messages();
+        assert.ok(captureMsgs.some(m => m.ok === true && (m.message ?? '').includes('Captured case')));
+
+        const updatedFlow = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(flowUri)));
+        assert.ok(Array.isArray(updatedFlow.cases) || Array.isArray(updatedFlow.extra?.cases), 'captured cases array exists in flow');
+
+        // 6. Unpin viewer
+        await act({ kind: 'deleteItems', flow: 'viewer_flow', ids: [viewerInst.id] });
+        const deleteMsgs = await messages();
+        assert.ok(deleteMsgs.some(m => m.ok === true));
+
+        const cleanedFlow = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(flowUri)));
+        assert.ok(!cleanedFlow.instances.some((i: any) => i.id === viewerInst.id), 'viewer instance removed');
+        assert.ok(!cleanedFlow.wires.some((w: any) => w.to === `${viewerInst.id}.in`), 'viewer wire removed');
+    });
+
 });
