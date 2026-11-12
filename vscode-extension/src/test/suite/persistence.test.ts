@@ -491,13 +491,15 @@ suite('Slate native persistence and proposal QA', () => {
             { id: 'ref_normalize', node: 'normalize' },
             { id: 'ref-legacy', node: 'clamp' },
         ]);
-        assert.ok(await mainDoc.save());
-        await act({ kind: 'refreshIndex' });
+        // Creating a reference while main.json is dirty updates and saves the open document so the new reference is retained on refresh.
+        await act({ kind: 'createRef', target: 'clamp', x: 50, y: 60 });
+        assert.equal(mainDoc.isDirty, false);
         assert.equal((await read('slate', 'layout.json')).refs, undefined);
-        assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, [
-            { id: 'ref_normalize', node: 'normalize' },
-            { id: 'ref-legacy', node: 'clamp' },
-        ]);
+        const snapInstancesAfterDirtyCreate = (await snapshot()).flows?.find(item => item.id === 'main')?.flow?.instances ?? [];
+        assert.equal(snapInstancesAfterDirtyCreate.length, 3);
+        assert.ok(snapInstancesAfterDirtyCreate.some(item => item.id === 'ref_normalize' && item.node === 'normalize'));
+        assert.ok(snapInstancesAfterDirtyCreate.some(item => item.id === 'ref-legacy' && item.node === 'clamp'));
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, snapInstancesAfterDirtyCreate);
 
         // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');

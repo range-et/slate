@@ -75,7 +75,7 @@ export class SlateFolderHost {
     async writeFlow(flowId: string, flow: SlateFlow): Promise<void> {
         const uri = this.uri(pathForFlowId(flowId));
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
-        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(serializeFlow(flow)));
+        await this.writeText(uri, serializeFlow(flow));
         if (flowId === MAIN_FLOW && this.deferredRefs.length > 0) {
             // main.json now holds the migrated root instances; drop the deferred legacy refs.
             this.deferredRefs = [];
@@ -236,7 +236,24 @@ export class SlateFolderHost {
 
     async writeLayout(): Promise<void> {
         const refs = [...this.deferredRefs, ...this.layout.refs.filter(ref => !this.deferredRefs.some(item => item.id === ref.id))];
-        await vscode.workspace.fs.writeFile(this.uri(LAYOUT_PATH), new TextEncoder().encode(serializeLayout({ ...this.layout, refs })));
+        await this.writeText(this.uri(LAYOUT_PATH), serializeLayout({ ...this.layout, refs }));
+    }
+
+    private async writeText(uri: vscode.Uri, text: string): Promise<void> {
+        const open = vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
+        if (open?.isDirty) {
+            if (text !== open.getText()) {
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(open.uri, new vscode.Range(open.positionAt(0), open.positionAt(open.getText().length)), text);
+                if (!await vscode.workspace.applyEdit(edit)) throw new Error(`VS Code rejected the edit to ${this.relative(uri)}.`);
+            }
+            try {
+                if (await open.save()) return;
+            } catch {
+                // Fall back to direct write if the open document's disk timestamp is stale.
+            }
+        }
+        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
     }
 
     /** Current node from its (possibly dirty) document. */
