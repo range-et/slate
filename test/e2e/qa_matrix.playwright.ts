@@ -1040,3 +1040,120 @@ test('Live mode topbar toggle, side-effect consent modal, and status badge (S-60
         enabled: false,
     }));
 });
+
+test('Occurrence-aware micro packets: exact packet Inspector view, occurrence badge, neighbor signatures, cases count, and prompt details (S-700)', async ({ page }) => {
+    await page.goto('/harness.html?test=1');
+
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 1,
+                projectName: 'PacketDemo',
+                documents: [
+                    {
+                        id: 'calc',
+                        path: 'slate/nodes/calc.json',
+                        sourceHash: 'sha256:1111',
+                        valid: true,
+                        stale: false,
+                        units: [{
+                            id: 'calc',
+                            identity: 'durable',
+                            kind: 'function',
+                            name: 'calc',
+                            qualifiedName: 'calc',
+                            parentId: null,
+                            ranges: {
+                                name: { start: { line: 1, character: 4 }, end: { line: 1, character: 8 } },
+                                declaration: { start: { line: 1, character: 0 }, end: { line: 2, character: 16 } },
+                            },
+                            annotation: { intent: 'Perform calculation', contract: 'x: int -> int' },
+                            decorators: [],
+                        }],
+                        diagnostics: [],
+                    },
+                ],
+                flows: [
+                    {
+                        id: 'flow_alpha',
+                        flow: {
+                            name: 'flow_alpha',
+                            inputs: [],
+                            outputs: [],
+                            instances: [{ id: 'inst_calc_1', node: 'calc' }],
+                            wires: [],
+                            extra: {},
+                        },
+                    },
+                ],
+            },
+        }, '*');
+    });
+
+    // Select the node
+    await page.evaluate(() => {
+        window.postMessage({ type: 'selectUnit', unitId: 'calc' }, '*');
+    });
+
+    // Provide the occurrence-aware packetPreview
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'packetPreview',
+            unitId: 'calc',
+            packet: {
+                items: [
+                    { id: 'calc', path: 'slate/nodes/calc.json', qualifiedName: 'calc', role: 'target', sourceHash: 'sha256:1111', characters: 60 },
+                ],
+                estimatedInputTokens: 185,
+                inputBudgetTokens: 600,
+                outputBudgetTokens: 768,
+                omittedNeighbors: ['heavy_math'],
+                occurrence: { flowId: 'flow_alpha', instanceId: 'inst_calc_1' },
+                prompt: 'You are a constrained local component forge engine.\n\n### Target stub: calc\n```python\ndef calc(x: int) -> int:\n    pass\n```',
+                neighbors: [
+                    { id: 'add', qualifiedName: 'add', signature: 'def add(a: int, b: int) -> int:', intent: 'Add two numbers' },
+                ],
+                casesCount: 3,
+            },
+        }, '*');
+    });
+
+    // Check exact packet section in Inspector
+    const exactSection = page.locator('[data-testid="inspector-exact-packet"]');
+    await expect(exactSection).toBeVisible();
+
+    // Check occurrence badge
+    const occBadge = page.locator('[data-testid="packet-occurrence-badge"]');
+    await expect(occBadge).toBeVisible();
+    await expect(occBadge).toContainText('inst_calc_1');
+    await expect(occBadge).toContainText('flow_alpha');
+
+    // Check token bar and cases count
+    await expect(exactSection.locator('.packet-tokens')).toContainText('185 / 600 estimated input tokens');
+    await expect(exactSection.locator('.packet-tokens')).toContainText('3 cases');
+
+    // Check neighbor signatures
+    const neighborsSection = page.locator('[data-testid="packet-neighbors"]');
+    await expect(neighborsSection).toBeVisible();
+    await expect(neighborsSection).toContainText('def add(a: int, b: int) -> int:');
+    await expect(neighborsSection).toContainText('Add two numbers');
+
+    // Check budget omissions
+    await expect(exactSection.locator('.omissions')).toContainText('heavy_math');
+
+    // Check expandable exact prompt viewer
+    const promptDetails = page.locator('[data-testid="packet-prompt-details"]');
+    await expect(promptDetails).toBeVisible();
+    const promptPre = page.locator('[data-testid="exact-prompt-preview"]');
+    await expect(promptPre).toContainText('You are a constrained local component forge engine.');
+    await expect(promptPre).toContainText('def calc(x: int) -> int:');
+
+    // Click Generate with llama.cpp and verify occurrence forwarded
+    await page.getByRole('button', { name: 'Generate with llama.cpp', exact: true }).click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'generate',
+        unitId: 'calc',
+        occurrence: { flowId: 'flow_alpha', instanceId: 'inst_calc_1' },
+    }));
+});

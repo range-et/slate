@@ -302,16 +302,27 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'packetPreview' && typeof value.unitId === 'string') {
-            this.postPacketPreview(value.unitId);
+            const occurrence = (value.occurrence && typeof value.occurrence === 'object'
+                && typeof (value.occurrence as Record<string, unknown>).flowId === 'string'
+                && typeof (value.occurrence as Record<string, unknown>).instanceId === 'string')
+                ? (value.occurrence as { flowId: string; instanceId: string })
+                : undefined;
+            this.postPacketPreview(value.unitId, occurrence);
             return;
         }
         if (value.type === 'generate' && typeof value.unitId === 'string') {
+            const occurrence = (value.occurrence && typeof value.occurrence === 'object'
+                && typeof (value.occurrence as Record<string, unknown>).flowId === 'string'
+                && typeof (value.occurrence as Record<string, unknown>).instanceId === 'string')
+                ? (value.occurrence as { flowId: string; instanceId: string })
+                : undefined;
             await this.generate(value.unitId, {
                 forge: (value as { forge?: boolean }).forge,
                 boundInputs: (value as { boundInputs?: boolean }).boundInputs,
                 retryFeedback: typeof (value as { retryFeedback?: unknown }).retryFeedback === 'string'
                     ? (value as { retryFeedback: string }).retryFeedback
                     : undefined,
+                occurrence,
             });
             return;
         }
@@ -435,9 +446,9 @@ export class HarnessPanel implements vscode.Disposable {
         );
     }
 
-    private postPacketPreview(unitId: string): void {
+    private postPacketPreview(unitId: string, occurrence?: { flowId: string; instanceId: string }): void {
         try {
-            const packet = this.packet(unitId, { forge: true });
+            const packet = this.packet(unitId, { forge: true, occurrence });
             void this.postMessage({
                 type: 'packetPreview',
                 unitId,
@@ -447,6 +458,10 @@ export class HarnessPanel implements vscode.Disposable {
                     inputBudgetTokens: packet.inputBudgetTokens,
                     outputBudgetTokens: packet.outputBudgetTokens,
                     omittedNeighbors: packet.omittedNeighbors,
+                    occurrence: packet.occurrence,
+                    prompt: packet.prompt,
+                    neighbors: packet.neighbors,
+                    casesCount: packet.cases?.length ?? 0,
                 },
             });
         } catch (error) {
@@ -456,7 +471,7 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
-    private async generate(unitId: string, options?: { forge?: boolean; boundInputs?: boolean; retryFeedback?: string }): Promise<void> {
+    private async generate(unitId: string, options?: { forge?: boolean; boundInputs?: boolean; retryFeedback?: string; occurrence?: { flowId: string; instanceId: string } }): Promise<void> {
         if (this.generation) {
             this.postCommandResult(false, 'A llama.cpp generation is already running.');
             return;
@@ -471,6 +486,7 @@ export class HarnessPanel implements vscode.Disposable {
                 forge: isForge,
                 boundInputs,
                 retryFeedback: options?.retryFeedback,
+                occurrence: options?.occurrence,
             });
             const target = this.resolveUnit(unitId);
             const settings = this.generationSettings();

@@ -712,6 +712,7 @@ suite('Slate native persistence and proposal QA', () => {
         const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
         await vscode.window.showTextDocument(layoutDoc);
         await vscode.commands.executeCommand('workbench.action.files.revert');
+        await eventually(async () => !layoutDoc.isDirty && layoutDoc.getText().includes('missing_target'), 'layoutDoc reloaded from disk');
         const dirtyLayoutEdit = new vscode.WorkspaceEdit();
         dirtyLayoutEdit.replace(
             layoutDoc.uri,
@@ -727,6 +728,7 @@ suite('Slate native persistence and proposal QA', () => {
             .includes('v_ref_dirty = clamp(value=x, lower=lo, upper=hi)'));
         await vscode.window.showTextDocument(layoutDoc);
         await vscode.commands.executeCommand('workbench.action.files.revert');
+        await eventually(async () => !layoutDoc.isDirty, 'layoutDoc reverted');
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 
         await vscode.workspace.fs.delete(layoutUri);
@@ -1527,6 +1529,85 @@ suite('Slate native persistence and proposal QA', () => {
         snap = await snapshot();
         assert.equal(snap.liveMode?.enabled, false);
         assert.equal(snap.liveMode?.consented, true); // Consent is remembered
+    });
+
+    test('occurrence-aware micro packets: isolates flow neighbors and previews prompt (S-700)', async () => {
+        // 1. Create two flows sharing the 'clamp' node definition
+        // Flow 1: 'flow_one' has clamp instance wired to normalize instance
+        const flowOneUri = uri('slate', 'flows', 'flow_one.json');
+        await vscode.workspace.fs.writeFile(flowOneUri, encode({
+            slate: 3,
+            name: 'flow_one',
+            inputs: [{ name: 'v', annotation: 'int' }],
+            outputs: [{ name: 'res', annotation: 'int' }],
+            instances: [
+                { id: 'inst_c1', node: 'clamp' },
+                { id: 'inst_n1', node: 'normalize' },
+            ],
+            wires: [
+                { from: 'input:v', to: 'inst_c1.in:value' },
+                { from: 'inst_c1.out', to: 'inst_n1.in:score' },
+                { from: 'inst_n1.out', to: 'output:res' },
+            ],
+            extra: {},
+        }));
+
+        // Flow 2: 'flow_two' has clamp instance wired to a second node without normalize
+        const flowTwoUri = uri('slate', 'flows', 'flow_two.json');
+        await vscode.workspace.fs.writeFile(flowTwoUri, encode({
+            slate: 3,
+            name: 'flow_two',
+            inputs: [{ name: 'v2', annotation: 'int' }],
+            outputs: [{ name: 'res2', annotation: 'int' }],
+            instances: [
+                { id: 'inst_c2', node: 'clamp' },
+            ],
+            wires: [
+                { from: 'input:v2', to: 'inst_c2.in:value' },
+                { from: 'inst_c2.out', to: 'output:res2' },
+            ],
+            extra: {},
+        }));
+
+        await act({ kind: 'refreshIndex' });
+        await eventually(async () => {
+            const snap = await snapshot();
+            return Boolean(snap?.flows?.some(f => f.id === 'flow_one') && snap?.flows?.some(f => f.id === 'flow_two'));
+        }, 'flows indexed');
+        await messages();
+
+        // 2. Request packetPreview for clamp with occurrence in flow_one
+        await post({
+            type: 'packetPreview',
+            unitId: 'clamp',
+            occurrence: { flowId: 'flow_one', instanceId: 'inst_c1' },
+        });
+
+        let msgs = await messages();
+        let previewMsg = msgs.find(m => m.type === 'packetPreview' && m.unitId === 'clamp') as any;
+        assert.ok(previewMsg?.packet, 'received packet preview for flow_one occurrence');
+        assert.deepEqual(previewMsg.packet.occurrence, { flowId: 'flow_one', instanceId: 'inst_c1' });
+        assert.ok(Array.isArray(previewMsg.packet.neighbors), 'neighbors array populated');
+        assert.ok(previewMsg.packet.neighbors.some((n: any) => n.id === 'normalize'), 'includes normalize neighbor');
+        assert.ok(typeof previewMsg.packet.prompt === 'string', 'prompt is provided in preview');
+        assert.ok(previewMsg.packet.prompt.includes('Dependency: normalize'), 'prompt contains normalize signature');
+
+        // 3. Request packetPreview for clamp with occurrence in flow_two
+        await post({
+            type: 'packetPreview',
+            unitId: 'clamp',
+            occurrence: { flowId: 'flow_two', instanceId: 'inst_c2' },
+        });
+
+        msgs = await messages();
+        previewMsg = msgs.find(m => m.type === 'packetPreview' && m.unitId === 'clamp') as any;
+        assert.ok(previewMsg?.packet, 'received packet preview for flow_two occurrence');
+        assert.deepEqual(previewMsg.packet.occurrence, { flowId: 'flow_two', instanceId: 'inst_c2' });
+        assert.equal(previewMsg.packet.neighbors?.length ?? 0, 0, 'flow_two has no neighbor node instances for clamp');
+        assert.ok(!previewMsg.packet.prompt.includes('Dependency: normalize'), 'flow_two prompt does not leak normalize from flow_one');
+
+        try { await vscode.workspace.fs.delete(flowOneUri); } catch {}
+        try { await vscode.workspace.fs.delete(flowTwoUri); } catch {}
     });
 
 });

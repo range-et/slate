@@ -692,14 +692,51 @@ function Inspector({
                             onPick={id => action({ kind: 'setContext', consumer: unit.id, dependency: id, enabled: true })}
                         />
                     </section>
-                    <section className="packet-preview">
+                    <section className="packet-preview" data-testid="inspector-exact-packet">
                         <h3>Exact packet</h3>
                         {packetError && <p className="error">{packetError}</p>}
                         {packet && <>
-                            <p>{packet.estimatedInputTokens} / {packet.inputBudgetTokens} estimated input tokens · {packet.outputBudgetTokens} reserved output</p>
-                            <ul>{packet.items.map(item => <li key={`${item.role}:${item.id}`}><strong>{item.role === 'target' ? 'TARGET' : 'CONTEXT'}</strong> {item.qualifiedName} <small>{item.path} · {item.characters} chars</small></li>)}</ul>
+                            {packet.occurrence && (
+                                <div className="packet-occurrence" data-testid="packet-occurrence-badge">
+                                    <span className="packet-occurrence__label">Occurrence:</span>{' '}
+                                    <code>{packet.occurrence.instanceId}</code> in flow <code>{packet.occurrence.flowId}</code>
+                                </div>
+                            )}
+                            <p className="packet-tokens">
+                                <strong>{packet.estimatedInputTokens}</strong> / {packet.inputBudgetTokens} estimated input tokens · {packet.outputBudgetTokens} reserved output
+                                {typeof packet.casesCount === 'number' && packet.casesCount > 0 && (
+                                    <span> · {packet.casesCount} case{packet.casesCount === 1 ? '' : 's'}</span>
+                                )}
+                            </p>
+                            <ul>
+                                {packet.items.map(item => (
+                                    <li key={`${item.role}:${item.id}`}>
+                                        <strong>{item.role === 'target' ? 'TARGET' : 'CONTEXT'}</strong> {item.qualifiedName}{' '}
+                                        <small>{item.path} · {item.characters} chars</small>
+                                    </li>
+                                ))}
+                            </ul>
+                            {packet.neighbors && packet.neighbors.length > 0 && (
+                                <div className="packet-neighbors" data-testid="packet-neighbors">
+                                    <h4>Bounded Neighbors ({packet.neighbors.length})</h4>
+                                    <ul className="packet-neighbors-list">
+                                        {packet.neighbors.map(n => (
+                                            <li key={n.id} className="packet-neighbor-item">
+                                                <code>{n.signature}</code>
+                                                {n.intent && <span className="packet-neighbor-intent"> — {n.intent}</span>}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
                             {packet.omittedNeighbors && packet.omittedNeighbors.length > 0 && (
                                 <p className="omissions">Omitted context (budget): {packet.omittedNeighbors.join(', ')}</p>
+                            )}
+                            {packet.prompt && (
+                                <details className="packet-prompt-details" data-testid="packet-prompt-details">
+                                    <summary>Exact Forge Prompt ({packet.estimatedInputTokens} tokens)</summary>
+                                    <pre className="exact-prompt-preview" data-testid="exact-prompt-preview">{packet.prompt}</pre>
+                                </details>
                             )}
                         </>}
                     </section>
@@ -711,7 +748,7 @@ function Inspector({
                         <ul>{proposal.checks.map(check => <li key={check}>✓ {check}</li>)}</ul>
                         <button disabled={Boolean(proposal.staleMessage)} onClick={() => vscode?.postMessage({ type: 'acceptProposal', proposalId: proposal.id })}>Accept WorkspaceEdit</button>
                     </section>}
-                    {!generation && (!proposal || proposal.unitId !== unit.id) && <button disabled={!packet} onClick={() => vscode?.postMessage({ type: 'generate', unitId: unit.id })}>Generate with llama.cpp</button>}
+                    {!generation && (!proposal || proposal.unitId !== unit.id) && <button disabled={!packet} onClick={() => vscode?.postMessage({ type: 'generate', unitId: unit.id, occurrence: packet?.occurrence })}>Generate with llama.cpp</button>}
                     {accepted && <button className="secondary" onClick={() => vscode?.postMessage({ type: 'undoAccepted' })}>Undo accepted edit</button>}
                     <button className="secondary" onClick={() => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true })}>
                         Open node file
@@ -1544,7 +1581,14 @@ function HarnessApp() {
                     : `Search: ${data.results.length} result${data.results.length === 1 ? '' : 's'} for “${data.query}”`);
             }
             if (data.type === 'packetPreview') {
-                setPackets(current => ({ ...current, [data.unitId]: { packet: data.packet, error: data.error } }));
+                const key = data.packet?.occurrence
+                    ? `${data.unitId}:${data.packet.occurrence.flowId}:${data.packet.occurrence.instanceId}`
+                    : data.unitId;
+                setPackets(current => ({
+                    ...current,
+                    [key]: { packet: data.packet, error: data.error },
+                    [data.unitId]: { packet: data.packet, error: data.error },
+                }));
             }
             if (data.type === 'generationStarted') {
                 activeGeneration.current = data.unitId;
@@ -1648,8 +1692,15 @@ function HarnessApp() {
 
     useEffect(() => {
         const unitId = selected?.data.unit?.id;
-        if (unitId) vscode?.postMessage({ type: 'packetPreview', unitId });
-    }, [selected?.data.unit?.id, snapshot.revision]);
+        if (unitId) {
+            const occurrence = scope.flow
+                ? { flowId: scope.flow, instanceId: selected.id }
+                : (selected?.data.kind === 'instance' || snapshot.flows?.find(f => f.id === 'main')?.flow?.instances.some(i => i.id === selected.id))
+                    ? { flowId: 'main', instanceId: selected.id }
+                    : undefined;
+            vscode?.postMessage({ type: 'packetPreview', unitId, occurrence });
+        }
+    }, [selected?.data.unit?.id, selected?.id, scope.flow, snapshot.revision]);
 
     useEffect(() => {
         const openPalette = (event: KeyboardEvent) => {
@@ -2369,24 +2420,36 @@ function HarnessApp() {
                     </div>
                 </section>
             )}
-            {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
-                key={selected.id}
-                visible={inspectorVisible}
-                width={effectiveInspectorWidth}
-                maxWidth={maxInspectorWidth}
-                onResize={next => setInspectorWidth(clampInspectorWidth(next, viewportWidth, libraryOpen))}
-                onEnterFlow={enterFlow}
-                onGoTo={goTo}
-                onNavigateToInstance={goToInstance}
-                node={selected}
-                document={selectedDocument}
-                snapshot={snapshot}
-                packet={selected.data.unit ? packets[selected.data.unit.id]?.packet : undefined}
-                packetError={selected.data.unit ? packets[selected.data.unit.id]?.error : undefined}
-                generation={generation && generation.unitId === selected.data.unit?.id ? generation.message : null}
-                proposal={proposal}
-                accepted={acceptedUnitId === selected.data.unit?.id}
-            />}
+            {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && (() => {
+                const selectedOccurrence = scope.flow
+                    ? { flowId: scope.flow, instanceId: selected.id }
+                    : (selected.data.kind === 'instance' || snapshot.flows?.find(f => f.id === 'main')?.flow?.instances.some(i => i.id === selected.id))
+                        ? { flowId: 'main', instanceId: selected.id }
+                        : undefined;
+                const occKey = selected.data.unit && selectedOccurrence
+                    ? `${selected.data.unit.id}:${selectedOccurrence.flowId}:${selectedOccurrence.instanceId}`
+                    : undefined;
+                return (
+                    <Inspector
+                        key={selected.id}
+                        visible={inspectorVisible}
+                        width={effectiveInspectorWidth}
+                        maxWidth={maxInspectorWidth}
+                        onResize={next => setInspectorWidth(clampInspectorWidth(next, viewportWidth, libraryOpen))}
+                        onEnterFlow={enterFlow}
+                        onGoTo={goTo}
+                        onNavigateToInstance={goToInstance}
+                        node={selected}
+                        document={selectedDocument}
+                        snapshot={snapshot}
+                        packet={selected.data.unit ? ((occKey ? packets[occKey]?.packet : undefined) ?? packets[selected.data.unit.id]?.packet) : undefined}
+                        packetError={selected.data.unit ? ((occKey ? packets[occKey]?.error : undefined) ?? packets[selected.data.unit.id]?.error) : undefined}
+                        generation={generation && generation.unitId === selected.data.unit?.id ? generation.message : null}
+                        proposal={proposal}
+                        accepted={acceptedUnitId === selected.data.unit?.id}
+                    />
+                );
+            })()}
             {boardMenu && <BoardContextMenu
                 menu={boardMenu}
                 snapshot={snapshot}
