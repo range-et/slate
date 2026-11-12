@@ -11,6 +11,8 @@ type Snapshot = {
     documents: Array<{
         path: string;
         sourceHash: string;
+        imports?: string[];
+        uses?: string[];
         diagnostics: Array<{ code: string }>;
         units: Array<{ id: string; name: string; annotation: Record<string, unknown> | null }>;
     }>;
@@ -288,6 +290,8 @@ suite('Slate Extension Host', () => {
 
             const snapshot = await waitForSnapshot(value => value.documents.length === 4);
             assert.ok(snapshot.documents.some(document => document.path === 'slate/nodes/ops/_prelude.json' && document.diagnostics.length === 0));
+            const indexedRun = snapshot.documents.find(document => document.path === 'slate/nodes/app/run.json');
+            assert.deepEqual(indexedRun?.uses, ['ops/_prelude', 'ops/add'], 'indexed HarnessDocument retains uses for health report analysis');
 
             // Leaves first: add before run; module state is never described.
             await vscode.commands.executeCommand('slate.test.postMessage', { type: 'action', action: { kind: 'describeNodes' } });

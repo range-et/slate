@@ -21,7 +21,8 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 
 import { demoSnapshot } from './demo';
-import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, type CanvasScope, type SlateNodeData } from './graph';
+import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, typesMismatch, type CanvasScope, type SlateEdgeData, type SlateNodeData } from './graph';
+import { buildNodeHealthReport, diffNodeCode } from './health';
 import { inputPorts, outputPorts, type Port } from '../../vscode-extension/src/flow';
 import { rankPalette, type Rankable } from './palette';
 import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, PacketPreview } from './types';
@@ -193,10 +194,22 @@ function CodeEditor({ initial, onChange }: { initial: string; onChange(value: st
     return <div className="node-code-editor" ref={host} aria-label="Node code" />;
 }
 
+const MIN_INSPECTOR_WIDTH = 280;
+const MAX_INSPECTOR_WIDTH = 640;
+const MIN_CANVAS_WIDTH = 260;
+const LIBRARY_WIDTH = 240;
+const maxInspectorWidthForViewport = (viewportWidth: number, libraryOpen: boolean) =>
+    Math.max(MIN_INSPECTOR_WIDTH, Math.min(MAX_INSPECTOR_WIDTH, viewportWidth - (libraryOpen ? LIBRARY_WIDTH : 0) - MIN_CANVAS_WIDTH));
+const clampInspectorWidth = (value: number, viewportWidth = window.innerWidth, libraryOpen = false) =>
+    Math.max(MIN_INSPECTOR_WIDTH, Math.min(maxInspectorWidthForViewport(viewportWidth, libraryOpen), Math.round(value)));
+
 function Inspector({
-    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, visible,
+    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, visible, width, maxWidth, onResize,
 }: {
     visible: boolean;
+    width: number;
+    maxWidth: number;
+    onResize(width: number): void;
     onEnterFlow(flowId: string): void;
     onGoTo(target: string): void;
     node: Node<SlateNodeData>;
@@ -235,7 +248,35 @@ function Inspector({
     const namedDependency = (id: string) => snapshot.documents.flatMap(item => item.units).find(candidate => candidate.id === id);
     const action = (value: unknown) => vscode?.postMessage({ type: 'action', action: value, revision: snapshot.revision });
     return (
-        <aside className="harness-inspector harness-inspector--wide" aria-label="Selected node details" hidden={!visible} style={{ display: visible ? undefined : 'none' }}>
+        <aside className="harness-inspector harness-inspector--wide harness-inspector--docked" aria-label="Selected node details" hidden={!visible} style={{ display: visible ? undefined : 'none' }}>
+            <div
+                className="harness-inspector__resizer"
+                role="separator"
+                tabIndex={0}
+                aria-label="Resize inspector"
+                aria-orientation="vertical"
+                aria-valuemin={MIN_INSPECTOR_WIDTH}
+                aria-valuemax={maxWidth}
+                aria-valuenow={width}
+                onMouseDown={event => {
+                    event.preventDefault();
+                    const startX = event.clientX;
+                    const startWidth = width;
+                    const onMove = (moveEvent: MouseEvent) => {
+                        onResize(startWidth + (startX - moveEvent.clientX));
+                    };
+                    const onUp = () => {
+                        window.removeEventListener('mousemove', onMove);
+                        window.removeEventListener('mouseup', onUp);
+                    };
+                    window.addEventListener('mousemove', onMove);
+                    window.addEventListener('mouseup', onUp);
+                }}
+                onKeyDown={event => {
+                    if (event.key === 'ArrowLeft') { event.preventDefault(); onResize(width + 24); }
+                    if (event.key === 'ArrowRight') { event.preventDefault(); onResize(width - 24); }
+                }}
+            />
             <div className="harness-inspector__eyebrow">{node.data.kind.replace('_', ' ')}</div>
             <h2>{node.data.label}</h2>
             {node.data.path && <code className="harness-inspector__path">{node.data.path}</code>}
@@ -425,7 +466,7 @@ type BoardMenuState = {
     /** A right-clicked context edge: dependency → consumer. */
     edge?: { dependency: string; consumer: string };
     /** A right-clicked data wire (flow endpoints). */
-    wire?: { from: string; to: string };
+    wire?: { from: string; to: string; warning?: string };
 };
 
 function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onEnterFlow, onGoTo, onFindRefs, onAdd }: {
@@ -470,6 +511,7 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
         </>}
         {menu.wire && <>
             <div className="board-context-menu__label">{menu.wire.from} → {menu.wire.to}</div>
+            {menu.wire.warning && <div className="board-context-menu__warning" role="note">⚠ Type mismatch: {menu.wire.warning}</div>}
             <button role="menuitem" className="danger" onClick={() => act({ kind: 'disconnectData', from: menu.wire!.from, to: menu.wire!.to })}>Remove wire</button>
         </>}
         {!node && !menu.edge && !menu.wire && <>
@@ -639,6 +681,163 @@ function LibrarySidebar({ snapshot, onPick, onAddLibrary }: { snapshot: HarnessS
     </aside>;
 }
 
+function NodeHealthReport({ snapshot, onNavigate, onClose }: {
+    snapshot: HarnessSnapshot;
+    onNavigate(target: string): void;
+    onClose(): void;
+}) {
+    const report = useMemo(() => buildNodeHealthReport(snapshot), [snapshot]);
+    const [diffPair, setDiffPair] = useState<{ leftId: string; rightId: string } | null>(null);
+    const dialogRef = useRef<HTMLElement | null>(null);
+    useEffect(() => {
+        const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const firstButton = dialogRef.current?.querySelector<HTMLElement>('button');
+        (firstButton ?? dialogRef.current)?.focus();
+        return () => {
+            const fallback = document.querySelector<HTMLElement>('.harness-health-toggle');
+            const target = previousActive && previousActive.isConnected && previousActive !== document.body
+                ? previousActive
+                : fallback;
+            target?.focus();
+        };
+    }, []);
+    useEffect(() => {
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                onClose();
+                return;
+            }
+            if (event.key === 'Tab') {
+                const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? []);
+                event.preventDefault();
+                event.stopPropagation();
+                if (focusable.length === 0) {
+                    dialogRef.current?.focus();
+                    return;
+                }
+                const active = document.activeElement as HTMLElement | null;
+                const index = active ? focusable.indexOf(active) : -1;
+                const nextIndex = event.shiftKey
+                    ? (index <= 0 ? focusable.length - 1 : index - 1)
+                    : (index === -1 || index === focusable.length - 1 ? 0 : index + 1);
+                focusable[nextIndex].focus();
+            }
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [onClose]);
+    const sourceOf = (id: string) => snapshot.documents.find(doc => nodeIdOf(doc.path) === id)?.source ?? '';
+    const diffLines = useMemo(() => diffPair ? diffNodeCode(sourceOf(diffPair.leftId), sourceOf(diffPair.rightId)) : [], [diffPair, snapshot]);
+    return (
+        <div className="health-backdrop" onMouseDown={onClose}>
+            <section ref={dialogRef} tabIndex={-1} className="health-report" role="dialog" aria-modal="true" aria-label="Node health report" onMouseDown={event => event.stopPropagation()}>
+                <header className="health-report__header">
+                    <div>
+                        <h2>Node health report</h2>
+                        <span className="health-report__badge">Read-only</span>
+                    </div>
+                    <button aria-label="Close health report" onClick={onClose}>×</button>
+                </header>
+                <div className="health-report__body">
+                    <div className="health-report__caveats" role="note" aria-label="Analysis coverage caveats">
+                        <strong>Coverage gaps — “no known references” is never safe to delete automatically</strong>
+                        <ul>
+                            {report.caveats.map(caveat => <li key={caveat}>{caveat}</li>)}
+                        </ul>
+                    </div>
+                    <section className="health-report__section" aria-label="Unreferenced candidates">
+                        <h3>No known references ({report.unreferenced.length})</h3>
+                        <p>Definitions with no static flow instance, canvas reference, or indexed call. Review manually; do not assume safe to delete.</p>
+                        {report.unreferenced.length === 0 && <p className="health-report__empty">Every indexed definition has at least one static reference.</p>}
+                        {report.unreferenced.length > 0 && <ul className="health-report__list">
+                            {report.unreferenced.map(item => (
+                                <li key={item.nodeId} className="health-report__item">
+                                    <div>
+                                        <strong>{item.nodeId}</strong>
+                                        <code>{item.signature ?? item.name}</code>
+                                        {item.intent && <small>{item.intent}</small>}
+                                        {item.contextOnlyBy.length > 0 && (
+                                            <small className="health-report__context-note">Prompt context only for: {item.contextOnlyBy.join(', ')}</small>
+                                        )}
+                                    </div>
+                                    <button className="secondary" onClick={() => { onNavigate(item.nodeId); onClose(); }}>Go to {item.nodeId}</button>
+                                </li>
+                            ))}
+                        </ul>}
+                    </section>
+                    <section className="health-report__section" aria-label="Exact duplicates">
+                        <h3>Exact duplicates ({report.exactDuplicates.length})</h3>
+                        <p>Definitions with identical normalized Python body (ignoring comments, docstrings, whitespace, and function/parameter names).</p>
+                        {report.exactDuplicates.length === 0 && <p className="health-report__empty">No exact duplicates detected.</p>}
+                        {report.exactDuplicates.length > 0 && <ul className="health-report__list">
+                            {report.exactDuplicates.map(group => (
+                                <li key={group.nodeIds.join('::')} className="health-report__item">
+                                    <div>
+                                        <strong>{group.nodeIds.join(' = ')}</strong>
+                                        <code>{group.normalizedCode.split('\n')[0]}</code>
+                                    </div>
+                                    <div className="health-report__item-actions">
+                                        {group.nodeIds.map(id => (
+                                            <button key={id} className="secondary" onClick={() => { onNavigate(id); onClose(); }}>Go to {id}</button>
+                                        ))}
+                                        <button onClick={() => setDiffPair({ leftId: group.nodeIds[0], rightId: group.nodeIds[1] })}>
+                                            Compare {group.nodeIds[0]} vs {group.nodeIds[1]}
+                                        </button>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>}
+                    </section>
+                    <section className="health-report__section" aria-label="Near duplicates">
+                        <h3>Near duplicates ({report.nearDuplicates.length})</h3>
+                        <p>Heuristic structural similarity across multi-line definitions.</p>
+                        {report.nearDuplicates.length === 0 && <p className="health-report__empty">No near duplicates detected.</p>}
+                        {report.nearDuplicates.length > 0 && <ul className="health-report__list">
+                            {report.nearDuplicates.map(pair => (
+                                <li key={`${pair.leftId}::${pair.rightId}`} className="health-report__item">
+                                    <div>
+                                        <strong>{pair.leftId} ↔ {pair.rightId}</strong>
+                                        <span className="health-report__similarity">{Math.round(pair.similarity * 100)}% similar</span>
+                                    </div>
+                                    <div className="health-report__item-actions">
+                                        <button className="secondary" onClick={() => { onNavigate(pair.leftId); onClose(); }}>Go to {pair.leftId}</button>
+                                        <button className="secondary" onClick={() => { onNavigate(pair.rightId); onClose(); }}>Go to {pair.rightId}</button>
+                                        <button onClick={() => setDiffPair({ leftId: pair.leftId, rightId: pair.rightId })}>
+                                            Compare {pair.leftId} vs {pair.rightId}
+                                        </button>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>}
+                    </section>
+                    {diffPair && (
+                        <section className="health-report__diff" aria-label={`Diff ${diffPair.leftId} vs ${diffPair.rightId}`}>
+                            <header>
+                                <strong>Diff: {diffPair.leftId} vs {diffPair.rightId} (read-only)</strong>
+                                <div className="health-report__item-actions">
+                                    <button className="secondary" onClick={() => { onNavigate(diffPair.leftId); onClose(); }}>Go to {diffPair.leftId}</button>
+                                    <button className="secondary" onClick={() => { onNavigate(diffPair.rightId); onClose(); }}>Go to {diffPair.rightId}</button>
+                                    <button className="secondary" aria-label="Close diff" onClick={() => setDiffPair(null)}>Close diff</button>
+                                </div>
+                            </header>
+                            <pre className="health-report__diff-code">{diffLines.map((line, idx) => (
+                                <div key={idx} className={`diff-line diff-line--${line.kind}`}>
+                                    <span className="diff-line__num">{line.leftLine ?? ''}</span>
+                                    <span className="diff-line__num">{line.rightLine ?? ''}</span>
+                                    <span className="diff-line__sign">{line.kind === 'remove' ? '-' : line.kind === 'add' ? '+' : ' '}</span>
+                                    <span className="diff-line__text">{line.text}</span>
+                                </div>
+                            ))}</pre>
+                        </section>
+                    )}
+                </div>
+            </section>
+        </div>
+    );
+}
+
 type AddRequest = { x: number; y: number; connectFrom?: string; connectTo?: string; annotation?: string | null };
 
 function HarnessApp() {
@@ -663,6 +862,13 @@ function HarnessApp() {
     const [view, setView] = useState<'compose' | 'map'>('compose');
     const [flowStack, setFlowStack] = useState<string[]>([]);
     const [libraryOpen, setLibraryOpen] = useState(true);
+    const [healthOpen, setHealthOpen] = useState(false);
+    const [showAllContext, setShowAllContext] = useState(false);
+    const [activeContextNodes, setActiveContextNodes] = useState<string[]>([]);
+    const [inspectorWidth, setInspectorWidth] = useState(360);
+    const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+    const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
+    const inspectorTimer = useRef<number | null>(null);
     const [adding, setAdding] = useState<AddRequest | null>(null);
     const [highlight, setHighlight] = useState<string | null>(null);
     const [pendingCenter, setPendingCenter] = useState<string | null>(null);
@@ -678,20 +884,43 @@ function HarnessApp() {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node<SlateNodeData>>(graph.nodes);
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
-    // Let a second click reach a node before its inspector can cover it.
-    const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
-    const inspectorTimer = useRef<number | null>(null);
     useEffect(() => {
+        const onResize = () => setViewportWidth(window.innerWidth);
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, []);
+    useEffect(() => {
+        if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current);
         setInspectorNodeId(null);
-        if (selected) inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(selected.id), 400);
-        return () => { if (inspectorTimer.current !== null) window.clearTimeout(inspectorTimer.current); };
+        if (!selected || selected.data.kind === 'group' || selected.data.kind === 'folder') return;
+        const id = selected.id;
+        inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(id), 400);
+        return () => { if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current); };
+    }, [selected?.id, selected?.data.kind, scope.flow, scope.view]);
+    useEffect(() => {
+        setActiveContextNodes([]);
     }, [selected?.id, scope.flow, scope.view]);
+    const inspectorVisible = Boolean(selected && inspectorNodeId === selected.id && selected.data.kind !== 'group' && selected.data.kind !== 'folder');
+    const maxInspectorWidth = maxInspectorWidthForViewport(viewportWidth, libraryOpen);
+    const effectiveInspectorWidth = clampInspectorWidth(inspectorWidth, viewportWidth, libraryOpen);
+    const inspectorDocked = inspectorVisible && viewportWidth >= (libraryOpen ? LIBRARY_WIDTH : 0) + MIN_INSPECTOR_WIDTH + MIN_CANVAS_WIDTH;
     const selectedDocument = selected
         ? snapshot.documents.find(document => nodeIdOf(document.path) === selected.data.path)
         : undefined;
+    const visibleEdges = useMemo(() => {
+        if (showAllContext) return graph.edges;
+        const focusIds = new Set<string>(activeContextNodes);
+        for (const node of selectedNodes) {
+            focusIds.add(node.id);
+            if (node.data.target) focusIds.add(node.data.target);
+        }
+        return graph.edges.filter(edge => !edge.id.startsWith('context:') || focusIds.has(edge.source) || focusIds.has(edge.target));
+    }, [graph.edges, showAllContext, selectedNodes, activeContextNodes]);
     const invalidCount = snapshot.documents.filter(document => !document.valid).length;
     const staleCount = snapshot.documents.filter(document => document.stale).length;
-    const contextCount = graph.edges.filter(edge => edge.id.startsWith('context:')).length;
+    const totalContextCount = graph.edges.filter(edge => edge.id.startsWith('context:')).length;
+    const visibleContextCount = visibleEdges.filter(edge => edge.id.startsWith('context:')).length;
+    const mismatchEdges = useMemo(() => graph.edges.filter(edge => (edge.data as SlateEdgeData | undefined)?.mismatch), [graph.edges]);
     const noteCount = snapshot.notes?.length ?? 0;
 
     useEffect(() => {
@@ -755,8 +984,15 @@ function HarnessApp() {
 
     useEffect(() => {
         setNodes(current => {
-            const selectedIds = new Set(current.filter(node => node.selected).map(node => node.id));
-            return graph.nodes.map(node => ({ ...node, selected: selectedIds.has(node.id) }));
+            const byId = new Map(current.map(node => [node.id, node]));
+            return graph.nodes.map(node => {
+                const existing = byId.get(node.id);
+                return {
+                    ...node,
+                    ...(existing?.measured ? { measured: existing.measured } : {}),
+                    selected: Boolean(existing?.selected),
+                };
+            });
         });
     }, [graph.nodes, setNodes]);
 
@@ -767,6 +1003,7 @@ function HarnessApp() {
 
     useEffect(() => {
         const openPalette = (event: KeyboardEvent) => {
+            if (healthOpen) return;
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
                 event.preventDefault();
                 event.stopPropagation();
@@ -784,10 +1021,11 @@ function HarnessApp() {
         };
         window.addEventListener('keydown', openPalette, true);
         return () => window.removeEventListener('keydown', openPalette, true);
-    }, []);
+    }, [healthOpen]);
 
     useEffect(() => {
         const focusSelectedUnit = (event: KeyboardEvent) => {
+            if (healthOpen) return;
             const target = event.target as HTMLElement | null;
             if (event.key !== 'Enter' || target?.matches('input, textarea, button, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
             if (!selected?.data.unit) return;
@@ -796,7 +1034,7 @@ function HarnessApp() {
         };
         window.addEventListener('keydown', focusSelectedUnit);
         return () => window.removeEventListener('keydown', focusSelectedUnit);
-    }, [selected?.data.unit]);
+    }, [selected?.data.unit, healthOpen]);
 
     useEffect(() => {
         if (!boardMenu) return;
@@ -870,7 +1108,7 @@ function HarnessApp() {
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
             const target = event.target as HTMLElement | null;
-            if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor') || paletteOpen || adding) return;
+            if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor') || paletteOpen || adding || healthOpen) return;
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'g') {
                 event.preventDefault();
                 groupSelection();
@@ -962,6 +1200,8 @@ function HarnessApp() {
             items.push({ id: 'new-flow', group: 'canvas', label: 'New flow…', run: () => { const point = viewCenter(); post({ kind: 'createFlow', x: point.x, y: point.y }); } });
         }
         items.push({ id: 'library', group: 'canvas', label: libraryOpen ? 'Hide library' : 'Show library', run: () => setLibraryOpen(open => !open) });
+        items.push({ id: 'health', group: 'canvas', label: 'Node health report', detail: 'Unreferenced candidates & duplicate code (read-only)', run: () => setHealthOpen(true) });
+        items.push({ id: 'context-links', group: 'canvas', label: showAllContext ? 'Show context links on demand' : 'Show all context links', detail: 'Keep ordinary wires focused on dataflow', run: () => setShowAllContext(current => !current) });
         items.push({ id: 'add-library', group: 'canvas', label: 'Add library file…', run: () => post({ kind: 'addLibrary' }) });
         items.push(describing
             ? { id: 'describe-stop', group: 'canvas', label: 'Stop describing', run: () => post({ kind: 'cancelDescribe' }) }
@@ -975,7 +1215,10 @@ function HarnessApp() {
             { id: 'fit', group: 'canvas', label: 'Fit view', run: () => flow.current?.fitView({ padding: 0.2, duration: 300 }) },
             { id: 'refresh', group: 'canvas', label: 'Refresh index', run: () => post({ kind: 'refreshIndex' }) },
             { id: 'save', group: 'canvas', label: 'Save all files', run: () => post({ kind: 'saveWorkspace' }) },
-            { id: 'clear', group: 'canvas', label: 'Clear selection', run: () => setNodes(current => current.map(node => ({ ...node, selected: false }))) },
+            { id: 'clear', group: 'canvas', label: 'Clear selection', run: () => {
+                setActiveContextNodes([]);
+                setNodes(current => current.map(node => ({ ...node, selected: false })));
+            } },
         );
         for (const candidate of units) {
             items.push({
@@ -994,7 +1237,7 @@ function HarnessApp() {
         const text = paletteQuery.trim();
         if (text) items.push({ id: 'search', group: 'search', always: true, label: `Search code for “${text}”`, run: () => runSearch(text) });
         return items;
-    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, scope, view, libraryOpen]);
+    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, scope, view, libraryOpen, showAllContext]);
 
     // Add-node search: every callable (minus the open flow), a literal value, and at the root a placeholder.
     const addItems = useMemo<PaletteEntry[]>(() => {
@@ -1025,7 +1268,7 @@ function HarnessApp() {
     }, [adding, snapshot, scope, paletteQuery]);
 
     return (
-        <main className="harness-shell">
+        <main className="harness-shell" style={{ '--inspector-width': `${effectiveInspectorWidth}px` } as React.CSSProperties}>
             <header className="harness-topbar">
                 <nav className="harness-crumbs" aria-label="Canvas path">
                     <strong>SLATE</strong>
@@ -1039,12 +1282,21 @@ function HarnessApp() {
                         <button aria-pressed={view === 'map'} onClick={() => setView('map')}>Map</button>
                     </span>}
                     <button className="harness-library-toggle" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(open => !open)}>Library</button>
+                    <button className="harness-health-toggle" aria-pressed={healthOpen} onClick={() => setHealthOpen(open => !open)}>Health</button>
                 </nav>
                 <div className="harness-status">
                     <span>{snapshot.documents.length} nodes</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
-                    {contextCount > 0 && <span className="status-context">{contextCount} context</span>}
+                    {totalContextCount > 0 && <button
+                        type="button"
+                        className="status-context status-toggle"
+                        aria-label="Toggle context links"
+                        aria-pressed={showAllContext}
+                        title={showAllContext ? 'Showing all context links (click for on-demand)' : 'Context links shown on demand for selected node (click to show all)'}
+                        onClick={() => setShowAllContext(current => !current)}
+                    >{visibleContextCount}/{totalContextCount} context</button>}
+                    {mismatchEdges.length > 0 && <span className="status-warning">{mismatchEdges.length} type mismatch{mismatchEdges.length === 1 ? '' : 'es'}</span>}
                     {staleCount > 0 && <span className="status-warning">{staleCount} stale</span>}
                     {invalidCount > 0 && <span className="status-error">{invalidCount} invalid</span>}
                 </div>
@@ -1061,7 +1313,7 @@ function HarnessApp() {
             />}
             <ScopeContext.Provider value={scope.flow}>
             <section
-                className={`harness-canvas ${libraryOpen ? 'harness-canvas--library' : ''}`}
+                className={`harness-canvas ${libraryOpen ? 'harness-canvas--library' : ''} ${inspectorDocked ? 'harness-canvas--inspector' : ''}`}
                 aria-label="Python project graph"
                 onMouseMove={event => { pointer.current = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? null; }}
                 onDragOver={event => { if (event.dataTransfer.types.includes('application/slate-target')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
@@ -1083,19 +1335,19 @@ function HarnessApp() {
                     : 'Right-click the canvas → New node file… to start, or drag from the library.'}</div>}
                 <ReactFlow
                     nodes={nodes}
-                    edges={graph.edges}
+                    edges={visibleEdges}
                     nodeTypes={nodeTypes}
                     onNodesChange={onNodesChange}
                     onInit={instance => { flow.current = instance; instance.fitView({ padding: 0.2 }); }}
                     onNodeClick={(_, node) => {
                         // A later single click can reopen details after a source double-click.
-                        if (selected?.id === node.id && inspectorNodeId !== node.id) {
-                            if (inspectorTimer.current !== null) window.clearTimeout(inspectorTimer.current);
+                        if (selected?.id === node.id && inspectorNodeId !== node.id && node.data.kind !== 'group' && node.data.kind !== 'folder') {
+                            if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current);
                             inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(node.id), 400);
                         }
                     }}
                     onNodeDoubleClick={(_, node) => {
-                        if (inspectorTimer.current !== null) window.clearTimeout(inspectorTimer.current);
+                        if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current);
                         setInspectorNodeId(null);
                         if (node.data.flowId) enterFlow(node.data.flowId);
                         else if (node.data.unit && (node.data.path || !node.data.target)) vscode?.postMessage({ type: 'reveal', unitId: node.data.unit.id, focus: true });
@@ -1103,7 +1355,7 @@ function HarnessApp() {
                     zoomOnDoubleClick={false}
                     onNodeContextMenu={(event, node) => openBoardMenu(event, node)}
                     onPaneContextMenu={event => openBoardMenu(event, null)}
-                    onPaneClick={() => { setBoardMenu(null); setHighlight(null); }}
+                    onPaneClick={() => { setBoardMenu(null); setHighlight(null); setActiveContextNodes([]); }}
                     onNodeDragStop={(_, node, dragged) => vscode?.postMessage({
                         type: 'layout',
                         revision: snapshot.revision,
@@ -1131,17 +1383,30 @@ function HarnessApp() {
                         return (from === 'out' || from.startsWith('out:') || from.startsWith('input:'))
                             && (to.startsWith('in:') || to.startsWith('output:')) && !(from === 'input:+' && to === 'output:+');
                     }}
+                    onConnectStart={(_, params) => {
+                        if (params.nodeId && (params.handleId === 'ctx-out' || params.handleId === 'ctx-in')) {
+                            setActiveContextNodes(current => current.includes(params.nodeId!) ? current : [...current, params.nodeId!]);
+                        }
+                    }}
                     onConnect={connection => {
                         if (!connection.source || !connection.target) return;
                         if (connection.sourceHandle === 'ctx-out') {
+                            setActiveContextNodes([connection.source, connection.target]);
                             post({ kind: 'setContext', consumer: connection.target, dependency: connection.source, enabled: true });
                             setCommandResult(`Context: ${connection.source} → ${connection.target}`);
                             return;
                         }
                         const from = endpointOf(connection.source, connection.sourceHandle);
                         const to = endpointOf(connection.target, connection.targetHandle);
+                        const sourceNode = nodes.find(node => node.id === connection.source)?.data;
+                        const targetNode = nodes.find(node => node.id === connection.target)?.data;
+                        const sourcePort = [...(sourceNode?.outputs ?? []), ...(sourceNode?.inputs ?? [])].find(port => port.id === connection.sourceHandle);
+                        const targetPort = [...(targetNode?.inputs ?? []), ...(targetNode?.outputs ?? [])].find(port => port.id === connection.targetHandle);
+                        const mismatch = typesMismatch(sourcePort?.annotation, targetPort?.annotation);
                         post({ kind: 'connectData', from, to });
-                        setCommandResult(`Wire: ${from} → ${to}`);
+                        setCommandResult(mismatch
+                            ? `Wire: ${from} → ${to} (⚠ type mismatch: ${sourcePort?.annotation?.trim()} → ${targetPort?.annotation?.trim()})`
+                            : `Wire: ${from} → ${to}`);
                     }}
                     onConnectEnd={(event, state) => {
                         // Dropping a data wire on empty canvas opens add-node search filtered by the port's type.
@@ -1161,7 +1426,7 @@ function HarnessApp() {
                             setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: 0, flowY: 0, node: null,
                                 edge: { dependency: edge.source, consumer: edge.target } });
                         } else if (edge.id.startsWith('data:')) {
-                            const wire = edge.data as { from: string; to: string };
+                            const wire = edge.data as { from: string; to: string; warning?: string };
                             setBoardMenu({ screenX: event.clientX, screenY: event.clientY, flowX: 0, flowY: 0, node: null, wire });
                         }
                     }}
@@ -1204,7 +1469,10 @@ function HarnessApp() {
             )}
             {selected && selected.data.kind !== 'group' && selected.data.kind !== 'folder' && <Inspector
                 key={selected.id}
-                visible={inspectorNodeId === selected.id}
+                visible={inspectorVisible}
+                width={effectiveInspectorWidth}
+                maxWidth={maxInspectorWidth}
+                onResize={next => setInspectorWidth(clampInspectorWidth(next, viewportWidth, libraryOpen))}
                 onEnterFlow={enterFlow}
                 onGoTo={goTo}
                 node={selected}
@@ -1245,6 +1513,11 @@ function HarnessApp() {
                 onClose={() => setAdding(null)}
                 label="Add node"
                 placeholder={adding.annotation ? `Add a node that takes or gives ${adding.annotation}…` : 'Add a node, flow, library function, or value…'}
+            />}
+            {healthOpen && <NodeHealthReport
+                snapshot={snapshot}
+                onNavigate={goTo}
+                onClose={() => setHealthOpen(false)}
             />}
         </main>
     );

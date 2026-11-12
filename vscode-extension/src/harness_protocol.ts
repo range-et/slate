@@ -63,6 +63,10 @@ export interface HarnessDocument extends ParseModuleResult {
     source?: string;
     /** Module state (`prelude`/`epilogue`) instead of one definition. */
     nodeKind?: 'prelude' | 'epilogue';
+    /** External import lines declared in the node JSON (`imports`). */
+    imports?: string[];
+    /** Explicit node dependencies declared in the node JSON (`uses`). */
+    uses?: string[];
 }
 
 export type Point = { x: number; y: number };
