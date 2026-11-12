@@ -111,6 +111,36 @@ export interface NodeVerificationResult {
 
 export type Point = { x: number; y: number };
 
+export type RunStatus = 'idle' | 'running' | 'completed' | 'failed' | 'stopped' | 'timeout';
+
+export interface ObservedValue {
+    type: string;
+    repr: string;
+    json: unknown;
+}
+
+export interface InstanceRunObservation {
+    path: string[];
+    instanceId: string;
+    status: 'executed' | 'failed' | 'not_executed';
+    inputs: Record<string, ObservedValue>;
+    outputs: Record<string, ObservedValue>;
+    error?: string;
+}
+
+export interface FlowExecutionSnapshot {
+    runId: string;
+    flowId: string;
+    status: RunStatus;
+    durationMs?: number;
+    exitCode?: number | null;
+    error?: string;
+    stdout?: string;
+    stderr?: string;
+    observations: InstanceRunObservation[];
+    valuesByUse: Record<string, ObservedValue>;
+}
+
 export interface HarnessSnapshot {
     revision: number;
     projectName: string;
@@ -131,6 +161,8 @@ export interface HarnessSnapshot {
     verifications?: Record<string, NodeVerificationResult>;
     /** Derived usage index for node definitions (S-502). */
     usages?: Record<string, NodeUsageInfo>;
+    /** Active or latest flow execution snapshot (S-600). */
+    execution?: FlowExecutionSnapshot;
 }
 
 /** A canvas alias of a node, flow, or library unit (stored in layout.json). */
@@ -263,4 +295,5 @@ export type HostMessage =
     | { type: 'proposalAccepted'; unitId: string }
     | { type: 'describeState'; running: boolean }
     | { type: 'verificationStatus'; result: NodeVerificationResult }
-    | { type: 'verificationBatch'; results: Record<string, NodeVerificationResult> };
+    | { type: 'verificationBatch'; results: Record<string, NodeVerificationResult> }
+    | { type: 'executionStatus'; execution: FlowExecutionSnapshot };

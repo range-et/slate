@@ -584,3 +584,114 @@ test('surfaces Used-by-N badge, shared-definition banner with Fork, and navigabl
     await expect(usagesSection).toContainText('Code reference in normalize');
     await expect(usagesSection).toContainText('Prompt context only (1): report_generator');
 });
+
+test('surfaces Run/Stop flow controls, execution status badge, node execution badges, observed values, and Inspector execution section (S-600)', async ({ page }) => {
+    await host(page, null);
+
+    // 1. Verify Run flow button is visible in topbar and posts runFlow on click
+    const runBtn = page.getByTestId('flow-run-button');
+    await expect(runBtn).toBeVisible();
+    await runBtn.click();
+
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'runFlow',
+        flowId: 'main',
+    }));
+
+    // 2. Post running execution state and verify Stop button appears
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'executionStatus',
+            execution: {
+                runId: 'run-test-1',
+                flowId: 'main',
+                status: 'running',
+                observations: [],
+                valuesByUse: {},
+            },
+        }, '*');
+    });
+
+    const stopBtn = page.getByTestId('flow-stop-button');
+    await expect(stopBtn).toBeVisible();
+    const statusBadge = page.getByTestId('status-execution-badge');
+    await expect(statusBadge).toBeVisible();
+    await expect(statusBadge).toContainText('Running…');
+
+    // Click Stop button
+    await stopBtn.click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'stopFlow',
+    }));
+
+    // 3. Post completed execution state with node observations
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 10,
+                projectName: 'demo_proj',
+                layout: { clamp: { x: 100, y: 100 } },
+                documents: [
+                    {
+                        id: 'node:clamp',
+                        path: 'slate/nodes/clamp.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:clamp',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def clamp(value: int, lower: int, upper: int) -> int:\n    return max(lower, min(value, upper))\n',
+                        units: [{
+                            id: 'clamp', identity: 'durable', kind: 'function', name: 'clamp', qualifiedName: 'clamp', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 40 } } },
+                            annotation: { intent: 'Clamp value', contract: 'Test', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def clamp(value: int, lower: int, upper: int) -> int', parameters: 'value: int, lower: int, upper: int', returnAnnotation: 'int',
+                            params: [{ name: 'value', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                    },
+                ],
+                execution: {
+                    runId: 'run-test-2',
+                    flowId: 'main',
+                    status: 'completed',
+                    durationMs: 120,
+                    exitCode: 0,
+                    observations: [
+                        {
+                            path: [],
+                            instanceId: 'clamp',
+                            status: 'executed',
+                            inputs: { 'in:value': { type: 'int', repr: '42', json: 42 } },
+                            outputs: { out: { type: 'int', repr: '42', json: 42 } },
+                        },
+                    ],
+                    valuesByUse: {
+                        '::clamp::out': { type: 'int', repr: '42', json: 42 },
+                    },
+                },
+            },
+        }, '*');
+    });
+
+    // 4. Verify completed badge and node card values
+    await expect(statusBadge).toContainText('✓ Run 0.12s');
+
+    const nodeBadge = page.locator('.react-flow__node[data-id="clamp"] [data-testid="execution-badge-executed"]');
+    await expect(nodeBadge).toBeVisible();
+    await expect(nodeBadge).toContainText('● run');
+
+    const observedPills = page.locator('.react-flow__node[data-id="clamp"] [data-testid="node-observed-values"]');
+    await expect(observedPills).toBeVisible();
+    await expect(observedPills).toContainText('42');
+
+    // 5. Select node and verify Execution & Values section in Inspector
+    await select(page, 'clamp');
+    const inspectorSection = page.locator('[data-testid="inspector-execution-section"]');
+    await expect(inspectorSection).toBeVisible();
+    await expect(inspectorSection).toContainText('Execution & Values');
+    await expect(inspectorSection).toContainText('executed');
+    await expect(inspectorSection).toContainText('in:value');
+    await expect(inspectorSection).toContainText('out');
+    await expect(inspectorSection).toContainText('42');
+});

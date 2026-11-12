@@ -4,7 +4,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, FlowInstance, HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
+import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
 import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
@@ -13,12 +13,13 @@ import { PythonAdapter, sourceHash } from './python_adapter';
 import { searchUnits } from './search';
 import {
     connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
-    removeInstances, removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, serializeFlow, uniqueName, unitSignature, type Port,
+    removeInstances, removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, serializeFlow, uniqueName, unitSignature, type CallableSignature, type Port,
 } from './flow';
 import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
 import { buildUsageIndex } from './usage_index';
+import { runFlow } from './flow_runner';
 
 function nonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -93,6 +94,8 @@ export class HarnessPanel implements vscode.Disposable {
     private bridgePort: number | undefined;
     private verifications = new Map<string, NodeVerificationResult>();
     private activeVerifications = new Map<string, AbortController>();
+    private activeRunController: AbortController | undefined;
+    private currentExecution: FlowExecutionSnapshot | undefined;
 
     static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
@@ -238,6 +241,7 @@ export class HarnessPanel implements vscode.Disposable {
                 library: index.library,
                 verifications,
                 usages,
+                execution: this.currentExecution,
             };
             await this.postMessage({ type: 'snapshot', snapshot: this.snapshot });
         } catch (error) {
@@ -251,7 +255,7 @@ export class HarnessPanel implements vscode.Disposable {
         const value = (message && typeof message === 'object' ? message : {}) as Record<string, unknown>;
         const kind = (value.action as Record<string, unknown> | undefined)?.kind;
         const queued = ['layout', 'noteCreate', 'noteUpdate', 'noteDelete', 'acceptProposal', 'undoAccepted'].includes(value.type as string)
-            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe' && kind !== 'verifyNode' && kind !== 'cancelVerification' && kind !== 'tryRevisions');
+            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe' && kind !== 'verifyNode' && kind !== 'cancelVerification' && kind !== 'tryRevisions' && kind !== 'runFlow' && kind !== 'stopFlow');
         if (!queued) return this.handleMessageNow(message);
         this.mutations = this.mutations.then(() => this.handleMessageNow(message), () => this.handleMessageNow(message));
         return this.mutations;
@@ -320,6 +324,16 @@ export class HarnessPanel implements vscode.Disposable {
             if (target) {
                 await this.tryRevisions(this.folderNodeId(target), typeof value.maxRevisions === 'number' ? value.maxRevisions : 3);
             }
+            return;
+        }
+        if (value.type === 'runFlow') {
+            const flowId = typeof value.flowId === 'string' ? value.flowId : undefined;
+            const inputs = value.inputs && typeof value.inputs === 'object' ? value.inputs as Record<string, unknown> : undefined;
+            await this.executeFlow(flowId, inputs);
+            return;
+        }
+        if (value.type === 'stopFlow') {
+            this.stopFlow();
             return;
         }
         if (value.type === 'acceptProposal' && typeof value.proposalId === 'string') {
@@ -818,6 +832,100 @@ export class HarnessPanel implements vscode.Disposable {
             this.postCommandResult(false, `Revision loop failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
             this.activeVerifications.delete(nodeId);
+        }
+    }
+
+    private async executeFlow(flowId?: string, inputs?: Record<string, unknown>): Promise<void> {
+        if (this.activeRunController) {
+            this.activeRunController.abort();
+            this.activeRunController = undefined;
+        }
+
+        const targetFlowId = flowId || MAIN_FLOW;
+        const controller = new AbortController();
+        this.activeRunController = controller;
+
+        const initialSnapshot: FlowExecutionSnapshot = {
+            runId: 'pending',
+            flowId: targetFlowId,
+            status: 'running',
+            observations: [],
+            valuesByUse: {},
+        };
+        this.currentExecution = initialSnapshot;
+        await this.postMessage({ type: 'executionStatus', execution: initialSnapshot });
+
+        try {
+            const index = await this.folder.index();
+            const { config, nodes } = await this.folder.readNodes();
+            const flowMap = new Map<string, SlateFlow>();
+            for (const hf of index.flows) {
+                if (hf.flow) flowMap.set(hf.id, hf.flow);
+            }
+            const library = await this.folder.readLibrary(config);
+            const libraryMap = new Map<string, CallableSignature>();
+            for (const doc of library) {
+                for (const u of doc.units) {
+                    if (u.signature) {
+                        const sig = unitSignature(u, doc.units);
+                        if (sig) libraryMap.set(u.id, sig);
+                    }
+                }
+            }
+
+            const configuredPython = vscode.workspace.getConfiguration('slate.python').get<string>('path');
+
+            const result = await runFlow({
+                workspaceRoot: this.folder.root.fsPath,
+                flowId: targetFlowId,
+                documents: nodes,
+                flows: flowMap,
+                config,
+                library: libraryMap,
+                pythonPath: configuredPython,
+                inputs,
+                isTrusted: vscode.workspace.isTrusted,
+                signal: controller.signal,
+            });
+
+            this.currentExecution = result;
+            await this.postMessage({ type: 'executionStatus', execution: result });
+            this.postCommandResult(
+                result.status === 'completed',
+                result.status === 'completed'
+                    ? `Run ${result.flowId} completed in ${((result.durationMs ?? 0) / 1000).toFixed(2)}s.`
+                    : `Run ${result.flowId} ${result.status}: ${result.error || result.stderr || 'see output'}`,
+            );
+            this.scheduleRefresh(0);
+        } catch (error) {
+            const failResult: FlowExecutionSnapshot = {
+                runId: '',
+                flowId: targetFlowId,
+                status: 'failed',
+                durationMs: 0,
+                exitCode: null,
+                error: error instanceof Error ? error.message : String(error),
+                observations: [],
+                valuesByUse: {},
+            };
+            this.currentExecution = failResult;
+            await this.postMessage({ type: 'executionStatus', execution: failResult });
+            this.postCommandResult(false, `Run failed: ${failResult.error}`);
+            this.scheduleRefresh(0);
+        } finally {
+            if (this.activeRunController === controller) {
+                this.activeRunController = undefined;
+            }
+        }
+    }
+
+    private stopFlow(): void {
+        if (this.activeRunController) {
+            this.activeRunController.abort();
+            this.activeRunController = undefined;
+            this.postCommandResult(true, 'Flow execution stopped.');
+        } else {
+            this.postCommandResult(false, 'No flow is currently running.');
         }
     }
 
@@ -1556,6 +1664,16 @@ export class HarnessPanel implements vscode.Disposable {
     private async handleFolderAction(folder: SlateFolderHost, action: Record<string, unknown>): Promise<void> {
         try {
             if (await this.handleCanvasAction(action)) return;
+            if (action.kind === 'runFlow') {
+                const flowId = typeof action.flowId === 'string' ? action.flowId : typeof action.flow === 'string' ? action.flow : undefined;
+                const inputs = action.inputs && typeof action.inputs === 'object' ? action.inputs as Record<string, unknown> : undefined;
+                await this.executeFlow(flowId, inputs);
+                return;
+            }
+            if (action.kind === 'stopFlow') {
+                this.stopFlow();
+                return;
+            }
             if (action.kind === 'refreshIndex') {
                 await this.refresh();
                 const invalid = this.snapshot?.documents.filter(document => !document.valid || document.diagnostics.length > 0).length ?? 0;
@@ -1829,6 +1947,10 @@ export class HarnessPanel implements vscode.Disposable {
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.generation?.abort();
         this.describeRun?.abort();
+        if (this.activeRunController) {
+            this.activeRunController.abort();
+            this.activeRunController = undefined;
+        }
         this.refreshGeneration++;
         while (this.disposables.length) this.disposables.pop()?.dispose();
     }
