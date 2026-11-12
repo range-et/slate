@@ -769,6 +769,7 @@ function HarnessApp() {
         const openPalette = (event: KeyboardEvent) => {
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
                 event.preventDefault();
+                event.stopPropagation();
                 setPaletteQuery('');
                 setPaletteOpen(open => !open);
                 return;
@@ -777,11 +778,12 @@ function HarnessApp() {
             if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
             if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
             event.preventDefault();
+            event.stopPropagation();
             setPaletteQuery('');
             setPaletteOpen(true);
         };
-        window.addEventListener('keydown', openPalette);
-        return () => window.removeEventListener('keydown', openPalette);
+        window.addEventListener('keydown', openPalette, true);
+        return () => window.removeEventListener('keydown', openPalette, true);
     }, []);
 
     useEffect(() => {
@@ -858,8 +860,14 @@ function HarnessApp() {
     };
     const findReferences = (target: string) => {
         setHighlight(target);
-        const refs = (snapshot.refs ?? []).filter(ref => ref.target === target).length;
-        const flows = (snapshot.flows ?? []).filter(item => item.flow?.instances.some(instance => instance.node === target)).map(item => item.id);
+        const rootRefs = new Map<string, string>();
+        const main = snapshot.flows?.find(item => item.id === 'main')?.flow;
+        for (const instance of main?.instances ?? []) {
+            if (instance.kind !== 'value' && instance.node) rootRefs.set(instance.id, instance.node);
+        }
+        for (const ref of snapshot.refs ?? []) rootRefs.set(ref.id, ref.target);
+        const refs = [...rootRefs.values()].filter(node => node === target).length;
+        const flows = (snapshot.flows ?? []).filter(item => item.id !== 'main' && item.flow?.instances.some(instance => instance.node === target)).map(item => item.id);
         setCommandResult(`${target}: ${refs} reference${refs === 1 ? '' : 's'} on the canvas${flows.length ? `; used in flows ${flows.join(', ')}` : ''}.`);
     };
     const endpointOf = (nodeId: string, handle: string | null | undefined) =>

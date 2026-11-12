@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { FLOWS_DIR, flowIdForPath, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
+import { FLOWS_DIR, flowIdForPath, MAIN_FLOW, migrateRootOccurrences, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
 import type { HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
 import { parseModule } from './python_adapter';
 import {
@@ -158,7 +158,30 @@ export class SlateFolderHost {
             documents.push(document);
         }
         documents.sort((left, right) => left.path.localeCompare(right.path));
-        return { config, documents, sources, flows: await this.readFlows(), library: await this.readLibrary(config) };
+        const flows = await this.readFlows();
+        const mainEntry = flows.find(item => item.id === MAIN_FLOW);
+        if (!mainEntry || mainEntry.flow !== null) {
+            const definitionIds = documents.flatMap(document => [
+                ...(document.nodeKind ? [nodeIdForPath(document.path)!] : []),
+                ...document.units.map(unit => unit.id),
+            ]).filter(Boolean);
+            const flowIds = flows.filter(item => item.id !== MAIN_FLOW).map(item => item.id);
+            const migrated = migrateRootOccurrences(mainEntry?.flow ?? null, this.layout.refs, this.layout.positions, definitionIds, flowIds);
+            if (migrated.changed) {
+                this.layout.positions = migrated.positions;
+                this.layout.refs = [];
+                await this.writeLayout();
+                if (migrated.main) {
+                    await this.writeFlow(MAIN_FLOW, migrated.main);
+                    if (mainEntry) mainEntry.flow = migrated.main;
+                    else {
+                        flows.push({ id: MAIN_FLOW, flow: migrated.main });
+                        flows.sort((left, right) => left.id.localeCompare(right.id));
+                    }
+                }
+            }
+        }
+        return { config, documents, sources, flows, library: await this.readLibrary(config) };
     }
 
     /** Every node file, parsed (dirty buffers included); unreadable files are reported, not thrown. */

@@ -232,7 +232,19 @@ function buildRoot(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edge
     const targets = callables(snapshot);
     const layout = snapshot.layout ?? {};
     const nodeIds = snapshot.documents.map(document => nodeIdOf(document.path));
-    (snapshot.refs ?? []).forEach((ref, index) => nodes.push(callerNode(snapshot, targets, ref.id, ref.target, 'ref', layout[ref.id] ?? { x: 760, y: 360 + index * 120 })));
+    const definitionIds = new Set(nodes.map(node => node.id));
+    const main = flowOf(snapshot, MAIN_FLOW);
+    const refs = new Map<string, string>();
+    for (const instance of main?.instances ?? []) {
+        if (instance.kind === 'value' || !instance.node) continue;
+        if (definitionIds.has(instance.id) || instance.id.startsWith('flow:')) continue;
+        refs.set(instance.id, instance.node);
+    }
+    for (const ref of snapshot.refs ?? []) {
+        refs.set(ref.id, ref.target);
+    }
+    [...refs.entries()].forEach(([id, target], index) =>
+        nodes.push(callerNode(snapshot, targets, id, target, 'ref', layout[id] ?? { x: 760, y: 360 + index * 120 })));
     (snapshot.placeholders ?? []).forEach((placeholder, index) => {
         const matches = nodeIds.filter(id => id === placeholder.name || id.split('/').pop() === placeholder.name);
         const resolvesTo = matches.length === 1 ? matches[0] : null;
@@ -255,7 +267,6 @@ function buildRoot(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edge
             },
         });
     });
-    const main = flowOf(snapshot, MAIN_FLOW);
     if (main) {
         main.instances.filter(instance => instance.kind === 'value')
             .forEach((instance, index) => nodes.push(valueNode(instance.id, instance.value ?? '', layout[instance.id] ?? { x: 760, y: 600 + index * 90 })));

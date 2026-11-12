@@ -5,9 +5,9 @@
   "outputs": [],
   "instances": [
     { "id": "value", "kind": "value", "value": "42" },
-    { "id": "flow:report", "node": "report" }
+    { "id": "ref_report", "node": "report" }
   ],
   "wires": [
-    { "from": "value.out", "to": "flow:report.in:score" }
+    { "from": "value.out", "to": "ref_report.in:score" }
   ]
 }

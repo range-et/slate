@@ -18,7 +18,7 @@ export function prepareSystemSandbox(root, sandbox = process.cwd()) {
         if (fs.existsSync(destination)) {
             if (fs.realpathSync(destination) !== fs.realpathSync(source)) throw new Error(`Refusing to replace ${destination}`);
         } else {
-            fs.symlinkSync(source, destination, 'dir');
+            fs.symlinkSync(source, destination, process.platform === 'win32' ? 'junction' : 'dir');
         }
     }
 }

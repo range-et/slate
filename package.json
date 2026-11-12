@@ -13,7 +13,7 @@
     "test:watch": "vitest",
     "test:webview": "playwright test",
     "test:electron": "npm run build && npm --prefix vscode-extension run sync-dist && npm --prefix vscode-extension run compile && npm --prefix vscode-extension run test:integration",
-    "test:workbench": "npm run build && npm --prefix vscode-extension run compile && npm --prefix vscode-extension run test:workbench",
+    "test:workbench": "npm run build && npm --prefix vscode-extension run sync-dist && npm --prefix vscode-extension run compile && npm --prefix vscode-extension run test:workbench",
     "test:qa": "npm run test:webview && npm run test:electron && npm run test:workbench",
     "test:harness": "npm test && npm run test:qa",
     "verify:baseline": "bash scripts/verify-baseline.sh",
