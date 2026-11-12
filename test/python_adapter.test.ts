@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { AdapterError, parseModule, PythonAdapter } from '../vscode-extension/src/python_adapter';
+import { AdapterError, parseModule, PythonAdapter, topLevelBindings } from '../vscode-extension/src/python_adapter';
 
 const serviceSource = `# A plain comment, even one that looks like ## @slate id=old
 @registered
@@ -74,12 +74,19 @@ describe('TypeScript Python adapter', () => {
 });
 
 it.each([
+    ['  a: int  ', '  a: int  '],
+    ['   ', '   '],
     ['a: int,\n    b: str', 'a: int,\n    b: str'],
     ['\n    a: int,\n    b: str,\n', 'a: int,\nb: str,\n'],
+    ['\n    a: int,\n\n    b: str,\n', 'a: int,\n\nb: str,\n'],
+    ['\n    a: int,\n  \n    b: str,\n', 'a: int,\n\nb: str,\n'],
     ['\n    a: int,\n      b: str', 'a: int,\n  b: str'],
+    ['\n    a: int,\n    b: str,\n        ', 'a: int,\nb: str,\n'],
+    ['   \n    a: int,\n        ', 'a: int,\n'],
     [' \n\ta: int,\n\t', 'a: int,\n'],
     ['\n\n', '\n'],
     ['\r\n    a: int,\r\n    b: str,\r\n', 'a: int,\nb: str,\n'],
+    ['\r    a: int,\r    b: str,\r', 'a: int,\nb: str,\n'],
 ])('preserves multiline parameter content and meaningful closing-line shape for %j', (parameters, expected) => {
     const parsed = parseModule(`def run(${parameters}) -> int:\n    return 1\n`, 'run.py');
     expect(parsed.valid).toBe(true);
@@ -129,4 +136,47 @@ it('trims replacement padding and returns the exact edit range and hashes', asyn
     expect(result.baseSourceHash).toBe(parsed.sourceHash);
     expect(result.proposedSourceHash).toBe(parseModule(expected).sourceHash);
     expect(result.parsed).toEqual(parseModule(expected, 'run.py'));
+});
+
+it('handles nested classes, slash after variadic params, star/broken top-level bindings, and CR-only method replacements', async () => {
+    const nested = parseModule('class Outer:\n    class Inner:\n        pass\n', 'nested.py');
+    expect(nested.units.map(unit => [unit.kind, unit.qualifiedName])).toEqual([
+        ['class', 'Outer'],
+        ['nested_class', 'Outer.Inner'],
+    ]);
+
+    const variadicSlash = parseModule('def run(*args, /):\n    pass\n', 'slash.py');
+    expect(variadicSlash.units[0].params).toEqual([{ name: 'args', annotation: null, default: null, kind: 'var' }]);
+
+    expect([...topLevelBindings('from math import *\nx = 1\n')]).toEqual(['x']);
+
+    const classSource = 'class Box:\n    def f(self):\n        return 1\n';
+    const parsedClass = parseModule(classSource, 'box.py');
+    const methodUnit = parsedClass.units.find(unit => unit.qualifiedName === 'Box.f')!;
+    const adapter = new PythonAdapter();
+    await expect(adapter.replaceUnit({
+        source: classSource,
+        path: 'box.py',
+        expectedHash: parsedClass.sourceHash,
+        unitId: methodUnit.id,
+        replacement: 'def f(self):\r    return 2',
+    })).rejects.toThrow('proposed edit produces invalid Python');
+
+    await expect(adapter.replaceUnit({
+        source: classSource,
+        path: 'box.py',
+        expectedHash: parsedClass.sourceHash,
+        unitId: methodUnit.id,
+        replacement: 'def f(self):\n    def inner():\n        return 1\n    return inner()',
+    })).rejects.toThrow('replacement must contain exactly one valid function');
+
+    const replacedWithNonStringNodeId = await adapter.replaceUnit({
+        source: classSource,
+        path: 'box.py',
+        nodeId: 123 as unknown as string,
+        expectedHash: parsedClass.sourceHash,
+        unitId: methodUnit.id,
+        replacement: 'def f(self):\n    return 2',
+    });
+    expect(replacedWithNonStringNodeId.proposedSource).toContain('return 2');
 });

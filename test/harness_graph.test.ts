@@ -114,12 +114,17 @@ describe('Python harness graph', () => {
 
 it('merges explicit context edges and attaches notes only to existing nodes', () => {
     const snapshot = structuredClone(demoSnapshot);
-    snapshot.contextEdges = [{ kind: 'context', sourceId: 'clamp', targetId: 'scoring/normalize_score' },
-        { kind: 'context', sourceId: 'missing', targetId: 'clamp' }];
+    (snapshot.documents[1].units[0].annotation as { dependencies: unknown[] }).dependencies = [42, 'clamp'];
+    snapshot.contextEdges = [
+        { kind: 'context', sourceId: 'clamp', targetId: 'scoring/normalize_score' },
+        { kind: 'context', sourceId: 'missing', targetId: 'clamp' },
+        { kind: 'other' as 'context', sourceId: 'clamp', targetId: 'scoring/Grader' },
+    ];
     snapshot.notes = [{ id: 'attached', title: 'Explain', body: 'Details', attachedTo: 'clamp' },
         { id: 'orphan', title: '', body: '', attachedTo: 'missing' }];
     const graph = buildGraph(snapshot);
     expect(graph.edges.filter(edge => edge.id === 'context:clamp:scoring/normalize_score')).toHaveLength(1);
+    expect(graph.edges.some(edge => edge.id === 'context:clamp:scoring/Grader')).toBe(false);
     expect(graph.edges).toContainEqual(expect.objectContaining({ id: 'note:attached:clamp', source: 'attached', target: 'clamp', selectable: false }));
     expect(graph.edges.some(edge => edge.source === 'missing' || edge.target === 'missing')).toBe(false);
 });
@@ -174,9 +179,10 @@ it('keeps unreadable flows visible and omits dangling data wires on the root can
     snapshot.flows = [
         { id: 'broken', flow: null, problem: 'Invalid JSON' },
         { id: 'main', flow: { name: 'main', inputs: [], outputs: [], extra: {},
-            instances: [{ id: 'literal', kind: 'value' }],
+            instances: [{ id: 'literal', kind: 'value' }, { id: '__input', kind: 'value', value: '0' }],
             wires: [
                 { from: 'literal.out', to: 'clamp.in:value' },
+                { from: 'input:x', to: 'clamp.in:upper' },
                 { from: 'missing.out', to: 'clamp.in:lower' },
                 { from: 'literal.out', to: 'missing.in:value' },
             ],
@@ -191,6 +197,6 @@ it('keeps unreadable flows visible and omits dangling data wires on the root can
         position: { x: 760, y: 600 }, data: { kind: 'value', value: '' },
     });
     expect(graph.edges.filter(edge => edge.id.startsWith('data:')).map(edge => edge.id))
-        .toEqual(['data:literal.out->clamp.in:value']);
+        .toEqual(['data:literal.out->clamp.in:value', 'data:input:x->clamp.in:upper']);
     expect(buildGraph(snapshot, { view: 'compose', flow: 'broken' })).toEqual({ nodes: [], edges: [] });
 });

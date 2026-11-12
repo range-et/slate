@@ -194,3 +194,103 @@ it('preserves unresolved exports and star imports from a ported module with expl
         'consumer.py: star import copied to every node in the module.',
     ]));
 });
+
+it('ports decorated classes, blank-separated preludes, trailing comments, multi-dot relative imports, and shadowed prelude bindings', () => {
+    const ported = portPythonProject(new Map([
+        ['pkg/ops.py', 'def add(a, b):\n    return a + b\n'],
+        ['pkg/sub/mod.py', [
+            'from ..ops import add',
+            'A = 1',
+            '',
+            'B = 2',
+            'Box = None',
+            '@dec',
+            'class Box:',
+            '    def calc(self):',
+            '        return add(A, B)',
+            '# trailing module comment',
+            '',
+        ].join('\n')],
+    ]));
+    expect(ported.nodes.get('pkg/sub/mod/_prelude')?.code).toEqual(['A = 1', '', 'B = 2', 'Box = None', '# trailing module comment']);
+    expect(ported.nodes.get('pkg/sub/mod/Box')?.uses).toEqual(['pkg/ops/add', 'pkg/sub/mod/_prelude']);
+    expect(ported.report.warnings).toContain('pkg/sub/mod/Box: the prelude also binds Box.');
+});
+
+it('covers flow edge cases, root module folder collisions, invalid/star imports, and uncompiled/library uses', () => {
+    const collision = compilePython(new Map([
+        ['root_fn', node({ name: 'root_fn', code: ['def root_fn() -> int:', '    return 1'] })],
+        ['demo/sub', node({ name: 'sub', code: ['def sub() -> int:', '    return 2'] })],
+    ]), config);
+    expect(collision.diagnostics.map(item => item.message)).toContain('Folder demo/ collides with the module for root-level nodes (demo.py).');
+
+    const result = compilePython(
+        new Map([
+            ['root_fn', node({ name: 'root_fn', imports: ['import os', 'from typing import Any', 'from math import *', 'not an import'], uses: ['lib:vendor/mod.py:unused_fn', 'd/bad', 'b/_epilogue', 'b/unused'], code: ['def root_fn(x: Any) -> int:', '    return 1'] })],
+            ['root_fn2', node({ name: 'root_fn2', imports: ['import os', 'from typing import Any'], code: ['def root_fn2(x: Any) -> int:', '    return root_fn(x)'] })],
+            ['pkg/sub', node({ name: 'sub', code: ['def sub(a: int = 1, b: int = 2, /) -> int:', '    return a + b'] })],
+            ['b/_epilogue', node({ name: '_epilogue', kind: 'epilogue', code: ['DONE = True'] })],
+            ['b/unused', node({ name: 'unused', code: ['def unused() -> int:', '    return 0'] })],
+            ['d/bad', node({ name: 'bad', code: ['def bad(:'] })],
+        ]),
+        config,
+        new Map([
+            ['main', { name: 'main', inputs: [], outputs: [], instances: [], wires: [], extra: {} }],
+            ['side_effect', {
+                name: 'side_effect',
+                inputs: [],
+                outputs: [],
+                instances: [{ id: 'v', kind: 'value', node: 'missing_target' }],
+                wires: [],
+                extra: {},
+            }],
+            ['caller_flow', {
+                name: 'caller_flow',
+                inputs: [],
+                outputs: [{ name: 'out', annotation: null }],
+                instances: [
+                    { id: 'se', node: 'side_effect' },
+                    { id: 'v', kind: 'value' },
+                ],
+                wires: [{ from: 'v.out', to: 'output:out' }],
+                extra: {},
+            }],
+            ['pair_flow', {
+                name: 'pair_flow',
+                inputs: [],
+                outputs: [{ name: 'first', annotation: 'int' }, { name: 'second', annotation: 'str' }],
+                instances: [
+                    { id: 'v1', kind: 'value', value: '1' },
+                    { id: 'v2', kind: 'value', value: '"ok"' },
+                ],
+                wires: [
+                    { from: 'v1.out', to: 'output:first' },
+                    { from: 'v2.out', to: 'output:second' },
+                ],
+                extra: {},
+            }],
+            ['bad_flow', {
+                name: 'bad_flow',
+                inputs: [],
+                outputs: [],
+                instances: [
+                    { id: 'v', kind: 'value', value: '1' },
+                    { id: 's', node: 'pkg/sub' },
+                ],
+                wires: [
+                    { from: 'v.out', to: 'v.in:x' },
+                    { from: 'v.out', to: 's.in:b' },
+                ],
+                extra: {},
+            }],
+        ]),
+    );
+    const messages = result.diagnostics.map(item => `${item.severity}: ${item.message}`).join('\n');
+    expect(messages).toContain('root_fn: "not an import" is not an import.');
+    expect(messages).toContain('root_fn uses lib:vendor/mod.py:unused_fn, which is not in the library.');
+    expect(messages).toContain('root_fn uses d/bad, which did not compile.');
+    expect(messages).toContain('flows/bad_flow: wire v.out → v.in:x has an unknown endpoint.');
+    expect(messages).toContain('flows/bad_flow: s.in:b is positional-only after an unwired one.');
+    expect(result.files.get('demo.py')).toContain('def caller_flow():\n    side_effect()\n    v_v = None\n    return v_v');
+    expect(result.files.get('demo.py')).toContain('def pair_flow() -> tuple[int, str]:\n    v_v1 = 1\n    v_v2 = "ok"\n    return (v_v1, v_v2)');
+});
