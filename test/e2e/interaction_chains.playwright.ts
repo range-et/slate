@@ -678,4 +678,13 @@ test('chain canvas ergonomics: Delete/Backspace prompt, copy/paste linked/duplic
         type: 'action',
         action: expect.objectContaining({ flow: 'report', kind: 'renameFlowPort', direction: 'output' }),
     }));
+
+    // 6. Note deletion via Delete key sends noteDelete directly without deleteItems prompt
+    await command(page, 'Back to parent canvas');
+    await clear(page);
+    await page.locator('.slate-node--note').click();
+    await page.keyboard.press('Delete');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'noteDelete',
+    }));
 });

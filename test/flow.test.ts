@@ -157,6 +157,20 @@ describe('flow format and ports', () => {
         const unpluggedCallerOutput = repairCallerWiresOnPortDelete(caller, 'pipe', 'output', 'clamped', 2);
         expect(unpluggedCallerOutput.wires).toEqual([{ from: 'other.out', to: 'pipe_1.in:val' }]);
 
+        // When deleting an output leaves exactly 1 surviving output, rewrite surviving caller endpoint to inst.out
+        const multiOutputCaller = flow({
+            name: 'main',
+            instances: [{ id: 'pipe_1', node: 'pipe' }, { id: 'other', node: 'math/double' }],
+            wires: [
+                { from: 'pipe_1.out:clamped', to: 'other.in:x' },
+                { from: 'pipe_1.out:status', to: 'other.in:s' },
+            ],
+        });
+        const repairedSingleOutputCaller = repairCallerWiresOnPortDelete(multiOutputCaller, 'pipe', 'output', 'clamped', 1, 'status');
+        expect(repairedSingleOutputCaller.wires).toEqual([
+            { from: 'pipe_1.out', to: 'other.in:s' },
+        ]);
+
         // Removing all references to a deleted node
         const removed = removeNodeReferences(caller, 'math/double');
         expect(removed.instances).toEqual([{ id: 'pipe_1', node: 'pipe' }]);
@@ -320,5 +334,25 @@ describe('one occurrence model and root migration', () => {
         const repeatLegacy = migrateRootOccurrences(legacyMain, [], migrated.positions, ['math/double', 'math/add', 'math/stats'], ['report']);
         expect(repeatLegacy.main?.instances.map(item => item.id)).toEqual(['value', 'ref_double', 'ref_report', 'ref_add']);
         expect(repeatLegacy.positions).toEqual(migrated.positions);
+    });
+
+    it('renames function definition and all recursive self-references when forking code', () => {
+        const sourceCode = [
+            'def factorial(n: int) -> int:',
+            '    if n <= 1:',
+            '        return 1',
+            '    return n * factorial(n - 1)',
+        ];
+        const oldName = 'factorial';
+        const newName = 'factorial_copy';
+        const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`\\b${escaped}\\b`, 'g');
+        const transformed = sourceCode.map(line => line.replace(regex, newName));
+        expect(transformed).toEqual([
+            'def factorial_copy(n: int) -> int:',
+            '    if n <= 1:',
+            '        return 1',
+            '    return n * factorial_copy(n - 1)',
+        ]);
     });
 });

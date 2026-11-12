@@ -258,6 +258,7 @@ export function repairCallerWiresOnPortDelete(
     direction: 'input' | 'output',
     name: string,
     calleeOutputsCount = 1,
+    survivingOutputName?: string,
 ): SlateFlow {
     const matchingInstanceIds = new Set(
         callerFlow.instances
@@ -266,21 +267,37 @@ export function repairCallerWiresOnPortDelete(
     );
     if (matchingInstanceIds.size === 0) return callerFlow;
 
-    const wires = callerFlow.wires.filter(wire => {
+    const wires: FlowWire[] = [];
+    for (const wire of callerFlow.wires) {
         const from = parseEndpoint(wire.from);
         const to = parseEndpoint(wire.to);
         if (direction === 'input') {
             if (to.instance && matchingInstanceIds.has(to.instance) && to.port === `in:${name}`) {
-                return false;
+                continue;
             }
+            wires.push(wire);
         } else {
             if (from.instance && matchingInstanceIds.has(from.instance)) {
-                if (from.port === `out:${name}`) return false;
-                if (calleeOutputsCount <= 1 && from.port === 'out') return false;
+                if (from.port === `out:${name}`) {
+                    continue;
+                }
+                if (calleeOutputsCount <= 0 && from.port === 'out') {
+                    continue;
+                }
+                if (calleeOutputsCount === 1) {
+                    if (survivingOutputName && from.port === `out:${survivingOutputName}`) {
+                        wires.push({ ...wire, from: `${from.instance}.out` });
+                        continue;
+                    }
+                    if (!survivingOutputName && from.port.startsWith('out:')) {
+                        wires.push({ ...wire, from: `${from.instance}.out` });
+                        continue;
+                    }
+                }
             }
+            wires.push(wire);
         }
-        return true;
-    });
+    }
 
     return { ...callerFlow, wires };
 }

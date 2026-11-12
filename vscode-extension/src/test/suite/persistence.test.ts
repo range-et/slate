@@ -98,7 +98,14 @@ suite('Slate native persistence and proposal QA', () => {
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await vscode.workspace.getConfiguration('slate.llama').update('endpoint', oldEndpoint, vscode.ConfigurationTarget.Global);
         await new Promise<void>(resolve => server.close(() => resolve()));
-        await vscode.workspace.fs.delete(root, { recursive: true, useTrash: false });
+        try {
+            await vscode.workspace.fs.delete(root, { recursive: true, useTrash: false });
+        } catch {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            try {
+                await vscode.workspace.fs.delete(root, { recursive: true, useTrash: false });
+            } catch { /* best effort cleanup on Windows */ }
+        }
     });
 
     test('accepts the real streamed proposal, persists it, reloads it, and natively undoes then saves the original', async () => {
@@ -584,6 +591,8 @@ suite('Slate native persistence and proposal QA', () => {
             ],
         }));
         const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
+        await vscode.window.showTextDocument(layoutDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
         const dirtyLayoutEdit = new vscode.WorkspaceEdit();
         dirtyLayoutEdit.replace(
             layoutDoc.uri,
@@ -782,14 +791,19 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(linkedInst);
         await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(uri('slate', 'nodes', `${linkedInst.id}.json`))));
 
-        // 5. Paste duplicate: forks node into a fresh node file on disk
-        await act({ flow: 'ergo_flow', kind: 'pasteItems', mode: 'duplicate', items: [{ id: 'clamp', node: 'clamp', x: 80, y: 80 }] });
+        // 5. Paste duplicate: forks node into a fresh node file on disk, handling batch uniqueness
+        await act({ flow: 'ergo_flow', kind: 'pasteItems', mode: 'duplicate', items: [
+            { id: 'clamp', node: 'clamp', x: 80, y: 80 },
+            { id: 'clamp', node: 'clamp', x: 120, y: 120 },
+        ] });
         let flowAfterPasteDuplicate = await read('slate', 'flows', 'ergo_flow.json');
-        const duplicateInst = flowAfterPasteDuplicate.instances.find((i: any) => i.node.includes('clamp_copy'))!;
-        assert.ok(duplicateInst);
-        const dupNodeDisk = await read('slate', 'nodes', `${duplicateInst.node}.json`);
-        assert.equal(dupNodeDisk.name, duplicateInst.node);
-        assert.ok(dupNodeDisk.code.some((l: string) => l.includes(`def ${duplicateInst.node}`)));
+        const dupInstances = flowAfterPasteDuplicate.instances.filter((i: any) => i.node.includes('clamp_copy'));
+        assert.equal(dupInstances.length, 2);
+        assert.notEqual(dupInstances[0].node, dupInstances[1].node);
+        const dup0 = await read('slate', 'nodes', `${dupInstances[0].node}.json`);
+        const dup1 = await read('slate', 'nodes', `${dupInstances[1].node}.json`);
+        assert.equal(dup0.name, dupInstances[0].node);
+        assert.equal(dup1.name, dupInstances[1].node);
 
         // 6. Make unique: forks the linked instance into its own independent node file
         await act({ flow: 'ergo_flow', kind: 'makeUnique', id: linkedInst.id });
@@ -798,6 +812,20 @@ suite('Slate native persistence and proposal QA', () => {
         assert.notEqual(uniqueInst.node, 'clamp');
         const uniqueNodeDisk = await read('slate', 'nodes', `${uniqueInst.node}.json`);
         assert.equal(uniqueNodeDisk.name, uniqueInst.node);
+        assert.ok(uniqueNodeDisk.code.some((l: string) => l.includes(`def ${uniqueInst.node}`)));
+
+        // 6b. Make unique on library reference shows warning and leaves flow unchanged
+        await act({ flow: 'ergo_flow', kind: 'pasteItems', mode: 'linked', items: [{ id: 'lib_call', node: 'lib:math.sin', x: 20, y: 20 }] });
+        const beforeLibFlow = await read('slate', 'flows', 'ergo_flow.json');
+        const libInst = beforeLibFlow.instances.find((i: any) => i.node === 'lib:math.sin')!;
+        let warnedLib = false;
+        replaceMethod(vscode.window, 'showWarningMessage', async (msg: string) => {
+            if (msg.includes('Cannot fork library')) warnedLib = true;
+            return undefined;
+        });
+        await act({ flow: 'ergo_flow', kind: 'makeUnique', id: libInst.id });
+        assert.ok(warnedLib);
+        restores.pop()!();
 
         // 7. Deletion: prompt cancelled writes nothing
         replaceMethod(vscode.window, 'showWarningMessage', async () => undefined);
@@ -816,14 +844,16 @@ suite('Slate native persistence and proposal QA', () => {
 
         // 9. Deletion: "Delete node file" deletes node file from disk and unplugs all instances/wires
         replaceMethod(vscode.window, 'showWarningMessage', async () => 'Delete node file');
-        await act({ flow: 'ergo_flow', kind: 'deleteItems', ids: [duplicateInst.id], prompt: true });
+        await act({ flow: 'ergo_flow', kind: 'deleteItems', ids: [dupInstances[0].id], prompt: true });
         let flowAfterDefDelete = await read('slate', 'flows', 'ergo_flow.json');
-        assert.ok(!flowAfterDefDelete.instances.some((i: any) => i.node === duplicateInst.node));
-        await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(uri('slate', 'nodes', `${duplicateInst.node}.json`))));
+        assert.ok(!flowAfterDefDelete.instances.some((i: any) => i.node === dupInstances[0].node));
+        await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(uri('slate', 'nodes', `${dupInstances[0].node}.json`))));
         restores.pop()!();
 
         // Clean up created files
         try { await vscode.workspace.fs.delete(uri('slate', 'nodes', `${uniqueInst.node}.json`)); } catch {}
+        try { await vscode.workspace.fs.delete(uri('slate', 'nodes', `${dupInstances[0].node}.json`)); } catch {}
+        try { await vscode.workspace.fs.delete(uri('slate', 'nodes', `${dupInstances[1].node}.json`)); } catch {}
         try { await vscode.workspace.fs.delete(uri('slate', 'flows', 'ergo_flow.json')); } catch {}
     });
 

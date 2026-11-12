@@ -812,14 +812,12 @@ export class HarnessPanel implements vscode.Disposable {
                         }
                     }
 
-                    for (const del of deletes) {
-                        try {
-                            await vscode.workspace.fs.delete(del, { useTrash: false });
-                        } catch { /* best effort */ }
-                    }
-
                     for (const [fId, flowObj] of flowsMap.entries()) {
                         await folder.writeFlow(fId, flowObj);
+                    }
+
+                    for (const del of deletes) {
+                        await vscode.workspace.fs.delete(del, { useTrash: false });
                     }
 
                     await finish(`Deleted ${nodeIdsToDelete.size} node file(s).`);
@@ -855,6 +853,9 @@ export class HarnessPanel implements vscode.Disposable {
                 const baseOffsetX = typeof action.x === 'number' ? action.x : undefined;
                 const baseOffsetY = typeof action.y === 'number' ? action.y : undefined;
 
+                const allocatedFlowNames = new Set((this.snapshot?.flows ?? []).map(f => f.id));
+                const allocatedNodeNames = new Set((this.snapshot?.documents ?? []).map(doc => nodeIdForPath(doc.path)!));
+
                 for (let index = 0; index < items.length; index++) {
                     const item = items[index];
                     const originalTarget = String(item.node ?? item.target ?? item.id);
@@ -882,8 +883,8 @@ export class HarnessPanel implements vscode.Disposable {
                     } else {
                         if (this.snapshot?.flows?.some(f => f.id === originalTarget)) {
                             const sourceFlow = this.flow(originalTarget);
-                            const existingFlowNames = (this.snapshot.flows ?? []).map(f => f.id);
-                            const newFlowName = uniqueName(`${sourceFlow.name}_copy`, existingFlowNames);
+                            const newFlowName = uniqueName(`${sourceFlow.name}_copy`, allocatedFlowNames);
+                            allocatedFlowNames.add(newFlowName);
                             const duplicatedFlow: SlateFlow = {
                                 ...sourceFlow,
                                 name: newFlowName,
@@ -898,16 +899,15 @@ export class HarnessPanel implements vscode.Disposable {
                             this.placeAt(scope, instId, posX, posY);
                         } else {
                             const sourceNode = await folder.readNode(originalTarget);
-                            const existingNodes = (this.snapshot?.documents ?? []).map(doc => nodeIdForPath(doc.path)!);
                             const baseName = sourceNode.name.replace(/_copy\d*$/, '') + '_copy';
-                            const newNodeName = uniqueName(baseName, existingNodes);
+                            const newNodeName = uniqueName(baseName, allocatedNodeNames);
+                            allocatedNodeNames.add(newNodeName);
+                            const escapedOldName = sourceNode.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            const selfRefRegex = new RegExp(`\\b${escapedOldName}\\b`, 'g');
                             const clonedNode: SlateNode = {
                                 ...sourceNode,
                                 name: newNodeName,
-                                code: sourceNode.code.map(line =>
-                                    line.replace(new RegExp(`\\bdef ${sourceNode.name}\\b`), `def ${newNodeName}`)
-                                        .replace(new RegExp(`\\bclass ${sourceNode.name}\\b`), `class ${newNodeName}`)
-                                ),
+                                code: sourceNode.code.map(line => line.replace(selfRefRegex, newNodeName)),
                             };
                             await folder.createNode(clonedNode, { x: posX, y: posY });
                             const instId = isRoot
@@ -932,17 +932,20 @@ export class HarnessPanel implements vscode.Disposable {
                     throw new Error('Select a node instance to make unique.');
                 }
                 const targetNodeId = instance.node;
+                if (targetNodeId.startsWith('lib:')) {
+                    vscode.window.showWarningMessage(`Cannot fork library reference "${targetNodeId}".`);
+                    return true;
+                }
                 const sourceNode = await folder.readNode(targetNodeId);
                 const existingNodes = (this.snapshot?.documents ?? []).map(doc => nodeIdForPath(doc.path)!);
                 const baseName = sourceNode.name.replace(/_copy\d*$/, '') + '_copy';
                 const newNodeName = uniqueName(baseName, existingNodes);
+                const escapedOldName = sourceNode.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const selfRefRegex = new RegExp(`\\b${escapedOldName}\\b`, 'g');
                 const clonedNode: SlateNode = {
                     ...sourceNode,
                     name: newNodeName,
-                    code: sourceNode.code.map(line =>
-                        line.replace(new RegExp(`\\bdef ${sourceNode.name}\\b`), `def ${newNodeName}`)
-                            .replace(new RegExp(`\\bclass ${sourceNode.name}\\b`), `class ${newNodeName}`)
-                    ),
+                    code: sourceNode.code.map(line => line.replace(selfRefRegex, newNodeName)),
                 };
                 const pos = (scope === null ? layout.positions[id] : layout.flowPositions[scope]?.[id]) ?? { x: 100, y: 100 };
                 await folder.createNode(clonedNode, pos);
@@ -1014,9 +1017,17 @@ export class HarnessPanel implements vscode.Disposable {
                 flowsMap.set(MAIN_FLOW, this.flow(MAIN_FLOW));
                 flowsMap.set(targetFlowId, updatedTargetFlow);
 
+                const survivingOutput = updatedTargetFlow.outputs.length === 1 ? updatedTargetFlow.outputs[0].name : undefined;
                 for (const [fId, flowObj] of flowsMap.entries()) {
                     if (fId === targetFlowId) continue;
-                    const repaired = repairCallerWiresOnPortDelete(flowObj, targetFlowId, direction, name, targetFlow.outputs.length);
+                    const repaired = repairCallerWiresOnPortDelete(
+                        flowObj,
+                        targetFlowId,
+                        direction,
+                        name,
+                        updatedTargetFlow.outputs.length,
+                        survivingOutput,
+                    );
                     if (repaired !== flowObj) {
                         flowsMap.set(fId, repaired);
                     }

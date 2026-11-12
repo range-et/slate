@@ -294,7 +294,7 @@ function Inspector({
                 <div className="harness-inspector__actions">
                     {node.data.flowId && <button onClick={() => onEnterFlow(node.data.flowId!)}>Open flow</button>}
                     {node.data.target && !node.data.broken && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => onGoTo(node.data.target!)}>Go to definition</button>}
-                    {node.data.target && !node.data.broken && !node.data.flowId && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => action({ kind: 'makeUnique', id: node.id })}>Make unique</button>}
+                    {node.data.target && !node.data.broken && !node.data.flowId && !node.data.target.startsWith('lib:') && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => action({ kind: 'makeUnique', id: node.id })}>Make unique</button>}
                 </div>
             </section>}
             {note && <>
@@ -545,7 +545,7 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
             {data.flowId && <button role="menuitem" onClick={() => { onEnterFlow(data.flowId!); onClose(); }}>Open flow</button>}
             {!data.broken && <button role="menuitem" onClick={() => { onGoTo(data.target!); onClose(); }}>Go to definition</button>}
             {!data.broken && <button role="menuitem" onClick={() => { onFindRefs(data.target!); onClose(); }}>Find references</button>}
-            {data.target && !data.broken && !data.flowId && <button role="menuitem" onClick={() => act({ kind: 'makeUnique', id: node!.id })}>Make unique</button>}
+            {data.target && !data.broken && !data.flowId && !data.target.startsWith('lib:') && <button role="menuitem" onClick={() => act({ kind: 'makeUnique', id: node!.id })}>Make unique</button>}
             {data.unit && ['function', 'method'].includes(data.unit.kind) && data.path && <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'generate', unitId: data.target });
                 onClose();
@@ -553,7 +553,7 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
             <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>
                 {data.kind === 'ref' ? 'Delete reference' : 'Remove from flow'}
             </button>
-            {data.target && !data.broken && !data.flowId && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id], mode: 'deleteDefinition', prompt: true })}>
+            {data.target && !data.broken && !data.flowId && !data.target.startsWith('lib:') && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id], mode: 'deleteDefinition', prompt: true })}>
                 Delete node file…
             </button>}
         </>}
@@ -1141,9 +1141,17 @@ function HarnessApp() {
                 event.preventDefault();
                 groupSelection();
             } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
-                if (selectedNodes.length > 0) {
+                const copiable = selectedNodes.filter(node => {
+                    const kind = node.data?.kind;
+                    const type = node.type;
+                    if (type === 'note' || kind === 'note') return false;
+                    if (kind === 'placeholder' || kind === 'group') return false;
+                    if (node.id === '__input' || node.id === '__output') return false;
+                    return true;
+                });
+                if (copiable.length > 0) {
                     event.preventDefault();
-                    const items = selectedNodes.map(node => ({
+                    const items = copiable.map(node => ({
                         id: node.id,
                         kind: node.data.kind,
                         node: node.data.target ?? node.data.path ?? node.id,
@@ -1165,12 +1173,16 @@ function HarnessApp() {
                     post({ kind: 'pasteItems', mode: isDuplicate ? 'duplicate' : 'linked', items: clipboard, x: point.x, y: point.y });
                 }
             } else if (event.key === 'Delete' || event.key === 'Backspace') {
-                if (selectedNodes.length > 0) {
+                const noteNode = selectedNodes.find(n => n.data?.note || n.data?.kind === 'note' || n.type === 'note');
+                if (noteNode?.data?.note) {
                     event.preventDefault();
-                    post({ kind: 'deleteItems', ids: selectedNodes.map(n => n.id), prompt: true });
-                } else if (selected?.data.note) {
+                    vscode?.postMessage({ type: 'noteDelete', revision: snapshot.revision, noteId: noteNode.data.note.id });
+                } else if (selected?.data?.note) {
                     event.preventDefault();
                     vscode?.postMessage({ type: 'noteDelete', revision: snapshot.revision, noteId: selected.data.note.id });
+                } else if (selectedNodes.length > 0) {
+                    event.preventDefault();
+                    post({ kind: 'deleteItems', ids: selectedNodes.map(n => n.id), prompt: true });
                 }
             } else if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey) {
                 event.preventDefault();
@@ -1245,10 +1257,18 @@ function HarnessApp() {
         const removable = selectedNodes.filter(node => ['ref', 'instance', 'value', 'placeholder', 'function', 'class', 'module', 'document'].includes(node.data.kind)).map(node => node.id);
         const removableCount = selectedNodes.filter(node => ['ref', 'instance', 'value', 'placeholder'].includes(node.data.kind)).length || selectedNodes.length;
         items.push({ id: 'add-node', group: 'canvas', label: 'Add node…', detail: 'Tab · Shift+A · double-click', run: () => openAdd() });
-        if (selectedIds.length) {
-            items.push({ id: 'copy', group: 'selection', label: `Copy selected (${selectedIds.length})`, detail: '⌘C',
+        const copiableNodes = selectedNodes.filter(node => {
+            const kind = node.data?.kind;
+            const type = node.type;
+            if (type === 'note' || kind === 'note') return false;
+            if (kind === 'placeholder' || kind === 'group') return false;
+            if (node.id === '__input' || node.id === '__output') return false;
+            return true;
+        });
+        if (copiableNodes.length) {
+            items.push({ id: 'copy', group: 'selection', label: `Copy selected (${copiableNodes.length})`, detail: '⌘C',
                 run: () => {
-                    const clipboardItems = selectedNodes.map(node => ({
+                    const clipboardItems = copiableNodes.map(node => ({
                         id: node.id,
                         kind: node.data.kind,
                         node: node.data.target ?? node.data.path ?? node.id,
@@ -1279,7 +1299,7 @@ function HarnessApp() {
                 }
             });
         }
-        if (selected && (selected.data.kind === 'ref' || selected.data.kind === 'instance') && selected.data.target && !selected.data.broken && !selected.data.flowId) {
+        if (selected && (selected.data.kind === 'ref' || selected.data.kind === 'instance') && selected.data.target && !selected.data.broken && !selected.data.flowId && !selected.data.target.startsWith('lib:')) {
             items.push({ id: 'make-unique', group: 'selection', label: `Make unique (${selected.data.target})`,
                 detail: 'Fork this occurrence into an independent definition file',
                 run: () => post({ kind: 'makeUnique', id: selected.id }) });
@@ -1353,7 +1373,7 @@ function HarnessApp() {
         const text = paletteQuery.trim();
         if (text) items.push({ id: 'search', group: 'search', always: true, label: `Search code for “${text}”`, run: () => runSearch(text) });
         return items;
-    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, scope, view, libraryOpen, showAllContext]);
+    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, scope, view, libraryOpen, showAllContext, clipboard]);
 
     // Add-node search: every callable (minus the open flow), a literal value, and at the root a placeholder.
     const addItems = useMemo<PaletteEntry[]>(() => {
