@@ -27,6 +27,11 @@ export class SlateFolderHost {
     private readonly flowVersions = new Map<string, number | null>();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
+    removeDeferredRefs(ids: Iterable<string>): void {
+        const set = new Set(ids);
+        this.deferredRefs = this.deferredRefs.filter(ref => !set.has(ref.id));
+    }
+
     constructor(readonly root: vscode.Uri) {}
 
     static async detect(root: vscode.Uri): Promise<boolean> {
@@ -275,9 +280,13 @@ export class SlateFolderHost {
         });
     }
 
-    async writeLayout(): Promise<void> {
+    layoutText(): string {
         const refs = [...this.deferredRefs, ...this.layout.refs.filter(ref => !this.deferredRefs.some(item => item.id === ref.id))];
-        await this.writeText(this.uri(LAYOUT_PATH), serializeLayout({ ...this.layout, refs }));
+        return serializeLayout({ ...this.layout, refs });
+    }
+
+    async writeLayout(): Promise<void> {
+        await this.writeText(this.uri(LAYOUT_PATH), this.layoutText());
     }
 
     private async writeText(uri: vscode.Uri, text: string): Promise<void> {

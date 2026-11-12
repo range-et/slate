@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { compilePython } from '../vscode-extension/src/compile/python';
-import { connect, extractFlow, inputPorts, migrateRootOccurrences, outputPorts, parseFlow, serializeFlow, unitSignature, type Port } from '../vscode-extension/src/flow';
+import {
+    connect, deleteFlowPort, extractFlow, inputPorts, migrateRootOccurrences, outputPorts, parseFlow,
+    removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename,
+    serializeFlow, unitSignature, type Port,
+} from '../vscode-extension/src/flow';
 import type { SlateFlow } from '../vscode-extension/src/harness_protocol';
 import { parseModule } from '../vscode-extension/src/python_adapter';
 import type { SlateNode } from '../vscode-extension/src/slate_folder';
@@ -80,6 +84,97 @@ describe('flow format and ports', () => {
         // One distinct inside source → a single `out` port, even with two outside targets.
         const single = extractFlow(parent, ['b'], { id: 'one', name: 'one', instanceId: 'h' }, ports).parent;
         expect(single.wires).toEqual(expect.arrayContaining([{ from: 'h.out', to: 'output:result' }, { from: 'h.out', to: 'c.in:x' }]));
+    });
+
+    it('renames and deletes flow ports and repairs caller wires', () => {
+        const callee = flow({
+            name: 'pipe',
+            inputs: [{ name: 'val', annotation: 'int' }, { name: 'bound', annotation: 'int' }],
+            outputs: [{ name: 'clamped', annotation: 'int' }, { name: 'status', annotation: 'str' }],
+            instances: [{ id: 'a', node: 'math/double' }],
+            wires: [
+                { from: 'input:val', to: 'a.in:x' },
+                { from: 'a.out', to: 'output:clamped' },
+            ],
+        });
+
+        // Renaming an input updates internal wires
+        const renamedInput = renameFlowPort(callee, 'input', 'val', 'data');
+        expect(renamedInput.inputs).toEqual([{ name: 'data', annotation: 'int' }, { name: 'bound', annotation: 'int' }]);
+        expect(renamedInput.wires).toEqual([
+            { from: 'input:data', to: 'a.in:x' },
+            { from: 'a.out', to: 'output:clamped' },
+        ]);
+
+        // Renaming an output updates internal wires
+        const renamedOutput = renameFlowPort(callee, 'output', 'clamped', 'res');
+        expect(renamedOutput.outputs).toEqual([{ name: 'res', annotation: 'int' }, { name: 'status', annotation: 'str' }]);
+        expect(renamedOutput.wires).toEqual([
+            { from: 'input:val', to: 'a.in:x' },
+            { from: 'a.out', to: 'output:res' },
+        ]);
+
+        // Validation: reject invalid identifiers and duplicate port names
+        expect(() => renameFlowPort(callee, 'input', 'val', 'not valid!')).toThrow(/identifier/);
+        expect(() => renameFlowPort(callee, 'input', 'val', 'bound')).toThrow(/already exists/);
+        expect(() => renameFlowPort(callee, 'input', 'missing', 'x')).toThrow(/does not exist/);
+
+        // Caller wire repair on input rename
+        const caller = flow({
+            name: 'main',
+            instances: [{ id: 'pipe_1', node: 'pipe' }, { id: 'other', node: 'math/double' }],
+            wires: [
+                { from: 'other.out', to: 'pipe_1.in:val' },
+                { from: 'pipe_1.out:clamped', to: 'other.in:x' },
+            ],
+        });
+        const repairedCallerInput = repairCallerWiresOnPortRename(caller, 'pipe', 'input', 'val', 'data', 2);
+        expect(repairedCallerInput.wires).toEqual([
+            { from: 'other.out', to: 'pipe_1.in:data' },
+            { from: 'pipe_1.out:clamped', to: 'other.in:x' },
+        ]);
+
+        // Caller wire repair on output rename
+        const repairedCallerOutput = repairCallerWiresOnPortRename(caller, 'pipe', 'output', 'clamped', 'res', 2);
+        expect(repairedCallerOutput.wires).toEqual([
+            { from: 'other.out', to: 'pipe_1.in:val' },
+            { from: 'pipe_1.out:res', to: 'other.in:x' },
+        ]);
+
+        // Deleting ports unplugs internal wires
+        const deletedInput = deleteFlowPort(callee, 'input', 'val');
+        expect(deletedInput.inputs).toEqual([{ name: 'bound', annotation: 'int' }]);
+        expect(deletedInput.wires).toEqual([{ from: 'a.out', to: 'output:clamped' }]);
+
+        const deletedOutput = deleteFlowPort(callee, 'output', 'clamped');
+        expect(deletedOutput.outputs).toEqual([{ name: 'status', annotation: 'str' }]);
+        expect(deletedOutput.wires).toEqual([{ from: 'input:val', to: 'a.in:x' }]);
+
+        // Caller wire unplug on port delete
+        const unpluggedCallerInput = repairCallerWiresOnPortDelete(caller, 'pipe', 'input', 'val', 2);
+        expect(unpluggedCallerInput.wires).toEqual([{ from: 'pipe_1.out:clamped', to: 'other.in:x' }]);
+
+        const unpluggedCallerOutput = repairCallerWiresOnPortDelete(caller, 'pipe', 'output', 'clamped', 2);
+        expect(unpluggedCallerOutput.wires).toEqual([{ from: 'other.out', to: 'pipe_1.in:val' }]);
+
+        // When deleting an output leaves exactly 1 surviving output, rewrite surviving caller endpoint to inst.out
+        const multiOutputCaller = flow({
+            name: 'main',
+            instances: [{ id: 'pipe_1', node: 'pipe' }, { id: 'other', node: 'math/double' }],
+            wires: [
+                { from: 'pipe_1.out:clamped', to: 'other.in:x' },
+                { from: 'pipe_1.out:status', to: 'other.in:s' },
+            ],
+        });
+        const repairedSingleOutputCaller = repairCallerWiresOnPortDelete(multiOutputCaller, 'pipe', 'output', 'clamped', 1, 'status');
+        expect(repairedSingleOutputCaller.wires).toEqual([
+            { from: 'pipe_1.out', to: 'other.in:s' },
+        ]);
+
+        // Removing all references to a deleted node
+        const removed = removeNodeReferences(caller, 'math/double');
+        expect(removed.instances).toEqual([{ id: 'pipe_1', node: 'pipe' }]);
+        expect(removed.wires).toEqual([]);
     });
 });
 
@@ -239,5 +334,25 @@ describe('one occurrence model and root migration', () => {
         const repeatLegacy = migrateRootOccurrences(legacyMain, [], migrated.positions, ['math/double', 'math/add', 'math/stats'], ['report']);
         expect(repeatLegacy.main?.instances.map(item => item.id)).toEqual(['value', 'ref_double', 'ref_report', 'ref_add']);
         expect(repeatLegacy.positions).toEqual(migrated.positions);
+    });
+
+    it('renames function definition and all recursive self-references when forking code', () => {
+        const sourceCode = [
+            'def factorial(n: int) -> int:',
+            '    if n <= 1:',
+            '        return 1',
+            '    return n * factorial(n - 1)',
+        ];
+        const oldName = 'factorial';
+        const newName = 'factorial_copy';
+        const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`\\b${escaped}\\b`, 'g');
+        const transformed = sourceCode.map(line => line.replace(regex, newName));
+        expect(transformed).toEqual([
+            'def factorial_copy(n: int) -> int:',
+            '    if n <= 1:',
+            '        return 1',
+            '    return n * factorial_copy(n - 1)',
+        ]);
     });
 });

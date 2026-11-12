@@ -98,7 +98,14 @@ suite('Slate native persistence and proposal QA', () => {
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await vscode.workspace.getConfiguration('slate.llama').update('endpoint', oldEndpoint, vscode.ConfigurationTarget.Global);
         await new Promise<void>(resolve => server.close(() => resolve()));
-        await vscode.workspace.fs.delete(root, { recursive: true, useTrash: false });
+        try {
+            await vscode.workspace.fs.delete(root, { recursive: true, useTrash: false });
+        } catch {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            try {
+                await vscode.workspace.fs.delete(root, { recursive: true, useTrash: false });
+            } catch { /* best effort cleanup on Windows */ }
+        }
     });
 
     test('accepts the real streamed proposal, persists it, reloads it, and natively undoes then saves the original', async () => {
@@ -584,6 +591,8 @@ suite('Slate native persistence and proposal QA', () => {
             ],
         }));
         const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
+        await vscode.window.showTextDocument(layoutDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
         const dirtyLayoutEdit = new vscode.WorkspaceEdit();
         dirtyLayoutEdit.replace(
             layoutDoc.uri,
@@ -732,6 +741,120 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(errs.some(m => m?.includes('cannot feed itself')));
         assert.ok(errs.some(m => m?.includes('cannot be its own context')));
         assert.ok(errs.some(m => m?.includes('not available for slate/ node folders')));
+    });
+
+    test('canvas ergonomics: deletion with confirmation, copy/paste linked and duplicate, make unique, and flow port renaming/deletion', async () => {
+        // Create a new flow for ergo testing
+        await act({ kind: 'createFlow', name: 'ergo_flow', x: 10, y: 10 });
+        await act({ flow: 'ergo_flow', kind: 'addInstance', target: 'clamp', x: 100, y: 100 });
+        await act({ flow: 'ergo_flow', kind: 'addInstance', target: 'normalize', x: 400, y: 100 });
+        await act({ flow: 'ergo_flow', kind: 'connectData', from: 'input:+', to: 'clamp.in:value' });
+        await act({ flow: 'ergo_flow', kind: 'connectData', from: 'clamp.out', to: 'normalize.in:score' });
+        await act({ flow: 'ergo_flow', kind: 'connectData', from: 'normalize.out', to: 'output:+' });
+
+        // Wire an instance of ergo_flow in main.json to test caller wire repairs
+        await act({ kind: 'addInstance', target: 'ergo_flow', x: 200, y: 200 });
+        const ergoMainInst = (await read('slate', 'flows', 'main.json')).instances.find((i: any) => i.node === 'ergo_flow')!;
+        await act({ kind: 'connectData', from: 'clamp.out', to: `${ergoMainInst.id}.in:value` });
+
+        let flowBefore = await read('slate', 'flows', 'ergo_flow.json');
+        assert.equal(flowBefore.inputs[0].name, 'value');
+        assert.equal(flowBefore.outputs[0].name, 'normalize');
+
+        // 1. Rename flow input: updates internal wires and repairs caller wire in main.json
+        await act({ flow: 'ergo_flow', kind: 'renameFlowPort', direction: 'input', oldName: 'value', newName: 'num_input' });
+        let flowAfterInRename = await read('slate', 'flows', 'ergo_flow.json');
+        assert.equal(flowAfterInRename.inputs[0].name, 'num_input');
+        assert.ok(flowAfterInRename.wires.some((w: any) => w.from === 'input:num_input' && w.to === 'clamp.in:value'));
+
+        let mainAfterInRename = await read('slate', 'flows', 'main.json');
+        assert.ok(mainAfterInRename.wires.some((w: any) => w.from === 'ref_clamp.out' && w.to === `${ergoMainInst.id}.in:num_input`));
+
+        // 2. Rename flow output: updates internal wires
+        await act({ flow: 'ergo_flow', kind: 'renameFlowPort', direction: 'output', oldName: 'normalize', newName: 'final_score' });
+        let flowAfterOutRename = await read('slate', 'flows', 'ergo_flow.json');
+        assert.equal(flowAfterOutRename.outputs[0].name, 'final_score');
+        assert.ok(flowAfterOutRename.wires.some((w: any) => w.to === 'output:final_score'));
+
+        // 3. Delete flow input: unplugs internal wire and caller wire
+        await act({ flow: 'ergo_flow', kind: 'deleteFlowPort', direction: 'input', name: 'num_input', prompt: false });
+        let flowAfterInDelete = await read('slate', 'flows', 'ergo_flow.json');
+        assert.equal(flowAfterInDelete.inputs.length, 0);
+        assert.ok(!flowAfterInDelete.wires.some((w: any) => w.from === 'input:num_input'));
+        let mainAfterInDelete = await read('slate', 'flows', 'main.json');
+        assert.ok(!mainAfterInDelete.wires.some((w: any) => w.to === `${ergoMainInst.id}.in:num_input`));
+
+        // 4. Paste linked: creates new instance referencing existing clamp without creating node file
+        await act({ flow: 'ergo_flow', kind: 'pasteItems', mode: 'linked', items: [{ id: 'clamp', node: 'clamp', x: 50, y: 50 }] });
+        let flowAfterPasteLinked = await read('slate', 'flows', 'ergo_flow.json');
+        const linkedInst = flowAfterPasteLinked.instances.find((i: any) => i.id !== 'clamp' && i.node === 'clamp')!;
+        assert.ok(linkedInst);
+        await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(uri('slate', 'nodes', `${linkedInst.id}.json`))));
+
+        // 5. Paste duplicate: forks node into a fresh node file on disk, handling batch uniqueness
+        await act({ flow: 'ergo_flow', kind: 'pasteItems', mode: 'duplicate', items: [
+            { id: 'clamp', node: 'clamp', x: 80, y: 80 },
+            { id: 'clamp', node: 'clamp', x: 120, y: 120 },
+        ] });
+        let flowAfterPasteDuplicate = await read('slate', 'flows', 'ergo_flow.json');
+        const dupInstances = flowAfterPasteDuplicate.instances.filter((i: any) => i.node.includes('clamp_copy'));
+        assert.equal(dupInstances.length, 2);
+        assert.notEqual(dupInstances[0].node, dupInstances[1].node);
+        const dup0 = await read('slate', 'nodes', `${dupInstances[0].node}.json`);
+        const dup1 = await read('slate', 'nodes', `${dupInstances[1].node}.json`);
+        assert.equal(dup0.name, dupInstances[0].node);
+        assert.equal(dup1.name, dupInstances[1].node);
+
+        // 6. Make unique: forks the linked instance into its own independent node file
+        await act({ flow: 'ergo_flow', kind: 'makeUnique', id: linkedInst.id });
+        let flowAfterUnique = await read('slate', 'flows', 'ergo_flow.json');
+        const uniqueInst = flowAfterUnique.instances.find((i: any) => i.id === linkedInst.id)!;
+        assert.notEqual(uniqueInst.node, 'clamp');
+        const uniqueNodeDisk = await read('slate', 'nodes', `${uniqueInst.node}.json`);
+        assert.equal(uniqueNodeDisk.name, uniqueInst.node);
+        assert.ok(uniqueNodeDisk.code.some((l: string) => l.includes(`def ${uniqueInst.node}`)));
+
+        // 6b. Make unique on library reference shows warning and leaves flow unchanged
+        await act({ flow: 'ergo_flow', kind: 'pasteItems', mode: 'linked', items: [{ id: 'lib_call', node: 'lib:math.sin', x: 20, y: 20 }] });
+        const beforeLibFlow = await read('slate', 'flows', 'ergo_flow.json');
+        const libInst = beforeLibFlow.instances.find((i: any) => i.node === 'lib:math.sin')!;
+        let warnedLib = false;
+        replaceMethod(vscode.window, 'showWarningMessage', async (msg: string) => {
+            if (msg.includes('Cannot fork library')) warnedLib = true;
+            return undefined;
+        });
+        await act({ flow: 'ergo_flow', kind: 'makeUnique', id: libInst.id });
+        assert.ok(warnedLib);
+        restores.pop()!();
+
+        // 7. Deletion: prompt cancelled writes nothing
+        replaceMethod(vscode.window, 'showWarningMessage', async () => undefined);
+        await act({ flow: 'ergo_flow', kind: 'deleteItems', ids: [uniqueInst.id], prompt: true });
+        let flowAfterCancel = await read('slate', 'flows', 'ergo_flow.json');
+        assert.ok(flowAfterCancel.instances.some((i: any) => i.id === uniqueInst.id));
+        restores.pop()!();
+
+        // 8. Deletion: "Remove call instance" removes from flow but leaves node file on disk
+        replaceMethod(vscode.window, 'showWarningMessage', async () => 'Remove call instance');
+        await act({ flow: 'ergo_flow', kind: 'deleteItems', ids: [uniqueInst.id], prompt: true });
+        let flowAfterRemove = await read('slate', 'flows', 'ergo_flow.json');
+        assert.ok(!flowAfterRemove.instances.some((i: any) => i.id === uniqueInst.id));
+        assert.ok(await vscode.workspace.fs.stat(uri('slate', 'nodes', `${uniqueInst.node}.json`)));
+        restores.pop()!();
+
+        // 9. Deletion: "Delete node file" deletes node file from disk and unplugs all instances/wires
+        replaceMethod(vscode.window, 'showWarningMessage', async () => 'Delete node file');
+        await act({ flow: 'ergo_flow', kind: 'deleteItems', ids: [dupInstances[0].id], prompt: true });
+        let flowAfterDefDelete = await read('slate', 'flows', 'ergo_flow.json');
+        assert.ok(!flowAfterDefDelete.instances.some((i: any) => i.node === dupInstances[0].node));
+        await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(uri('slate', 'nodes', `${dupInstances[0].node}.json`))));
+        restores.pop()!();
+
+        // Clean up created files
+        try { await vscode.workspace.fs.delete(uri('slate', 'nodes', `${uniqueInst.node}.json`)); } catch {}
+        try { await vscode.workspace.fs.delete(uri('slate', 'nodes', `${dupInstances[0].node}.json`)); } catch {}
+        try { await vscode.workspace.fs.delete(uri('slate', 'nodes', `${dupInstances[1].node}.json`)); } catch {}
+        try { await vscode.workspace.fs.delete(uri('slate', 'flows', 'ergo_flow.json')); } catch {}
     });
 
     test('concurrent generation/describe guards, cancellation, compile action, stale lastGood graph, and layout error reporting', async () => {

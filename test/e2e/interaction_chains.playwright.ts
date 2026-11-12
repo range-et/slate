@@ -610,3 +610,81 @@ test('palette shortcuts stop propagation in capture phase before host bubble lis
     expect(forwarded).not.toContain('Ctrl+K');
     expect(forwarded).toEqual(['/', 'Escape']);
 });
+
+test('chain canvas ergonomics: Delete/Backspace prompt, copy/paste linked/duplicate, make unique, and port context menu', async ({ page }) => {
+    // 1. Delete and Backspace trigger deleteItems with prompt: true
+    await node(page, 'ref-clamp').click();
+    await page.keyboard.press('Delete');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({ kind: 'deleteItems', ids: ['ref-clamp'], prompt: true }),
+    }));
+
+    await clear(page);
+    await node(page, 'ref-clamp').click();
+    await page.keyboard.press('Backspace');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({ kind: 'deleteItems', ids: ['ref-clamp'], prompt: true }),
+    }));
+
+    // 2. Copy and Paste linked (Control+c, Control+v)
+    await clear(page);
+    await node(page, 'ref-clamp').click();
+    await page.keyboard.press('Control+c');
+    await expect(page.getByRole('status')).toContainText('Copied 1 item(s)');
+
+    await page.keyboard.press('Control+v');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({
+            kind: 'pasteItems',
+            mode: 'linked',
+            items: expect.arrayContaining([expect.objectContaining({ id: 'ref-clamp', node: 'clamp' })]),
+        }),
+    }));
+
+    // 3. Paste duplicate (Control+Shift+v)
+    await clear(page);
+    await page.keyboard.press('Control+Shift+V');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({
+            kind: 'pasteItems',
+            mode: 'duplicate',
+            items: expect.arrayContaining([expect.objectContaining({ id: 'ref-clamp', node: 'clamp' })]),
+        }),
+    }));
+
+    // 4. "Make unique" button in Inspector
+    await clear(page);
+    await node(page, 'ref-clamp').click();
+    const makeUniqueBtn = page.getByRole('button', { name: 'Make unique', exact: true });
+    await expect(makeUniqueBtn).toBeVisible();
+    await makeUniqueBtn.click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({ kind: 'makeUnique', id: 'ref-clamp' }),
+    }));
+
+    // 5. Flow port rename and delete in flow group context menu
+    await command(page, 'Flow: report');
+    await expect(node(page, '__output')).toBeVisible();
+    await node(page, '__output').click({ button: 'right' });
+    const renameItem = page.getByRole('menuitem', { name: /Rename output/ });
+    await expect(renameItem.first()).toBeVisible();
+    await renameItem.first().click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({ flow: 'report', kind: 'renameFlowPort', direction: 'output' }),
+    }));
+
+    // 6. Note deletion via Delete key sends noteDelete directly without deleteItems prompt
+    await command(page, 'Back to parent canvas');
+    await clear(page);
+    await page.locator('.slate-node--note').click();
+    await page.keyboard.press('Delete');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'noteDelete',
+    }));
+});

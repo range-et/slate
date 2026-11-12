@@ -173,6 +173,143 @@ export function removeInstances(flow: SlateFlow, ids: Iterable<string>): SlateFl
     };
 }
 
+/** Rename an input or output port of a flow and update its internal wires. */
+export function renameFlowPort(flow: SlateFlow, direction: 'input' | 'output', oldName: string, newName: string): SlateFlow {
+    if (!IDENTIFIER.test(newName)) throw new FlowFormatError('port name must be an identifier');
+    if (oldName === newName) return flow;
+    const listKey = direction === 'input' ? 'inputs' : 'outputs';
+    if (flow[listKey].some(port => port.name === newName)) throw new FlowFormatError(`port ${newName} already exists`);
+    const portIndex = flow[listKey].findIndex(port => port.name === oldName);
+    if (portIndex < 0) throw new FlowFormatError(`port ${oldName} does not exist`);
+    const updatedPorts = [...flow[listKey]];
+    updatedPorts[portIndex] = { ...updatedPorts[portIndex], name: newName };
+
+    const oldEndpoint = direction === 'input' ? `input:${oldName}` : `output:${oldName}`;
+    const newEndpoint = direction === 'input' ? `input:${newName}` : `output:${newName}`;
+
+    const wires = flow.wires.map(wire => {
+        if (direction === 'input' && wire.from === oldEndpoint) return { ...wire, from: newEndpoint };
+        if (direction === 'output' && wire.to === oldEndpoint) return { ...wire, to: newEndpoint };
+        return wire;
+    });
+
+    return {
+        ...flow,
+        [listKey]: updatedPorts,
+        wires,
+    };
+}
+
+/** Delete an input or output port of a flow and unplug its internal wires. */
+export function deleteFlowPort(flow: SlateFlow, direction: 'input' | 'output', name: string): SlateFlow {
+    const listKey = direction === 'input' ? 'inputs' : 'outputs';
+    const targetEndpoint = direction === 'input' ? `input:${name}` : `output:${name}`;
+    return {
+        ...flow,
+        [listKey]: flow[listKey].filter(port => port.name !== name),
+        wires: flow.wires.filter(wire => direction === 'input' ? wire.from !== targetEndpoint : wire.to !== targetEndpoint),
+    };
+}
+
+/** Update caller wires when a referenced flow's input or output port is renamed. */
+export function repairCallerWiresOnPortRename(
+    callerFlow: SlateFlow,
+    calleeFlowId: string,
+    direction: 'input' | 'output',
+    oldName: string,
+    newName: string,
+    calleeOutputsCount = 1,
+): SlateFlow {
+    const matchingInstanceIds = new Set(
+        callerFlow.instances
+            .filter(instance => instance.node === calleeFlowId || instance.node === `flow:${calleeFlowId}`)
+            .map(instance => instance.id),
+    );
+    if (matchingInstanceIds.size === 0) return callerFlow;
+
+    const wires = callerFlow.wires.map(wire => {
+        const from = parseEndpoint(wire.from);
+        const to = parseEndpoint(wire.to);
+        if (direction === 'input') {
+            if (to.instance && matchingInstanceIds.has(to.instance) && to.port === `in:${oldName}`) {
+                return { ...wire, to: `${to.instance}.in:${newName}` };
+            }
+        } else {
+            if (from.instance && matchingInstanceIds.has(from.instance)) {
+                if (from.port === `out:${oldName}`) {
+                    return { ...wire, from: `${from.instance}.out:${newName}` };
+                }
+                if (calleeOutputsCount === 1 && from.port === 'out') {
+                    // Single output callers might use out:oldName
+                    return wire;
+                }
+            }
+        }
+        return wire;
+    });
+
+    return { ...callerFlow, wires };
+}
+
+/** Update caller wires when a referenced flow's input or output port is deleted. */
+export function repairCallerWiresOnPortDelete(
+    callerFlow: SlateFlow,
+    calleeFlowId: string,
+    direction: 'input' | 'output',
+    name: string,
+    calleeOutputsCount = 1,
+    survivingOutputName?: string,
+): SlateFlow {
+    const matchingInstanceIds = new Set(
+        callerFlow.instances
+            .filter(instance => instance.node === calleeFlowId || instance.node === `flow:${calleeFlowId}`)
+            .map(instance => instance.id),
+    );
+    if (matchingInstanceIds.size === 0) return callerFlow;
+
+    const wires: FlowWire[] = [];
+    for (const wire of callerFlow.wires) {
+        const from = parseEndpoint(wire.from);
+        const to = parseEndpoint(wire.to);
+        if (direction === 'input') {
+            if (to.instance && matchingInstanceIds.has(to.instance) && to.port === `in:${name}`) {
+                continue;
+            }
+            wires.push(wire);
+        } else {
+            if (from.instance && matchingInstanceIds.has(from.instance)) {
+                if (from.port === `out:${name}`) {
+                    continue;
+                }
+                if (calleeOutputsCount <= 0 && from.port === 'out') {
+                    continue;
+                }
+                if (calleeOutputsCount === 1) {
+                    if (survivingOutputName && from.port === `out:${survivingOutputName}`) {
+                        wires.push({ ...wire, from: `${from.instance}.out` });
+                        continue;
+                    }
+                    if (!survivingOutputName && from.port.startsWith('out:')) {
+                        wires.push({ ...wire, from: `${from.instance}.out` });
+                        continue;
+                    }
+                }
+            }
+            wires.push(wire);
+        }
+    }
+
+    return { ...callerFlow, wires };
+}
+
+/** Remove all instances referencing a deleted node definition from a flow, unplugging their wires. */
+export function removeNodeReferences(flow: SlateFlow, targetNodeId: string): SlateFlow {
+    const matchingIds = flow.instances
+        .filter(instance => instance.node === targetNodeId || instance.node === `flow:${targetNodeId}`)
+        .map(instance => instance.id);
+    return matchingIds.length > 0 ? removeInstances(flow, matchingIds) : flow;
+}
+
 /**
  * Move the selected instances into a new flow. Wires crossing the selection
  * become the new flow's inputs (one per distinct outside source) and outputs
