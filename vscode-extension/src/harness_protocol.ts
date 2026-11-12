@@ -69,6 +69,26 @@ export interface HarnessDocument extends ParseModuleResult {
     uses?: string[];
     /** Per-node verification status badge (S-513). */
     verification?: NodeVerificationResult;
+    /** Derived usage info across instances and dependencies (S-502). */
+    usage?: NodeUsageInfo;
+}
+
+export interface NodeUsageSite {
+    kind: 'flow_instance' | 'root_instance' | 'code_dependency';
+    flowId?: string;
+    instanceId?: string;
+    nodeId?: string;
+    label: string;
+}
+
+export interface NodeUsageInfo {
+    nodeId: string;
+    totalUses: number;
+    instanceCount: number;
+    dependencyCount: number;
+    contextCount: number;
+    callSites: NodeUsageSite[];
+    contextUsers: string[];
 }
 
 export type VerificationState = 'untested' | 'running' | 'passed' | 'failed' | 'mutant_survived' | 'stale';
@@ -109,6 +129,8 @@ export interface HarnessSnapshot {
     library?: LibraryDocument[];
     /** Per-node verification status map (S-513). */
     verifications?: Record<string, NodeVerificationResult>;
+    /** Derived usage index for node definitions (S-502). */
+    usages?: Record<string, NodeUsageInfo>;
 }
 
 /** A canvas alias of a node, flow, or library unit (stored in layout.json). */

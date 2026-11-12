@@ -3,7 +3,7 @@ import type { Edge, Node } from '@xyflow/react';
 import {
     flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature, type Port,
 } from '../../vscode-extension/src/flow';
-import type { BoardNote, HarnessSnapshot, HarnessUnit, NodeVerificationResult, Placeholder, SlateFlow } from './types';
+import type { BoardNote, HarnessSnapshot, HarnessUnit, NodeUsageInfo, NodeVerificationResult, Placeholder, SlateFlow } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
@@ -66,6 +66,8 @@ export type SlateNodeData = {
     highlighted?: boolean;
     /** Per-node verification result badge (S-513). */
     verification?: NodeVerificationResult;
+    /** Derived usage info across instances and dependencies (S-502). */
+    usage?: NodeUsageInfo;
 };
 
 function compactOutsideStrings(text: string): string {
@@ -391,6 +393,7 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
                 editableIntent: Boolean(top) && !isClass && !map,
                 problem: document.diagnostics[0]?.message,
                 verification: snapshot.verifications?.[nodeId] ?? document.verification,
+                usage: snapshot.usages?.[nodeId] ?? document.usage,
                 ...ports,
                 contextPorts: Boolean(top) && !map,
             },
@@ -433,6 +436,7 @@ function callerNode(
             detail: callable ? `${kind === 'ref' ? '→ ' : ''}${target}` : `missing: ${target}`,
             kind, broken: !callable, path: callable?.group === 'node' ? target : '', unit: callable?.group === 'node' ? callable.unit : undefined,
             target, flowId, groupColor: flowId ? '#f6c453' : callable?.group === 'library' ? '#9da5ad' : undefined,
+            usage: callable?.group === 'node' ? snapshot.usages?.[target] : undefined,
             ...portsOf(callable?.signature),
         },
     };

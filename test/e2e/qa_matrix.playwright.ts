@@ -505,3 +505,82 @@ test('surfaces live verification badges on canvas nodes and verification inspect
     await expect(mutantBadge).toBeVisible();
     await expect(page.locator('.verification-summary__mutation')).toContainText('1 surviving / 4 mutants');
 });
+
+test('surfaces Used-by-N badge, shared-definition banner with Fork, and navigable call sites in Inspector (S-502)', async ({ page }) => {
+    await host(page, null);
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 5,
+                projectName: 'usage-demo',
+                documents: [
+                    {
+                        id: 'node:math/clamp',
+                        path: 'slate/nodes/math/clamp.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:clamp',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def clamp(value: int, minimum: int, maximum: int) -> int:\n    return min(max(value, minimum), maximum)\n',
+                        units: [{
+                            id: 'math/clamp', identity: 'durable', kind: 'function', name: 'clamp', qualifiedName: 'math.clamp', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 45 } } },
+                            annotation: { intent: 'Clamp value', contract: 'Test', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def clamp(value: int, minimum: int, maximum: int) -> int', parameters: 'value: int, minimum: int, maximum: int', returnAnnotation: 'int',
+                            params: [{ name: 'value', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                    },
+                ],
+                usages: {
+                    'math/clamp': {
+                        nodeId: 'math/clamp',
+                        totalUses: 3,
+                        instanceCount: 2,
+                        dependencyCount: 1,
+                        contextCount: 1,
+                        callSites: [
+                            { kind: 'root_instance', instanceId: 'clamp_root_1', label: 'Root canvas (clamp_root_1)' },
+                            { kind: 'flow_instance', flowId: 'subflow_1', instanceId: 'clamp_flow_1', label: 'Flow "subflow_1" (clamp_flow_1)' },
+                            { kind: 'code_dependency', nodeId: 'normalize', label: 'Code reference in normalize' },
+                        ],
+                        contextUsers: ['report_generator'],
+                    },
+                },
+            },
+        }, '*');
+    });
+
+    // 1. Check Used-by-N badge on the canvas card
+    const ubadge = page.locator('.react-flow__node[data-id="math/clamp"] [data-testid="node-usage-badge"]');
+    await expect(ubadge).toBeVisible();
+    await expect(ubadge).toContainText('3 uses');
+
+    // 2. Select node and verify shared definition banner and fork button
+    await select(page, 'math/clamp');
+    const sharedBanner = page.locator('[data-testid="shared-edit-banner"]');
+    await expect(sharedBanner).toBeVisible();
+    await expect(sharedBanner).toContainText('Editing affects 3 uses across the project');
+
+    const forkBtn = sharedBanner.locator('button', { hasText: 'Fork definition' });
+    await expect(forkBtn).toBeVisible();
+    await forkBtn.click();
+
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'action',
+        action: expect.objectContaining({
+            kind: 'forkDefinition',
+            target: 'math/clamp',
+        }),
+    }));
+
+    // 3. Verify Usages section and call sites list
+    const usagesSection = page.locator('[data-testid="node-usages-section"]');
+    await expect(usagesSection).toBeVisible();
+    await expect(usagesSection).toContainText('Usages (3)');
+    await expect(usagesSection).toContainText('Root canvas (clamp_root_1)');
+    await expect(usagesSection).toContainText('Flow "subflow_1" (clamp_flow_1)');
+    await expect(usagesSection).toContainText('Code reference in normalize');
+    await expect(usagesSection).toContainText('Prompt context only (1): report_generator');
+});

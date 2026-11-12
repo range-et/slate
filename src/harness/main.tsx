@@ -165,6 +165,15 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                     {data.broken && <span className="slate-node__problem" title="The target no longer exists">BROKEN&nbsp;</span>}
                     {data.unit?.annotation?.locked === true && data.kind !== 'ref' && data.kind !== 'instance' && <span title="Generation is locked">LOCKED&nbsp;</span>}
                     {data.identity === 'provisional' && <span title="Nested unit">◇</span>}
+                    {data.usage && data.usage.totalUses > 0 && data.kind !== 'ref' && data.kind !== 'instance' && (
+                        <span
+                            className="slate-node__ubadge"
+                            data-testid="node-usage-badge"
+                            title={`Used by ${data.usage.totalUses} instance(s)/caller(s) (${data.usage.instanceCount} instances, ${data.usage.dependencyCount} code dependencies)`}
+                        >
+                            {data.usage.totalUses} {data.usage.totalUses === 1 ? 'use' : 'uses'}
+                        </span>
+                    )}
                     {data.verification && (
                         <span
                             className={`slate-node__vbadge slate-node__vbadge--${data.verification.state}`}
@@ -237,7 +246,7 @@ const clampInspectorWidth = (value: number, viewportWidth = window.innerWidth, l
     Math.max(MIN_INSPECTOR_WIDTH, Math.min(maxInspectorWidthForViewport(viewportWidth, libraryOpen), Math.round(value)));
 
 function Inspector({
-    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, visible, width, maxWidth, onResize,
+    node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, onNavigateToInstance, visible, width, maxWidth, onResize,
 }: {
     visible: boolean;
     width: number;
@@ -245,6 +254,7 @@ function Inspector({
     onResize(width: number): void;
     onEnterFlow(flowId: string): void;
     onGoTo(target: string): void;
+    onNavigateToInstance?(flowId: string | null | undefined, instanceId: string): void;
     node: Node<SlateNodeData>;
     document?: HarnessDocument;
     snapshot: HarnessSnapshot;
@@ -268,6 +278,7 @@ function Inspector({
     const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
     const nodeCode = unit?.parentId === null || node.data.kind === 'module' ? document?.source ?? '' : null;
     const [codeDraft, setCodeDraft] = useState(nodeCode ?? '');
+    const usage = node.data.usage ?? document?.usage ?? (node.data.path ? snapshot.usages?.[node.data.path] : undefined);
     useEffect(() => { setCodeDraft(nodeCode ?? ''); }, [unit?.id, document?.sourceHash]);
     useEffect(() => { setIntentDraft(intent); setContractDraft(contract); }, [unit?.id, intent, contract]);
     useEffect(() => {
@@ -387,6 +398,32 @@ function Inspector({
                             <p><strong>JPL-60 Notice:</strong> Function exceeds 60 lines. Atomic library nodes must be &le;60 lines. Decompose into stubs and a flow composition.</p>
                         </div>
                     )}
+                    {usage && usage.totalUses > 1 && (
+                        <div className="harness-inspector__shared-banner" data-testid="shared-edit-banner">
+                            <div className="shared-banner__text">
+                                <strong>Shared definition:</strong> Editing affects {usage.totalUses} uses across the project.
+                            </div>
+                            <div className="shared-banner__actions">
+                                {node.data.kind === 'instance' || node.data.kind === 'ref' ? (
+                                    <button
+                                        className="secondary small"
+                                        onClick={() => action({ kind: 'makeUnique', id: node.id })}
+                                        title="Fork this specific instance into an independent node file"
+                                    >
+                                        Fork this use
+                                    </button>
+                                ) : (
+                                    <button
+                                        className="secondary small"
+                                        onClick={() => action({ kind: 'forkDefinition', target: node.data.path || unit.id })}
+                                        title="Clone this definition into a new node file"
+                                    >
+                                        Fork definition
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
                     {nodeCode !== null && <section className="node-code">
                         <h3>Code</h3>
                         <CodeEditor key={`${unit.id}:${document?.sourceHash}`} initial={nodeCode} onChange={setCodeDraft} />
@@ -399,6 +436,37 @@ function Inspector({
                             })}>{unit.annotation?.locked === true ? 'Unlock' : 'Lock'}</button>
                         </div>
                     </section>}
+                    {usage && usage.totalUses > 0 && (
+                        <section className="harness-inspector__usages" data-testid="node-usages-section">
+                            <h3>Usages ({usage.totalUses})</h3>
+                            <ul className="usage-site-list">
+                                {usage.callSites.map((site, i) => (
+                                    <li key={`${site.kind}:${site.flowId}:${site.instanceId}:${site.nodeId}:${i}`}>
+                                        <span className={`usage-site-kind usage-site-kind--${site.kind}`}>{site.kind.replace('_', ' ')}</span>
+                                        <button
+                                            className="link-button"
+                                            onClick={() => {
+                                                if (site.kind === 'flow_instance' && site.flowId && onNavigateToInstance) {
+                                                    onNavigateToInstance(site.flowId, site.instanceId!);
+                                                } else if (site.kind === 'root_instance' && onNavigateToInstance) {
+                                                    onNavigateToInstance('main', site.instanceId!);
+                                                } else if (site.nodeId) {
+                                                    onGoTo(site.nodeId);
+                                                }
+                                            }}
+                                        >
+                                            {site.label}
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                            {usage.contextCount > 0 && (
+                                <p className="context-only-explainer">
+                                    Prompt context only ({usage.contextCount}): {usage.contextUsers.join(', ')}
+                                </p>
+                            )}
+                        </section>
+                    )}
                     <section className="context-workbench">
                         <h3>Required context</h3>
                         <p>Reference material only; this does not imply an import or call dependency.</p>
@@ -1282,6 +1350,17 @@ function HarnessApp() {
         setView('compose');
         setPendingCenter(id);
     };
+    const goToInstance = (flowId: string | null | undefined, instanceId: string) => {
+        if (!flowId || flowId === 'main') {
+            setFlowStack([]);
+            setView('compose');
+            setPendingCenter(instanceId);
+        } else {
+            setFlowStack([flowId]);
+            setView('compose');
+            setPendingCenter(instanceId);
+        }
+    };
     const findReferences = (target: string) => {
         setHighlight(target);
         const rootRefs = new Map<string, string>();
@@ -1775,6 +1854,7 @@ function HarnessApp() {
                 onResize={next => setInspectorWidth(clampInspectorWidth(next, viewportWidth, libraryOpen))}
                 onEnterFlow={enterFlow}
                 onGoTo={goTo}
+                onNavigateToInstance={goToInstance}
                 node={selected}
                 document={selectedDocument}
                 snapshot={snapshot}
