@@ -23,7 +23,7 @@ jobs:
           python-version: '3.12'
       - run: npm ci
       - run: npm ci --prefix vscode-extension
-      - run: python -m pip install pytest
+      - run: python -m pip install pytest pydantic mutmut
       - run: npm run verify:contracts
       - run: npm run verify:baseline
 
@@ -37,6 +37,10 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest pydantic mutmut
       - run: npm ci
       - run: npm ci --prefix vscode-extension
       - run: npx playwright install --with-deps chromium

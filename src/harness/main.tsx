@@ -25,7 +25,7 @@ import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, typesMismatch, 
 import { buildNodeHealthReport, diffNodeCode } from './health';
 import { inputPorts, outputPorts, type Port } from '../../vscode-extension/src/flow';
 import { rankPalette, type Rankable } from './palette';
-import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, PacketPreview } from './types';
+import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, NodeVerificationResult, PacketPreview } from './types';
 import './styles.css';
 
 interface VsCodeApi {
@@ -123,6 +123,30 @@ function ValueEditor({ id, value }: { id: string; value: string }) {
     />;
 }
 
+function verificationBadgeLabel(state: string): string {
+    switch (state) {
+        case 'running': return 'VERIFYING…';
+        case 'passed': return 'PASSED ✓';
+        case 'failed': return 'FAILED ✗';
+        case 'mutant_survived': return 'MUTANT ⚠';
+        case 'stale': return 'STALE ⟳';
+        case 'untested':
+        default: return 'UNTESTED';
+    }
+}
+
+function verificationTooltip(v: NodeVerificationResult): string {
+    switch (v.state) {
+        case 'running': return 'Verification running in .slate/build/…';
+        case 'passed': return `Verification passed: ${v.testsPassed ?? 0}/${v.testsTotal ?? 0} tests passed, 0 surviving mutants`;
+        case 'failed': return `Verification failed: ${v.diagnostics?.[0] ?? v.traceback?.slice(0, 100) ?? 'failure'}`;
+        case 'mutant_survived': return `Mutation warning: ${v.survivingMutants} surviving mutant(s) detected`;
+        case 'stale': return 'Code or contract changed since last verification run; re-verify';
+        case 'untested':
+        default: return 'Untested node';
+    }
+}
+
 function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
     const colorStyle = { '--slate-group': data.groupColor } as React.CSSProperties;
     const plainHandles = data.kind === 'note';
@@ -141,6 +165,15 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                     {data.broken && <span className="slate-node__problem" title="The target no longer exists">BROKEN&nbsp;</span>}
                     {data.unit?.annotation?.locked === true && data.kind !== 'ref' && data.kind !== 'instance' && <span title="Generation is locked">LOCKED&nbsp;</span>}
                     {data.identity === 'provisional' && <span title="Nested unit">◇</span>}
+                    {data.verification && (
+                        <span
+                            className={`slate-node__vbadge slate-node__vbadge--${data.verification.state}`}
+                            data-testid={`verification-badge-${data.verification.state}`}
+                            title={verificationTooltip(data.verification)}
+                        >
+                            {verificationBadgeLabel(data.verification.state)}
+                        </span>
+                    )}
                 </span>
             </div>}
             <strong>{data.label}</strong>
@@ -405,6 +438,63 @@ function Inspector({
                     <button className="secondary" onClick={() => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true })}>
                         Open node file
                     </button>
+                    <section className="harness-inspector__verification">
+                        <h3>Verification & JPL-60 Quality</h3>
+                        {node.data.verification ? (
+                            <div className={`verification-summary verification-summary--${node.data.verification.state}`}>
+                                <div className="verification-summary__header">
+                                    <span className={`verification-badge verification-badge--${node.data.verification.state}`} data-testid="inspector-verification-badge">
+                                        {verificationBadgeLabel(node.data.verification.state)}
+                                    </span>
+                                    {node.data.verification.testsTotal !== undefined && (
+                                        <span className="verification-summary__tests">
+                                            {node.data.verification.testsPassed ?? 0}/{node.data.verification.testsTotal} pytest checks passed
+                                        </span>
+                                    )}
+                                </div>
+                                {node.data.verification.survivingMutants !== undefined && (
+                                    <div className="verification-summary__mutation">
+                                        Mutmut mutation: {node.data.verification.survivingMutants} surviving / {node.data.verification.totalMutants ?? node.data.verification.survivingMutants} mutants
+                                    </div>
+                                )}
+                                {node.data.verification.diagnostics && node.data.verification.diagnostics.length > 0 && (
+                                    <ul className="verification-summary__diagnostics">
+                                        {node.data.verification.diagnostics.map((d, i) => <li key={i}>{d}</li>)}
+                                    </ul>
+                                )}
+                                {node.data.verification.mutantDiff && (
+                                    <details className="verification-summary__diff">
+                                        <summary>Surviving Mutant Diff</summary>
+                                        <pre><code>{node.data.verification.mutantDiff}</code></pre>
+                                    </details>
+                                )}
+                                {node.data.verification.traceback && (
+                                    <details className="verification-summary__traceback">
+                                        <summary>Failure Traceback</summary>
+                                        <pre><code>{node.data.verification.traceback}</code></pre>
+                                    </details>
+                                )}
+                            </div>
+                        ) : (
+                            <p style={{ color: 'var(--strata-text-secondary)', fontSize: '11px', margin: '4px 0 8px' }}>Node has not been verified yet.</p>
+                        )}
+                        <div className="harness-inspector__actions">
+                            <button
+                                className="secondary"
+                                data-testid="btn-verify-node"
+                                onClick={() => vscode?.postMessage({ type: 'verifyNode', unitId: unit.id })}
+                            >
+                                Verify Node
+                            </button>
+                            <button
+                                className="secondary"
+                                data-testid="btn-try-revisions"
+                                onClick={() => vscode?.postMessage({ type: 'tryRevisions', unitId: unit.id, maxRevisions: 3 })}
+                            >
+                                Try up to 3 revisions
+                            </button>
+                        </div>
+                    </section>
                 </>
             )}
             {!unit && document && document.diagnostics.length > 0 && (
@@ -1052,6 +1142,26 @@ function HarnessApp() {
                 setAcceptedUnitId(data.unitId);
             }
             if (data.type === 'describeState') setDescribing(data.running);
+            if (data.type === 'verificationStatus') {
+                const res = data.result;
+                setSnapshot(current => {
+                    if (!current) return current;
+                    return {
+                        ...current,
+                        verifications: { ...current.verifications, [res.nodeId]: res },
+                    };
+                });
+            }
+            if (data.type === 'verificationBatch') {
+                const batch = data.results;
+                setSnapshot(current => {
+                    if (!current) return current;
+                    return {
+                        ...current,
+                        verifications: { ...current.verifications, ...batch },
+                    };
+                });
+            }
         };
         window.addEventListener('message', onMessage);
         vscode?.postMessage({ type: 'ready' });

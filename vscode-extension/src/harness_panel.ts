@@ -4,19 +4,20 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, FlowInstance, HarnessDocument, HarnessSnapshot, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
-import { buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
+import { BoardNote, FlowInstance, HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
+import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
-import { PythonAdapter } from './python_adapter';
+import { PythonAdapter, sourceHash } from './python_adapter';
 import { searchUnits } from './search';
 import {
     connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
     removeInstances, removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, serializeFlow, uniqueName, unitSignature, type Port,
 } from './flow';
-import { checkNodeCode, codeLines, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
+import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
+import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
 
 function nonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -89,6 +90,8 @@ export class HarnessPanel implements vscode.Disposable {
     private readonly testMessages: unknown[] | undefined;
     private bridgeServer: http.Server | undefined;
     private bridgePort: number | undefined;
+    private verifications = new Map<string, NodeVerificationResult>();
+    private activeVerifications = new Map<string, AbortController>();
 
     static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
@@ -193,10 +196,32 @@ export class HarnessPanel implements vscode.Disposable {
             const index = await folder.index();
             if (generation !== this.refreshGeneration) return;
             this.sources = index.sources;
+            const verifications: Record<string, NodeVerificationResult> = {};
+            for (const document of index.documents) {
+                const nodeId = nodeIdForPath(document.path);
+                if (!nodeId) continue;
+                let v = this.verifications.get(nodeId) ?? document.verification;
+                if (v) {
+                    if (v.sourceHash && v.sourceHash !== document.sourceHash) {
+                        v = { ...v, state: 'stale' };
+                        this.verifications.set(nodeId, v);
+                    }
+                    verifications[nodeId] = v;
+                }
+            }
+
             this.snapshot = {
                 revision: ++this.revision,
                 projectName: index.config.name,
-                documents: index.documents.map(document => ({ ...document, source: index.sources.get(document.path) })),
+                documents: index.documents.map(document => {
+                    const nodeId = nodeIdForPath(document.path);
+                    const v = nodeId ? (verifications[nodeId] ?? document.verification) : document.verification;
+                    return {
+                        ...document,
+                        source: index.sources.get(document.path),
+                        verification: v,
+                    };
+                }),
                 notes: folder.layout.notes,
                 contextEdges: [],
                 layout: folder.layout.positions,
@@ -206,6 +231,7 @@ export class HarnessPanel implements vscode.Disposable {
                 placeholders: folder.layout.placeholders,
                 flows: index.flows,
                 library: index.library,
+                verifications,
             };
             await this.postMessage({ type: 'snapshot', snapshot: this.snapshot });
         } catch (error) {
@@ -219,7 +245,7 @@ export class HarnessPanel implements vscode.Disposable {
         const value = (message && typeof message === 'object' ? message : {}) as Record<string, unknown>;
         const kind = (value.action as Record<string, unknown> | undefined)?.kind;
         const queued = ['layout', 'noteCreate', 'noteUpdate', 'noteDelete', 'acceptProposal', 'undoAccepted'].includes(value.type as string)
-            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe');
+            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe' && kind !== 'verifyNode' && kind !== 'cancelVerification' && kind !== 'tryRevisions');
         if (!queued) return this.handleMessageNow(message);
         this.mutations = this.mutations.then(() => this.handleMessageNow(message), () => this.handleMessageNow(message));
         return this.mutations;
@@ -269,6 +295,25 @@ export class HarnessPanel implements vscode.Disposable {
         }
         if (value.type === 'cancelGeneration') {
             this.generation?.abort();
+            return;
+        }
+        if (value.type === 'verifyNode') {
+            const target = typeof value.nodeId === 'string' ? value.nodeId : typeof value.unitId === 'string' ? value.unitId : null;
+            if (target) {
+                await this.verifyNode(this.folderNodeId(target));
+            }
+            return;
+        }
+        if (value.type === 'cancelVerification') {
+            const target = typeof value.nodeId === 'string' ? value.nodeId : typeof value.unitId === 'string' ? value.unitId : undefined;
+            this.cancelVerification(target ? this.folderNodeId(target) : undefined);
+            return;
+        }
+        if (value.type === 'tryRevisions') {
+            const target = typeof value.nodeId === 'string' ? value.nodeId : typeof value.unitId === 'string' ? value.unitId : null;
+            if (target) {
+                await this.tryRevisions(this.folderNodeId(target), typeof value.maxRevisions === 'number' ? value.maxRevisions : 3);
+            }
             return;
         }
         if (value.type === 'acceptProposal' && typeof value.proposalId === 'string') {
@@ -544,6 +589,230 @@ export class HarnessPanel implements vscode.Disposable {
         this.pendingProposal = undefined;
         await this.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
         this.postCommandResult(true, `Wrote the candidate into ${pending.path}. Use Undo to revert it.`);
+    }
+
+    private cancelVerification(nodeId?: string): void {
+        if (nodeId) {
+            const controller = this.activeVerifications.get(nodeId);
+            if (controller) {
+                controller.abort();
+                this.activeVerifications.delete(nodeId);
+                this.postCommandResult(true, `Cancelled verification for ${nodeId}.`);
+            }
+        } else {
+            for (const controller of this.activeVerifications.values()) {
+                controller.abort();
+            }
+            this.activeVerifications.clear();
+            this.postCommandResult(true, 'Cancelled all in-flight verifications.');
+        }
+    }
+
+    private async verifyNode(nodeId: string): Promise<void> {
+        if (this.activeVerifications.has(nodeId)) {
+            this.postCommandResult(false, `Verification for ${nodeId} is already running.`);
+            return;
+        }
+
+        const controller = new AbortController();
+        this.activeVerifications.set(nodeId, controller);
+
+        const runningResult: NodeVerificationResult = {
+            nodeId,
+            state: 'running',
+            timestamp: Date.now(),
+            sourceHash: '',
+        };
+        await this.postMessage({ type: 'verificationStatus', result: runningResult });
+
+        try {
+            const node = await this.folder.readNode(nodeId);
+            runningResult.sourceHash = sourceHash(codeText(node));
+
+            const dependencies = new Map<string, SlateNode>();
+            for (const depId of node.context) {
+                try {
+                    const depNode = await this.folder.readNode(depId);
+                    dependencies.set(depId, depNode);
+                } catch {}
+            }
+
+            const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+            const result = await runNodeVerification({
+                workspaceRoot: this.folder.root.fsPath,
+                node,
+                nodeId,
+                dependencies,
+                isTrusted: vscode.workspace.isTrusted,
+                timeoutMs: 15000,
+                signal: controller.signal,
+                pythonPath,
+            });
+
+            this.verifications.set(nodeId, result);
+            node.verification = result;
+            await this.folder.writeNode(nodeId, node);
+
+            await this.postMessage({ type: 'verificationStatus', result });
+            this.postCommandResult(
+                result.state === 'passed',
+                result.state === 'passed'
+                    ? `Verification passed for ${nodeId}.`
+                    : result.state === 'mutant_survived'
+                        ? `Verification warning: ${result.survivingMutants} mutant(s) survived for ${nodeId}.`
+                        : `Verification failed for ${nodeId}.`,
+            );
+        } catch (error) {
+            const failResult: NodeVerificationResult = {
+                nodeId,
+                state: 'failed',
+                timestamp: Date.now(),
+                sourceHash: runningResult.sourceHash,
+                diagnostics: [error instanceof Error ? error.message : String(error)],
+            };
+            this.verifications.set(nodeId, failResult);
+            await this.postMessage({ type: 'verificationStatus', result: failResult });
+            this.postCommandResult(false, `Verification error: ${failResult.diagnostics![0]}`);
+        } finally {
+            this.activeVerifications.delete(nodeId);
+        }
+    }
+
+    private async tryRevisions(nodeId: string, maxRevisions = 3): Promise<void> {
+        if (this.activeVerifications.has(nodeId) || this.generation) {
+            this.postCommandResult(false, `Operation already running for ${nodeId}.`);
+            return;
+        }
+
+        const controller = new AbortController();
+        this.activeVerifications.set(nodeId, controller);
+
+        try {
+            const node = await this.folder.readNode(nodeId);
+            this.postCommandResult(true, `Starting bounded revision loop for ${nodeId} (up to ${maxRevisions} revisions)...`);
+
+            const loopResult = await runRevisionLoop({
+                nodeId,
+                node,
+                maxRevisions,
+                forgeCandidate: async (feedback: string) => {
+                    if (controller.signal.aborted) return null;
+                    const settings = this.generationSettings();
+                    const packet = this.packet(nodeId, {
+                        forge: true,
+                        boundInputs: true,
+                        retryFeedback: feedback,
+                    });
+
+                    const raw = await streamLlamaCompletion(
+                        packet.prompt,
+                        {
+                            ...settings,
+                            system: 'You are a constrained local component forge engine. Follow JPL-60 rules strictly and provide both implementation and unit check.',
+                        },
+                        controller.signal,
+                        () => {},
+                    );
+
+                    const parsed = parseForgeCandidate(raw);
+                    const target = this.resolveUnit(nodeId);
+                    if (target) {
+                        const validation = validateForgeCandidate(target.unit, parsed);
+                        if (!validation.valid) {
+                            throw new Error(`Candidate invalid: ${validation.diagnostics.join('; ')}`);
+                        }
+                    }
+
+                    return parsed;
+                },
+                verifyCandidate: async (candidateNode: SlateNode) => {
+                    const deps = new Map<string, SlateNode>();
+                    for (const depId of candidateNode.context) {
+                        try {
+                            deps.set(depId, await this.folder.readNode(depId));
+                        } catch {}
+                    }
+                    const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                    return runNodeVerification({
+                        workspaceRoot: this.folder.root.fsPath,
+                        node: candidateNode,
+                        nodeId,
+                        dependencies: deps,
+                        isTrusted: vscode.workspace.isTrusted,
+                        timeoutMs: 15000,
+                        signal: controller.signal,
+                        pythonPath,
+                    });
+                },
+            });
+
+            this.verifications.set(nodeId, loopResult.finalResult);
+            await this.postMessage({ type: 'verificationStatus', result: loopResult.finalResult });
+
+            if (loopResult.lastCandidate) {
+                const candidateCode = loopResult.lastCandidate.implementation;
+                const candidateCheck = loopResult.lastCandidate.check;
+                const fullCandidateText = candidateCheck
+                    ? `# Implementation:\n${candidateCode}\n\n# Unit Check:\n${candidateCheck}`
+                    : candidateCode;
+
+                const target = this.resolveUnit(nodeId);
+                const proposal = await this.adapter.replaceUnit({
+                    source: this.sources.get(target.document.path) ?? '',
+                    path: target.document.path,
+                    expectedHash: target.document.sourceHash,
+                    unitId: nodeId,
+                    replacement: candidateCode,
+                    nodeId: nodeIdForPath(target.document.path) ?? undefined,
+                });
+
+                const checks = [
+                    '<=60 lines (JPL-60 compliant)',
+                    `Revision ${loopResult.finalResult.retryCount ?? 1} of ${maxRevisions}`,
+                    loopResult.success ? 'Verified: Pydantic & Pytest tests passed' : 'Verification failed on revisions',
+                ];
+
+                const packet = this.packet(nodeId, {
+                    forge: true,
+                    boundInputs: true,
+                });
+
+                const id = randomUUID();
+                this.pendingProposal = {
+                    id,
+                    packet,
+                    proposal,
+                    candidate: fullCandidateText,
+                    implementation: candidateCode,
+                    check: candidateCheck,
+                    path: target.document.path,
+                };
+
+                await this.postMessage({
+                    type: 'proposalReady',
+                    proposal: {
+                        id,
+                        unitId: nodeId,
+                        path: target.document.path,
+                        candidate: fullCandidateText,
+                        implementation: candidateCode,
+                        check: candidateCheck,
+                        checks,
+                    },
+                });
+            }
+
+            this.postCommandResult(
+                loopResult.success,
+                loopResult.success
+                    ? `Revision loop passed on attempt ${loopResult.finalResult.retryCount ?? 0}. Review and accept the proposal.`
+                    : `Revision loop completed (${loopResult.attempts.length - 1} revisions attempted). Remaining issues exist.`,
+            );
+        } catch (error) {
+            this.postCommandResult(false, `Revision loop failed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            this.activeVerifications.delete(nodeId);
+        }
     }
 
     private folderNodeId(target: unknown): string {
@@ -1282,6 +1551,18 @@ export class HarnessPanel implements vscode.Disposable {
             }
             if (action.kind === 'cancelDescribe') {
                 this.describeRun?.abort();
+                return;
+            }
+            if (action.kind === 'verifyNode' && typeof action.target === 'string') {
+                await this.verifyNode(this.folderNodeId(action.target));
+                return;
+            }
+            if (action.kind === 'tryRevisions' && typeof action.target === 'string') {
+                await this.tryRevisions(this.folderNodeId(action.target), typeof action.maxRevisions === 'number' ? action.maxRevisions : 3);
+                return;
+            }
+            if (action.kind === 'cancelVerification') {
+                this.cancelVerification(typeof action.target === 'string' ? this.folderNodeId(action.target) : undefined);
                 return;
             }
             if (action.kind === 'saveWorkspace') {

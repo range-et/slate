@@ -37,6 +37,7 @@ keep outstanding tasks on GitHub.
 | Frontier Architect MCP Server & Live Camera Sync (S-510, Issue #23) | ✅ shipped |
 | Python Contract Schema & CI Enforcement (JPL-60, parity, drift) | ✅ shipped |
 | Local llama.cpp component forge & dual body+check generator (S-512, Issue #25) | ✅ shipped |
+| Per-node Pydantic + pytest + mutmut verification runner & canvas badges (S-513, Issue #26) | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -258,6 +259,25 @@ keep outstanding tasks on GitHub.
   - **Proposal input staleness binding:** `acceptFolderProposal` verifies that target code, intent, contract, cases, imports, uses, lock, and neighbor signatures have not changed after generation before applying the `WorkspaceEdit`.
   - **Node persistence:** Persists both `node.code` and `node.check` into `slate/nodes/**/*.json` and validates schema.
 - **Verification:** 54 Vitest unit tests in `test/generation.matrix.test.ts`, Extension Host tests covering dual body+check persistence, `>60`-line candidate rejection, signature mismatch rejection, generation cancellation, and bound input staleness in `vscode-extension/src/test/suite/persistence.test.ts`, and full launch gate (`npm run verify:launch`).
+
+### Per-Node Pydantic + pytest + mutmut Verification Runner & Canvas Badges (S-513, Issue #26, 2026-11-12)
+
+- **Per-Node Verification Engine (`vscode-extension/src/verification_runner.ts`):**
+  - **Scoped Runner:** Executes verification in an isolated scratch workspace (`.slate/build/verify/<nodeId>/`) with strict timeout (30s) and cancellation via `AbortSignal`.
+  - **Untrusted Workspace Protection:** Refuses verification execution in untrusted workspaces, reporting an explicit diagnostic error.
+  - **Pydantic Contract Validation:** Synthesizes a validation wrapper using `@validate_call(validate_return=True)` around the node's function implementation to verify parameter types and return type contracts at runtime.
+  - **Pytest Case Runner:** Synthesizes `pytest` checks from structured `cases` (both object inputs/expected format and raw assertions) alongside the node's `check` property.
+  - **Scoped Mutmut Mutation Testing:** Runs `mutmut` against the `≤60`-line atomic function node file to verify that the test suite kills mutants; on Windows/platforms lacking native mutmut support, detects the WSL requirement and records clear diagnostic feedback while keeping pytest results intact.
+  - **Staleness Tracking:** Hashes node source code (`sourceHash`) to automatically mark verification status as `stale` whenever the function body is modified.
+  - **Bounded Retry Loop:** Supports an explicit **Try up to 3 revisions** action, piping failing pytest/Pydantic tracebacks or mutmut mutant diffs back into the local `llama.cpp` forge (`S-512`). Truncates feedback to fit within the `≤600`-token micro-packet budget, never auto-accepts proposals, and presents every attempt for human review.
+- **Canvas & Inspector UI Integration:**
+  - **Node Badges:** Real-time badge indicators rendered on canvas nodes: `PASSED ✓`, `FAILED ✗`, `MUTANT SURVIVED ⚠`, `RUNNING ⟳`, `STALE ⟳`, `UNTESTED` (nodes without test cases display `UNTESTED` rather than false passes).
+  - **Inspector Section:** "Verification & JPL-60 Quality" panel displays test counts (`X/Y passed`), surviving mutant metrics, collapsible failure tracebacks and mutant diffs, with **Verify Node** and **Try up to 3 revisions** buttons.
+- **Verification:**
+  - 17 Vitest unit tests in `test/verification_runner.matrix.test.ts`.
+  - Extension Host suite in `vscode-extension/src/test/suite/persistence.test.ts` verifying verification execution, badge reporting, code staleness transitions, cancellation, untrusted workspace rejection, and bounded retry loop.
+  - Playwright browser suite in `test/e2e/qa_matrix.playwright.ts` verifying canvas badges and inspector UI state transitions.
+  - Full launch gate (`npm run verify:launch`).
 
 ### Test platform
 

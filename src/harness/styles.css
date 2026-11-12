@@ -368,3 +368,108 @@ button, input, textarea, select { font: inherit; }
 .library__empty { color: var(--strata-text-secondary, #9da5ad); }
 .canvas-item p { margin: 4px 0 8px; color: var(--strata-text-secondary, #9da5ad); font-size: 12px; line-height: 1.45; }
 .canvas-item dl { font-size: 11px; }
+
+/* S-513 Verification Badges & Inspector styles */
+.slate-node__vbadge {
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    display: inline-block;
+    margin-left: 4px;
+}
+.slate-node__vbadge--passed, .verification-badge--passed {
+    background: rgba(94, 224, 160, 0.15);
+    color: #5ee0a0;
+    border: 1px solid #5ee0a0;
+}
+.slate-node__vbadge--failed, .verification-badge--failed {
+    background: rgba(255, 107, 107, 0.15);
+    color: #ff6b6b;
+    border: 1px solid #ff6b6b;
+}
+.slate-node__vbadge--mutant_survived, .verification-badge--mutant_survived {
+    background: rgba(245, 158, 114, 0.15);
+    color: #f59e72;
+    border: 1px solid #f59e72;
+}
+.slate-node__vbadge--running, .verification-badge--running {
+    background: rgba(98, 217, 255, 0.15);
+    color: #62d9ff;
+    border: 1px solid #62d9ff;
+    animation: vbadge-pulse 1.5s infinite;
+}
+.slate-node__vbadge--stale, .verification-badge--stale {
+    background: rgba(246, 196, 83, 0.15);
+    color: #f6c453;
+    border: 1px dashed #f6c453;
+}
+.slate-node__vbadge--untested, .verification-badge--untested {
+    background: rgba(157, 165, 173, 0.1);
+    color: #9da5ad;
+    border: 1px solid #9da5ad;
+}
+
+@keyframes vbadge-pulse {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
+}
+
+.harness-inspector__verification {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--strata-border);
+}
+.harness-inspector__verification h3 {
+    margin: 0 0 8px 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--strata-text-secondary);
+}
+.verification-summary {
+    background: var(--strata-layer-01);
+    border: 1px solid var(--strata-border);
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    font-size: 11px;
+}
+.verification-summary__header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.verification-summary__tests, .verification-summary__mutation {
+    font-size: 10px;
+    color: var(--strata-text-secondary);
+}
+.verification-summary__diagnostics {
+    margin: 6px 0;
+    padding-left: 16px;
+    color: #ff6b6b;
+    font-size: 10.5px;
+}
+.verification-summary__diff, .verification-summary__traceback {
+    margin-top: 6px;
+    font-size: 10px;
+}
+.verification-summary__diff summary, .verification-summary__traceback summary {
+    cursor: pointer;
+    color: var(--strata-info);
+    user-select: none;
+}
+.verification-summary__diff pre, .verification-summary__traceback pre {
+    max-height: 140px;
+    overflow: auto;
+    background: var(--strata-bg);
+    padding: 6px;
+    margin: 4px 0 0;
+    border-radius: 3px;
+    font-size: 10px;
+    color: var(--strata-text-primary);
+}

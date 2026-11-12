@@ -14,7 +14,7 @@ type ParsedDetails = ParseModuleResult & {
 
 export class AdapterError extends Error {}
 
-function sourceHash(source: string): `sha256:${string}` {
+export function sourceHash(source: string): `sha256:${string}` {
     return `sha256:${createHash('sha256').update(source, 'utf8').digest('hex')}`;
 }
 

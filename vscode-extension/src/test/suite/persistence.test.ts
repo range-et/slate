@@ -11,8 +11,8 @@ const act = (action: Record<string, unknown>) => post({ type: 'action', action }
 type Message = { type: string; message?: string; ok?: boolean; proposal?: { id: string; candidate: string }; proposalId?: string; unitId?: string };
 const messages = async () => await vscode.commands.executeCommand<Message[]>('slate.test.takeMessages') ?? [];
 
-async function eventually(check: () => Promise<boolean>, label: string): Promise<void> {
-    const deadline = Date.now() + 8000;
+async function eventually(check: () => Promise<boolean>, label: string, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     while (!await check()) {
         if (Date.now() > deadline) throw new Error(`Timed out: ${label}`);
         await new Promise(resolve => setTimeout(resolve, 30));
@@ -33,9 +33,19 @@ suite('Slate native persistence and proposal QA', () => {
     const snapshot = async () => (await vscode.commands.executeCommand<HarnessSnapshot>('slate.test.getSnapshot'))!;
 
     function replaceMethod(object: object, key: string, replacement: unknown): void {
-        const descriptor = Object.getOwnPropertyDescriptor(object, key)!;
-        Object.defineProperty(object, key, { ...descriptor, value: replacement });
-        restores.push(() => Object.defineProperty(object, key, descriptor));
+        const descriptor = Object.getOwnPropertyDescriptor(object, key)
+            ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(object), key)!;
+        if (descriptor.get || descriptor.set) {
+            Object.defineProperty(object, key, {
+                configurable: true,
+                enumerable: descriptor.enumerable,
+                get: typeof replacement === 'function' ? (replacement as () => unknown) : () => replacement,
+            });
+            restores.push(() => Object.defineProperty(object, key, descriptor));
+        } else {
+            Object.defineProperty(object, key, { ...descriptor, value: replacement });
+            restores.push(() => Object.defineProperty(object, key, descriptor));
+        }
     }
     async function open(): Promise<void> {
         await vscode.commands.executeCommand('vscode.openWith', uri('slate', 'slate.json'), 'slate.editor');
@@ -1071,6 +1081,125 @@ suite('Slate native persistence and proposal QA', () => {
         await act({ kind: 'refreshIndex' });
         assert.ok((await messages()).some(m => m.ok === false && m.message?.includes('Slate folder: slate/layout.json:')));
         await vscode.workspace.fs.writeFile(uri('slate', 'layout.json'), encode({ positions: {}, notes: [] }));
+    });
+
+    test('per-node Pydantic + pytest + mutmut verification runner, badges, staleness, cancellation, and bounded retry loop', async () => {
+        // 1. Untested when node has no check and no cases
+        await post({ type: 'verifyNode', nodeId: 'normalize' });
+        await eventually(async () => {
+            const snap = await snapshot();
+            return snap.verifications?.normalize?.state === 'untested';
+        }, 'verify untested status');
+        let snap = await snapshot();
+        assert.equal(snap.verifications?.normalize?.state, 'untested');
+
+        // 2. Untrusted workspace rejection
+        replaceMethod(vscode.workspace, 'isTrusted', false);
+        await post({ type: 'verifyNode', nodeId: 'normalize' });
+        await eventually(async () => {
+            const snap = await snapshot();
+            return snap.verifications?.normalize?.state === 'failed';
+        }, 'untrusted workspace rejection');
+        snap = await snapshot();
+        assert.ok(snap.verifications?.normalize?.diagnostics?.some(d => d.includes('not trusted')));
+        restores.pop()!();
+
+        // 3. Passing verification with Pydantic runtime contract validation & pytest cases
+        await editBuffer('normalize', node => {
+            node.code = [
+                'def normalize(score: int, maximum: int) -> int:',
+                '    return (score * 100) // maximum',
+            ];
+            node.cases = [
+                { score: 50, maximum: 100, expected: 50 },
+                { score: 100, maximum: 100, expected: 100 },
+            ];
+        });
+        await (await vscode.workspace.openTextDocument(uri(...nodePath('normalize')))).save();
+
+        await post({ type: 'verifyNode', nodeId: 'normalize' });
+        await eventually(async () => {
+            const snap = await snapshot();
+            const verif = snap.verifications?.normalize;
+            if (verif?.state === 'failed') {
+                throw new Error(`Verification failed unexpectedly: ${JSON.stringify(verif.diagnostics)} \nTraceback: ${verif.traceback}`);
+            }
+            return verif?.state === 'passed' || verif?.state === 'mutant_survived';
+        }, 'verification completed', 25000);
+        snap = await snapshot();
+        const normVerif = snap.verifications?.normalize;
+        assert.ok(normVerif?.state === 'passed' || normVerif?.state === 'mutant_survived');
+        assert.equal(normVerif?.pydanticValid, true);
+        assert.ok((normVerif?.testsPassed ?? 0) >= 1);
+
+        // Verification is persisted in the node file on disk
+        const savedNode = await read(...nodePath('normalize'));
+        assert.ok(savedNode.verification);
+        assert.equal(savedNode.verification.pydanticValid, true);
+
+        // Build artifacts exist in .slate/build/verify/normalize
+        const buildFiles = await vscode.workspace.fs.readDirectory(uri('.slate', 'build', 'verify', 'normalize'));
+        assert.ok(buildFiles.some(([name]) => name === 'normalize_impl.py'));
+        assert.ok(buildFiles.some(([name]) => name === 'test_normalize.py'));
+
+        // 4. Code modification transitions state to stale
+        await editBuffer('normalize', node => {
+            node.code = [
+                'def normalize(score: int, maximum: int) -> int:',
+                '    return 42',
+            ];
+        });
+        await act({ kind: 'refreshIndex' });
+        snap = await snapshot();
+        assert.equal(snap.verifications?.normalize?.state, 'stale');
+        const normDoc = snap.documents.find(d => d.path === 'slate/nodes/normalize.json')!;
+        assert.equal(normDoc.verification?.state, 'stale');
+
+        // 5. Contract failure (violating return type annotation) produces failed state
+        await editBuffer('normalize', node => {
+            node.code = [
+                'def normalize(score: int, maximum: int) -> int:',
+                '    return "not an integer"  # violates return type int',
+            ];
+            node.cases = [
+                { score: 50, maximum: 100, expected: 50 },
+            ];
+        });
+        await (await vscode.workspace.openTextDocument(uri(...nodePath('normalize')))).save();
+
+        await post({ type: 'verifyNode', nodeId: 'normalize' });
+        await eventually(async () => {
+            const state = (await snapshot()).verifications?.normalize?.state;
+            return state === 'failed';
+        }, 'contract failure verification');
+        snap = await snapshot();
+        assert.equal(snap.verifications?.normalize?.state, 'failed');
+        assert.equal(snap.verifications?.normalize?.pydanticValid, false);
+        assert.ok((snap.verifications?.normalize?.traceback?.length ?? 0) > 0);
+
+        // 6. cancelVerification executes cleanly
+        await post({ type: 'cancelVerification', nodeId: 'normalize' });
+        const cancelMsgs = await messages();
+        assert.ok(cancelMsgs !== undefined);
+
+        // 7. tryRevisions runs bounded retry loop with forge feedback and never auto-accepts
+        await messages();
+        serverResponseContent = '```python\ndef normalize(score: int, maximum: int) -> int:\n    return (score * 100) // maximum\n```\n\n```python\ndef test_normalize():\n    assert normalize(50, 100) == 50\n```';
+        await post({ type: 'tryRevisions', nodeId: 'normalize', maxRevisions: 3 });
+        let loopMsgs: any[] = [];
+        await eventually(async () => {
+            loopMsgs.push(...await messages());
+            return loopMsgs.some(m => m.type === 'proposalReady');
+        }, 'tryRevisions generated proposal');
+
+        // Target file on disk must NOT be auto-accepted
+        const diskAfterLoop = await read(...nodePath('normalize'));
+        assert.ok(diskAfterLoop.code.join('\n').includes('not an integer'));
+
+        // Generated proposal contains verification checks
+        const readyProposal = loopMsgs.find(m => m.type === 'proposalReady')?.proposal;
+        assert.ok(readyProposal);
+        assert.ok(readyProposal.checks.some((c: string) => c.includes('Revision') || c.includes('Verified')));
     });
 
 });
