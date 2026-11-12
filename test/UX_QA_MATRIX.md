@@ -34,6 +34,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Canvas | Trackpad-style wheel pans without zooming | B board context menus/panning |
 | Canvas | Drag nodes posts positions, revision and root/map/flow scope; multi-drag retains all selected positions | H/P root/map/flow layout persistence across reopen; C scoped drag and multi-drag |
 | Canvas | Fit via board menu/palette and React Flow controls; plus/minus zoom; drag pan; pinch zoom | C zoom controls, drag pan, menu/command/control fit and Chromium pinch gesture; physical device behavior remains manual |
+| MCP Camera Sync | Live canvas camera pan/zoom (`slate_focus`) dispatches to active webview via `HarnessPanel` or local bridge, smoothly centering target node, note, or bounding region in XYFlow viewport with target selection | B camera focus message handling and node selection; M `vscode-extension/src/test/suite/mcp.test.ts` real panel camera dispatch and region bounding; U `test/mcp_server.test.ts` |
 | View | Compose/Map toggles state; Map shows folders and hides refs, ports, wires; adding is blocked with explanatory status | B Map; Q library/Map chain; U graph |
 | Library | Filter by text, show/hide, click a callable to select it, drag callable onto canvas | Q filter/visibility; B library drag; C library find, missing match and off-canvas status |
 | Library | Add library posts `addLibrary` | Q dispatch; P real config persistence, deduplication, indexing after reopen and cancelled chooser; chooser selection is stubbed at the VS Code API boundary |

@@ -6,6 +6,7 @@ import Mocha from 'mocha';
 export function run(): Promise<void> {
     const mocha = new Mocha({ ui: 'tdd', color: true, timeout: 20_000 });
     mocha.addFile(path.resolve(__dirname, 'extension.test.js'));
+    mocha.addFile(path.resolve(__dirname, 'mcp.test.js'));
     mocha.addFile(path.resolve(__dirname, 'persistence.test.js'));
     mocha.addFile(path.resolve(__dirname, 'project.test.js'));
     return new Promise((resolve, reject) => {
