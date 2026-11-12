@@ -340,6 +340,9 @@ button, input, textarea, select { font: inherit; }
 .diff-line--add { background: color-mix(in srgb, var(--strata-success) 14%, transparent); color: var(--strata-success); }
 
 .harness-canvas--library { left: 240px; }
+@media (max-width: 500px) {
+    .harness-canvas--library { left: 0; }
+}
 .library {
     position: absolute; z-index: 15; inset: 44px auto 32px 0; width: 240px; overflow: auto; padding: 10px;
     border-right: 1px solid var(--strata-border, #30353a); background: var(--strata-layer-01, #181b1f); font-size: 12px;
