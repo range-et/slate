@@ -38,6 +38,7 @@ keep outstanding tasks on GitHub.
 | Python Contract Schema & CI Enforcement (JPL-60, parity, drift) | ✅ shipped |
 | Local llama.cpp component forge & dual body+check generator (S-512, Issue #25) | ✅ shipped |
 | Per-node Pydantic + pytest + mutmut verification runner & canvas badges (S-513, Issue #26) | ✅ shipped |
+| Used by N and shared-edit awareness (S-502, Issue #5) | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -424,6 +425,16 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   port…**). Renaming a port updates all internal wires and automatically repairs
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
+
+## Shipped — Used by N & Shared-Edit Awareness (2026-11-12, S-502)
+
+Completed for [issue #5](https://github.com/range-et/slate/issues/5):
+
+- **Derived Usage Index.** Derives usage counts across all call instances (in `flows/main.json` and nested subflows) and compiler-resolved code dependencies (`uses`), while cleanly isolating prompt-only context dependencies (`annotation.dependencies` / `context`) so reference material does not inflate runtime call counts (`totalUses = instanceCount + dependencyCount`). Deduplicates legacy `layout.refs` during migration.
+- **Canvas Badges.** Node cards display a `slate-node__ubadge` indicating "1 use" or "N uses" whenever `totalUses > 0`.
+- **Shared-Definition Banner & Forking.** When inspecting a definition node with `totalUses > 1`, the Inspector displays a prominent `Shared definition: Editing affects N uses across the project` warning banner with an inline **Fork definition** button (`forkDefinition`), which duplicates the node file to `<name>_copy.json`, registers it on canvas, and selects it. Instances continue to feature **Fork this use** (`makeUnique`).
+- **Navigable Call Sites.** The Inspector includes a dedicated **Usages (N)** section listing all call sites (instances in flows and root scope, as well as code callers). Clicking an instance call site switches the active flow view and selects that instance; clicking a code caller navigates to that definition.
+
 
 ## Shipped — Python Contract Schema & JPL-60 CI Enforcement (2026-11-12)
 

@@ -18,6 +18,7 @@ import {
 import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
+import { buildUsageIndex } from './usage_index';
 
 function nonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -210,16 +211,20 @@ export class HarnessPanel implements vscode.Disposable {
                 }
             }
 
+            const usages = buildUsageIndex(index.documents, index.flows, folder.layout.refs);
+
             this.snapshot = {
                 revision: ++this.revision,
                 projectName: index.config.name,
                 documents: index.documents.map(document => {
                     const nodeId = nodeIdForPath(document.path);
                     const v = nodeId ? (verifications[nodeId] ?? document.verification) : document.verification;
+                    const u = nodeId ? usages[nodeId] : undefined;
                     return {
                         ...document,
                         source: index.sources.get(document.path),
                         verification: v,
+                        usage: u,
                     };
                 }),
                 notes: folder.layout.notes,
@@ -232,6 +237,7 @@ export class HarnessPanel implements vscode.Disposable {
                 flows: index.flows,
                 library: index.library,
                 verifications,
+                usages,
             };
             await this.postMessage({ type: 'snapshot', snapshot: this.snapshot });
         } catch (error) {
@@ -932,7 +938,7 @@ export class HarnessPanel implements vscode.Disposable {
             'createRef', 'createPlaceholder', 'placeholderToRef', 'placeholderToNode',
             'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
             'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
-            'pasteItems', 'makeUnique', 'renameFlowPort', 'deleteFlowPort',
+            'pasteItems', 'makeUnique', 'forkDefinition', 'renameFlowPort', 'deleteFlowPort',
         ].includes(String(action.kind))) {
             return false;
         }
@@ -1332,6 +1338,25 @@ export class HarnessPanel implements vscode.Disposable {
                 };
                 await saveFlow(flowId, flow);
                 await finish(`Forked ${targetNodeId} into independent ${newNodeName}.`, id);
+                return true;
+            }
+            case 'forkDefinition': {
+                const target = this.folderNodeId(String(action.target));
+                const sourceNode = await folder.readNode(target);
+                const existingNodes = (this.snapshot?.documents ?? []).map(doc => nodeIdForPath(doc.path)!);
+                const baseName = sourceNode.name.replace(/_copy\d*$/, '') + '_copy';
+                const newNodeName = uniqueName(baseName, existingNodes);
+                const escapedOldName = sourceNode.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const selfRefRegex = new RegExp(`\\b${escapedOldName}\\b`, 'g');
+                const clonedNode: SlateNode = {
+                    ...sourceNode,
+                    name: newNodeName,
+                    code: sourceNode.code.map(line => line.replace(selfRefRegex, newNodeName)),
+                };
+                const oldPos = layout.positions[target] ?? { x: 100, y: 100 };
+                const newPos = { x: oldPos.x + 40, y: oldPos.y + 40 };
+                await folder.createNode(clonedNode, newPos);
+                await finish(`Forked definition ${target} into ${newNodeName}.`, newNodeName);
                 return true;
             }
             case 'renameFlowPort': {

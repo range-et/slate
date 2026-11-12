@@ -1202,4 +1202,49 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(readyProposal.checks.some((c: string) => c.includes('Revision') || c.includes('Verified')));
     });
 
+    test('derived usage index across instances and dependencies, and forkDefinition action (S-502)', async () => {
+        await open();
+
+        // 1. Initial snapshot has usages index for all definition nodes
+        let snap = await snapshot();
+        assert.ok(snap.usages, 'snapshot has usages index');
+        assert.ok(snap.usages.normalize, 'usages has entry for normalize');
+        assert.ok(snap.usages.clamp, 'usages has entry for clamp');
+        assert.equal(snap.usages.normalize.totalUses, 0);
+        // Clamp has prompt context from normalize without inflating totalUses
+        assert.equal(snap.usages.clamp.contextCount, 1);
+        assert.ok(snap.usages.clamp.contextUsers.includes('normalize'));
+        assert.equal(snap.usages.clamp.totalUses, 0);
+
+        // 2. Add an instance of normalize to root canvas
+        await act({ kind: 'addInstance', target: 'normalize' });
+        snap = await snapshot();
+        const normUsage = snap.usages?.normalize;
+        assert.ok(normUsage);
+        assert.equal(normUsage.instanceCount, 1);
+        assert.equal(normUsage.totalUses, 1);
+        assert.ok(normUsage.callSites.some(site => site.kind === 'root_instance' && site.instanceId?.startsWith('ref-')));
+
+        // Document also carries derived usage
+        const normDoc = snap.documents.find(d => d.path === 'slate/nodes/normalize.json')!;
+        assert.ok(normDoc.usage);
+        assert.equal(normDoc.usage.instanceCount, 1);
+
+        // 3. forkDefinition clones definition into a fresh node file on disk and layout position
+        await messages();
+        await act({ kind: 'forkDefinition', target: 'normalize' });
+        const msgs = await messages();
+        assert.ok(msgs.some(m => m.ok === true && m.message?.includes('Forked definition normalize')));
+
+        // Check new node exists on disk
+        const copyNode = await read(...nodePath('normalize_copy'));
+        assert.equal(copyNode.name, 'normalize_copy');
+        assert.ok(copyNode.code.some((line: string) => line.includes('def normalize_copy(')));
+
+        // Check new node has layout position and usage entry
+        const updatedSnap = await snapshot();
+        assert.ok(updatedSnap.layout?.normalize_copy, 'normalize_copy has layout position');
+        assert.ok(updatedSnap.usages?.normalize_copy, 'normalize_copy has usage entry');
+    });
+
 });
