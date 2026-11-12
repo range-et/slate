@@ -167,7 +167,7 @@ export class SlateFolderHost {
             const relativePath = this.relative(uri);
             const file = await this.read(relativePath);
             if (!file) continue;
-            const { document, code } = indexNode(relativePath, file.text, config.language, file.version);
+            const { document, code } = indexNode(relativePath, file.text, config.language, file.version, { checkJpl60: true });
             const previous = this.lastGood.get(relativePath);
             if (document.valid) this.lastGood.set(relativePath, { document, code });
             else if (previous) {
