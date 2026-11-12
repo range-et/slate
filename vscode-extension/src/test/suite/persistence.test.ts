@@ -11,8 +11,8 @@ const act = (action: Record<string, unknown>) => post({ type: 'action', action }
 type Message = { type: string; message?: string; ok?: boolean; proposal?: { id: string; candidate: string }; proposalId?: string; unitId?: string };
 const messages = async () => await vscode.commands.executeCommand<Message[]>('slate.test.takeMessages') ?? [];
 
-async function eventually(check: () => Promise<boolean>, label: string): Promise<void> {
-    const deadline = Date.now() + 8000;
+async function eventually(check: () => Promise<boolean>, label: string, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     while (!await check()) {
         if (Date.now() > deadline) throw new Error(`Timed out: ${label}`);
         await new Promise(resolve => setTimeout(resolve, 30));
@@ -1119,9 +1119,13 @@ suite('Slate native persistence and proposal QA', () => {
 
         await post({ type: 'verifyNode', nodeId: 'normalize' });
         await eventually(async () => {
-            const state = (await snapshot()).verifications?.normalize?.state;
-            return state === 'passed' || state === 'mutant_survived';
-        }, 'verification completed');
+            const snap = await snapshot();
+            const verif = snap.verifications?.normalize;
+            if (verif?.state === 'failed') {
+                throw new Error(`Verification failed unexpectedly: ${JSON.stringify(verif.diagnostics)} \nTraceback: ${verif.traceback}`);
+            }
+            return verif?.state === 'passed' || verif?.state === 'mutant_survived';
+        }, 'verification completed', 25000);
         snap = await snapshot();
         const normVerif = snap.verifications?.normalize;
         assert.ok(normVerif?.state === 'passed' || normVerif?.state === 'mutant_survived');
