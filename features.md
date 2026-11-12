@@ -34,6 +34,7 @@ keep outstanding tasks on GitHub.
 | Read-only Node Health Report (unreferenced candidates, exact/near duplicates, diff, caveats) | ✅ shipped |
 | Docked & resizable Inspector, on-demand context links, wire type-mismatch warnings | ✅ shipped |
 | Canvas ergonomics: Delete confirmation, linked & duplicate paste, flow ports | ✅ shipped |
+| Python Contract Schema & CI Enforcement (JPL-60, parity, drift) | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -378,6 +379,20 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   port…**). Renaming a port updates all internal wires and automatically repairs
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
+
+## Shipped — Python Contract Schema & JPL-60 CI Enforcement (2026-11-12)
+
+- **Formal JSON Schema.** `contracts/slate-node.schema.json` and `contracts/slate-flow.schema.json`
+  codify JSON Schema Draft-7 validations for all node and flow fields, requiring non-empty `intent`
+  and documentation `contract`, bounding `code` to JPL-60 (<=60 lines), and enforcing valid identifiers and types.
+- **AST Contract Validator (`scripts/verify-contracts.mjs`).** Automated CI validator powered by the Lezer Python parser:
+  - Enforces strict typing: all parameters must declare explicit type annotations, and function signatures must declare return type annotations (`-> ReturnType`).
+  - Enforces JPL-60: <=60 total lines and <=60 executable lines per atomic function node.
+  - Parity check: verifies 100% of defined functions in project Python files originate from and map to a documented `slate/nodes/` or `slate/flows/` unit. Fails with clear diagnostic if any undocumented "rogue" function exists.
+  - Drift check: verifies that compiled output matches committed disk output.
+- **Canvas and Inspector JPL-60 Badges & Refactor Prompt.** When an atomic node exceeds 60 lines or lacks typing/contract, canvas cards display `!` warning badges and the Inspector panel surfaces a warning along with a prompt to split or refactor into smaller stubs + a flow composition.
+- **CI Gate Integration.** Added `npm run verify:contracts` to `package.json`, called in `scripts/verify-baseline.sh` and GitHub Actions `.github/workflows/test.yml`.
+- Closes [#24](https://github.com/range-et/slate/issues/24) (S-511).
 
 ## Partially done
 

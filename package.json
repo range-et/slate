@@ -16,6 +16,7 @@
     "test:workbench": "npm run build && npm --prefix vscode-extension run sync-dist && npm --prefix vscode-extension run compile && npm --prefix vscode-extension run test:workbench",
     "test:qa": "npm run test:webview && npm run test:electron && npm run test:workbench",
     "test:harness": "npm test && npm run test:qa",
+    "verify:contracts": "node scripts/verify-contracts.mjs",
     "verify:baseline": "bash scripts/verify-baseline.sh",
     "verify:launch": "npm run verify:baseline && npm run test:qa",
     "package-extension": "node scripts/package-extension.js",

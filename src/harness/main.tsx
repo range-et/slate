@@ -137,7 +137,7 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
             {data.kind !== 'folder' && <div className="slate-node__kind">
                 <span>{kindLabel}</span>
                 <span>
-                    {data.problem && <span className="slate-node__problem" title={data.problem}>!&nbsp;</span>}
+                    {data.problem && <span className="slate-node__problem" data-testid="node-problem-badge" title={data.problem}>!&nbsp;</span>}
                     {data.broken && <span className="slate-node__problem" title="The target no longer exists">BROKEN&nbsp;</span>}
                     {data.unit?.annotation?.locked === true && data.kind !== 'ref' && data.kind !== 'instance' && <span title="Generation is locked">LOCKED&nbsp;</span>}
                     {data.identity === 'provisional' && <span title="Nested unit">◇</span>}
@@ -349,6 +349,11 @@ function Inspector({
                     {document && document.diagnostics.length > 0 && <div className="harness-inspector__diagnostic">
                         {document.diagnostics.map(item => <p key={`${item.code}:${item.message}`}>{item.message}</p>)}
                     </div>}
+                    {document && document.diagnostics.some(item => item.code === 'jpl60-line-count') && (
+                        <div className="harness-inspector__split-prompt" data-testid="jpl60-split-prompt">
+                            <p><strong>JPL-60 Notice:</strong> Function exceeds 60 lines. Atomic library nodes must be &le;60 lines. Decompose into stubs and a flow composition.</p>
+                        </div>
+                    )}
                     {nodeCode !== null && <section className="node-code">
                         <h3>Code</h3>
                         <CodeEditor key={`${unit.id}:${document?.sourceHash}`} initial={nodeCode} onChange={setCodeDraft} />

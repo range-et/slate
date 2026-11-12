@@ -2,6 +2,7 @@
   "slate": 3,
   "name": "normalize",
   "intent": "Convert a score to a percentage",
+  "contract": "Normalize score relative to maximum as percentage",
   "context": [
     "clamp"
   ],

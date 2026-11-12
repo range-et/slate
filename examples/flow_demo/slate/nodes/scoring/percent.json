@@ -2,6 +2,7 @@
   "slate": 3,
   "name": "percent",
   "intent": "Score as a whole-number percentage of the maximum",
+  "contract": "Return whole-number percentage score / maximum * 100",
   "locked": false,
   "code": [
     "def percent(score: int, maximum: int) -> int:",
