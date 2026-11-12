@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as cp from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { SlateMcpServer } from '../../mcp/slate_mcp_server';
@@ -253,4 +256,36 @@ suite('Slate Frontier Architect MCP Suite', () => {
         assert.equal(result.isError, true);
         assert.ok(result.content[0].text.includes('does not exist in flow'));
     });
-});
+
+    test('bundled standalone MCP server starts without node_modules and answers initialize', async () => {
+        const extension = vscode.extensions.getExtension('indrajeet-haldar.slate-code');
+        assert.ok(extension);
+        const serverPath = path.join(extension.extensionPath, 'out', 'mcp', 'slate_mcp_server.js');
+        const bundle = fs.readFileSync(serverPath, 'utf8');
+        assert.ok(!bundle.includes('require("@lezer/python")'), 'server bundle must inline @lezer/python');
+
+        const projectRoot = vscode.workspace.workspaceFolders![0].uri.fsPath;
+        const child = cp.spawn(process.execPath, [serverPath, '--workspace', projectRoot], {
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        try {
+            const reply = await new Promise<string>((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('standalone server did not reply')), 10_000);
+                let out = '';
+                let err = '';
+                child.stderr.on('data', d => { err += String(d); });
+                child.stdout.on('data', d => {
+                    out += String(d);
+                    if (out.includes('\n')) { clearTimeout(timer); resolve(out.split('\n')[0]); }
+                });
+                child.on('exit', code => { clearTimeout(timer); reject(new Error('server exited ' + code + ': ' + err)); });
+                child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
+            });
+            const parsed = JSON.parse(reply);
+            assert.equal(parsed.id, 1);
+            assert.ok(parsed.result?.capabilities?.tools);
+        } finally {
+            child.kill();
+        }
+    });});

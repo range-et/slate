@@ -242,6 +242,7 @@ keep outstanding tasks on GitHub.
   - `slate_define_stub`: create and update typed atomic stubs with signatures, intents, contracts, and structured cases. Strictly refuses arbitrary implementation body code (only stubs such as `pass`, `...`, or `raise NotImplementedError` are permitted) and supports decomposing oversized (`>60`-line) nodes into smaller atomic stubs (`splitFrom`).
   - `slate_wire_flow`: connect typed dataflow wires deterministically via `flow.ts` and `layout.json` without self-loops.
 - **Live webview bridge:** `HarnessPanel` provides direct in-process camera focus and an ephemeral local bridge (`.slate/live_bridge.json`) allowing standalone MCP server processes to smoothly pan/zoom the active XYFlow canvas in real time.
+- **Packaging and safety:** The standalone server is esbuild-bundled to `out/mcp/slate_mcp_server.js` so the installed VSIX can launch it without `node_modules`; invalid or unreadable `layout.json`/flow/node files are rejected instead of being overwritten; position-only flow updates preserve instance `node`/value fields.
 - **Verification:** Unit tests in `test/mcp_server.test.ts`, live camera focus webview tests in `test/e2e/harness.playwright.ts`, Extension Host integration tests in `vscode-extension/src/test/suite/mcp.test.ts`, and full launch gate (`npm run verify:launch`).
 
 ### Test platform

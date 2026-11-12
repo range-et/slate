@@ -480,8 +480,18 @@ test('MCP frontier architect live camera sync centers and selects target on focu
 
     // Verify clamp node is selected
     await expect(page.locator('.react-flow__node[data-id="clamp"]')).toHaveClass(/selected/);
+    // Exact id wins: name-based fallback must not also select other nodes that reference `clamp`.
+    await expect(page.locator('.react-flow__node.selected')).toHaveCount(1);
 
-    // Send region focus message
+    // Focusing a different target moves the selection (uses the latest rendered nodes, not a stale list).
+    await page.evaluate(() => {
+        window.postMessage({ type: 'focus', target: 'definitely-not-a-node', duration: 50 }, '*');
+    });
+    await expect(page.locator('.react-flow__node.selected')).toHaveCount(0);
+    await page.evaluate(() => {
+        window.postMessage({ type: 'focus', target: 'clamp', duration: 50 }, '*');
+    });
+    await expect(page.locator('.react-flow__node[data-id="clamp"]')).toHaveClass(/selected/);
     await page.evaluate(() => {
         window.postMessage({ type: 'focus', region: { x: 50, y: 50, width: 300, height: 200 }, duration: 100 }, '*');
     });

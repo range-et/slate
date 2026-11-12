@@ -882,6 +882,8 @@ function HarnessApp() {
             ? { ...node, data: { ...node.data, highlighted: true } } : node) };
     }, [snapshot, scope, highlight]);
     const [nodes, setNodes, onNodesChange] = useNodesState<Node<SlateNodeData>>(graph.nodes);
+    const latestNodes = useRef(nodes);
+    latestNodes.current = nodes;
     const selectedNodes = nodes.filter(node => node.selected);
     const selected = selectedNodes[0] ?? null;
     useEffect(() => {
@@ -945,13 +947,16 @@ function HarnessApp() {
                         (node.data as any)?.label === target ||
                         (node.data as any)?.target === target;
 
+                    // Use the latest rendered nodes (this listener is registered once, so a
+                    // closed-over `nodes` would be the first render's stale list).
+                    const allNodes = flow.current?.getNodes() ?? latestNodes.current;
+                    const exact = allNodes.find(node => node.id === target);
+                    const targetNode = exact ?? allNodes.find(matchesTarget);
+                    const focusId = targetNode?.id ?? target;
                     setNodes(current => current.map(node => ({
                         ...node,
-                        selected: matchesTarget(node),
+                        selected: targetNode ? node.id === targetNode.id : matchesTarget(node),
                     })));
-                    const allNodes = flow.current?.getNodes() ?? nodes;
-                    const targetNode = flow.current?.getNode(target) || allNodes.find(matchesTarget);
-                    const focusId = targetNode?.id ?? target;
                     flow.current?.fitView({
                         nodes: [{ id: focusId }],
                         duration: data.duration ?? 300,

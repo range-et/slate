@@ -495,12 +495,24 @@ export class SlateMcpServer {
         return resolved;
     }
 
-    private async readJsonFile<T>(rel: string): Promise<T | null> {
+    /** Read a file's text; returns null only when the file is missing, throws on any other failure. */
+    private async readTextIfExists(rel: string): Promise<string | null> {
         try {
-            const raw = await fs.readFile(this.absPath(rel), 'utf8');
-            return JSON.parse(raw) as T;
-        } catch {
-            return null;
+            return await fs.readFile(this.absPath(rel), 'utf8');
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            throw new Error(`Cannot read "${rel}": ${(error as Error).message}`);
+        }
+    }
+
+    /** Read + parse an existing node; null if missing, error (never silent overwrite) if unreadable/invalid. */
+    private async readExistingNode(rel: string): Promise<SlateNode | null> {
+        const raw = await this.readTextIfExists(rel);
+        if (raw === null) return null;
+        try {
+            return parseNode(raw);
+        } catch (error) {
+            throw new Error(`Existing node file "${rel}" is invalid and was not modified: ${(error as Error).message}`);
         }
     }
 
@@ -511,11 +523,12 @@ export class SlateMcpServer {
     }
 
     private async readLayout(): Promise<SlateLayout> {
+        const text = await this.readTextIfExists(LAYOUT_PATH);
+        if (text === null) return emptyLayout();
         try {
-            const text = await fs.readFile(this.absPath(LAYOUT_PATH), 'utf8');
             return parseLayout(text);
-        } catch {
-            return emptyLayout();
+        } catch (error) {
+            throw new Error(`Existing "${LAYOUT_PATH}" is invalid and was not modified: ${(error as Error).message}`);
         }
     }
 
@@ -874,7 +887,7 @@ export class SlateMcpServer {
             this.assertSafePath(nodeRelPath, NODES_DIR);
 
             // Check if node already exists
-            const existingNode = await this.readJsonFile<SlateNode>(nodeRelPath);
+            const existingNode = await this.readExistingNode(nodeRelPath);
             if (existingNode) {
                 if (existingNode.locked) {
                     throw new Error(`Node "${nodeId}" is locked and cannot be modified.`);
@@ -975,11 +988,15 @@ export class SlateMcpServer {
         this.assertSafePath(flowRelPath, 'slate/flows');
         let flow: SlateFlow;
 
-        try {
-            const raw = await fs.readFile(this.absPath(flowRelPath), 'utf8');
-            flow = parseFlow(raw);
-        } catch {
+        const rawFlow = await this.readTextIfExists(flowRelPath);
+        if (rawFlow === null) {
             flow = emptyFlow(flowId);
+        } else {
+            try {
+                flow = parseFlow(rawFlow);
+            } catch (error) {
+                throw new Error(`Existing flow file "${flowRelPath}" is invalid and was not modified: ${(error as Error).message}`);
+            }
         }
 
         const layout = await this.readLayout();
@@ -999,9 +1016,23 @@ export class SlateMcpServer {
         if (args.instances && args.instances.length > 0) {
             for (const inst of args.instances) {
                 const existingIdx = flow.instances.findIndex((i: FlowInstance) => i.id === inst.id);
-                const nextInst: FlowInstance = inst.kind === 'value'
-                    ? { id: inst.id, kind: 'value', value: inst.value ?? '0' }
-                    : { id: inst.id, node: inst.node || inst.id };
+                const existing = existingIdx >= 0 ? flow.instances[existingIdx] : undefined;
+                let nextInst: FlowInstance;
+                if (existing) {
+                    // Preserve the existing instance unless the caller explicitly changes it.
+                    nextInst = { ...existing } as FlowInstance;
+                    if (inst.kind === 'value') {
+                        nextInst = { id: inst.id, kind: 'value', value: inst.value ?? ('value' in existing ? (existing as { value?: string }).value ?? '0' : '0') } as FlowInstance;
+                    } else if (inst.node) {
+                        nextInst = { id: inst.id, node: inst.node } as FlowInstance;
+                    } else if ('kind' in existing && (existing as { kind?: string }).kind === 'value' && inst.value !== undefined) {
+                        (nextInst as { value?: string }).value = inst.value;
+                    }
+                } else if (inst.kind === 'value') {
+                    nextInst = { id: inst.id, kind: 'value', value: inst.value ?? '0' };
+                } else {
+                    nextInst = { id: inst.id, node: inst.node || inst.id };
+                }
 
                 if (existingIdx >= 0) {
                     flow.instances[existingIdx] = nextInst;

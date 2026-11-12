@@ -514,6 +514,77 @@ describe('Frontier Architect MCP Server (S-510)', () => {
         });
     });
 
+    describe('Existing file safety (no silent erasure)', () => {
+        it('rejects print(...) smuggled inside NotImplementedError(...)', () => {
+            const res = validateStubBody('def foo() -> None', "raise NotImplementedError(print('implemented'))");
+            expect(res.valid).toBe(false);
+        });
+
+        it('slate_place_notes refuses to overwrite a malformed layout.json', async () => {
+            const layoutPath = path.join(tmpDir, 'slate', 'layout.json');
+            await fs.writeFile(layoutPath, '{ not valid json', 'utf8');
+            const res = await server.callTool('slate_place_notes', { title: 'New', body: 'x' });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('invalid and was not modified');
+            expect(await fs.readFile(layoutPath, 'utf8')).toBe('{ not valid json');
+        });
+
+        it('slate_place_notes creates a layout only when layout.json is missing', async () => {
+            await fs.rm(path.join(tmpDir, 'slate', 'layout.json'));
+            const res = await server.callTool('slate_place_notes', { title: 'Fresh', body: 'x' });
+            expect(res.isError).toBe(false);
+            const layout = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'layout.json'), 'utf8'));
+            expect(layout.notes.some((n: any) => n.title === 'Fresh')).toBe(true);
+        });
+
+        it('slate_wire_flow refuses to overwrite a malformed flow file', async () => {
+            const flowPath = path.join(tmpDir, 'slate', 'flows', 'main.json');
+            await fs.writeFile(flowPath, '{ broken', 'utf8');
+            const res = await server.callTool('slate_wire_flow', { instances: [{ id: 'a', node: 'calc' }] });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('invalid and was not modified');
+            expect(await fs.readFile(flowPath, 'utf8')).toBe('{ broken');
+        });
+
+        it('slate_define_stub refuses to overwrite a malformed node file', async () => {
+            const nodePath = path.join(tmpDir, 'slate', 'nodes', 'broken.json');
+            await fs.writeFile(nodePath, '{ nope', 'utf8');
+            const res = await server.callTool('slate_define_stub', {
+                name: 'broken', signature: 'def broken() -> None', intent: 'x',
+            });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('invalid and was not modified');
+            expect(await fs.readFile(nodePath, 'utf8')).toBe('{ nope');
+        });
+
+        it('slate_wire_flow position-only update preserves the instance node and value', async () => {
+            await server.callTool('slate_wire_flow', {
+                instances: [{ id: 'step', node: 'calc' }, { id: 'const', kind: 'value', value: '7' }],
+            });
+            const res = await server.callTool('slate_wire_flow', {
+                instances: [
+                    { id: 'step', position: { x: 10, y: 20 } },
+                    { id: 'const', position: { x: 30, y: 40 } },
+                ],
+            });
+            expect(res.isError).toBe(false);
+            const flow = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'flows', 'main.json'), 'utf8'));
+            const step = flow.instances.find((i: any) => (typeof i === 'string' ? i : i.id) === 'step');
+            const konst = flow.instances.find((i: any) => (typeof i === 'string' ? false : i.id === 'const'));
+            expect(step).toMatchObject({ id: 'step', node: 'calc' });
+            expect(konst).toMatchObject({ id: 'const', kind: 'value', value: '7' });
+            const layout = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'layout.json'), 'utf8'));
+            expect(layout.positions.step).toEqual({ x: 10, y: 20 });
+        });
+
+        it('slate_wire_flow can still retarget an instance when node is given explicitly', async () => {
+            await server.callTool('slate_wire_flow', { instances: [{ id: 'step', node: 'calc' }] });
+            await server.callTool('slate_wire_flow', { instances: [{ id: 'step', node: 'other' }] });
+            const flow = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'flows', 'main.json'), 'utf8'));
+            expect(flow.instances.find((i: any) => i.id === 'step')).toMatchObject({ node: 'other' });
+        });
+    });
+
     describe('Parallel edits mutation serialization', () => {
         it('serializes concurrent file-changing operations without losing updates', async () => {
             const promises = [

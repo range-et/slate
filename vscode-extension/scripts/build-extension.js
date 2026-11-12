@@ -2,7 +2,7 @@ const esbuild = require('esbuild');
 const fs = require('node:fs');
 const { instrumentSource } = require('../../scripts/source-instrumentation.cjs');
 
-esbuild.build({
+const common = {
     plugins: process.env.SLATE_SOURCE_COVERAGE ? [{
         name: 'slate-source-coverage',
         setup(build) {
@@ -14,12 +14,17 @@ esbuild.build({
             });
         },
     }] : [],
-    entryPoints: ['src/extension.ts'],
-    outfile: 'out/extension.js',
     bundle: true,
     platform: 'node',
     format: 'cjs',
     target: 'node18',
     external: ['vscode'],
     sourcemap: true,
-}).catch(error => { console.error(error); process.exitCode = 1; });
+};
+
+// The extension host bundle plus the standalone stdio MCP server. The server is bundled so the
+// installed VSIX (which excludes node_modules) can launch out/mcp/slate_mcp_server.js directly.
+Promise.all([
+    esbuild.build({ ...common, entryPoints: ['src/extension.ts'], outfile: 'out/extension.js' }),
+    esbuild.build({ ...common, entryPoints: ['src/mcp/slate_mcp_server.ts'], outfile: 'out/mcp/slate_mcp_server.js' }),
+]).catch(error => { console.error(error); process.exitCode = 1; });
