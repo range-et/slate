@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildGenerationPacket, PacketError, stripModelEnvelope } from '../vscode-extension/src/generation';
+import { buildForgePacket, buildGenerationPacket, FORGE_INPUT_BUDGET_TOKENS, PacketError, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from '../vscode-extension/src/generation';
 import { buildDescribePacket, describeNodes, describeOrder, parseDescribeReply } from '../vscode-extension/src/port/describe';
 import { indexNode, parseNode } from '../vscode-extension/src/slate_folder';
 
@@ -152,4 +152,144 @@ it('reports non-Error model failures without writing or describing the node', as
     expect(report.cancelled).toBe(false);
     expect(write).not.toHaveBeenCalled();
     expect(node.intent).toBe('');
+});
+
+describe('S-512 local llama.cpp component forge matrix', () => {
+    it('assembles a forge micro-packet with cases, contract, and retry feedback within 600 tokens', () => {
+        const { snapshot, sources, target } = fixture();
+        const cases = [
+            { name: 'positive', input: { x: 5 }, expected: 5 },
+            { name: 'zero', input: { x: 0 }, expected: 0 },
+        ];
+        const packet = buildForgePacket(snapshot, sources, 'run', {
+            cases,
+            retryFeedback: 'assert run(-1) == -1 failed',
+        });
+        expect(packet.inputBudgetTokens).toBe(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.prompt).toContain('Case "positive": input={"x":5} expected=5');
+        expect(packet.prompt).toContain('Case "zero": input={"x":0} expected=0');
+        expect(packet.prompt).toContain('assert run(-1) == -1 failed');
+        expect(packet.prompt).toContain('JPL-60');
+        expect(packet.prompt).toContain('### Implementation');
+        expect(packet.prompt).toContain('### Unit Check');
+        expect(packet.fingerprint).toBeDefined();
+        expect(packet.fingerprint?.intent).toBe('Return x');
+        expect(packet.fingerprint?.contract).toBe('Preserve x');
+        expect(packet.fingerprint?.cases).toEqual(cases);
+    });
+
+    it('refuses oversized targets whose stub, cases, and feedback alone exceed 600 tokens rather than truncating', () => {
+        const { snapshot, sources } = fixture({
+            intent: 'Massive intent '.repeat(200), // ~3000 chars -> 750 tokens
+        });
+        expect(() => buildForgePacket(snapshot, sources, 'run')).toThrow(/Refusing oversized target/);
+    });
+
+    it('trims neighbor context first when dependencies push total beyond the 600 token budget', () => {
+        const { snapshot, sources, target } = fixture();
+        // Add 5 dependencies
+        const depNames = ['dep1', 'dep2', 'dep3', 'dep4', 'dep5'];
+        for (const name of depNames) {
+            const depNode = indexNode(`slate/nodes/${name}.json`, JSON.stringify({
+                slate: 3, name, intent: `Intent for ${name} `.repeat(15), contract: 'ok',
+                code: [`def ${name}(a: int, b: int) -> int:`, '    return a + b'],
+            }), 'python', 1);
+            snapshot.documents.push(depNode.document);
+            sources.set(depNode.document.path, depNode.code);
+        }
+        target.document.units[0].annotation!.dependencies = depNames;
+
+        const packet = buildForgePacket(snapshot, sources, 'run');
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.neighbors).toBeDefined();
+        expect(packet.omittedNeighbors).toBeDefined();
+        // At least some neighbors were included and some omitted due to budget
+        expect((packet.neighbors?.length ?? 0) + (packet.omittedNeighbors?.length ?? 0)).toBe(5);
+        expect(packet.omittedNeighbors!.length).toBeGreaterThan(0);
+        // Included neighbors have signatures and intents, not entire function bodies
+        for (const neighbor of packet.neighbors!) {
+            expect(neighbor.signature).toContain('def dep');
+            expect(neighbor.intent).toContain('Intent for');
+            expect(packet.prompt).toContain(`Signature: ${neighbor.signature}`);
+        }
+    });
+
+    it.each([
+        [
+            'structured section headers',
+            `### Implementation\n\`\`\`python\ndef run(x: int) -> int:\n    return x\n\`\`\`\n\n### Unit Check\n\`\`\`python\ndef test_run():\n    assert run(1) == 1\n\`\`\``,
+            'def run(x: int) -> int:\n    return x',
+            'def test_run():\n    assert run(1) == 1',
+        ],
+        [
+            'multiple markdown code fences',
+            `\`\`\`python\ndef run(x: int) -> int:\n    return x\n\`\`\`\n\n\`\`\`python\ndef test_run():\n    assert run(2) == 2\n\`\`\``,
+            'def run(x: int) -> int:\n    return x',
+            'def test_run():\n    assert run(2) == 2',
+        ],
+        [
+            'single block with def test_ boundary',
+            `\`\`\`python\ndef run(x: int) -> int:\n    return x\n\ndef test_run():\n    assert run(3) == 3\n\`\`\``,
+            'def run(x: int) -> int:\n    return x',
+            'def test_run():\n    assert run(3) == 3',
+        ],
+        [
+            'single implementation without check',
+            `\`\`\`python\ndef run(x: int) -> int:\n    return x\n\`\`\``,
+            'def run(x: int) -> int:\n    return x',
+            undefined,
+        ],
+    ])('parses candidate reply from %s', (_label, raw, expectedImpl, expectedCheck) => {
+        const candidate = parseForgeCandidate(raw);
+        expect(candidate.implementation).toBe(expectedImpl);
+        expect(candidate.check).toBe(expectedCheck);
+    });
+
+    it('validates compliant candidate with <=60 lines and valid check', () => {
+        const { target } = fixture();
+        const candidate = {
+            implementation: 'def run(x: int) -> int:\n    return x',
+            check: 'def test_run():\n    assert run(1) == 1',
+        };
+        const res = validateForgeCandidate(target.document.units[0], candidate);
+        expect(res.valid).toBe(true);
+        expect(res.lineCount).toBe(2);
+        expect(res.checkLineCount).toBe(2);
+        expect(res.diagnostics).toEqual([]);
+    });
+
+    it('rejects candidate with line count > 60 lines (JPL-60)', () => {
+        const { target } = fixture();
+        const lines65 = ['def run(x: int) -> int:'];
+        for (let i = 0; i < 64; i++) lines65.push(`    val_${i} = ${i}`);
+        lines65.push('    return x');
+        const candidate = { implementation: lines65.join('\n') };
+        const res = validateForgeCandidate(target.document.units[0], candidate);
+        expect(res.valid).toBe(false);
+        expect(res.diagnostics.some(d => d.includes('exceeds JPL-60 limit of 60 lines'))).toBe(true);
+    });
+
+    it('rejects candidate with signature parameter mismatch', () => {
+        const { target } = fixture();
+        // Parameter name mismatch
+        const candidate1 = { implementation: 'def run(y: int) -> int:\n    return y' };
+        expect(validateForgeCandidate(target.document.units[0], candidate1).diagnostics.some(d => d.includes('does not match target parameter'))).toBe(true);
+
+        // Parameter type annotation mismatch
+        const candidate2 = { implementation: 'def run(x: str) -> int:\n    return 0' };
+        expect(validateForgeCandidate(target.document.units[0], candidate2).diagnostics.some(d => d.includes('type annotation'))).toBe(true);
+
+        // Return type annotation mismatch
+        const candidate3 = { implementation: 'def run(x: int) -> str:\n    return str(x)' };
+        expect(validateForgeCandidate(target.document.units[0], candidate3).diagnostics.some(d => d.includes('return type annotation'))).toBe(true);
+    });
+
+    it('rejects candidate with invalid Python syntax', () => {
+        const { target } = fixture();
+        const candidate = { implementation: 'def run(x: int) -> int:\n    return x +' };
+        const res = validateForgeCandidate(target.document.units[0], candidate);
+        expect(res.valid).toBe(false);
+        expect(res.diagnostics.some(d => d.includes('not valid Python'))).toBe(true);
+    });
 });

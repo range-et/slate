@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
 import { BoardNote, FlowInstance, HarnessDocument, HarnessSnapshot, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
-import { buildGenerationPacket, GenerationPacket, stripModelEnvelope } from './generation';
+import { buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
@@ -80,6 +80,8 @@ export class HarnessPanel implements vscode.Disposable {
         packet: GenerationPacket;
         proposal: SourceProposal;
         candidate: string;
+        implementation?: string;
+        check?: string;
         path: string;
     } | undefined;
     private lastAcceptedUnitId: string | undefined;
@@ -256,7 +258,13 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'generate' && typeof value.unitId === 'string') {
-            await this.generate(value.unitId);
+            await this.generate(value.unitId, {
+                forge: (value as { forge?: boolean }).forge,
+                boundInputs: (value as { boundInputs?: boolean }).boundInputs,
+                retryFeedback: typeof (value as { retryFeedback?: unknown }).retryFeedback === 'string'
+                    ? (value as { retryFeedback: string }).retryFeedback
+                    : undefined,
+            });
             return;
         }
         if (value.type === 'cancelGeneration') {
@@ -323,7 +331,7 @@ export class HarnessPanel implements vscode.Disposable {
         };
     }
 
-    private packet(unitId: string): GenerationPacket {
+    private packet(unitId: string, options?: ForgeOptions): GenerationPacket {
         if (!this.snapshot) throw new Error('The graph is not indexed yet.');
         const settings = this.generationSettings();
         return buildGenerationPacket(
@@ -332,12 +340,13 @@ export class HarnessPanel implements vscode.Disposable {
             unitId,
             settings.contextWindowTokens,
             settings.outputTokens,
+            options,
         );
     }
 
     private postPacketPreview(unitId: string): void {
         try {
-            const packet = this.packet(unitId);
+            const packet = this.packet(unitId, { forge: true });
             void this.postMessage({
                 type: 'packetPreview',
                 unitId,
@@ -346,6 +355,7 @@ export class HarnessPanel implements vscode.Disposable {
                     estimatedInputTokens: packet.estimatedInputTokens,
                     inputBudgetTokens: packet.inputBudgetTokens,
                     outputBudgetTokens: packet.outputBudgetTokens,
+                    omittedNeighbors: packet.omittedNeighbors,
                 },
             });
         } catch (error) {
@@ -355,13 +365,22 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
-    private async generate(unitId: string): Promise<void> {
+    private async generate(unitId: string, options?: { forge?: boolean; boundInputs?: boolean; retryFeedback?: string }): Promise<void> {
         if (this.generation) {
             this.postCommandResult(false, 'A llama.cpp generation is already running.');
             return;
         }
         try {
-            const packet = this.packet(unitId);
+            const config = vscode.workspace.getConfiguration('slate.llama');
+            const isForge = options?.forge !== false;
+            const boundInputs = typeof options?.boundInputs === 'boolean'
+                ? options.boundInputs
+                : config.get<boolean>('boundInputs', false);
+            const packet = this.packet(unitId, {
+                forge: isForge,
+                boundInputs,
+                retryFeedback: options?.retryFeedback,
+            });
             const target = this.resolveUnit(unitId);
             const settings = this.generationSettings();
             const controller = new AbortController();
@@ -372,26 +391,60 @@ export class HarnessPanel implements vscode.Disposable {
                 message: `Sent ${packet.items.length} exact source unit${packet.items.length === 1 ? '' : 's'} (${packet.estimatedInputTokens}/${packet.inputBudgetTokens} estimated input tokens) to ${settings.endpoint}.`,
             });
             let received = 0;
-            const raw = await streamLlamaCompletion(packet.prompt, settings, controller.signal, token => {
+            const raw = await streamLlamaCompletion(packet.prompt, {
+                ...settings,
+                system: isForge
+                    ? 'You are a constrained local component forge engine. Follow JPL-60 rules strictly and provide both implementation and unit check.'
+                    : undefined,
+            }, controller.signal, token => {
                 received += token.length;
                 void this.postMessage({ type: 'generationProgress', unitId, receivedCharacters: received });
             });
-            const candidate = stripModelEnvelope(raw);
+
+            const forgeCandidate = parseForgeCandidate(raw);
+            const validation = validateForgeCandidate(target.unit, forgeCandidate);
+            if (!validation.valid) {
+                throw new Error(validation.diagnostics.join('; '));
+            }
+
+            const candidateSource = forgeCandidate.check
+                ? `# Implementation:\n${forgeCandidate.implementation}\n\n# Unit Check:\n${forgeCandidate.check}`
+                : forgeCandidate.implementation;
+
             const proposal = await this.adapter.replaceUnit({
                 source: this.sources.get(target.document.path) ?? '',
                 path: target.document.path,
                 expectedHash: packet.items[0].sourceHash,
                 unitId,
-                replacement: candidate,
+                replacement: forgeCandidate.implementation,
                 nodeId: nodeIdForPath(target.document.path) ?? undefined,
             });
             const id = randomUUID();
-            this.pendingProposal = { id, packet, proposal, candidate, path: target.document.path };
+            this.pendingProposal = {
+                id,
+                packet,
+                proposal,
+                candidate: candidateSource,
+                implementation: forgeCandidate.implementation,
+                check: forgeCandidate.check,
+                path: target.document.path,
+            };
+            const checks = [
+                'Valid Python',
+                'Exactly one function',
+                'Name and signature preserved',
+                'Edit confined to owned function',
+                `JPL-60 compliant (${validation.lineCount} lines, typed)`,
+                forgeCandidate.check ? 'Pytest unit check generated' : 'Check generated',
+            ];
             await this.postMessage({
                 type: 'proposalReady',
                 proposal: {
-                    id, unitId, path: target.document.path, candidate,
-                    checks: ['Valid Python', 'Exactly one function', 'Name and signature preserved', 'Edit confined to owned function'],
+                    id, unitId, path: target.document.path,
+                    candidate: candidateSource,
+                    implementation: forgeCandidate.implementation,
+                    check: forgeCandidate.check,
+                    checks,
                 },
             });
         } catch (error) {
@@ -424,16 +477,62 @@ export class HarnessPanel implements vscode.Disposable {
         folder: SlateFolderHost,
         pending: NonNullable<HarnessPanel['pendingProposal']>,
     ): Promise<void> {
-        for (const item of pending.packet.items) {
-            const current = (await folder.readNode(nodeIdForPath(item.path)!)).code.join('\n') + '\n';
-            if ((await this.adapter.parseModule(current, item.path)).sourceHash !== item.sourceHash) {
-                throw new Error(`${item.qualifiedName} changed after generation. The draft was preserved; regenerate against current code.`);
+        if (pending.packet.boundInputs && pending.packet.fingerprint) {
+            const fp = pending.packet.fingerprint;
+            const targetNodeId = nodeIdForPath(pending.path)!;
+            const currentNode = await folder.readNode(targetNodeId);
+            if (currentNode.locked) {
+                throw new Error('This function is locked. Unlock it before accepting a proposal.');
+            }
+            const currentCode = codeLines(currentNode.code.join('\n')).join('\n');
+            const fpCode = codeLines(fp.code.join('\n')).join('\n');
+            if (currentCode !== fpCode) {
+                throw new Error(`${targetNodeId} code changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            if (currentNode.intent !== fp.intent) {
+                throw new Error(`${targetNodeId} intent changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            if (currentNode.contract !== fp.contract) {
+                throw new Error(`${targetNodeId} contract changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            if (JSON.stringify(currentNode.cases ?? []) !== JSON.stringify(fp.cases ?? [])) {
+                throw new Error(`${targetNodeId} cases changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            if (JSON.stringify(currentNode.uses) !== JSON.stringify(fp.uses)) {
+                throw new Error(`${targetNodeId} uses changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            if (JSON.stringify(currentNode.imports) !== JSON.stringify(fp.imports)) {
+                throw new Error(`${targetNodeId} imports changed after generation. The draft was preserved; regenerate against current code.`);
+            }
+            for (const [neighborId, expected] of Object.entries(fp.neighborSignatures)) {
+                try {
+                    const neighborNode = await folder.readNode(neighborId);
+                    const neighborCode = neighborNode.code.join('\n');
+                    const parsed = await this.adapter.parseModule(neighborCode + '\n', neighborId);
+                    const currentSig = parsed.units[0]?.signature ?? neighborNode.code[0];
+                    if (currentSig !== expected.signature) {
+                        throw new Error(`Neighbor ${neighborId} signature changed after generation. The draft was preserved; regenerate against current code.`);
+                    }
+                } catch (e) {
+                    if (e instanceof Error && e.message.includes('changed after generation')) throw e;
+                    throw new Error(`Neighbor ${neighborId} is no longer available. The draft was preserved; regenerate against current code.`);
+                }
+            }
+        } else {
+            for (const item of pending.packet.items) {
+                const current = (await folder.readNode(nodeIdForPath(item.path)!)).code.join('\n') + '\n';
+                if ((await this.adapter.parseModule(current, item.path)).sourceHash !== item.sourceHash) {
+                    throw new Error(`${item.qualifiedName} changed after generation. The draft was preserved; regenerate against current code.`);
+                }
             }
         }
         const nodeId = nodeIdForPath(pending.path)!;
         const node = await folder.readNode(nodeId);
         if (node.locked) throw new Error('This function is locked. Unlock it before accepting a proposal.');
-        node.code = codeLines(pending.proposal.proposedSource);
+        node.code = codeLines(pending.implementation ?? pending.proposal.proposedSource);
+        if (pending.check) {
+            node.check = codeLines(pending.check);
+        }
         const appliedVersion = await folder.writeNode(nodeId, node);
         this.lastAcceptedUnitId = pending.packet.targetId;
         this.lastAcceptedVersion = appliedVersion;

@@ -97,6 +97,11 @@
           "type": "integer",
           "default": 120,
           "minimum": 5
+        },
+        "slate.llama.boundInputs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Bind proposal acceptance strictly to all packet inputs (code hash, imports/uses, intent, contract, lock, cases, neighbor signatures)."
         }
       }
     }
