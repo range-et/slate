@@ -48,10 +48,13 @@ design per phase.
     atomic stubs + contracts + test cases (`slate_define_stub`, refusing
     arbitrary body code), wire flows (`slate_wire_flow`), and split oversized
     (`>60`-line) nodes into smaller stubs.
-  - **Tier 2 — Local LLM Component Forge (`llama.cpp`):** Takes one atomic stub
-    + its contract/cases + bounded neighbor signatures (`≤600` tokens) and
-    generates/debugs the `≤60`-line function body + its unit check, verified by
-    `Pydantic` + `pytest` + `mutmut`.
+  - **Tier 2 — Local LLM Component Forge (`llama.cpp`):** Takes a single forge
+    input micro-packet (`≤600` tokens total across the target atomic stub's
+    signature/intent/contract, selected cases, any bounded retry feedback, and
+    bounded neighbor signatures + intents; trimming neighbor context first and
+    refusing oversized targets whose stub + cases + retry feedback alone exceed
+    `600` tokens) and generates/debugs the `≤60`-line function body + its unit
+    check, verified by `Pydantic` + `pytest` + `mutmut`.
 - The source of truth is a `slate/` folder of JSON only: one file per node,
   plus JSONs that refer to nodes by ID. Compile generates `src/`. The format
   stays language-agnostic (Python first, then Prose Mode `language: "prose"` as
@@ -357,10 +360,14 @@ adapters.
     - Mandatory parameter and return type annotations on function signatures.
     - Bounded control flow and contract/check readiness indicators.
 - **S-512 — Local `llama.cpp` stub-to-body and check forge:**
-  - Extend `generation.ts` to take a single atomic stub (`slate/nodes/**/*.json`)
-    + its `intent`, `contract`, structured `cases`, and bounded neighbor
-    signatures (`≤600` tokens) and forge **both** the `≤60`-line Python
-    implementation and its corresponding `Pydantic`/`pytest` unit check.
+  - Extend `generation.ts` to pack a single forge input micro-packet (`≤600`
+    tokens total across the target atomic stub in `slate/nodes/**/*.json` + its
+    `intent`, `contract`, selected structured `cases`, any bounded retry
+    feedback, and bounded neighbor signatures + intents; trimming neighbor
+    context first to fit the `≤600`-token total packet budget and refusing
+    oversized targets whose stub + cases + retry feedback alone exceed `600`
+    tokens) and forge **both** the `≤60`-line Python implementation and its
+    corresponding `Pydantic`/`pytest` unit check.
   - Enforce the JPL-60 line and signature rules on generated candidates before
     presenting proposals.
 - **S-513 — Per-node `Pydantic` + `pytest` + `mutmut` verification runner and canvas badges:**

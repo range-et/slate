@@ -42,9 +42,13 @@ Instead of a blanket "no cloud anywhere" rule, Slate enforces a strict
    - Wire flows (`slate_wire_flow`) and split oversized (`>60`-line) nodes into
      smaller stubs.
 2. **Tier 2 — Local LLM Component Forge (`llama.cpp`):**
-   Takes one atomic stub + its contract/cases + bounded neighbor signatures
-   (`≤600` tokens) and generates or debugs the `≤60`-line function body and its
-   unit check locally, verified by `Pydantic` + `pytest` + `mutmut`.
+   Takes a single forge input micro-packet (`≤600` tokens total: the target
+   atomic stub's signature/intent/contract, selected cases, any bounded retry
+   feedback, and bounded neighbor signatures + intents, trimming neighbor
+   context first and refusing oversized targets whose stub + cases + retry
+   feedback alone exceed `600` tokens) and generates or debugs the `≤60`-line
+   function body and its unit check locally, verified by `Pydantic` + `pytest` +
+   `mutmut`.
 
 ### Reuse by identity
 
@@ -323,12 +327,16 @@ cases.
    in `slate_folder.ts` (`checkNodeCode`), compile diagnostics, and canvas
    badges.
 3. **Local Component Forge (`S-512`):** `llama.cpp` works on a single atomic
-   definition reached through one of its uses. The micro-packet (`≤600` tokens)
-   contains the target stub's signature, intent, contract, structured cases,
-   and bounded neighbor signatures + intents (never aggregating every linked
-   use's neighborhood). It generates both the `≤60`-line Python implementation
-   and its corresponding `Pydantic`/`pytest` check. The exact packet and any
-   omissions are shown; oversized targets are refused, not truncated.
+   definition reached through one of its uses. The forge input micro-packet is
+   capped at `≤600` tokens total across all inputs: the target stub's signature,
+   intent, contract, selected structured cases, any bounded retry feedback, and
+   bounded neighbor signatures + intents (never aggregating every linked use's
+   neighborhood). Neighbor context is trimmed first to fit the `≤600`-token
+   total packet budget; oversized targets whose stub, cases, and retry feedback
+   alone exceed `600` tokens are refused rather than truncated. It generates
+   both the `≤60`-line Python implementation and its corresponding
+   `Pydantic`/`pytest` check, and shows the exact packet and any omitted
+   neighbor context.
 4. **Per-Node Verification & Mutation Gate (`S-513`):** Candidates compile in a
    scratch overlay and run `pytest` + `Pydantic` contract validation + scoped
    `mutmut` mutation testing per atomic node. Live verification badges appear
@@ -430,7 +438,9 @@ JSON spine and MCP Architect ("ComfyUI for text"). TypeScript self-hosting
   (`checkNodeCode`), compile diagnostics, and canvas badges.
 - **S-512 Local llama.cpp stub-to-body and check forge:** Generate both the
   `≤60`-line Python implementation and its corresponding `Pydantic`/`pytest`
-  check from an atomic stub in a bounded micro-packet (`≤600` tokens).
+  check from an atomic stub in a bounded forge input micro-packet (`≤600` tokens
+  total across target stub, cases, retry feedback, and neighbor signatures +
+  intents, trimming neighbor context first and refusing oversized targets).
 - **S-513 Per-node Pydantic + pytest + mutmut verification runner and canvas
   badges:** Run `pytest` + `Pydantic` contract checks + scoped `mutmut`
   mutation testing per atomic node; surface live verification badges on canvas

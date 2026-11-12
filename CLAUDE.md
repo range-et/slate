@@ -28,10 +28,13 @@ transport, proposals, and the planned Frontier Architect MCP server).
     the live canvas camera (`slate_focus`), define typed atomic stubs +
     contracts + cases (`slate_define_stub`, refusing arbitrary body code), wire
     flows (`slate_wire_flow`), and split oversized (`>60`-line) nodes (`S-510`).
-  - **Tier 2 — Local LLM Component Forge (`llama.cpp`):** Takes one atomic stub
-    + its contract/cases + bounded neighbor signatures (`≤600` tokens) and
-    forges the `≤60`-line function body + its unit check (`S-512`), verified by
-    `Pydantic` + `pytest` + `mutmut` (`S-511`, `S-513`).
+  - **Tier 2 — Local LLM Component Forge (`llama.cpp`):** Takes a single forge
+    input micro-packet (`≤600` tokens total across the target atomic stub's
+    signature/intent/contract, selected cases, any bounded retry feedback, and
+    bounded neighbor signatures + intents; trimming neighbor context first and
+    refusing oversized targets whose stub + cases + retry feedback alone exceed
+    `600` tokens) and forges the `≤60`-line function body + its unit check
+    (`S-512`), verified by `Pydantic` + `pytest` + `mutmut` (`S-511`, `S-513`).
 
 - Direction: [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)
 - Inventory: [features.md](features.md)
