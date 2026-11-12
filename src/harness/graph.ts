@@ -3,7 +3,7 @@ import type { Edge, Node } from '@xyflow/react';
 import {
     flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature, type Port,
 } from '../../vscode-extension/src/flow';
-import type { BoardNote, HarnessSnapshot, HarnessUnit, Placeholder, SlateFlow } from './types';
+import type { BoardNote, HarnessSnapshot, HarnessUnit, NodeVerificationResult, Placeholder, SlateFlow } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
@@ -64,6 +64,8 @@ export type SlateNodeData = {
     resolvesTo?: string | null;
     /** Find references: the target and its refs are highlighted. */
     highlighted?: boolean;
+    /** Per-node verification result badge (S-513). */
+    verification?: NodeVerificationResult;
 };
 
 function compactOutsideStrings(text: string): string {
@@ -388,6 +390,7 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
                 intent,
                 editableIntent: Boolean(top) && !isClass && !map,
                 problem: document.diagnostics[0]?.message,
+                verification: snapshot.verifications?.[nodeId] ?? document.verification,
                 ...ports,
                 contextPorts: Boolean(top) && !map,
             },

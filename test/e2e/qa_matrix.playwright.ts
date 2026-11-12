@@ -413,3 +413,95 @@ test('surfaces JPL-60 node problem badges and split prompt on over-length nodes'
     await expect(page.locator('[data-testid="jpl60-split-prompt"]')).toBeVisible();
     await expect(page.locator('[data-testid="jpl60-split-prompt"]')).toContainText('JPL-60 Notice:');
 });
+
+test('surfaces live verification badges on canvas nodes and verification inspector controls', async ({ page }) => {
+    await host(page, null);
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 4,
+                projectName: 'verify-demo',
+                documents: [
+                    {
+                        id: 'node:scoring/normalize_score',
+                        path: 'slate/nodes/scoring/normalize_score.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:norm',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def normalize_score(score: int, maximum: int) -> int:\n    return (score * 100) // maximum\n',
+                        units: [{
+                            id: 'scoring/normalize_score', identity: 'durable', kind: 'function', name: 'normalize_score', qualifiedName: 'scoring.normalize_score', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 19 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 35 } } },
+                            annotation: { intent: 'Normalize score', contract: 'Test', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def normalize_score(score: int, maximum: int) -> int', parameters: 'score: int, maximum: int', returnAnnotation: 'int',
+                            params: [{ name: 'score', annotation: 'int', default: null, kind: 'keyword' }, { name: 'maximum', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                    },
+                ],
+                verifications: {
+                    'scoring/normalize_score': {
+                        nodeId: 'scoring/normalize_score',
+                        state: 'passed',
+                        timestamp: Date.now(),
+                        sourceHash: 'sha256:norm',
+                        pydanticValid: true,
+                        testsPassed: 3,
+                        testsTotal: 3,
+                        diagnostics: ['Pytest passed; mutmut mutation testing passed (0 mutants survived).'],
+                    },
+                },
+            },
+        }, '*');
+    });
+
+    // 1. Check canvas verification badge
+    const badge = page.locator('.react-flow__node[data-id="scoring/normalize_score"] [data-testid="verification-badge-passed"]');
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText(/passed/i);
+
+    // 2. Select node and verify inspector details
+    await select(page, 'scoring/normalize_score');
+    await expect(page.locator('[data-testid="inspector-verification-badge"]')).toContainText(/passed/i);
+    await expect(page.locator('.verification-summary__tests')).toContainText('3/3 pytest checks passed');
+
+    // 3. Test inspector action buttons
+    await page.locator('[data-testid="btn-verify-node"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'verifyNode',
+        unitId: 'scoring/normalize_score',
+    }));
+
+    await page.locator('[data-testid="btn-try-revisions"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'tryRevisions',
+        unitId: 'scoring/normalize_score',
+        maxRevisions: 3,
+    }));
+
+    // 4. Update verification to mutant_survived and verify badge and diff
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'verificationStatus',
+            result: {
+                nodeId: 'scoring/normalize_score',
+                state: 'mutant_survived',
+                timestamp: Date.now(),
+                sourceHash: 'sha256:norm',
+                pydanticValid: true,
+                testsPassed: 3,
+                testsTotal: 3,
+                survivingMutants: 1,
+                totalMutants: 4,
+                mutantDiff: '--- score * 100\n+++ score * 101',
+                diagnostics: ['1 surviving mutant(s) detected by mutmut.'],
+            },
+        }, '*');
+    });
+
+    const mutantBadge = page.locator('.react-flow__node[data-id="scoring/normalize_score"] [data-testid="verification-badge-mutant_survived"]');
+    await expect(mutantBadge).toBeVisible();
+    await expect(page.locator('.verification-summary__mutation')).toContainText('1 surviving / 4 mutants');
+});

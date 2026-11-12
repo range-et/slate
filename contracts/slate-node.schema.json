@@ -57,6 +57,47 @@
         "type": "string"
       }
     },
+    "verification": {
+      "type": "object",
+      "description": "Per-node verification result (Pydantic contract, pytest checks, mutmut mutation testing)",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["untested", "running", "passed", "failed", "mutant_survived", "stale"]
+        },
+        "timestamp": {
+          "type": "number"
+        },
+        "sourceHash": {
+          "type": "string"
+        },
+        "testsPassed": {
+          "type": "integer"
+        },
+        "testsTotal": {
+          "type": "integer"
+        },
+        "survivingMutants": {
+          "type": "integer"
+        },
+        "totalMutants": {
+          "type": "integer"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "traceback": {
+          "type": "string"
+        },
+        "mutantDiff": {
+          "type": "string"
+        },
+        "retryCount": {
+          "type": "integer"
+        }
+      }
+    },
     "context": {
       "type": "array",
       "description": "Node IDs referenced for background context/readiness",

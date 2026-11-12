@@ -67,6 +67,26 @@ export interface HarnessDocument extends ParseModuleResult {
     imports?: string[];
     /** Explicit node dependencies declared in the node JSON (`uses`). */
     uses?: string[];
+    /** Per-node verification status badge (S-513). */
+    verification?: NodeVerificationResult;
+}
+
+export type VerificationState = 'untested' | 'running' | 'passed' | 'failed' | 'mutant_survived' | 'stale';
+
+export interface NodeVerificationResult {
+    nodeId: string;
+    state: VerificationState;
+    timestamp: number;
+    sourceHash: string;
+    pydanticValid?: boolean;
+    testsPassed?: number;
+    testsTotal?: number;
+    survivingMutants?: number;
+    totalMutants?: number;
+    diagnostics?: string[];
+    traceback?: string;
+    mutantDiff?: string;
+    retryCount?: number;
 }
 
 export type Point = { x: number; y: number };
@@ -87,6 +107,8 @@ export interface HarnessSnapshot {
     placeholders?: Placeholder[];
     flows?: HarnessFlow[];
     library?: LibraryDocument[];
+    /** Per-node verification status map (S-513). */
+    verifications?: Record<string, NodeVerificationResult>;
 }
 
 /** A canvas alias of a node, flow, or library unit (stored in layout.json). */
@@ -217,4 +239,6 @@ export type HostMessage =
     | { type: 'proposalReady'; proposal: HarnessProposal }
     | { type: 'proposalStale'; proposalId: string; message: string }
     | { type: 'proposalAccepted'; unitId: string }
-    | { type: 'describeState'; running: boolean };
+    | { type: 'describeState'; running: boolean }
+    | { type: 'verificationStatus'; result: NodeVerificationResult }
+    | { type: 'verificationBatch'; results: Record<string, NodeVerificationResult> };

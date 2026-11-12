@@ -23,6 +23,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 |---|---|---|
 | Startup | Host receives `ready`; snapshot renders definitions, state, diagnostics, refs, placeholders, flows, values, notes | B/Q startup; H indexing; W bundle rendering |
 | JPL-60 & Contracts | Warning badge on node card for >60 lines or missing annotations; inspector displays diagnostics and split/refactor prompt | B inspector diagnostics; Q inspector JPL-60 warning / split action |
+| Node Verification & Quality Badges | Live verification badge on node cards (untested, running, passed, failed, mutant_survived, stale); inspector displays Verification & JPL-60 Quality section with passed/total tests, mutant count, collapsible failure traceback / mutant diff, "Verify Node" trigger and "Try up to 3 revisions" bounded retry loop with micro-packet feedback | Q surfaces live verification badges on canvas nodes and verification inspector controls; P per-node Pydantic + pytest + mutmut verification runner, badges, staleness, cancellation, and bounded retry loop; U verification_runner.matrix.test.ts |
 | Selection | Node click selects and opens inspector; selected unit requests packet preview | B context workbench; Q inspector / generation |
 | Selection | Shift multi-select followed by grouping preserves the selected instance IDs and flow scope | B refs/flows/grouping |
 | Selection | Clear selection removes selected styling and inspector | Q palette keyboard/reference navigation |

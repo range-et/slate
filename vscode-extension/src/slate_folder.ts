@@ -1,6 +1,6 @@
 import { parser } from '@lezer/python';
 
-import type { BoardNote, CanvasRef, HarnessDocument, Placeholder, Point } from './harness_protocol';
+import type { BoardNote, CanvasRef, HarnessDocument, NodeVerificationResult, Placeholder, Point } from './harness_protocol';
 import { parseModule } from './python_adapter';
 
 // The decoupled `slate/` folder: slate.json, layout.json, and one JSON file per
@@ -40,6 +40,7 @@ export interface SlateNode {
     context: string[];
     cases?: unknown[];
     check?: string[];
+    verification?: NodeVerificationResult;
     examples: string[];
     describedBy?: 'human' | 'llama';
     locked: boolean;
@@ -57,7 +58,7 @@ export interface SlateNode {
 
 export type NodeKind = 'prelude' | 'epilogue';
 
-const NODE_KEYS = ['slate', 'name', 'language', 'kind', 'intent', 'contract', 'context', 'cases', 'check', 'examples', 'describedBy', 'locked', 'order', 'imports', 'uses', 'code'];
+const NODE_KEYS = ['slate', 'name', 'language', 'kind', 'intent', 'contract', 'context', 'cases', 'check', 'verification', 'examples', 'describedBy', 'locked', 'order', 'imports', 'uses', 'code'];
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ZERO_RANGE = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
 
@@ -178,6 +179,7 @@ export function parseNode(text: string): SlateNode {
         context: stringList(value.context, 'context'),
         cases: Array.isArray(value.cases) ? value.cases : undefined,
         check: value.check !== undefined ? stringList(value.check, 'check') : undefined,
+        verification: isRecord(value.verification) ? value.verification as unknown as NodeVerificationResult : undefined,
         examples: stringList(value.examples, 'examples'),
         describedBy: value.describedBy as SlateNode['describedBy'],
         locked: value.locked === true,
@@ -199,6 +201,7 @@ export function serializeNode(node: SlateNode): string {
     if (node.context.length) value.context = node.context;
     if (node.cases?.length) value.cases = node.cases;
     if (node.check?.length) value.check = node.check;
+    if (node.verification) value.verification = node.verification;
     if (node.examples.length) value.examples = node.examples;
     if (node.describedBy) value.describedBy = node.describedBy;
     value.locked = node.locked;
@@ -301,6 +304,7 @@ export function indexNode(
                 imports: node.imports,
                 uses: node.uses,
                 examples: node.examples,
+                verification: node.verification,
                 locked: node.locked,
             };
         }
@@ -321,7 +325,7 @@ export function indexNode(
             }
         }
     }
-    return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, diagnostics }, node, code };
+    return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, verification: node.verification, diagnostics }, node, code };
 }
 
 export interface Jpl60CheckResult {
