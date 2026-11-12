@@ -294,6 +294,7 @@ function Inspector({
                 <div className="harness-inspector__actions">
                     {node.data.flowId && <button onClick={() => onEnterFlow(node.data.flowId!)}>Open flow</button>}
                     {node.data.target && !node.data.broken && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => onGoTo(node.data.target!)}>Go to definition</button>}
+                    {node.data.target && !node.data.broken && !node.data.flowId && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => action({ kind: 'makeUnique', id: node.id })}>Make unique</button>}
                 </div>
             </section>}
             {note && <>
@@ -537,12 +538,14 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
                 vscode?.postMessage({ type: 'generate', unitId: unit.id });
                 onClose();
             }}>Generate implementation</button>}
+            <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [data?.path ?? unit.id], mode: 'deleteDefinition', prompt: true })}>Delete node file…</button>
         </>}
         {(data?.kind === 'ref' || data?.kind === 'instance') && <>
             <div className="board-context-menu__label">{data.target}</div>
             {data.flowId && <button role="menuitem" onClick={() => { onEnterFlow(data.flowId!); onClose(); }}>Open flow</button>}
             {!data.broken && <button role="menuitem" onClick={() => { onGoTo(data.target!); onClose(); }}>Go to definition</button>}
             {!data.broken && <button role="menuitem" onClick={() => { onFindRefs(data.target!); onClose(); }}>Find references</button>}
+            {data.target && !data.broken && !data.flowId && <button role="menuitem" onClick={() => act({ kind: 'makeUnique', id: node!.id })}>Make unique</button>}
             {data.unit && ['function', 'method'].includes(data.unit.kind) && data.path && <button role="menuitem" onClick={() => {
                 vscode?.postMessage({ type: 'generate', unitId: data.target });
                 onClose();
@@ -550,6 +553,24 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
             <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>
                 {data.kind === 'ref' ? 'Delete reference' : 'Remove from flow'}
             </button>
+            {data.target && !data.broken && !data.flowId && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id], mode: 'deleteDefinition', prompt: true })}>
+                Delete node file…
+            </button>}
+        </>}
+        {data?.kind === 'group' && <>
+            <div className="board-context-menu__label">{data.label}</div>
+            {(data.outputs ?? []).filter(p => p.name !== '+').map(port => (
+                <React.Fragment key={port.id}>
+                    <button role="menuitem" onClick={() => act({ kind: 'renameFlowPort', flow: scope.flow, direction: 'input', oldName: port.name })}>Rename input “{port.name}”…</button>
+                    <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteFlowPort', flow: scope.flow, direction: 'input', name: port.name })}>Delete input “{port.name}”</button>
+                </React.Fragment>
+            ))}
+            {(data.inputs ?? []).filter(p => p.name !== '+').map(port => (
+                <React.Fragment key={port.id}>
+                    <button role="menuitem" onClick={() => act({ kind: 'renameFlowPort', flow: scope.flow, direction: 'output', oldName: port.name })}>Rename output “{port.name}”…</button>
+                    <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteFlowPort', flow: scope.flow, direction: 'output', name: port.name })}>Delete output “{port.name}”</button>
+                </React.Fragment>
+            ))}
         </>}
         {data?.kind === 'placeholder' && <>
             <div className="board-context-menu__label">{data.label}</div>
@@ -859,6 +880,7 @@ function HarnessApp() {
     const [proposal, setProposal] = useState<HarnessProposal | null>(null);
     const [acceptedUnitId, setAcceptedUnitId] = useState<string | null>(null);
     const [boardMenu, setBoardMenu] = useState<BoardMenuState | null>(null);
+    const [clipboard, setClipboard] = useState<Array<{ id: string; kind: string; node?: string; value?: string; x?: number; y?: number }> | null>(null);
     const [view, setView] = useState<'compose' | 'map'>('compose');
     const [flowStack, setFlowStack] = useState<string[]>([]);
     const [libraryOpen, setLibraryOpen] = useState(true);
@@ -1118,6 +1140,38 @@ function HarnessApp() {
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'g') {
                 event.preventDefault();
                 groupSelection();
+            } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+                if (selectedNodes.length > 0) {
+                    event.preventDefault();
+                    const items = selectedNodes.map(node => ({
+                        id: node.id,
+                        kind: node.data.kind,
+                        node: node.data.target ?? node.data.path ?? node.id,
+                        value: node.data.value,
+                        x: node.position.x,
+                        y: node.position.y,
+                    }));
+                    setClipboard(items);
+                    try {
+                        window.navigator.clipboard?.writeText(JSON.stringify({ slateClipboard: true, items }));
+                    } catch { /* headless or permissions */ }
+                    setCommandResult(`Copied ${items.length} item(s).`);
+                }
+            } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'v') {
+                event.preventDefault();
+                const isDuplicate = event.shiftKey;
+                const point = pointer.current ?? viewCenter();
+                if (clipboard && clipboard.length > 0) {
+                    post({ kind: 'pasteItems', mode: isDuplicate ? 'duplicate' : 'linked', items: clipboard, x: point.x, y: point.y });
+                }
+            } else if (event.key === 'Delete' || event.key === 'Backspace') {
+                if (selectedNodes.length > 0) {
+                    event.preventDefault();
+                    post({ kind: 'deleteItems', ids: selectedNodes.map(n => n.id), prompt: true });
+                } else if (selected?.data.note) {
+                    event.preventDefault();
+                    vscode?.postMessage({ type: 'noteDelete', revision: snapshot.revision, noteId: selected.data.note.id });
+                }
             } else if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey) {
                 event.preventDefault();
                 if (selected?.data.flowId) enterFlow(selected.data.flowId);
@@ -1188,16 +1242,72 @@ function HarnessApp() {
             }
         }
         const selectedIds = selectedNodes.map(node => node.id);
-        const removable = selectedNodes.filter(node => ['ref', 'instance', 'value', 'placeholder'].includes(node.data.kind)).map(node => node.id);
+        const removable = selectedNodes.filter(node => ['ref', 'instance', 'value', 'placeholder', 'function', 'class', 'module', 'document'].includes(node.data.kind)).map(node => node.id);
+        const removableCount = selectedNodes.filter(node => ['ref', 'instance', 'value', 'placeholder'].includes(node.data.kind)).length || selectedNodes.length;
         items.push({ id: 'add-node', group: 'canvas', label: 'Add node…', detail: 'Tab · Shift+A · double-click', run: () => openAdd() });
-        if (selectedIds.length) items.push({ id: 'group', group: 'canvas', label: 'Group selection into flow', detail: '⌘G', run: groupSelection });
-        if (removable.length) items.push({ id: 'delete', group: 'canvas', label: `Delete selected (${removable.length})`, run: () => post({ kind: 'deleteItems', ids: removable }) });
+        if (selectedIds.length) {
+            items.push({ id: 'copy', group: 'selection', label: `Copy selected (${selectedIds.length})`, detail: '⌘C',
+                run: () => {
+                    const clipboardItems = selectedNodes.map(node => ({
+                        id: node.id,
+                        kind: node.data.kind,
+                        node: node.data.target ?? node.data.path ?? node.id,
+                        value: node.data.value,
+                        x: node.position.x,
+                        y: node.position.y,
+                    }));
+                    setClipboard(clipboardItems);
+                    try {
+                        window.navigator.clipboard?.writeText(JSON.stringify({ slateClipboard: true, items: clipboardItems }));
+                    } catch { /* ignore */ }
+                    setCommandResult(`Copied ${clipboardItems.length} item(s).`);
+                }
+            });
+            items.push({ id: 'group', group: 'canvas', label: 'Group selection into flow', detail: '⌘G', run: groupSelection });
+        }
+        if (clipboard && clipboard.length > 0) {
+            items.push({ id: 'paste-linked', group: 'canvas', label: `Paste linked (${clipboard.length})`, detail: '⌘V',
+                run: () => {
+                    const point = pointer.current ?? viewCenter();
+                    post({ kind: 'pasteItems', mode: 'linked', items: clipboard, x: point.x, y: point.y });
+                }
+            });
+            items.push({ id: 'paste-duplicate', group: 'canvas', label: `Paste duplicate (${clipboard.length})`, detail: '⇧⌘V',
+                run: () => {
+                    const point = pointer.current ?? viewCenter();
+                    post({ kind: 'pasteItems', mode: 'duplicate', items: clipboard, x: point.x, y: point.y });
+                }
+            });
+        }
+        if (selected && (selected.data.kind === 'ref' || selected.data.kind === 'instance') && selected.data.target && !selected.data.broken && !selected.data.flowId) {
+            items.push({ id: 'make-unique', group: 'selection', label: `Make unique (${selected.data.target})`,
+                detail: 'Fork this occurrence into an independent definition file',
+                run: () => post({ kind: 'makeUnique', id: selected.id }) });
+        }
+        if (removable.length) items.push({ id: 'delete', group: 'canvas', label: `Delete selected (${removableCount})`, detail: 'Delete / ⌫', run: () => post({ kind: 'deleteItems', ids: removable }) });
         if (selected?.data.flowId) items.push({ id: 'enter', group: 'selection', label: `Open flow ${selected.data.flowId}`, detail: 'Tab', run: () => enterFlow(selected.data.flowId!) });
         if (selected?.data.target || selected?.data.unit) {
             const target = selected.data.target ?? selected.data.unit!.id;
             items.push({ id: 'refs', group: 'selection', label: `Find references of ${target}`, run: () => findReferences(target) });
         }
-        if (scope.flow) items.push({ id: 'up', group: 'canvas', label: 'Back to parent canvas', run: () => setFlowStack(stack => stack.slice(0, -1)) });
+        if (scope.flow) {
+            items.push({ id: 'up', group: 'canvas', label: 'Back to parent canvas', run: () => setFlowStack(stack => stack.slice(0, -1)) });
+            const currentFlowObj = snapshot.flows?.find(item => item.id === scope.flow)?.flow;
+            if (currentFlowObj) {
+                for (const input of currentFlowObj.inputs) {
+                    items.push({ id: `rename-in-${input.name}`, group: 'canvas', label: `Rename flow input “${input.name}”…`,
+                        run: () => post({ kind: 'renameFlowPort', flow: scope.flow, direction: 'input', oldName: input.name }) });
+                    items.push({ id: `delete-in-${input.name}`, group: 'canvas', label: `Delete flow input “${input.name}”`,
+                        run: () => post({ kind: 'deleteFlowPort', flow: scope.flow, direction: 'input', name: input.name }) });
+                }
+                for (const output of currentFlowObj.outputs) {
+                    items.push({ id: `rename-out-${output.name}`, group: 'canvas', label: `Rename flow output “${output.name}”…`,
+                        run: () => post({ kind: 'renameFlowPort', flow: scope.flow, direction: 'output', oldName: output.name }) });
+                    items.push({ id: `delete-out-${output.name}`, group: 'canvas', label: `Delete flow output “${output.name}”`,
+                        run: () => post({ kind: 'deleteFlowPort', flow: scope.flow, direction: 'output', name: output.name }) });
+                }
+            }
+        }
         if (!scope.flow) {
             items.push({ id: 'view', group: 'canvas', label: view === 'map' ? 'Switch to Compose' : 'Switch to Map', detail: 'Map groups nodes by folder', run: () => setView(view === 'map' ? 'compose' : 'map') });
             items.push({ id: 'new-node', group: 'canvas', label: 'New node file…', detail: 'Typed signature + intent',

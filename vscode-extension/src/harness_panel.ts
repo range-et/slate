@@ -11,10 +11,10 @@ import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
 import { searchUnits } from './search';
 import {
-    connect, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
-    removeInstances, uniqueName, unitSignature, type Port,
+    connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
+    removeInstances, removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, serializeFlow, uniqueName, unitSignature, type Port,
 } from './flow';
-import { checkNodeCode, codeLines, CONFIG_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId } from './slate_folder';
+import { checkNodeCode, codeLines, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 
 function nonce(): string {
@@ -555,6 +555,7 @@ export class HarnessPanel implements vscode.Disposable {
             'createRef', 'createPlaceholder', 'placeholderToRef', 'placeholderToNode',
             'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
             'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
+            'pasteItems', 'makeUnique', 'renameFlowPort', 'deleteFlowPort',
         ].includes(String(action.kind))) {
             return false;
         }
@@ -712,18 +713,320 @@ export class HarnessPanel implements vscode.Disposable {
                 return true;
             }
             case 'deleteItems': {
-                const ids = new Set(Array.isArray(action.ids) ? action.ids.map(String) : []);
-                if (scope === null) {
+                const rawIds = Array.isArray(action.ids) ? action.ids.map(String) : [];
+                if (!rawIds.length) return true;
+                const currentFlow = this.flow(flowId);
+                const isRoot = scope === null;
+                const flowInstances = new Map(currentFlow.instances.map(inst => [inst.id, inst]));
+
+                let mode = typeof action.mode === 'string' ? action.mode : null;
+                const wantsPrompt = action.prompt === true || mode === 'prompt';
+
+                const allDocuments = this.snapshot?.documents ?? [];
+                const definitionIds = new Set(allDocuments.map(doc => nodeIdForPath(doc.path)!));
+
+                if (wantsPrompt) {
+                    const firstId = rawIds[0];
+                    const inst = flowInstances.get(firstId);
+                    const isDef = definitionIds.has(firstId) || !inst;
+                    const label = inst ? (inst.kind === 'value' ? 'value' : inst.node ?? firstId) : firstId;
+
+                    if (inst && (inst.kind === 'value' || inst.id.startsWith('placeholder-'))) {
+                        const choice = await vscode.window.showWarningMessage(
+                            `Delete ${label}?`,
+                            { modal: true },
+                            'Delete',
+                        );
+                        if (choice !== 'Delete') return true;
+                        mode = 'removeInstance';
+                    } else if (inst && inst.node && definitionIds.has(inst.node)) {
+                        const choice = await vscode.window.showWarningMessage(
+                            `Delete ${label}?`,
+                            { modal: true },
+                            'Remove call instance',
+                            'Delete node file',
+                        );
+                        if (!choice) return true;
+                        mode = choice === 'Delete node file' ? 'deleteDefinition' : 'removeInstance';
+                    } else if (isDef && definitionIds.has(firstId)) {
+                        const choice = await vscode.window.showWarningMessage(
+                            `Delete slate/nodes/${firstId}.json from disk?`,
+                            { modal: true },
+                            'Delete node file',
+                        );
+                        if (choice !== 'Delete node file') return true;
+                        mode = 'deleteDefinition';
+                    } else {
+                        const choice = await vscode.window.showWarningMessage(
+                            `Delete ${label}?`,
+                            { modal: true },
+                            'Remove call instance',
+                        );
+                        if (choice !== 'Remove call instance') return true;
+                        mode = 'removeInstance';
+                    }
+                }
+
+                if (mode === 'deleteDefinition') {
+                    const nodeIdsToDelete = new Set<string>();
+                    for (const id of rawIds) {
+                        const inst = flowInstances.get(id);
+                        if (inst?.node) {
+                            nodeIdsToDelete.add(inst.node);
+                        } else if (definitionIds.has(id)) {
+                            nodeIdsToDelete.add(id);
+                        }
+                    }
+
+                    const deletes: vscode.Uri[] = [];
+                    for (const targetNodeId of nodeIdsToDelete) {
+                        deletes.push(folder.uri(pathForNodeId(targetNodeId)));
+                        delete layout.positions[targetNodeId];
+                    }
+
+                    const allFlows = await folder.readFlows();
+                    const flowsMap = new Map<string, SlateFlow>();
+                    for (const f of allFlows) {
+                        if (f.flow) flowsMap.set(f.id, f.flow);
+                    }
+                    flowsMap.set(MAIN_FLOW, this.flow(MAIN_FLOW));
+
+                    for (const targetNodeId of nodeIdsToDelete) {
+                        for (const [fId, flowObj] of flowsMap.entries()) {
+                            const cleanedFlow = removeNodeReferences(flowObj, targetNodeId);
+                            if (cleanedFlow !== flowObj) {
+                                flowsMap.set(fId, cleanedFlow);
+                                const removedInstIds = flowObj.instances
+                                    .filter(item => !cleanedFlow.instances.some(c => c.id === item.id))
+                                    .map(item => item.id);
+                                for (const instId of removedInstIds) {
+                                    if (fId === MAIN_FLOW) {
+                                        delete layout.positions[instId];
+                                        layout.refs = layout.refs.filter(ref => ref.id !== instId);
+                                        folder.removeDeferredRefs([instId]);
+                                    } else if (layout.flowPositions[fId]) {
+                                        delete layout.flowPositions[fId][instId];
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for (const del of deletes) {
+                        try {
+                            await vscode.workspace.fs.delete(del, { useTrash: false });
+                        } catch { /* best effort */ }
+                    }
+
+                    for (const [fId, flowObj] of flowsMap.entries()) {
+                        await folder.writeFlow(fId, flowObj);
+                    }
+
+                    await finish(`Deleted ${nodeIdsToDelete.size} node file(s).`);
+                    return true;
+                }
+
+                const ids = new Set(rawIds);
+                if (isRoot) {
                     layout.refs = layout.refs.filter(ref => !ids.has(ref.id));
                     layout.placeholders = layout.placeholders.filter(item => !ids.has(item.id));
+                    folder.removeDeferredRefs(ids);
                     for (const id of ids) delete layout.positions[id];
-                } else for (const id of ids) delete layout.flowPositions[scope]?.[id];
-                const current = this.flow(flowId);
-                const next = removeInstances(current, ids);
-                if (scope !== null || this.snapshot?.flows?.some(item => item.id === MAIN_FLOW) || current.instances.length > 0 || current.wires.length > 0) {
+                } else {
+                    for (const id of ids) delete layout.flowPositions[scope]?.[id];
+                }
+
+                const next = removeInstances(currentFlow, ids);
+                if (scope !== null || this.snapshot?.flows?.some(item => item.id === MAIN_FLOW) || currentFlow.instances.length > 0 || currentFlow.wires.length > 0) {
                     await saveFlow(flowId, next);
                 }
                 await finish(`Removed ${ids.size} item(s).`);
+                return true;
+            }
+            case 'pasteItems': {
+                const mode = action.mode === 'duplicate' ? 'duplicate' : 'linked';
+                const items = Array.isArray(action.items) ? action.items as Array<Record<string, unknown>> : [];
+                if (!items.length) return true;
+
+                let flow = this.flow(flowId);
+                const isRoot = scope === null;
+                let firstNewId: string | undefined;
+
+                const baseOffsetX = typeof action.x === 'number' ? action.x : undefined;
+                const baseOffsetY = typeof action.y === 'number' ? action.y : undefined;
+
+                for (let index = 0; index < items.length; index++) {
+                    const item = items[index];
+                    const originalTarget = String(item.node ?? item.target ?? item.id);
+                    const itemX = typeof item.x === 'number' ? item.x : 100;
+                    const itemY = typeof item.y === 'number' ? item.y : 100;
+                    const posX = baseOffsetX !== undefined ? baseOffsetX + index * 40 : itemX + 40;
+                    const posY = baseOffsetY !== undefined ? baseOffsetY + index * 40 : itemY + 40;
+
+                    if (item.kind === 'value') {
+                        const id = uniqueName('value', flow.instances.map(inst => inst.id));
+                        if (!firstNewId) firstNewId = id;
+                        flow = { ...flow, instances: [...flow.instances, { id, kind: 'value', value: String(item.value ?? '0') }] };
+                        this.placeAt(scope, id, posX, posY);
+                        continue;
+                    }
+
+                    if (mode === 'linked') {
+                        const short = originalTarget.split(/[/:]/).pop() || 'call';
+                        const id = isRoot
+                            ? uniqueName(`ref_${short}`, [...this.rootCanvasIds(), ...flow.instances.map(inst => inst.id)])
+                            : uniqueName(short, flow.instances.map(inst => inst.id));
+                        if (!firstNewId) firstNewId = id;
+                        flow = { ...flow, instances: [...flow.instances, { id, node: originalTarget }] };
+                        this.placeAt(scope, id, posX, posY);
+                    } else {
+                        if (this.snapshot?.flows?.some(f => f.id === originalTarget)) {
+                            const sourceFlow = this.flow(originalTarget);
+                            const existingFlowNames = (this.snapshot.flows ?? []).map(f => f.id);
+                            const newFlowName = uniqueName(`${sourceFlow.name}_copy`, existingFlowNames);
+                            const duplicatedFlow: SlateFlow = {
+                                ...sourceFlow,
+                                name: newFlowName,
+                                wires: [...sourceFlow.wires],
+                            };
+                            await folder.writeFlow(newFlowName, duplicatedFlow);
+                            const instId = isRoot
+                                ? uniqueName(`ref_${newFlowName}`, [...this.rootCanvasIds(), ...flow.instances.map(inst => inst.id)])
+                                : uniqueName(newFlowName, flow.instances.map(inst => inst.id));
+                            if (!firstNewId) firstNewId = instId;
+                            flow = { ...flow, instances: [...flow.instances, { id: instId, node: newFlowName }] };
+                            this.placeAt(scope, instId, posX, posY);
+                        } else {
+                            const sourceNode = await folder.readNode(originalTarget);
+                            const existingNodes = (this.snapshot?.documents ?? []).map(doc => nodeIdForPath(doc.path)!);
+                            const baseName = sourceNode.name.replace(/_copy\d*$/, '') + '_copy';
+                            const newNodeName = uniqueName(baseName, existingNodes);
+                            const clonedNode: SlateNode = {
+                                ...sourceNode,
+                                name: newNodeName,
+                                code: sourceNode.code.map(line =>
+                                    line.replace(new RegExp(`\\bdef ${sourceNode.name}\\b`), `def ${newNodeName}`)
+                                        .replace(new RegExp(`\\bclass ${sourceNode.name}\\b`), `class ${newNodeName}`)
+                                ),
+                            };
+                            await folder.createNode(clonedNode, { x: posX, y: posY });
+                            const instId = isRoot
+                                ? uniqueName(`ref_${newNodeName}`, [...this.rootCanvasIds(), ...flow.instances.map(inst => inst.id)])
+                                : uniqueName(newNodeName, flow.instances.map(inst => inst.id));
+                            if (!firstNewId) firstNewId = instId;
+                            flow = { ...flow, instances: [...flow.instances, { id: instId, node: newNodeName }] };
+                            this.placeAt(scope, instId, posX, posY);
+                        }
+                    }
+                }
+
+                await saveFlow(flowId, flow);
+                await finish(`Pasted ${items.length} item(s) (${mode}).`, firstNewId);
+                return true;
+            }
+            case 'makeUnique': {
+                const id = String(action.id);
+                let flow = this.flow(flowId);
+                const instance = flow.instances.find(inst => inst.id === id);
+                if (!instance || instance.kind === 'value' || !instance.node) {
+                    throw new Error('Select a node instance to make unique.');
+                }
+                const targetNodeId = instance.node;
+                const sourceNode = await folder.readNode(targetNodeId);
+                const existingNodes = (this.snapshot?.documents ?? []).map(doc => nodeIdForPath(doc.path)!);
+                const baseName = sourceNode.name.replace(/_copy\d*$/, '') + '_copy';
+                const newNodeName = uniqueName(baseName, existingNodes);
+                const clonedNode: SlateNode = {
+                    ...sourceNode,
+                    name: newNodeName,
+                    code: sourceNode.code.map(line =>
+                        line.replace(new RegExp(`\\bdef ${sourceNode.name}\\b`), `def ${newNodeName}`)
+                            .replace(new RegExp(`\\bclass ${sourceNode.name}\\b`), `class ${newNodeName}`)
+                    ),
+                };
+                const pos = (scope === null ? layout.positions[id] : layout.flowPositions[scope]?.[id]) ?? { x: 100, y: 100 };
+                await folder.createNode(clonedNode, pos);
+                flow = {
+                    ...flow,
+                    instances: flow.instances.map(inst => inst.id === id ? { ...inst, node: newNodeName } : inst),
+                };
+                await saveFlow(flowId, flow);
+                await finish(`Forked ${targetNodeId} into independent ${newNodeName}.`, id);
+                return true;
+            }
+            case 'renameFlowPort': {
+                const targetFlowId = typeof action.flow === 'string' && action.flow ? action.flow : flowId;
+                const direction = action.direction === 'output' ? 'output' : 'input';
+                const oldName = String(action.oldName);
+                const givenName = typeof action.newName === 'string' ? action.newName.trim() : null;
+                const newName = givenName ?? (await ask(`Rename ${direction} port ${oldName}`, oldName, text =>
+                    !/^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? 'Use a Python identifier' : null
+                ))?.trim();
+                if (!newName || newName === oldName) return true;
+
+                const targetFlow = this.flow(targetFlowId);
+                const updatedTargetFlow = renameFlowPort(targetFlow, direction, oldName, newName);
+
+                const allFlows = await folder.readFlows();
+                const flowsMap = new Map<string, SlateFlow>();
+                for (const f of allFlows) {
+                    if (f.flow) flowsMap.set(f.id, f.flow);
+                }
+                flowsMap.set(MAIN_FLOW, this.flow(MAIN_FLOW));
+                flowsMap.set(targetFlowId, updatedTargetFlow);
+
+                for (const [fId, flowObj] of flowsMap.entries()) {
+                    if (fId === targetFlowId) continue;
+                    const repaired = repairCallerWiresOnPortRename(flowObj, targetFlowId, direction, oldName, newName, targetFlow.outputs.length);
+                    if (repaired !== flowObj) {
+                        flowsMap.set(fId, repaired);
+                    }
+                }
+
+                for (const [fId, flowObj] of flowsMap.entries()) {
+                    await folder.writeFlow(fId, flowObj);
+                }
+
+                await finish(`Renamed port ${oldName} → ${newName}.`);
+                return true;
+            }
+            case 'deleteFlowPort': {
+                const targetFlowId = typeof action.flow === 'string' && action.flow ? action.flow : flowId;
+                const direction = action.direction === 'output' ? 'output' : 'input';
+                const name = String(action.name);
+                if (action.prompt !== false) {
+                    const choice = await vscode.window.showWarningMessage(
+                        `Delete ${direction} port "${name}" from flow ${targetFlowId}?`,
+                        { modal: true },
+                        'Delete',
+                    );
+                    if (choice !== 'Delete') return true;
+                }
+
+                const targetFlow = this.flow(targetFlowId);
+                const updatedTargetFlow = deleteFlowPort(targetFlow, direction, name);
+
+                const allFlows = await folder.readFlows();
+                const flowsMap = new Map<string, SlateFlow>();
+                for (const f of allFlows) {
+                    if (f.flow) flowsMap.set(f.id, f.flow);
+                }
+                flowsMap.set(MAIN_FLOW, this.flow(MAIN_FLOW));
+                flowsMap.set(targetFlowId, updatedTargetFlow);
+
+                for (const [fId, flowObj] of flowsMap.entries()) {
+                    if (fId === targetFlowId) continue;
+                    const repaired = repairCallerWiresOnPortDelete(flowObj, targetFlowId, direction, name, targetFlow.outputs.length);
+                    if (repaired !== flowObj) {
+                        flowsMap.set(fId, repaired);
+                    }
+                }
+
+                for (const [fId, flowObj] of flowsMap.entries()) {
+                    await folder.writeFlow(fId, flowObj);
+                }
+
+                await finish(`Deleted port ${name}.`);
                 return true;
             }
             case 'createFlow':

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-    FlowFormatError, connect, disconnect, emptyFlow, extractFlow, flowIdForPath,
+    FlowFormatError, connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath,
     flowSignature, inputPorts, migrateRootOccurrences, outputPorts, parseEndpoint, parseFlow, pathForFlowId,
-    removeInstances, serializeFlow, uniqueName, unitSignature,
+    removeInstances, removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename,
+    serializeFlow, uniqueName, unitSignature,
 } from '../vscode-extension/src/flow';
 import { parseModule } from '../vscode-extension/src/python_adapter';
 
@@ -151,6 +152,67 @@ it('extracts value and named-output boundaries without inventing unavailable por
         { from: 'input:external', to: 'group.in:unknown' }, { from: 'group.out:value', to: 'sink.in:x' }, { from: 'group.out:result', to: 'sink.in:y' },
     ]));
     expect(parent).toEqual(before);
+});
+
+describe('flow port rename and delete matrix', () => {
+    const makeFlow = () => emptyFlow('test');
+
+    it.each([
+        ['input', 'a', 'b'],
+        ['output', 'out_a', 'out_b'],
+    ])('noop when %s old name equals new name', (dir, name) => {
+        const flow = { ...makeFlow(), [dir === 'input' ? 'inputs' : 'outputs']: [{ name, annotation: 'int' }] };
+        const result = renameFlowPort(flow, dir as 'input' | 'output', name, name);
+        expect(result).toBe(flow);
+    });
+
+    it.each([
+        ['input', 'x', 'x'],
+        ['output', 'y', 'y'],
+    ])('deletes unwired %s port cleanly', (dir, name) => {
+        const key = dir === 'input' ? 'inputs' : 'outputs';
+        const flow = { ...makeFlow(), [key]: [{ name, annotation: 'str' }, { name: 'keep', annotation: 'int' }] };
+        const result = deleteFlowPort(flow, dir as 'input' | 'output', name);
+        expect(result[key]).toEqual([{ name: 'keep', annotation: 'int' }]);
+        expect(result.wires).toEqual([]);
+    });
+
+    it('returns caller flow unchanged when no matching instances exist', () => {
+        const caller = {
+            ...makeFlow(),
+            instances: [{ id: 'other', node: 'some_other_node' }],
+            wires: [{ from: 'input:x', to: 'other.in:val' }],
+        };
+        expect(repairCallerWiresOnPortRename(caller, 'target_flow', 'input', 'val', 'new_val', 1)).toBe(caller);
+        expect(repairCallerWiresOnPortDelete(caller, 'target_flow', 'input', 'val', 1)).toBe(caller);
+    });
+
+    it('repairs multiple caller instances across inputs and outputs', () => {
+        const caller = {
+            ...makeFlow(),
+            instances: [
+                { id: 'inst1', node: 'pipe' },
+                { id: 'inst2', node: 'flow:pipe' },
+            ],
+            wires: [
+                { from: 'input:x', to: 'inst1.in:old_p' },
+                { from: 'input:y', to: 'inst2.in:old_p' },
+                { from: 'inst1.out:old_out', to: 'output:a' },
+                { from: 'inst2.out:old_out', to: 'output:b' },
+            ],
+        };
+        const inRepaired = repairCallerWiresOnPortRename(caller, 'pipe', 'input', 'old_p', 'new_p', 2);
+        expect(inRepaired.wires.map(w => w.to)).toEqual(['inst1.in:new_p', 'inst2.in:new_p', 'output:a', 'output:b']);
+
+        const outRepaired = repairCallerWiresOnPortRename(inRepaired, 'pipe', 'output', 'old_out', 'new_out', 2);
+        expect(outRepaired.wires.map(w => w.from)).toEqual(['input:x', 'input:y', 'inst1.out:new_out', 'inst2.out:new_out']);
+
+        const deleted = repairCallerWiresOnPortDelete(outRepaired, 'pipe', 'input', 'new_p', 2);
+        expect(deleted.wires).toEqual([
+            { from: 'inst1.out:new_out', to: 'output:a' },
+            { from: 'inst2.out:new_out', to: 'output:b' },
+        ]);
+    });
 });
 
 describe('flow identifier type boundaries', () => {

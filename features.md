@@ -33,6 +33,7 @@ keep outstanding tasks on GitHub.
 | Add-node search (Tab, Shift+A, double-click, wire drop filtered by type) | ✅ shipped |
 | Read-only Node Health Report (unreferenced candidates, exact/near duplicates, diff, caveats) | ✅ shipped |
 | Docked & resizable Inspector, on-demand context links, wire type-mismatch warnings | ✅ shipped |
+| Canvas ergonomics: Delete confirmation, linked & duplicate paste, flow ports | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -351,6 +352,32 @@ Completed for [issue #7](https://github.com/range-et/slate/issues/7):
   selected or actively wired node, and toggleable globally via the topbar
   `context` button or Command Palette (**Show all context links** / **Show
   context links on demand**).
+
+## Shipped — Canvas Ergonomics: Deletion, Copy/Paste & Flow Ports (2026-11-12, S-501 & S-503)
+
+Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue #6](https://github.com/range-et/slate/issues/6):
+
+- **Deletion with Confirmation (`deleteItems`).** Selecting a node or call
+  instance and pressing `Delete` or `Backspace` prompts with a modal confirmation
+  dialog cleanly distinguishing between **Remove call instance** (pruning the
+  occurrence from the current flow or `main.json` while preserving the node
+  definition JSON on disk) and **Delete node file** (deleting `slate/nodes/<id>.json`
+  from disk and automatically unplugging all referencing instances and wires
+  across all flows). Cancelled prompts preserve disk and canvas state without writes.
+- **Copy & Paste Linked / Duplicate.** `Cmd+C` / `Ctrl+C` copies selected items to
+  a canvas clipboard. `Cmd+V` / `Ctrl+V` (**Paste linked**) creates explicit
+  instances `{ id, node }` referencing the existing definition without creating
+  any new files. `Cmd+Shift+V` / `Ctrl+Shift+V` (**Paste duplicate**) forks the
+  node definition into a fresh node file on disk with a unique name/id and places
+  a new call instance.
+- **Make Unique.** An Inspector button and Command Palette action allows forking
+  an occurrence instance into an independent definition file on disk, rewiring the
+  occurrence to point to the newly created definition.
+- **Flow Port Renaming and Deletion.** Flow inputs and outputs (`__input`,
+  `__output`) feature dedicated context menu actions (**Rename port…**, **Delete
+  port…**). Renaming a port updates all internal wires and automatically repairs
+  caller wires across all parent flows and `main.json`. Deleting a port safely
+  unplugs connected internal wires and caller wires.
 
 ## Partially done
 
