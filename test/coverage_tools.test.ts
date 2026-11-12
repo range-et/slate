@@ -16,6 +16,12 @@ describe('coverage source inventory', () => {
     it('normalizes Windows file URLs with drive letters', () => {
         expect(sourcePath('file:///C:/repo/vscode-extension/src/flow.ts', 'C:/repo/')).toBe('vscode-extension/src/flow.ts');
     });
+    it('strips trailing slashes on rootDir and falls back to URL pathname decoding when fileURLToPath rejects', () => {
+        expect(sourcePath('/custom/root/nested/module.ts', '/custom/root///')).toBe('nested/module.ts');
+        expect(sourcePath('C:\\custom\\root\\nested\\module.ts', 'C:\\custom\\root\\\\')).toBe('nested/module.ts');
+        expect(sourcePath('file:///repo/Custom%20Dir/file.ts', '/repo/')).toBe('Custom Dir/file.ts');
+        expect(sourcePath('file:///repo/Custom%2FDir/file.ts', '/repo///')).toBe('Custom/Dir/file.ts');
+    });
     it.each([
         ['src/harness/main.tsx', true], ['vscode-extension/src/extension.ts', true],
         ['vscode-extension/src/test/runTest.ts', false], ['src/harness/types.d.ts', false],

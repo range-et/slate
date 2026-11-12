@@ -278,9 +278,11 @@ Extension Host regression suites.
 - `scripts/prepare-system-mutation.mjs` and `stryker.full-unit.config.json`:
   uses `'junction'` on Windows and `'dir'` on POSIX when linking tool
   directories into the Stryker sandbox, and runs
-  `node scripts/prepare-system-mutation.mjs` as `buildCommand` in
-  `stryker.full-unit.config.json` so `vscode-extension/node_modules`
-  (`@lezer/python@1.1.19`) is linked inside full-unit mutation sandboxes.
+  `node scripts/prepare-system-mutation.mjs --optional-vscode-test` as
+  `buildCommand` in `stryker.full-unit.config.json` so
+  `vscode-extension/node_modules` (`@lezer/python@1.1.19`) is linked inside
+  full-unit mutation sandboxes without requiring a pre-downloaded
+  `vscode-extension/.vscode-test` editor cache.
 - `src/harness/main.tsx` and `package.json`: registered the `openPalette`
   window `keydown` listener in the capture phase (`true`) with
   `event.stopPropagation()` on `Cmd/Ctrl+K` and `/` so VS Code's outer webview
@@ -291,45 +293,44 @@ Extension Host regression suites.
 
 | Metric | Before (2026-11-09) | After (2026-11-11) | Delta |
 | --- | --- | --- | --- |
-| Lines | 94.42% (`2423 / 2566`) | **99.92% (`2566 / 2568`)** | **+5.50%** (`+143` lines; only `2` unreachable/packaging-only lines remain) |
-| Statements | 92.15% (`3077 / 3339`) | **98.71% (`3298 / 3341`)** | **+6.56%** (`+221` statements) |
-| Functions | 92.48% (`763 / 825`) | **98.42% (`812 / 825`)** | **+5.94%** (`+49` functions) |
-| Branches | 87.80% (`2296 / 2615`) | **94.53% (`2473 / 2616`)** | **+6.73%** (`+177` branches) |
+| Lines | 94.42% (`2423 / 2566`) | **99.96% (`2569 / 2570`)** | **+5.54%** (`+146` lines; only `1` packaging-only fallback line remains) |
+| Statements | 92.15% (`3077 / 3339`) | **98.77% (`3302 / 3343`)** | **+6.62%** (`+225` statements) |
+| Functions | 92.48% (`763 / 825`) | **98.78% (`815 / 825`)** | **+6.30%** (`+52` functions) |
+| Branches | 87.80% (`2296 / 2615`) | **94.45% (`2471 / 2616`)** | **+6.65%** (`+175` branches) |
 
 Per-file combined coverage across the 17 executable product files (`types.ts` and
 `harness_protocol.ts` are type-only):
 
 | File | Statements | Branches | Functions | Lines | Uncovered lines |
 | --- | --- | --- | --- | --- | --- |
-| `src/harness/demo.ts` | 99.38% (160/161) | 96.47% (82/85) | 100% (45/45) | 100% (121/121) | none |
-| `src/harness/graph.ts` | 98.78% (243/246) | 92.17% (212/230) | 100% (53/53) | 100% (192/192) | none |
-| `src/harness/main.tsx` | 97.69% (635/650) | 92.90% (537/578) | 100% (204/204) | 100% (481/481) | none |
-| `src/harness/palette.ts` | 100% (52/52) | 100% (45/45) | 100% (18/18) | 100% (31/31) | none |
-| `vscode-extension/src/extension.ts` | 100% (86/86) | 100% (40/40) | 100% (18/18) | 100% (76/76) | none |
-| `vscode-extension/src/flow.ts` | 100% (263/263) | 100% (261/261) | 100% (53/53) | 100% (201/201) | none |
-| `vscode-extension/src/generation.ts` | 100% (152/152) | 100% (129/129) | 100% (28/28) | 100% (126/126) | none |
-| `vscode-extension/src/harness_panel.ts` | 97.65% (415/425) | 90.08% (327/363) | 89.26% (108/121) | 99.45% (363/365) | `39, 499` |
-| `vscode-extension/src/llama_transport.ts` | 99.13% (114/115) | 88.04% (81/92) | 100% (18/18) | 100% (95/95) | none |
-| `vscode-extension/src/port_compile_host.ts` | 97.83% (135/138) | 91.67% (99/108) | 100% (32/32) | 100% (109/109) | none |
-| `vscode-extension/src/python_adapter.ts` | 98.58% (277/281) | 92.59% (200/216) | 100% (63/63) | 100% (223/223) | none |
-| `vscode-extension/src/search.ts` | 100% (44/44) | 100% (32/32) | 100% (11/11) | 100% (36/36) | none |
-| `vscode-extension/src/slate_folder.ts` | 100% (214/214) | 100% (169/169) | 100% (44/44) | 100% (163/163) | none |
-| `vscode-extension/src/slate_folder_host.ts` | 97.67% (126/129) | 82.98% (39/47) | 100% (34/34) | 100% (104/104) | none |
-| `vscode-extension/src/compile/python.ts` | 98.48% (130/132) | 96.49% (110/114) | 100% (26/26) | 100% (97/97) | none |
-| `vscode-extension/src/port/describe.ts` | 100% (95/95) | 100% (53/53) | 100% (28/28) | 100% (70/70) | none |
-| `vscode-extension/src/port/python_importer.ts` | 99.37% (157/158) | 96.61% (57/59) | 100% (29/29) | 100% (78/78) | none |
+| `src/harness/demo.ts` | 100% (15/15) | 89.47% (17/19) | 100% (8/8) | 100% (12/12) | none |
+| `src/harness/graph.ts` | 100% (164/164) | 99.50% (201/202) | 100% (46/46) | 100% (129/129) | none |
+| `src/harness/main.tsx` | 99.35% (775/780) | 94.00% (705/750) | 99.32% (295/297) | 100% (565/565) | none |
+| `src/harness/palette.ts` | 100% (35/35) | 100% (31/31) | 100% (6/6) | 100% (24/24) | none |
+| `vscode-extension/src/extension.ts` | 100% (62/62) | 100% (24/24) | 100% (19/19) | 100% (56/56) | none |
+| `vscode-extension/src/flow.ts` | 100% (147/147) | 100% (122/122) | 100% (47/47) | 100% (108/108) | none |
+| `vscode-extension/src/generation.ts` | 100% (57/57) | 100% (36/36) | 100% (11/11) | 100% (49/49) | none |
+| `vscode-extension/src/harness_panel.ts` | 96.17% (679/706) | 85.82% (430/501) | 94.63% (141/149) | 99.82% (558/559) | `39` |
+| `vscode-extension/src/llama_transport.ts` | 100% (53/53) | 96.87% (31/32) | 100% (3/3) | 100% (41/41) | none |
+| `vscode-extension/src/port_compile_host.ts` | 100% (95/95) | 98.18% (54/55) | 100% (14/14) | 100% (82/82) | none |
+| `vscode-extension/src/python_adapter.ts` | 98.87% (263/266) | 94.35% (167/177) | 100% (55/55) | 100% (204/204) | none |
+| `vscode-extension/src/search.ts` | 100% (54/54) | 100% (44/44) | 100% (6/6) | 100% (48/48) | none |
+| `vscode-extension/src/slate_folder.ts` | 100% (188/188) | 100% (174/174) | 100% (27/27) | 100% (142/142) | none |
+| `vscode-extension/src/slate_folder_host.ts` | 95.77% (136/142) | 81.35% (48/59) | 100% (30/30) | 100% (118/118) | none |
+| `vscode-extension/src/compile/python.ts` | 100% (318/318) | 99.59% (244/245) | 100% (58/58) | 100% (225/225) | none |
+| `vscode-extension/src/port/describe.ts` | 100% (87/87) | 100% (45/45) | 100% (17/17) | 100% (70/70) | none |
+| `vscode-extension/src/port/python_importer.ts` | 100% (174/174) | 98.00% (98/100) | 100% (32/32) | 100% (138/138) | none |
 
-Audit of the 2 remaining uncovered lines in `vscode-extension/src/harness_panel.ts`:
+Audit of the 1 remaining uncovered line in `vscode-extension/src/harness_panel.ts`
+(and how line `499` in `targetExists` was covered):
 - Line `39`: fallback HTML returned only when `dist/webview/harness.js` is absent
   from the packaged extension directory (`!fs.existsSync(scriptPath)`). In a
   valid build/test environment `sync-dist` always populates `dist/webview/harness.js`.
-- Line `499`: `return this.folder.libraryNodes().some(node => node.id === target);`
-  inside `targetExists(target)` when `createNode` checks for a conflicting
-  existing definition node id (`if (this.targetExists(nodeId))`). Because
-  `createNode` validates `nodeId` via `parseNodeId` (which rejects `lib:`
-  prefixes) and `libraryNodes()` always have `id: "lib:..."`, `targetExists` is
-  only reached with non-`lib:` ids where `this.folder.hasNode(target)` handles
-  every project node.
+- Line `499` (`(snapshot.library ?? []).some(document => document.units.some(unit => unit.id === target))`
+  inside `targetExists(target)`): reachable when `addInstance` or `createRef`
+  is invoked with a library callable ID (`lib:<path>:<name>`), and now covered
+  in `vscode-extension/src/test/suite/persistence.test.ts` by adding a
+  `lib:vendor/tools.py:double` instance wired to `normalize.in:score`.
 
 ### Refreshed mutation audit (`python_adapter.ts` & `palette.ts`)
 

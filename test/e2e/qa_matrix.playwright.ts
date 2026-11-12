@@ -274,8 +274,10 @@ test('QA statusbar palette button, selection palette commands, context menu refs
     // Context menu: Find references on unit and flow, Go to definition on ref.
     await page.locator('.react-flow__node[data-id="clamp"] strong').click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Find references', exact: true }).click();
+    await command(page, 'Clear selection');
     await page.locator('.react-flow__node[data-id="flow:report"] strong').click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Find references', exact: true }).click();
+    await command(page, 'Clear selection');
     await page.locator('.react-flow__node[data-id="ref-clamp"] strong').click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Go to definition', exact: true }).click();
 

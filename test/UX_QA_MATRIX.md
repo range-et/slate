@@ -221,9 +221,11 @@ Undo/Save claims continue to come from the real host/workbench suites.
   `revealUnit` missing-unit rejection, `createNode` confirmation, duplicate-node
   rejection and refused `WorkspaceEdit`, unchanged `writeNode` early return,
   `placeholderToRef` (missing, unmatched, matched) and `placeholderToNode`
-  (cancelled and confirmed), root-canvas `addInstance` with `connectFrom`/`connectTo`
-  and `deleteItems`, root `extractFlow` with mixed unit/note selection, flow
-  self-containment and self-wire guards, self-context rejection, concurrent
-  `generate` and `describeNodes` guards and `cancelGeneration`/`cancelDescribe`,
+  (cancelled and confirmed), root-canvas `addInstance` (including `lib:...` targets
+  and persisted `connectFrom`/`connectTo` wire endpoints in `main.json`) and
+  `deleteItems` (verifying removal of the ref, its position in `layout.json`, and
+  its attached wires in `main.json`), root `extractFlow` with mixed unit/note
+  selection, flow self-containment and self-wire guards, self-context rejection,
+  concurrent `generate` and `describeNodes` guards and `cancelGeneration`/`cancelDescribe`,
   `describeNodes` write-failure reporting, stale `lastGood` graph retention when a
   node buffer becomes invalid, and malformed `layout.json` error reporting.

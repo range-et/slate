@@ -205,6 +205,12 @@ suite('Slate native persistence and proposal QA', () => {
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await open();
         assert.equal((await snapshot()).library?.[0].units[0].id, 'lib:vendor/tools.py:double');
+        await act({ kind: 'addInstance', target: 'lib:vendor/tools.py:double', x: 25, y: 35, connectTo: 'normalize.in:score' });
+        const libRef = (await snapshot()).refs?.[0];
+        assert.equal(libRef?.target, 'lib:vendor/tools.py:double');
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: `${libRef!.id}.out`, to: 'normalize.in:score' },
+        ]);
         replaceMethod(vscode.window, 'showOpenDialog', async () => undefined);
         const before = await read('slate', 'slate.json');
         await act({ kind: 'addLibrary' });
@@ -498,9 +504,27 @@ suite('Slate native persistence and proposal QA', () => {
 
         // Root addInstance with connectFrom and connectTo, plus deleteItems on root.
         await act({ kind: 'addInstance', target: 'clamp', x: 40, y: 50, connectTo: 'normalize.in:score' });
+        const connectToRef = (await snapshot()).refs![1];
+        assert.equal(connectToRef.target, 'clamp');
+        assert.deepEqual((await read('slate', 'layout.json')).positions[connectToRef.id], { x: 40, y: 50 });
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: `${connectToRef.id}.out`, to: 'normalize.in:score' },
+        ]);
         await act({ kind: 'addInstance', target: 'normalize', x: 60, y: 70, connectFrom: 'clamp.out' });
-        const rootRefIds = (await snapshot()).refs!.map(r => r.id);
-        await act({ kind: 'deleteItems', ids: [rootRefIds[0]] });
+        const connectFromRef = (await snapshot()).refs![2];
+        assert.equal(connectFromRef.target, 'normalize');
+        assert.deepEqual((await read('slate', 'layout.json')).positions[connectFromRef.id], { x: 60, y: 70 });
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: `${connectToRef.id}.out`, to: 'normalize.in:score' },
+            { from: 'clamp.out', to: `${connectFromRef.id}.in:score` },
+        ]);
+        await act({ kind: 'deleteItems', ids: [connectToRef.id] });
+        const layoutAfterDelete = await read('slate', 'layout.json');
+        assert.ok(!layoutAfterDelete.refs.some((r: { id: string }) => r.id === connectToRef.id));
+        assert.equal(layoutAfterDelete.positions[connectToRef.id], undefined);
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: 'clamp.out', to: `${connectFromRef.id}.in:score` },
+        ]);
 
         // Note validation errors, valid note creation, and root extractFlow ignoring notes.
         await post({ type: 'noteCreate', x: 'bad', y: 0 });
