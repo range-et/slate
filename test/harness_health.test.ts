@@ -35,6 +35,14 @@ describe('Node health report and code normalization', () => {
         expect(normalizeNodeCode(strSpacesB, 'msg', ['x'])).toContain('"a b x msg"');
         expect(normalizeNodeCode(strSpacesA, 'msg', ['x']))
             .not.toBe(normalizeNodeCode(strSpacesB, 'msg', ['x']));
+
+        // Leaves attribute names and keyword-argument labels unrenamed
+        const attrA = 'def f(x: object) -> int:\n    return call(x=x.x)';
+        const attrB = 'def g(y: object) -> int:\n    return call(y=y.y)';
+        expect(normalizeNodeCode(attrA, 'f', ['x'])).toContain('call(x=_p0.x)');
+        expect(normalizeNodeCode(attrB, 'g', ['y'])).toContain('call(y=_p0.y)');
+        expect(normalizeNodeCode(attrA, 'f', ['x']))
+            .not.toBe(normalizeNodeCode(attrB, 'g', ['y']));
     });
 
     it('computes line-by-line LCS diffs with 1-based line numbers for unchanged, removed, and added lines', () => {

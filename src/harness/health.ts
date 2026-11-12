@@ -117,6 +117,13 @@ function directChildren(node: SyntaxNode): SyntaxNode[] {
     return children;
 }
 
+function isKeywordArgLabel(parent: SyntaxNode, child: SyntaxNode): boolean {
+    if (parent.name !== 'ArgList') return false;
+    const siblings = directChildren(parent);
+    const idx = siblings.findIndex(sib => sib.from === child.from && sib.to === child.to);
+    return idx >= 0 && siblings[idx + 1]?.name === 'AssignOp';
+}
+
 function formatLiteralNode(node: SyntaxNode, text: string, renameMap: ReadonlyMap<string, string>): string {
     if (node.name === 'String') return text.slice(node.from, node.to);
     if (node.name !== 'FormatString') return text.slice(node.from, node.to);
@@ -125,20 +132,20 @@ function formatLiteralNode(node: SyntaxNode, text: string, renameMap: ReadonlyMa
         for (const child of directChildren(current)) {
             if (child.name === 'FormatReplacement') {
                 const innerEdits: Array<{ from: number; to: number; value: string }> = [];
-                const visitInner = (expr: SyntaxNode) => {
+                const visitInner = (expr: SyntaxNode, parent: SyntaxNode) => {
                     if (expr.name === 'String' || expr.name === 'FormatString') {
                         innerEdits.push({ from: expr.from, to: expr.to, value: formatLiteralNode(expr, text, renameMap) });
                         return;
                     }
-                    if (expr.name === 'VariableName') {
+                    if (expr.name === 'VariableName' && !isKeywordArgLabel(parent, expr)) {
                         const raw = text.slice(expr.from, expr.to);
                         const renamed = renameMap.get(raw);
                         if (renamed) innerEdits.push({ from: expr.from, to: expr.to, value: renamed });
                         return;
                     }
-                    for (const sub of directChildren(expr)) visitInner(sub);
+                    for (const sub of directChildren(expr)) visitInner(sub, expr);
                 };
-                visitInner(child);
+                for (const sub of directChildren(child)) visitInner(sub, child);
                 innerEdits.sort((a, b) => b.from - a.from);
                 let replaced = text.slice(child.from, child.to);
                 for (const edit of innerEdits) {
@@ -164,7 +171,7 @@ function formatLiteralNode(node: SyntaxNode, text: string, renameMap: ReadonlyMa
  * - Strip comments and blank lines
  * - Strip leading module/function docstring
  * - Replace the top-level definition name with `_fn`
- * - Alpha-rename parameter names to `_p0`, `_p1`, ... across the definition (outside string literals)
+ * - Alpha-rename parameter names to `_p0`, `_p1`, ... across the definition (excluding strings, attribute accesses, and keyword-argument labels)
  * - Normalize internal whitespace outside string literals while preserving exact string contents
  */
 export function normalizeNodeCode(source: string, definitionName?: string, paramNames: string[] = []): string {
@@ -180,26 +187,31 @@ export function normalizeNodeCode(source: string, definitionName?: string, param
     });
     const joined = lines.join('\n');
     const literals: string[] = [];
-    const literalSpans: Array<{ from: number; to: number; placeholder: string }> = [];
-    const collectTopLiterals = (node: SyntaxNode) => {
+    const edits: Array<{ from: number; to: number; replacement: string }> = [];
+    const collectEdits = (node: SyntaxNode, parent: SyntaxNode | null) => {
         if (node.name === 'String' || node.name === 'FormatString') {
             const index = literals.length;
             literals.push(formatLiteralNode(node, joined, renameMap));
-            literalSpans.push({ from: node.from, to: node.to, placeholder: `__SLATE_STR_${index}__` });
+            edits.push({ from: node.from, to: node.to, replacement: `__SLATE_STR_${index}__` });
             return;
         }
-        for (const child of directChildren(node)) collectTopLiterals(child);
+        if (node.name === 'VariableName' && (!parent || !isKeywordArgLabel(parent, node))) {
+            const raw = joined.slice(node.from, node.to);
+            const renamed = renameMap.get(raw);
+            if (renamed) edits.push({ from: node.from, to: node.to, replacement: renamed });
+            return;
+        }
+        for (const child of directChildren(node)) collectEdits(child, node);
     };
-    collectTopLiterals(parser.parse(joined).topNode);
-    literalSpans.sort((a, b) => b.from - a.from);
+    collectEdits(parser.parse(joined).topNode, null);
+    edits.sort((a, b) => b.from - a.from);
     let masked = joined;
-    for (const span of literalSpans) {
-        masked = masked.slice(0, span.from) + span.placeholder + masked.slice(span.to);
+    for (const edit of edits) {
+        masked = masked.slice(0, edit.from) + edit.replacement + masked.slice(edit.to);
     }
     return masked.split('\n').map(line => {
         const indent = line.match(/^[ \t]*/)?.[0].replace(/\t/g, '    ') ?? '';
         const body = line.trim()
-            .replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, token => /^__SLATE_STR_\d+__$/.test(token) ? token : (renameMap.get(token) ?? token))
             .replace(/\s+/g, ' ')
             .replace(/\s*(->|[(),:[\]])\s*/g, '$1')
             .replace(/__SLATE_STR_(\d+)__/g, (_, idx) => literals[Number(idx)] ?? '');

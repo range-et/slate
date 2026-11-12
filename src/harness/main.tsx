@@ -897,6 +897,9 @@ function HarnessApp() {
         inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(id), 400);
         return () => { if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current); };
     }, [selected?.id, selected?.data.kind, scope.flow, scope.view]);
+    useEffect(() => {
+        setActiveContextNodes([]);
+    }, [selected?.id, scope.flow, scope.view]);
     const inspectorVisible = Boolean(selected && inspectorNodeId === selected.id && selected.data.kind !== 'group' && selected.data.kind !== 'folder');
     const maxInspectorWidth = maxInspectorWidthForViewport(viewportWidth, libraryOpen);
     const effectiveInspectorWidth = clampInspectorWidth(inspectorWidth, viewportWidth, libraryOpen);
@@ -1335,7 +1338,6 @@ function HarnessApp() {
                             if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current);
                             inspectorTimer.current = window.setTimeout(() => setInspectorNodeId(node.id), 400);
                         }
-                        setActiveContextNodes([node.id, ...(node.data.target ? [node.data.target] : [])]);
                     }}
                     onNodeDoubleClick={(_, node) => {
                         if (inspectorTimer.current) window.clearTimeout(inspectorTimer.current);

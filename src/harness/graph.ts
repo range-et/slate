@@ -187,6 +187,10 @@ function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
             return false;
         }
     }
+    if (sourceBase === 'tuple' && ['Sequence', 'Iterable', 'Collection'].includes(targetBase) && tList.length === 1) {
+        const elements = sList.filter(item => item !== '...');
+        return elements.length > 0 && elements.every(item => !typesMismatch(item, tList[0]));
+    }
     if ((targetBase === 'Iterable' || targetBase === 'Collection') && sourceBase === 'dict' && tList.length === 1 && sList.length === 2) {
         return !typesMismatch(sList[0], tList[0]);
     }
