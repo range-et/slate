@@ -3,13 +3,14 @@
  * AST Contract Validator & CI Enforcement (Epic 3 / S-511).
  *
  * Enforces:
- * 1. JSON Schema validation against contracts/slate-node.schema.json & contracts/slate-flow.schema.json.
+ * 1. JSON Schema validation against contracts/slate-node.schema.json & contracts/slate-flow.schema.json using Ajv.
  * 2. AST Contract validation using the Lezer Python parser:
- *    - Strict typing: all parameters must have type annotations, and function signature must have a return type annotation.
- *    - JPL-60: <=60 total lines and <=60 executable lines per atomic function node.
+ *    - Strict typing: all parameters must have explicit type annotations, and function signature must have a return type annotation.
+ *    - JPL-60: <=60 total lines and <=60 executable lines per atomic function node (including normalized embedded newlines).
+ *    - Single definition: code must define exactly one top-level function matching node.name.
  *    - Documentation: required non-empty intent and contract.
- * 3. Parity check: ensures 100% of defined functions in project Python files originate from and map to documented slate/nodes or slate/flows.
- * 4. Drift check: verifies that compiled output matches committed disk output.
+ * 3. Parity check: ensures 100% of defined functions in project Python files originate from and map to documented slate/nodes, slate/flows, or slate/library units.
+ * 4. Drift check: verifies that compiled output matches committed disk output, resolving default outDir ('src').
  */
 
 import { createRequire } from 'module';
@@ -33,96 +34,71 @@ if (!fs.existsSync(path.join(EXTENSION_OUT, 'slate_folder.js'))) {
     });
 }
 
+const Ajv = require('ajv');
+const ajv = new Ajv({ allErrors: true, allowUnionTypes: true });
+
+const nodeSchema = JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', 'slate-node.schema.json'), 'utf8'));
+const flowSchema = JSON.parse(fs.readFileSync(path.join(ROOT, 'contracts', 'slate-flow.schema.json'), 'utf8'));
+
+const validateNodeAjv = ajv.compile(nodeSchema);
+const validateFlowAjv = ajv.compile(flowSchema);
+
 const { parseModule } = require(path.join(EXTENSION_OUT, 'python_adapter.js'));
 const { parseConfig, parseNode } = require(path.join(EXTENSION_OUT, 'slate_folder.js'));
 const { parseFlow, unitSignature } = require(path.join(EXTENSION_OUT, 'flow.js'));
 const { compilePython } = require(path.join(EXTENSION_OUT, 'compile', 'python.js'));
 
-const IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
 /**
- * Validate a node object against the formal JSON schema rules.
+ * Validate a node object against the formal JSON schema rules using Ajv.
  */
 export function validateNodeSchema(data, sourceLabel = '<node>') {
     const errors = [];
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
         return { valid: false, errors: [`${sourceLabel}: must be a JSON object`] };
     }
-    if (data.slate !== 3) {
-        errors.push(`${sourceLabel}: "slate" must be 3`);
+
+    const valid = validateNodeAjv(data);
+    if (!valid && validateNodeAjv.errors) {
+        for (const err of validateNodeAjv.errors) {
+            const loc = err.instancePath ? err.instancePath : (err.params?.missingProperty ? `/${err.params.missingProperty}` : '');
+            errors.push(`${sourceLabel}: ${loc} ${err.message}`.trim());
+        }
     }
-    if (typeof data.name !== 'string' || !IDENTIFIER_REGEX.test(data.name)) {
-        errors.push(`${sourceLabel}: "name" must be a valid identifier (got: ${JSON.stringify(data.name)})`);
-    }
-    if (typeof data.intent !== 'string' || data.intent.trim().length === 0) {
+
+    // Additional semantic checks for whitespace-only strings and embedded newlines
+    if (typeof data.intent === 'string' && data.intent.trim().length === 0) {
         errors.push(`${sourceLabel}: "intent" is required and must be a non-empty string`);
     }
-    if (typeof data.contract !== 'string' || data.contract.trim().length === 0) {
+    if (typeof data.contract === 'string' && data.contract.trim().length === 0) {
         errors.push(`${sourceLabel}: "contract" is required documentation and must be a non-empty string`);
     }
-    if (!Array.isArray(data.code)) {
-        errors.push(`${sourceLabel}: "code" must be an array of strings`);
-    } else {
-        if (!data.code.every(line => typeof line === 'string')) {
-            errors.push(`${sourceLabel}: all entries in "code" must be strings`);
-        }
-        if (data.code.length > 60) {
-            errors.push(`${sourceLabel}: code exceeds JPL-60 limit of 60 lines (${data.code.length} lines > 60)`);
+    if (Array.isArray(data.code)) {
+        const flatLines = data.code.flatMap(line => typeof line === 'string' ? line.split(/\r?\n/) : [line]);
+        if (flatLines.length > 60) {
+            errors.push(`${sourceLabel}: code exceeds JPL-60 limit of 60 lines (${flatLines.length} lines > 60)`);
         }
     }
-    if (data.context !== undefined && (!Array.isArray(data.context) || !data.context.every(item => typeof item === 'string'))) {
-        errors.push(`${sourceLabel}: "context" must be a list of strings`);
-    }
-    if (data.examples !== undefined && (!Array.isArray(data.examples) || !data.examples.every(item => typeof item === 'string'))) {
-        errors.push(`${sourceLabel}: "examples" must be a list of strings`);
-    }
-    if (data.imports !== undefined && (!Array.isArray(data.imports) || !data.imports.every(item => typeof item === 'string'))) {
-        errors.push(`${sourceLabel}: "imports" must be a list of strings`);
-    }
-    if (data.uses !== undefined && (!Array.isArray(data.uses) || !data.uses.every(item => typeof item === 'string'))) {
-        errors.push(`${sourceLabel}: "uses" must be a list of strings`);
-    }
-    if (data.kind !== undefined && data.kind !== 'prelude' && data.kind !== 'epilogue') {
-        errors.push(`${sourceLabel}: "kind" must be "prelude" or "epilogue" if specified`);
-    }
-    if (data.describedBy !== undefined && data.describedBy !== 'human' && data.describedBy !== 'llama') {
-        errors.push(`${sourceLabel}: "describedBy" must be "human" or "llama" if specified`);
-    }
-    if (data.locked !== undefined && typeof data.locked !== 'boolean') {
-        errors.push(`${sourceLabel}: "locked" must be a boolean`);
-    }
-    if (data.order !== undefined && !Number.isInteger(data.order)) {
-        errors.push(`${sourceLabel}: "order" must be an integer`);
-    }
+
     return { valid: errors.length === 0, errors };
 }
 
 /**
- * Validate a flow object against the formal JSON schema rules.
+ * Validate a flow object against the formal JSON schema rules using Ajv.
  */
 export function validateFlowSchema(data, sourceLabel = '<flow>') {
     const errors = [];
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
         return { valid: false, errors: [`${sourceLabel}: must be a JSON object`] };
     }
-    if (data.slate !== 3) {
-        errors.push(`${sourceLabel}: "slate" must be 3`);
+
+    const valid = validateFlowAjv(data);
+    if (!valid && validateFlowAjv.errors) {
+        for (const err of validateFlowAjv.errors) {
+            const loc = err.instancePath ? err.instancePath : (err.params?.missingProperty ? `/${err.params.missingProperty}` : '');
+            errors.push(`${sourceLabel}: ${loc} ${err.message}`.trim());
+        }
     }
-    if (typeof data.name !== 'string' || !IDENTIFIER_REGEX.test(data.name)) {
-        errors.push(`${sourceLabel}: "name" must be a valid identifier (got: ${JSON.stringify(data.name)})`);
-    }
-    if (data.inputs !== undefined && !Array.isArray(data.inputs)) {
-        errors.push(`${sourceLabel}: "inputs" must be an array`);
-    }
-    if (data.outputs !== undefined && !Array.isArray(data.outputs)) {
-        errors.push(`${sourceLabel}: "outputs" must be an array`);
-    }
-    if (data.instances !== undefined && !Array.isArray(data.instances)) {
-        errors.push(`${sourceLabel}: "instances" must be an array`);
-    }
-    if (data.wires !== undefined && !Array.isArray(data.wires)) {
-        errors.push(`${sourceLabel}: "wires" must be an array`);
-    }
+
     return { valid: errors.length === 0, errors };
 }
 
@@ -133,9 +109,12 @@ export function validateNodeAst(node, relativePath = '<node>') {
     const errors = [];
     const warnings = [];
 
+    const rawLines = Array.isArray(node.code) ? node.code : [];
+    const codeLines = rawLines.flatMap(line => String(line).split(/\r?\n/));
+
     if (node.kind === 'prelude' || node.kind === 'epilogue') {
         // Module state: validate Python syntax
-        const codeText = Array.isArray(node.code) ? `${node.code.join('\n')}\n` : '';
+        const codeText = `${codeLines.join('\n')}\n`;
         const parsed = parseModule(codeText, relativePath);
         if (!parsed.valid) {
             errors.push(`${relativePath}: Python syntax error in module ${node.kind}: ${parsed.diagnostics.map(d => d.message).join('; ')}`);
@@ -143,7 +122,6 @@ export function validateNodeAst(node, relativePath = '<node>') {
         return { valid: errors.length === 0, errors, warnings, unit: null };
     }
 
-    const codeLines = Array.isArray(node.code) ? node.code : [];
     const codeText = `${codeLines.join('\n')}\n`;
     const parsed = parseModule(codeText, relativePath, node.name);
 
@@ -153,21 +131,20 @@ export function validateNodeAst(node, relativePath = '<node>') {
     }
 
     const topLevel = parsed.units.filter(unit => unit.parentId === null);
-    const definition = topLevel.find(unit => unit.name === node.name);
-
-    if (!definition) {
-        errors.push(`${relativePath}: code must define top-level function named "${node.name}"`);
+    if (topLevel.length !== 1 || topLevel[0].name !== node.name) {
+        errors.push(`${relativePath}: code must contain exactly one definition named "${node.name}" (found ${topLevel.length}: ${topLevel.map(u => u.name).join(', ') || 'none'})`);
         return { valid: false, errors, warnings, unit: null };
     }
+
+    const definition = topLevel[0];
 
     if (definition.kind !== 'function') {
         errors.push(`${relativePath}: atomic unit "${node.name}" must be a function, but is "${definition.kind}"`);
     }
 
-    // Strict typing: all parameters must have explicit type annotations
+    // Strict typing: all parameters must have explicit type annotations (no self/cls exemption for top-level functions)
     if (definition.params) {
         for (const param of definition.params) {
-            if (param.name === 'self' || param.name === 'cls') continue;
             if (!param.annotation || param.annotation.trim().length === 0) {
                 errors.push(`${relativePath}: [STRICT_TYPING] Parameter "${param.name}" in function "${node.name}" is missing a type annotation`);
             }
@@ -179,7 +156,7 @@ export function validateNodeAst(node, relativePath = '<node>') {
         errors.push(`${relativePath}: [STRICT_TYPING] Function "${node.name}" is missing a return type annotation (-> ReturnType)`);
     }
 
-    // JPL-60: <=60 total lines and <=60 executable lines
+    // JPL-60: <=60 total lines and <=60 executable lines (normalized for embedded newlines)
     if (codeLines.length > 60) {
         errors.push(`${relativePath}: [JPL-60] Function "${node.name}" exceeds 60 total lines (${codeLines.length} lines > 60). Split or refactor into stubs and a flow.`);
     }
@@ -202,8 +179,54 @@ export function validateNodeAst(node, relativePath = '<node>') {
 }
 
 /**
+ * Read and index all library documents and files, matching SlateFolderHost.readLibrary.
+ * Recursively descends into directory entries in config.library.
+ */
+export function readProjectLibrary(projectDir, config) {
+    const documents = [];
+    const libraryFiles = new Set();
+    const libraryUnits = new Set();
+
+    function visit(relativePath) {
+        const fullPath = path.join(projectDir, relativePath);
+        if (!fs.existsSync(fullPath)) return;
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory()) {
+            for (const entry of fs.readdirSync(fullPath, { withFileTypes: true })) {
+                if (entry.name.startsWith('.') || entry.name === '__pycache__') continue;
+                if (entry.isDirectory()) {
+                    visit(`${relativePath.replace(/\/+$/, '')}/${entry.name}`);
+                } else if (entry.isFile() && entry.name.endsWith('.py')) {
+                    visit(`${relativePath.replace(/\/+$/, '')}/${entry.name}`);
+                }
+            }
+            return;
+        }
+        if (!relativePath.endsWith('.py')) return;
+        const normalizedRel = path.normalize(relativePath).replace(/\\/g, '/');
+        libraryFiles.add(normalizedRel);
+        const text = fs.readFileSync(fullPath, 'utf8');
+        const parsed = parseModule(text, relativePath);
+        documents.push({
+            path: normalizedRel,
+            units: parsed.units,
+            valid: parsed.valid,
+        });
+        for (const unit of parsed.units) {
+            libraryUnits.add(unit.name);
+        }
+    }
+
+    for (const entry of config.library ?? []) {
+        visit(entry.replace(/\\/g, '/'));
+    }
+
+    return { documents, libraryFiles, libraryUnits };
+}
+
+/**
  * Scan project Python files to ensure 100% of defined functions originate from
- * and map to a documented slate/nodes/ or slate/flows/ unit.
+ * and map to a documented slate/nodes/, slate/flows/, or slate/library unit.
  * Fails with a clear diagnostic if an undocumented rogue function exists.
  */
 export function checkProjectParity(projectDir) {
@@ -257,16 +280,22 @@ export function checkProjectParity(projectDir) {
         }
     }
 
+    // Collect library files and units
+    const { libraryFiles, libraryUnits } = readProjectLibrary(projectDir, config);
+    for (const unitName of libraryUnits) {
+        documentedUnits.add(unitName);
+    }
+
     // Identify project Python files to scan
     const scannedFiles = [];
-    const libraryFiles = new Set((config.library ?? []).map(p => path.normalize(p).replace(/\\/g, '/')));
 
     function collectPyFiles(dir, relativeTo = '') {
         if (!fs.existsSync(dir)) return;
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             const entryRel = relativeTo ? `${relativeTo}/${entry.name}` : entry.name;
+            const normalizedRel = path.normalize(entryRel).replace(/\\/g, '/');
             if (entry.isDirectory()) {
-                if (['tests', 'tests', 'vendor', '__pycache__', '.venv', 'venv', 'env', 'node_modules'].includes(entry.name)) {
+                if (['tests', 'vendor', '__pycache__', '.venv', 'venv', 'env', 'node_modules'].includes(entry.name)) {
                     continue;
                 }
                 collectPyFiles(path.join(dir, entry.name), entryRel);
@@ -274,7 +303,7 @@ export function checkProjectParity(projectDir) {
                 if (entry.name.startsWith('test_') || entry.name.endsWith('_test.py')) {
                     continue;
                 }
-                if (libraryFiles.has(entryRel)) {
+                if (libraryFiles.has(normalizedRel)) {
                     continue;
                 }
                 scannedFiles.push({ fullPath: path.join(dir, entry.name), relativePath: entryRel });
@@ -282,10 +311,11 @@ export function checkProjectParity(projectDir) {
         }
     }
 
-    // If compile.outDir exists, scan that output directory
-    if (config.compile?.outDir) {
-        const outDir = path.resolve(projectDir, config.compile.outDir);
-        collectPyFiles(outDir, config.compile.outDir);
+    // Resolve outDir (defaults to 'src' when compile.outDir is omitted, matching compileSlateFolder)
+    if (config.compile) {
+        const outDirRel = (config.compile.outDir ?? 'src').replace(/\\/g, '/').replace(/\/+$/, '');
+        const outDir = path.resolve(projectDir, outDirRel);
+        collectPyFiles(outDir, outDirRel);
     }
 
     for (const { fullPath, relativePath } of scannedFiles) {
@@ -314,6 +344,7 @@ export function checkProjectParity(projectDir) {
 
 /**
  * Verify that compiled output matches committed disk output.
+ * Resolves default outDir ('src') when compile.outDir is omitted (matching compileSlateFolder).
  */
 export function checkProjectDrift(projectDir) {
     const errors = [];
@@ -324,13 +355,16 @@ export function checkProjectDrift(projectDir) {
     }
 
     const config = parseConfig(fs.readFileSync(configPath, 'utf8'));
-    if (!config.compile?.outDir) {
+    if (!config.compile) {
         return { valid: true, errors: [], filesChecked };
     }
 
-    const outDir = path.resolve(projectDir, config.compile.outDir);
+    const outDirRel = (config.compile.outDir ?? 'src').replace(/\\/g, '/').replace(/\/+$/, '');
+    const outDir = path.resolve(projectDir, outDirRel);
+
     if (!fs.existsSync(outDir)) {
-        return { valid: true, errors: [], filesChecked, note: 'outDir not present on disk' };
+        errors.push(`[COMPILE_DRIFT] Output directory "${outDirRel}" does not exist in project ${projectDir}. Compiled output must be generated and committed.`);
+        return { valid: false, errors, filesChecked };
     }
 
     const nodesDir = path.join(projectDir, 'slate', 'nodes');
@@ -361,13 +395,10 @@ export function checkProjectDrift(projectDir) {
     }
 
     const library = new Map();
-    for (const file of config.library ?? []) {
-        const fullLibPath = path.join(projectDir, file);
-        if (fs.existsSync(fullLibPath)) {
-            const units = parseModule(fs.readFileSync(fullLibPath, 'utf8'), file).units;
-            for (const unit of units.filter(item => item.parentId === null)) {
-                library.set(`lib:${file}:${unit.name}`, unitSignature(unit, units));
-            }
+    const { documents } = readProjectLibrary(projectDir, config);
+    for (const doc of documents) {
+        for (const unit of doc.units.filter(item => item.parentId === null)) {
+            library.set(`lib:${doc.path}:${unit.name}`, unitSignature(unit, doc.units));
         }
     }
 
@@ -385,7 +416,7 @@ export function checkProjectDrift(projectDir) {
         filesChecked.push(relPath);
 
         if (!fs.existsSync(diskFile)) {
-            errors.push(`[COMPILE_DRIFT] Missing compiled file on disk: ${path.join(config.compile.outDir, relPath)}`);
+            errors.push(`[COMPILE_DRIFT] Missing compiled file on disk: ${path.join(outDirRel, relPath)}`);
             continue;
         }
 
@@ -393,7 +424,7 @@ export function checkProjectDrift(projectDir) {
         const expectedNormalized = expectedText.replace(/\r\n/g, '\n');
 
         if (diskContent !== expectedNormalized) {
-            errors.push(`[COMPILE_DRIFT] File content mismatch in ${path.join(config.compile.outDir, relPath)}. Compile output does not match committed disk file.`);
+            errors.push(`[COMPILE_DRIFT] File content mismatch in ${path.join(outDirRel, relPath)}. Compile output does not match committed disk file.`);
         }
     }
 
@@ -406,7 +437,7 @@ export function checkProjectDrift(projectDir) {
 
         for (const diskRel of diskFiles) {
             if (!compiledRelativePaths.has(diskRel)) {
-                errors.push(`[COMPILE_DRIFT] Unexpected extra file in ${config.compile.outDir}: ${diskRel}`);
+                errors.push(`[COMPILE_DRIFT] Unexpected extra file in ${outDirRel}: ${diskRel}`);
             }
         }
     }
@@ -516,11 +547,10 @@ export function validateProjectContracts(projectDir) {
 export function verifyAll(projectDirs = []) {
     let targets = projectDirs;
     if (targets.length === 0) {
-        // Auto-discover Slate projects
+        // Auto-discover Slate projects (active workspace projects)
         const candidates = [
             path.join(ROOT, 'examples', 'flow_demo'),
             path.join(ROOT, 'examples', 'llama_demo'),
-            path.join(ROOT, 'vscode-extension', 'test-fixtures', 'electron', 'folder_project'),
         ];
         targets = candidates.filter(dir => fs.existsSync(path.join(dir, 'slate', 'slate.json')));
     }

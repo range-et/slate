@@ -350,10 +350,7 @@ function Inspector({
                     </div>}
                     {document && document.diagnostics.some(item => item.code === 'jpl60-line-count') && (
                         <div className="harness-inspector__split-prompt" data-testid="jpl60-split-prompt">
-                            <p><strong>JPL-60 Notice:</strong> Function exceeds 60 lines. Consider splitting into smaller stubs + a flow composition.</p>
-                            <button className="secondary" onClick={() => vscode?.postMessage({ type: 'splitNode', unitId: unit.id })}>
-                                Split into stubs + flow
-                            </button>
+                            <p><strong>JPL-60 Notice:</strong> Function exceeds 60 lines. Atomic library nodes must be &le;60 lines. Decompose into stubs and a flow composition.</p>
                         </div>
                     )}
                     {nodeCode !== null && <section className="node-code">

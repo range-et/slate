@@ -323,7 +323,8 @@ export interface Jpl60CheckResult {
 
 /** Check JPL-60 rules: <=60 lines, explicit parameter & return type annotations, contract documentation. */
 export function checkJpl60(node: SlateNode, code?: string): Jpl60CheckResult {
-    const lines = code !== undefined ? codeLines(code) : node.code;
+    const rawLines = code !== undefined ? codeLines(code) : node.code;
+    const lines = rawLines.flatMap(line => line.split(/\r?\n/));
     const executable = lines.filter(l => l.trim().length > 0 && !l.trim().startsWith('#')).length;
     const diagnostics: Array<{ code: string; message: string }> = [];
 
@@ -342,7 +343,7 @@ export function checkJpl60(node: SlateNode, code?: string): Jpl60CheckResult {
             if (def && def.kind === 'function') {
                 if (def.params) {
                     for (const p of def.params) {
-                        if (p.name !== 'self' && p.name !== 'cls' && (!p.annotation || !p.annotation.trim())) {
+                        if (!p.annotation || !p.annotation.trim()) {
                             diagnostics.push({
                                 code: 'jpl60-param-annotation',
                                 message: `Parameter "${p.name}" in "${node.name}" is missing a type annotation.`,

@@ -56,7 +56,7 @@ describe('contracts/slate-node.schema.json & validateNodeSchema', () => {
 
     it('rejects missing or wrong slate format version', () => {
         expect(validateNodeSchema({ ...validNode, slate: 2 }).valid).toBe(false);
-        expect(validateNodeSchema({ ...validNode, slate: 4 }).errors[0]).toContain('"slate" must be 3');
+        expect(validateNodeSchema({ ...validNode, slate: 4 }).errors[0]).toContain('/slate must be equal to constant');
     });
 
     it('rejects invalid node identifier names', () => {
@@ -92,7 +92,7 @@ describe('contracts/slate-node.schema.json & validateNodeSchema', () => {
 
         const result61 = validateNodeSchema({ ...validNode, code: lines61 });
         expect(result61.valid).toBe(false);
-        expect(result61.errors[0]).toContain('exceeds JPL-60 limit of 60 lines (61 lines > 60)');
+        expect(result61.errors.some(e => e.includes('must NOT have more than 60 items') || e.includes('exceeds JPL-60 limit'))).toBe(true);
     });
 
     it('rejects non-array or non-string code lines', () => {
@@ -121,11 +121,15 @@ describe('contracts/slate-flow.schema.json & validateFlowSchema', () => {
         expect(result.errors).toEqual([]);
     });
 
-    it('rejects invalid flow structure', () => {
+    it('rejects invalid flow structure via Ajv schema validation', () => {
         expect(validateFlowSchema({ ...validFlow, slate: 1 }).valid).toBe(false);
         expect(validateFlowSchema({ ...validFlow, name: 'bad-name' }).valid).toBe(false);
         expect(validateFlowSchema({ ...validFlow, inputs: 'not-array' }).valid).toBe(false);
         expect(validateFlowSchema({ ...validFlow, wires: null }).valid).toBe(false);
+        // Deep schema check: inputs must contain objects with required name
+        const badInputs = validateFlowSchema({ ...validFlow, inputs: [42] });
+        expect(badInputs.valid).toBe(false);
+        expect(badInputs.errors[0]).toContain('/inputs/0 must be object');
     });
 });
 
@@ -199,6 +203,39 @@ describe('AST Contract Validation & JPL-60 strict typing (validateNodeAst)', () 
         expect(result.errors.some(e => e.includes('[STRICT_TYPING]') && e.includes('missing a return type annotation'))).toBe(true);
     });
 
+    it('enforces parameter type annotations even if named self or cls', () => {
+        const untypedSelf = {
+            ...validNode,
+            name: 'method_like',
+            code: [
+                'def method_like(self, x: int) -> int:',
+                '    return x',
+            ],
+        };
+        const result = validateNodeAst(untypedSelf, 'method_like.json');
+        expect(result.valid).toBe(false);
+        expect(result.errors.some(e => e.includes('[STRICT_TYPING]') && e.includes('self'))).toBe(true);
+    });
+
+    it('detects embedded newlines in code strings exceeding JPL-60', () => {
+        // Single string element in code array with 65 lines embedded via newlines
+        const longBody = Array.from({ length: 65 }, (_, i) => `    v${i} = ${i}`).join('\n');
+        const embeddedCode = [
+            `def calculate_tax(amount: float) -> float:\n${longBody}\n    return amount`,
+        ];
+        expect(embeddedCode.length).toBe(1);
+
+        // AST validator detects >60 normalized lines
+        const astResult = validateNodeAst({ ...validNode, code: embeddedCode }, 'calculate_tax.json');
+        expect(astResult.valid).toBe(false);
+        expect(astResult.errors.some(e => e.includes('[JPL-60]') && e.includes('lines > 60'))).toBe(true);
+
+        // Schema validator also rejects normalized line count > 60
+        const schemaResult = validateNodeSchema({ ...validNode, code: embeddedCode }, 'calculate_tax.json');
+        expect(schemaResult.valid).toBe(false);
+        expect(schemaResult.errors.some(e => e.includes('exceeds JPL-60 limit of 60 lines'))).toBe(true);
+    });
+
     it('allows prelude and epilogue module state nodes', () => {
         const preludeNode = {
             slate: 3,
@@ -221,7 +258,7 @@ describe('AST Contract Validation & JPL-60 strict typing (validateNodeAst)', () 
         expect(result.errors[0]).toContain('Python syntax error');
     });
 
-    it('reports definition name mismatch', () => {
+    it('reports definition name mismatch or multiple top-level definitions', () => {
         const wrongName = {
             ...validNode,
             name: 'calculate_tax',
@@ -232,7 +269,21 @@ describe('AST Contract Validation & JPL-60 strict typing (validateNodeAst)', () 
         };
         const result = validateNodeAst(wrongName, 'calculate_tax.json');
         expect(result.valid).toBe(false);
-        expect(result.errors[0]).toContain('code must define top-level function named "calculate_tax"');
+        expect(result.errors[0]).toContain('code must contain exactly one definition named "calculate_tax"');
+
+        const multipleDefs = {
+            ...validNode,
+            name: 'calculate_tax',
+            code: [
+                'def calculate_tax(amount: float, rate: float = 0.05) -> float:',
+                '    return amount * rate',
+                'def helper(x: int) -> int:',
+                '    return x',
+            ],
+        };
+        const resultMulti = validateNodeAst(multipleDefs, 'calculate_tax.json');
+        expect(resultMulti.valid).toBe(false);
+        expect(resultMulti.errors[0]).toContain('code must contain exactly one definition named "calculate_tax"');
     });
 });
 
@@ -362,6 +413,87 @@ describe('Drift check (checkProjectDrift)', () => {
             const result = checkProjectDrift(tmpDir);
             expect(result.valid).toBe(false);
             expect(result.errors.some(e => e.includes('[COMPILE_DRIFT]') && e.includes('Unexpected extra file'))).toBe(true);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('fails when output directory does not exist on disk', () => {
+        const tmpDir = path.resolve(__dirname, '..', 'node_modules', '.tmp_missing_outdir_test');
+        fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+
+        try {
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'missing_outdir',
+                language: 'python',
+                compile: { outDir: 'src/generated' },
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'add.json'), JSON.stringify({
+                slate: 3,
+                name: 'add',
+                intent: 'Add numbers',
+                contract: 'Return sum',
+                code: ['def add(a: int, b: int) -> int:', '    return a + b'],
+            }));
+
+            // outDir src/generated does not exist
+            const result = checkProjectDrift(tmpDir);
+            expect(result.valid).toBe(false);
+            expect(result.errors.some(e => e.includes('[COMPILE_DRIFT]') && e.includes('Output directory "src/generated" does not exist'))).toBe(true);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('recursively processes directory entries in config.library without error', () => {
+        const tmpDir = path.resolve(__dirname, '..', 'node_modules', '.tmp_lib_dir_test');
+        fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+        fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+        fs.mkdirSync(path.join(tmpDir, 'vendor', 'nested'), { recursive: true });
+
+        try {
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'lib_dir_test',
+                language: 'python',
+                compile: { outDir: 'src' },
+                library: ['vendor'], // directory entry!
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'vendor', 'nested', 'helpers.py'), [
+                'def helper_util(x: int) -> int:',
+                '    return x * 2',
+            ].join('\n'));
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'add.json'), JSON.stringify({
+                slate: 3,
+                name: 'add',
+                intent: 'Add numbers',
+                contract: 'Return sum',
+                code: ['def add(a: int, b: int) -> int:', '    return a + b'],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'src', 'lib_dir_test.py'), [
+                '# Generated by Slate from slate/nodes/; edit the node files, not this file.',
+                '',
+                '',
+                '# slate: nodes/add',
+                '# intent: Add numbers',
+                '# contract: Return sum',
+                'def add(a: int, b: int) -> int:',
+                '    return a + b',
+                '',
+            ].join('\n'));
+
+            // Neither parity nor drift should crash on directory entry 'vendor', and helper_util shouldn't be rogue
+            const parity = checkProjectParity(tmpDir);
+            expect(parity.valid).toBe(true);
+            expect(parity.documentedUnits).toContain('helper_util');
+
+            const drift = checkProjectDrift(tmpDir);
+            expect(drift.valid).toBe(true);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });
         }

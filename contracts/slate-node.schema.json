@@ -34,11 +34,13 @@
     "intent": {
       "type": "string",
       "minLength": 1,
+      "pattern": "\\S",
       "description": "Required non-empty high-level summary of the node's intent"
     },
     "contract": {
       "type": "string",
       "minLength": 1,
+      "pattern": "\\S",
       "description": "Required documentation of invariants, error handling, and behavioral contract"
     },
     "cases": {
