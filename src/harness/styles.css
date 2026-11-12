@@ -127,6 +127,15 @@ button, input, textarea, select { font: inherit; }
 .proposal-review li { color: var(--strata-success, #55d187); }
 .error { color: var(--strata-error, #ff6b6b) !important; }
 .harness-inspector__diagnostic { margin-top: 16px; color: var(--strata-error, #ff6b6b); font-size: 11px; }
+.harness-inspector__split-prompt {
+    margin-top: 12px;
+    padding: 10px;
+    background: var(--strata-bg-subtle, #14171a);
+    border: 1px solid var(--strata-warning, #ffaa00);
+    border-radius: 0;
+    font-size: 11px;
+}
+.harness-inspector__split-prompt p { margin: 0; color: var(--strata-warning, #ffaa00); }
 .board-note-explainer { margin: 14px 0; color: var(--strata-warning); font-size: 10px; }
 .board-note-field { display: grid; gap: 5px; margin: 12px 0; color: var(--strata-text-secondary); font-size: 10px; }
 .board-note-field input { width: 100%; padding: 7px; color: var(--strata-text-primary); border: 1px solid var(--strata-border); background: var(--strata-bg); }

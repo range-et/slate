@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildGenerationPacket } from '../vscode-extension/src/generation';
 import {
-    checkNodeCode, indexNode, nodeFromSignature, parseConfig, parseLayout, parseNode, serializeNode, SlateFormatError,
+    checkJpl60, checkNodeCode, indexNode, nodeFromSignature, parseConfig, parseLayout, parseNode, serializeNode, SlateFormatError,
 } from '../vscode-extension/src/slate_folder';
 
 const normalize = {
@@ -90,6 +90,41 @@ describe('slate/ folder format', () => {
         expect(() => checkNodeCode(node, 'normalize', 'def renamed(score: int, maximum: int) -> int:\n    return 1\n')).toThrow(SlateFormatError);
         expect(() => checkNodeCode(node, 'normalize', 'import math\ndef normalize(score: int, maximum: int) -> int:\n    return 1\n')).toThrow(SlateFormatError);
         expect(() => checkNodeCode(node, 'normalize', 'def normalize(:\n')).toThrow(SlateFormatError);
+    });
+
+    it('validates JPL-60 line boundaries (59, 60, 61 lines) and strict type annotations', () => {
+        const baseNode = parseNode(json({ ...normalize, contract: 'Valid contract' }));
+
+        const lines59 = ['def normalize(score: int, maximum: int) -> int:', ...Array.from({ length: 57 }, (_, i) => `    x${i} = ${i}`), '    return 1'];
+        expect(lines59.length).toBe(59);
+        expect(checkJpl60(baseNode, lines59.join('\n')).valid).toBe(true);
+
+        const lines60 = ['def normalize(score: int, maximum: int) -> int:', ...Array.from({ length: 58 }, (_, i) => `    x${i} = ${i}`), '    return 1'];
+        expect(lines60.length).toBe(60);
+        expect(checkJpl60(baseNode, lines60.join('\n')).valid).toBe(true);
+
+        const lines61 = ['def normalize(score: int, maximum: int) -> int:', ...Array.from({ length: 59 }, (_, i) => `    x${i} = ${i}`), '    return 1'];
+        expect(lines61.length).toBe(61);
+        const res61 = checkJpl60(baseNode, lines61.join('\n'));
+        expect(res61.valid).toBe(false);
+        expect(res61.diagnostics.some(d => d.code === 'jpl60-line-count')).toBe(true);
+
+        // checkNodeCode with enforceJpl60 throws on line count violation
+        expect(() => checkNodeCode(baseNode, 'normalize', lines61.join('\n'), { enforceJpl60: true })).toThrow(/JPL-60/);
+
+        // Missing param annotation
+        const untypedParam = 'def normalize(score, maximum: int) -> int:\n    return 1\n';
+        const resUntyped = checkJpl60(baseNode, untypedParam);
+        expect(resUntyped.diagnostics.some(d => d.code === 'jpl60-param-annotation')).toBe(true);
+
+        // Missing return annotation
+        const untypedRet = 'def normalize(score: int, maximum: int):\n    return 1\n';
+        const resNoRet = checkJpl60(baseNode, untypedRet);
+        expect(resNoRet.diagnostics.some(d => d.code === 'jpl60-return-annotation')).toBe(true);
+
+        // indexNode with checkJpl60 surfaces diagnostics
+        const indexed61 = indexNode('slate/nodes/normalize.json', json({ ...normalize, contract: 'ok', code: lines61 }), 'python', null, { checkJpl60: true });
+        expect(indexed61.document.diagnostics.some(d => d.code === 'jpl60-line-count')).toBe(true);
     });
 
     it('creates a new node from a typed signature and rejects non-signatures', () => {

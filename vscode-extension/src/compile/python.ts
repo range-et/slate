@@ -1,7 +1,7 @@
 import { flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature } from '../flow';
 import type { SlateFlow } from '../harness_protocol';
 import { identifierNames, parseModule, splitImport, topLevelBindings } from '../python_adapter';
-import type { SlateConfig, SlateNode } from '../slate_folder';
+import { checkJpl60, type SlateConfig, type SlateNode } from '../slate_folder';
 
 // Compile slate/ nodes into Python modules. Each node folder becomes one module
 // (`a/b/` → `a/b.py`, or `a/b/__init__.py` when it also has subfolders);
@@ -198,6 +198,7 @@ export function compilePython(
     config: SlateConfig,
     flows: ReadonlyMap<string, SlateFlow> = new Map(),
     library: ReadonlyMap<string, CallableSignature> = new Map(),
+    options?: { checkJpl60?: boolean },
 ): CompileResult {
     const diagnostics: CompileDiagnostic[] = [];
     const error = (message: string) => diagnostics.push({ severity: 'error', message });
@@ -221,6 +222,16 @@ export function compilePython(
         if (language !== 'python') error(`${nodeId}: no compiler for language "${language}".`);
         else if (!parseModule(`${node.code.join('\n')}\n`, nodeId).valid) error(`${nodeId}: code is not valid Python.`);
         else valid.set(nodeId, node);
+    }
+
+    if (options?.checkJpl60) {
+        for (const [nodeId, node] of valid) {
+            if (node.kind) continue;
+            const jpl = checkJpl60(node);
+            for (const diag of jpl.diagnostics) {
+                diagnostics.push({ severity: 'warning', message: `${nodeId}: ${diag.message}` });
+            }
+        }
     }
 
     const folders = [...new Set([...valid.keys()].map(folderOf))].sort();

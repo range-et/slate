@@ -2,6 +2,7 @@
   "slate": 3,
   "name": "clamp",
   "intent": "Clamp an integer to inclusive bounds",
+  "contract": "Clamp value between lower and upper inclusive",
   "locked": false,
   "code": [
     "def clamp(value: int, lower: int, upper: int) -> int:",

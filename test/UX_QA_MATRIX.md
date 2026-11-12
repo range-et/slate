@@ -22,6 +22,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Area | Interaction and expected behavior | Automated evidence / remaining gap |
 |---|---|---|
 | Startup | Host receives `ready`; snapshot renders definitions, state, diagnostics, refs, placeholders, flows, values, notes | B/Q startup; H indexing; W bundle rendering |
+| JPL-60 & Contracts | Warning badge on node card for >60 lines or missing annotations; inspector displays diagnostics and split/refactor prompt | B inspector diagnostics; Q inspector JPL-60 warning / split action |
 | Selection | Node click selects and opens inspector; selected unit requests packet preview | B context workbench; Q inspector / generation |
 | Selection | Shift multi-select followed by grouping preserves the selected instance IDs and flow scope | B refs/flows/grouping |
 | Selection | Clear selection removes selected styling and inspector | Q palette keyboard/reference navigation |

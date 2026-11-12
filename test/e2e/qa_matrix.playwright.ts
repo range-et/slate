@@ -368,3 +368,48 @@ test('QA statusbar palette button, selection palette commands, context menu refs
     await page.locator('.react-flow__node[data-id="ref-flow"]').click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Open flow', exact: true }).click();
 });
+
+test('surfaces JPL-60 node problem badges and split prompt on over-length nodes', async ({ page }) => {
+    await host(page, null);
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 3,
+                projectName: 'jpl60-demo',
+                documents: [
+                    {
+                        id: 'node:oversized',
+                        path: 'slate/nodes/oversized.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:oversized',
+                        version: null,
+                        diagnostics: [
+                            { code: 'jpl60-line-count', message: 'Node "oversized" exceeds JPL-60 limit: 65 lines (>60). Split or refactor into stubs and a flow composition.', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } },
+                        ],
+                        source: 'def oversized(x: int) -> int:\n    return x\n',
+                        units: [{
+                            id: 'oversized', identity: 'durable', kind: 'function', name: 'oversized', qualifiedName: 'oversized', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 13 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 12 } } },
+                            annotation: { intent: 'Too long', contract: 'Test', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def oversized(x: int) -> int', parameters: 'x: int', returnAnnotation: 'int',
+                            params: [{ name: 'x', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                    },
+                ],
+            },
+        }, '*');
+    });
+
+    // Check card warning badge
+    const badge = page.locator('.react-flow__node[data-id="oversized"] .slate-node__problem');
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveAttribute('title', /exceeds JPL-60 limit/);
+
+    // Select node and verify inspector diagnostic + split prompt
+    await select(page, 'oversized');
+    await expect(page.locator('.harness-inspector__diagnostic')).toContainText('exceeds JPL-60 limit');
+    await expect(page.locator('[data-testid="jpl60-split-prompt"]')).toBeVisible();
+    await expect(page.locator('[data-testid="jpl60-split-prompt"]')).toContainText('JPL-60 Notice:');
+});

@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://slate.dev/schemas/slate-node.schema.json",
+  "title": "SlateNode",
+  "description": "Schema for an atomic library unit node in Slate (bounded by JPL-60: <=60 lines per function node, required intent and contract)",
+  "type": "object",
+  "required": [
+    "slate",
+    "name",
+    "intent",
+    "contract",
+    "code"
+  ],
+  "properties": {
+    "slate": {
+      "type": "integer",
+      "const": 3,
+      "description": "Slate workspace format version (always 3)"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "description": "Identifier name of the atomic node (matches file basename and Python function name)"
+    },
+    "language": {
+      "type": "string",
+      "description": "Target language (defaults to python if omitted)"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["prelude", "epilogue"],
+      "description": "Module-level statements instead of one function definition"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "Required non-empty high-level summary of the node's intent"
+    },
+    "contract": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "Required documentation of invariants, error handling, and behavioral contract"
+    },
+    "cases": {
+      "type": "array",
+      "description": "Structured verification cases/checks readiness indicator",
+      "items": {
+        "type": ["object", "string"]
+      }
+    },
+    "context": {
+      "type": "array",
+      "description": "Node IDs referenced for background context/readiness",
+      "items": {
+        "type": "string"
+      }
+    },
+    "examples": {
+      "type": "array",
+      "description": "Example calls or doctests",
+      "items": {
+        "type": "string"
+      }
+    },
+    "describedBy": {
+      "type": "string",
+      "enum": ["human", "llama"],
+      "description": "Provenance of the intent/contract description"
+    },
+    "locked": {
+      "type": "boolean",
+      "description": "Whether the node is locked against local LLM modification"
+    },
+    "order": {
+      "type": "integer",
+      "description": "Compile order within the output module"
+    },
+    "imports": {
+      "type": "array",
+      "description": "External import statements needed by this node",
+      "items": {
+        "type": "string"
+      }
+    },
+    "uses": {
+      "type": "array",
+      "description": "Other Slate node IDs this node depends on",
+      "items": {
+        "type": "string"
+      }
+    },
+    "code": {
+      "type": "array",
+      "description": "Python source lines bounded by JPL-60 (<=60 lines per atomic node)",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 60
+    }
+  },
+  "additionalProperties": true
+}
