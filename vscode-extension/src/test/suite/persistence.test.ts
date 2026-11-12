@@ -521,6 +521,32 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(mergedLayout.positions.normalize, { x: 140, y: 160 });
         assert.deepEqual(mergedLayout.notes, [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across drag', attachedTo: null }]);
 
+        // Grouping a legacy reference while layout.json has unsaved edits moves it to the child flow without restoring it to root.
+        const dirtyLegacyGroupEdit = new vscode.WorkspaceEdit();
+        dirtyLegacyGroupEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                positions: { 'ref-grouped': { x: 30, y: 40 }, normalize: { x: 140, y: 160 } },
+                notes: [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across group', attachedTo: null }],
+                refs: [{ id: 'ref-grouped', target: 'clamp' }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyLegacyGroupEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await act({ kind: 'refreshIndex' });
+        await act({ kind: 'extractFlow', name: 'grouped_legacy', ids: ['ref-grouped'] });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        assert.equal((await read('slate', 'layout.json')).refs, undefined);
+        assert.deepEqual((await read('slate', 'layout.json')).notes, [
+            { id: 'note-dirty', title: 'Unsaved note', body: 'Kept across group', attachedTo: null },
+        ]);
+        assert.ok(!(await read('slate', 'flows', 'main.json')).instances.some((item: any) => item.id === 'ref-grouped'));
+        assert.deepEqual((await read('slate', 'flows', 'grouped_legacy.json')).instances, [
+            { id: 'ref-grouped', node: 'clamp' },
+        ]);
+        await vscode.workspace.fs.delete(uri('slate', 'flows', 'grouped_legacy.json'));
+
         // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await vscode.workspace.fs.writeFile(layoutUri, encode({

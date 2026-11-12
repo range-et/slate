@@ -22,6 +22,7 @@ export interface FolderIndex {
 export class SlateFolderHost {
     layout: SlateLayout = emptyLayout();
     private deferredRefs: CanvasRef[] = [];
+    private layoutVersion: number | null = null;
     private readonly flowVersions = new Map<string, number | null>();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
@@ -79,9 +80,10 @@ export class SlateFolderHost {
         const uri = this.uri(pathForFlowId(flowId));
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
         await this.writeText(uri, serializeFlow(flow));
-        if (flowId === MAIN_FLOW && this.deferredRefs.length > 0) {
+        if (flowId === MAIN_FLOW && (this.deferredRefs.length > 0 || this.layout.refs.length > 0)) {
             // main.json now holds the migrated root instances; drop the deferred legacy refs.
             this.deferredRefs = [];
+            this.layout.refs = [];
             await this.writeLayout();
         }
     }
@@ -128,7 +130,9 @@ export class SlateFolderHost {
     }
 
     async readLayout(): Promise<SlateLayout> {
-        return parseLayout((await this.read(LAYOUT_PATH))?.text);
+        const file = await this.read(LAYOUT_PATH);
+        this.layoutVersion = file?.version ?? null;
+        return parseLayout(file?.text);
     }
 
     private isDirty(relativePath: string): boolean {
@@ -240,7 +244,9 @@ export class SlateFolderHost {
     hasUnsyncedDirtyFlow(): boolean {
         return vscode.workspace.textDocuments.some(document => {
             if (!document.isDirty) return false;
-            const id = flowIdForPath(this.relative(document.uri));
+            const relative = this.relative(document.uri);
+            if (relative === LAYOUT_PATH) return this.layoutVersion !== document.version;
+            const id = flowIdForPath(relative);
             return id !== null && this.flowVersions.get(id) !== document.version;
         });
     }
@@ -248,8 +254,10 @@ export class SlateFolderHost {
     async syncDirtyLayout(): Promise<void> {
         if (!this.isDirty(LAYOUT_PATH)) return;
         const latest = await this.readLayout();
+        this.deferredRefs = latest.refs;
         Object.assign(this.layout, {
             ...latest,
+            refs: [],
             positions: { ...this.layout.positions, ...latest.positions },
         });
     }
