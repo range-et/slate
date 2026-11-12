@@ -1,4 +1,5 @@
 import { expect, test } from './coverage-fixture';
+import { demoSnapshot } from '../../src/harness/demo';
 
 test('guided search returns provenance and reveals by durable unit id', async ({ page }) => {
     await page.addInitScript(() => {
@@ -279,4 +280,145 @@ test('refs, placeholders, data wires, flows, add-node search, and grouping post 
     await page.getByRole('button', { name: 'Map' }).click();
     await expect(page.locator('.slate-node--folder')).toHaveCount(2);
     await expect(page.locator('.react-flow__node[data-id="ref-clamp"]')).toHaveCount(0);
+});
+
+test('docked resizable inspector, on-demand context links, wire type-mismatch warnings, and read-only health report', async ({ page }) => {
+    await page.addInitScript(() => {
+        const messages: unknown[] = [];
+        Object.defineProperty(window, '__slateHostMessages', { value: messages });
+        window.acquireVsCodeApi = () => ({ postMessage(message: unknown) { messages.push(message); } });
+    });
+    await page.goto('/harness.html?demo');
+    const actions = async () => (await page.evaluate(() => (window as unknown as { __slateHostMessages: Array<{ type: string; action?: unknown }> }).__slateHostMessages))
+        .filter(message => message.type === 'action').map(message => message.action);
+
+    // 1. Context links are hidden until demanded so ordinary wires read as dataflow.
+    await expect(page.locator('.slate-edge--data')).toHaveCount(1);
+    await expect(page.locator('.slate-edge--context')).toHaveCount(0);
+    const ctxToggle = page.getByRole('button', { name: 'Toggle context links' });
+    await expect(ctxToggle).toHaveText('0/1 context');
+    await expect(ctxToggle).toHaveAttribute('aria-pressed', 'false');
+
+    // Selecting a node shows its context links AND opens the docked inspector without covering the canvas.
+    await page.locator('.react-flow__node[data-id="clamp"] strong').first().click();
+    await expect(page.locator('.slate-edge--context')).toHaveCount(1);
+    await expect(ctxToggle).toHaveText('1/1 context');
+
+    const inspector = page.getByRole('complementary', { name: 'Selected node details' });
+    await expect(inspector).toBeVisible();
+    const canvasBoxBefore = (await page.locator('.harness-canvas').boundingBox())!;
+    const inspectorBoxBefore = (await inspector.boundingBox())!;
+    expect(canvasBoxBefore.x + canvasBoxBefore.width).toBeLessThanOrEqual(inspectorBoxBefore.x);
+
+    // Resize the docked inspector via keyboard and pointer drag; canvas stays clear of the inspector.
+    const resizer = page.getByRole('separator', { name: 'Resize inspector' });
+    await resizer.focus();
+    await resizer.press('ArrowLeft');
+    const inspectorBoxWider = (await inspector.boundingBox())!;
+    const canvasBoxNarrower = (await page.locator('.harness-canvas').boundingBox())!;
+    expect(inspectorBoxWider.width).toBeGreaterThan(inspectorBoxBefore.width);
+    expect(canvasBoxNarrower.x + canvasBoxNarrower.width).toBeLessThanOrEqual(inspectorBoxWider.x);
+
+    const resizerBox = (await resizer.boundingBox())!;
+    await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y + resizerBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(resizerBox.x + 60, resizerBox.y + resizerBox.height / 2, { steps: 6 });
+    await page.mouse.up();
+    const inspectorBoxDragged = (await inspector.boundingBox())!;
+    const canvasBoxDragged = (await page.locator('.harness-canvas').boundingBox())!;
+    expect(inspectorBoxDragged.width).toBeLessThan(inspectorBoxWider.width);
+    expect(canvasBoxDragged.x + canvasBoxDragged.width).toBeLessThanOrEqual(inspectorBoxDragged.x);
+
+    // Clicking the pane clears selection and hides on-demand context links; toggle shows all context links.
+    await page.locator('.react-flow__pane').click({ position: { x: 15, y: 15 } });
+    await expect(page.locator('.slate-edge--context')).toHaveCount(0);
+    await ctxToggle.click();
+    await expect(ctxToggle).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('.slate-edge--context')).toHaveCount(1);
+    await ctxToggle.click();
+    await expect(ctxToggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('.slate-edge--context')).toHaveCount(0);
+
+    // 2. Type-mismatch warnings on wires warn without blocking connection.
+    await page.keyboard.press('Control+k');
+    await page.getByLabel('Command palette input').fill('Flow: report');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.react-flow__node[data-id="shout"]')).toBeVisible();
+
+    const settledBox = async (selector: string) => {
+        const locator = page.locator(selector);
+        let previous = await locator.boundingBox();
+        for (let attempt = 0; attempt < 50; attempt++) {
+            await page.waitForTimeout(80);
+            const current = await locator.boundingBox();
+            if (previous && current && current.x === previous.x && current.y === previous.y && current.width === previous.width) return current;
+            previous = current;
+        }
+        throw new Error(`${selector} did not settle`);
+    };
+    const shoutOut = await settledBox('.react-flow__node[data-id="shout"] [data-handleid="out"]');
+    const normMaxIn = await settledBox('.react-flow__node[data-id="normalize_score"] [data-handleid="in:maximum"]');
+    await page.mouse.move(shoutOut.x + shoutOut.width / 2, shoutOut.y + shoutOut.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(normMaxIn.x + normMaxIn.width / 2, normMaxIn.y + normMaxIn.height / 2, { steps: 12 });
+    await page.mouse.up();
+    expect(await actions()).toContainEqual({
+        flow: 'report', kind: 'connectData', from: 'shout.out', to: 'normalize_score.in:maximum',
+    });
+    await expect(page.getByRole('status')).toContainText('⚠ type mismatch: str → int');
+
+    // Feed updated snapshot with the mismatched wire and duplicate nodes for the Health report.
+    const nextSnapshot = structuredClone(demoSnapshot);
+    nextSnapshot.revision = 2;
+    nextSnapshot.flows!.find(f => f.id === 'report')!.flow!.wires.push({
+        from: 'shout.out', to: 'normalize_score.in:maximum',
+    });
+    const exactCopy = structuredClone(nextSnapshot.documents[0]);
+    exactCopy.id = 'node:clamp_copy';
+    exactCopy.path = 'slate/nodes/clamp_copy.json';
+    exactCopy.source = 'def clamp_copy(x: int, lo: int, hi: int) -> int:\n    """Exact structural copy."""\n    return max(lo, min(x, hi))\n';
+    exactCopy.imports = ['import importlib'];
+    exactCopy.units[0] = {
+        ...exactCopy.units[0],
+        id: 'clamp_copy',
+        name: 'clamp_copy',
+        qualifiedName: 'clamp_copy',
+        signature: 'def clamp_copy(x: int, lo: int, hi: int) -> int',
+        params: [{ name: 'x', annotation: 'int', optional: false }, { name: 'lo', annotation: 'int', optional: false }, { name: 'hi', annotation: 'int', optional: false }],
+    };
+    nextSnapshot.documents.push(exactCopy);
+    await page.evaluate(snapshot => window.postMessage({ type: 'snapshot', snapshot }, '*'), nextSnapshot);
+
+    await expect(page.locator('.slate-edge--mismatch')).toHaveCount(1);
+    await expect(page.locator('.harness-status')).toContainText('1 type mismatch');
+    await page.locator('.slate-edge--mismatch .react-flow__edge-interaction').click({ button: 'right', force: true });
+    const wireMenu = page.getByRole('menu', { name: 'Wire actions' });
+    await expect(wireMenu).toContainText('⚠ Type mismatch: str → int');
+    await page.keyboard.press('Escape');
+
+    // 3. Read-only Node Health Report shows caveats, unreferenced candidates, duplicates, diff, and navigation.
+    await page.getByRole('button', { name: 'Health', exact: true }).click();
+    const health = page.getByRole('dialog', { name: 'Node health report' });
+    await expect(health).toBeVisible();
+    await expect(health.getByText('Read-only', { exact: true })).toBeVisible();
+    const caveats = health.getByRole('note', { name: 'Analysis coverage caveats' });
+    await expect(caveats).toContainText('never safe to delete automatically');
+    await expect(caveats).toContainText('Dynamic import or reflection in clamp_copy');
+
+    const unrefSection = health.getByRole('region', { name: 'Unreferenced candidates' });
+    await expect(unrefSection).toContainText('scoring/Grader');
+    await expect(unrefSection).toContainText('clamp_copy');
+
+    const exactSection = health.getByRole('region', { name: 'Exact duplicates' });
+    await expect(exactSection).toContainText('clamp = clamp_copy');
+    await exactSection.getByRole('button', { name: 'Compare clamp vs clamp_copy' }).click();
+
+    const diffSection = health.getByRole('region', { name: 'Diff clamp vs clamp_copy' });
+    await expect(diffSection).toBeVisible();
+    await expect(diffSection).toContainText('def clamp(value: int, lower: int, upper: int) -> int:');
+    await expect(diffSection).toContainText('def clamp_copy(x: int, lo: int, hi: int) -> int:');
+
+    await diffSection.getByRole('button', { name: 'Go to clamp_copy' }).click();
+    await expect(health).toHaveCount(0);
+    await expect(page.locator('.react-flow__node[data-id="clamp_copy"]')).toHaveClass(/selected/);
 });

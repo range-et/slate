@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildGraph, callables, nodeIdOf, typeColor } from '../src/harness/graph';
+import { buildGraph, callables, nodeIdOf, typeColor, typesMismatch } from '../src/harness/graph';
 import { rankPalette, scoreMatch } from '../src/harness/palette';
 import { searchUnits } from '../vscode-extension/src/search';
 import { indexNode } from '../vscode-extension/src/slate_folder';
@@ -79,4 +79,30 @@ describe('canvas helper matrix', () => {
             expect(new Set(graph.nodes.map(node => node.id)).size).toBe(graph.nodes.length);
             if (scope.flow === 'missing') expect(graph).toEqual({ nodes: [], edges: [] });
         });
+    it.each([
+        ['int', 'int', false],
+        [' int ', 'int', false],
+        [null, 'int', false],
+        ['str', undefined, false],
+        ['Any', 'int', false],
+        ['dict[str, int]', 'any', false],
+        ['int', 'float', false],
+        ['bool', 'int', false],
+        ['bool', 'float', false],
+        ['float', 'int', true],
+        ['int', 'int | None', false],
+        ['int', 'Optional[int]', false],
+        ['int', 'Union[int, str]', false],
+        ['int | str', 'int', true],
+        ['list[int]', 'list', false],
+        ['list', 'list[int]', false],
+        ['list[int]', 'list[str]', true],
+        ['typing.List[int]', 'list[int]', false],
+        ['dict[str, int]', 'dict[int, int]', true],
+        ['int', 'str', true],
+        ['str', 'float', true],
+        ['bool', 'str', true],
+    ] as const)('evaluates typesMismatch(%j, %j) -> %s', (source, target, expected) => {
+        expect(typesMismatch(source, target)).toBe(expected);
+    });
 });

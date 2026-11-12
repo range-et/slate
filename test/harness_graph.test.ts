@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { demoSnapshot } from '../src/harness/demo';
-import { buildGraph, typeColor } from '../src/harness/graph';
+import { buildGraph, typeColor, typesMismatch } from '../src/harness/graph';
 
 describe('Python harness graph', () => {
     it('creates one free node per node file; classes contain their methods; module state is a small node', () => {
@@ -193,4 +193,49 @@ it('keeps unreadable flows visible and omits dangling data wires on the root can
     expect(graph.edges.filter(edge => edge.id.startsWith('data:')).map(edge => edge.id))
         .toEqual(['data:literal.out->clamp.in:value']);
     expect(buildGraph(snapshot, { view: 'compose', flow: 'broken' })).toEqual({ nodes: [], edges: [] });
+});
+
+it('filters context links on demand while preserving totalContextEdges count', () => {
+    const none = buildGraph(demoSnapshot, { view: 'compose', flow: null }, { contextFilter: 'none' });
+    expect(none.edges.filter(edge => edge.id.startsWith('context:'))).toEqual([]);
+    expect(none.totalContextEdges).toBe(1);
+
+    const unrelated = buildGraph(demoSnapshot, { view: 'compose', flow: null }, { contextFilter: new Set(['scoring/Grader']) });
+    expect(unrelated.edges.filter(edge => edge.id.startsWith('context:'))).toEqual([]);
+    expect(unrelated.totalContextEdges).toBe(1);
+
+    const focusedSource = buildGraph(demoSnapshot, { view: 'compose', flow: null }, { contextFilter: new Set(['clamp']) });
+    expect(focusedSource.edges.filter(edge => edge.id.startsWith('context:')).map(edge => edge.id))
+        .toEqual(['context:clamp:scoring/normalize_score']);
+
+    const focusedTarget = buildGraph(demoSnapshot, { view: 'compose', flow: null }, { contextFilter: new Set(['scoring/normalize_score']) });
+    expect(focusedTarget.edges.filter(edge => edge.id.startsWith('context:')).map(edge => edge.id))
+        .toEqual(['context:clamp:scoring/normalize_score']);
+});
+
+it('marks type-mismatched data wires with warning metadata and styling without blocking the wire', () => {
+    const snapshot = structuredClone(demoSnapshot);
+    const reportFlow = snapshot.flows!.find(item => item.id === 'report')!.flow!;
+    reportFlow.wires.push({ from: 'shout.out', to: 'normalize_score.in:maximum' });
+
+    const graph = buildGraph(snapshot, { view: 'compose', flow: 'report' });
+    const mismatched = graph.edges.find(edge => edge.id === 'data:shout.out->normalize_score.in:maximum')!;
+    expect(mismatched).toBeDefined();
+    expect(mismatched.className).toContain('slate-edge--mismatch');
+    expect(mismatched.label).toBe('⚠ str → int');
+    expect(mismatched.data).toMatchObject({
+        from: 'shout.out',
+        to: 'normalize_score.in:maximum',
+        sourceAnnotation: 'str',
+        targetAnnotation: 'int',
+        mismatch: true,
+        warning: 'str → int',
+    });
+
+    const compatible = graph.edges.find(edge => edge.id === 'data:input:score->normalize_score.in:score')!;
+    expect(compatible.className).not.toContain('slate-edge--mismatch');
+    expect(compatible.data).toMatchObject({ mismatch: false });
+    expect((compatible.data as { warning?: string }).warning).toBeUndefined();
+    expect(typesMismatch('str', 'int')).toBe(true);
+    expect(typesMismatch('int', 'float')).toBe(false);
 });

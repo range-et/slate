@@ -11,6 +11,25 @@ const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 export type CanvasScope = { view: 'compose' | 'map'; flow: string | null };
 export const ROOT_SCOPE: CanvasScope = { view: 'compose', flow: null };
 
+export type SlateEdgeData = {
+    from: string;
+    to: string;
+    sourceAnnotation: string | null;
+    targetAnnotation: string | null;
+    mismatch: boolean;
+    warning?: string;
+};
+
+export interface BuildGraphOptions {
+    /**
+     * Which context links to include on the root canvas:
+     * - `'all'` (default): every context edge
+     * - `'none'`: no context edges
+     * - `ReadonlySet<string>`: only context edges touching one of the given node IDs
+     */
+    contextFilter?: 'all' | 'none' | ReadonlySet<string>;
+}
+
 export type SlateNodeData = {
     label: string;
     detail: string;
@@ -54,6 +73,92 @@ export function typeColor(annotation: string | null | undefined): string {
     let hash = 0;
     for (const character of type) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
     return `hsl(${hash % 360} 70% 62%)`;
+}
+
+function normalizeType(annotation: string | null | undefined): string | null {
+    const compact = (annotation ?? '').replace(/\s+/g, '');
+    if (!compact || compact === 'Any' || compact === 'any') return null;
+    return compact;
+}
+
+function splitTopLevelUnion(type: string): string[] {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < type.length; index++) {
+        const ch = type[index];
+        if (ch === '[' || ch === '(' || ch === '{') depth++;
+        else if (ch === ']' || ch === ')' || ch === '}') depth--;
+        else if (ch === '|' && depth === 0) {
+            parts.push(type.slice(start, index));
+            start = index + 1;
+        }
+    }
+    parts.push(type.slice(start));
+    const expanded: string[] = [];
+    for (const part of parts) {
+        const opt = part.match(/^(?:typing\.)?Optional\[(.+)\]$/);
+        if (opt) expanded.push(...splitTopLevelUnion(opt[1]), 'None');
+        else {
+            const union = part.match(/^(?:typing\.)?Union\[(.+)\]$/);
+            if (union) {
+                let innerDepth = 0;
+                let innerStart = 0;
+                const inner = union[1];
+                for (let index = 0; index < inner.length; index++) {
+                    const ch = inner[index];
+                    if (ch === '[' || ch === '(' || ch === '{') innerDepth++;
+                    else if (ch === ']' || ch === ')' || ch === '}') innerDepth--;
+                    else if (ch === ',' && innerDepth === 0) {
+                        expanded.push(...splitTopLevelUnion(inner.slice(innerStart, index)));
+                        innerStart = index + 1;
+                    }
+                }
+                expanded.push(...splitTopLevelUnion(inner.slice(innerStart)));
+            } else expanded.push(part);
+        }
+    }
+    return [...new Set(expanded.filter(Boolean))];
+}
+
+function canonicalAtom(atom: string): string {
+    const stripped = atom.replace(/^(?:typing|collections\.abc|builtins)\./, '');
+    if (stripped === 'List') return 'list';
+    if (stripped === 'Dict') return 'dict';
+    if (stripped === 'Tuple') return 'tuple';
+    if (stripped === 'Set') return 'set';
+    if (stripped === 'FrozenSet') return 'frozenset';
+    return stripped.replace(/\bList\[/g, 'list[').replace(/\bDict\[/g, 'dict[').replace(/\bTuple\[/g, 'tuple[').replace(/\bSet\[/g, 'set[');
+}
+
+function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
+    const source = canonicalAtom(sourceAtom);
+    const target = canonicalAtom(targetAtom);
+    if (!source || !target || source === 'Any' || source === 'any' || target === 'Any' || target === 'any' || target === 'object') return true;
+    if (source === target) return true;
+    if (source === 'int' && target === 'float') return true;
+    if (source === 'bool' && (target === 'int' || target === 'float')) return true;
+    const baseOf = (value: string) => value.includes('[') ? value.slice(0, value.indexOf('[')) : value;
+    const argsOf = (value: string) => value.includes('[') && value.endsWith(']') ? value.slice(value.indexOf('[') + 1, -1) : null;
+    const sourceBase = baseOf(source);
+    const targetBase = baseOf(target);
+    const sourceArgs = argsOf(source);
+    const targetArgs = argsOf(target);
+    if (sourceBase === targetBase && (sourceArgs === null || targetArgs === null)) return true;
+    return false;
+}
+
+/**
+ * Whether two port type annotations are incompatible (warned on the wire, never blocked).
+ * Untyped (`null`, `""`, `"Any"`, `"any"`) on either side is treated as compatible.
+ */
+export function typesMismatch(sourceAnnotation: string | null | undefined, targetAnnotation: string | null | undefined): boolean {
+    const source = normalizeType(sourceAnnotation);
+    const target = normalizeType(targetAnnotation);
+    if (!source || !target) return false;
+    const sourceMembers = splitTopLevelUnion(source);
+    const targetMembers = splitTopLevelUnion(target);
+    return !sourceMembers.every(sourceMember => targetMembers.some(targetMember => atomCompatible(sourceMember, targetMember)));
 }
 
 export function nodeIdOf(documentPath: string): string {
@@ -208,21 +313,40 @@ function valueNode(id: string, value: string, position: { x: number; y: number }
     };
 }
 
-function dataEdges(flow: SlateFlow, nodeIds: Set<string>, colorOf: (endpoint: string) => string): Edge[] {
+function dataEdges(
+    flow: SlateFlow,
+    byId: ReadonlyMap<string, Node<SlateNodeData>>,
+): Edge[] {
     const nodeFor = (endpoint: string, side: 'from' | 'to') => {
         const { instance, port } = parseEndpoint(endpoint);
         return instance === null ? { node: side === 'from' ? '__input' : '__output', handle: port } : { node: instance, handle: port };
     };
+    const annotationOf = (endpoint: string, side: 'from' | 'to'): string | null => {
+        const { instance, port } = parseEndpoint(endpoint);
+        if (instance === null) {
+            if (side === 'from') return flow.inputs.find(input => `input:${input.name}` === port)?.annotation ?? null;
+            return flow.outputs.find(output => `output:${output.name}` === port)?.annotation ?? null;
+        }
+        const ports = side === 'from' ? byId.get(instance)?.data.outputs : byId.get(instance)?.data.inputs;
+        return ports?.find(item => item.id === port)?.annotation ?? null;
+    };
     return flow.wires.flatMap(wire => {
         const from = nodeFor(wire.from, 'from');
         const to = nodeFor(wire.to, 'to');
-        if (!nodeIds.has(from.node) || !nodeIds.has(to.node)) return [];
+        if (!byId.has(from.node) || !byId.has(to.node)) return [];
+        const sourceAnnotation = annotationOf(wire.from, 'from');
+        const targetAnnotation = annotationOf(wire.to, 'to');
+        const mismatch = typesMismatch(sourceAnnotation, targetAnnotation);
+        const warning = mismatch ? `${sourceAnnotation} → ${targetAnnotation}` : undefined;
         return [{
             id: `data:${wire.from}->${wire.to}`,
             source: from.node, sourceHandle: from.handle, target: to.node, targetHandle: to.handle,
-            className: 'slate-edge slate-edge--data',
-            style: { stroke: colorOf(wire.from), strokeWidth: 2 },
-            data: { from: wire.from, to: wire.to },
+            className: `slate-edge slate-edge--data${mismatch ? ' slate-edge--mismatch' : ''}`,
+            style: mismatch
+                ? { stroke: 'var(--strata-warning, #f6c453)', strokeWidth: 2, strokeDasharray: '6 4' }
+                : { stroke: typeColor(sourceAnnotation), strokeWidth: 2 },
+            ...(warning ? { label: `⚠ ${warning}`, labelStyle: { fill: 'var(--strata-warning, #f6c453)', fontSize: 10, fontWeight: 600 }, labelShowBg: true, labelBgStyle: { fill: 'var(--strata-layer-01, #191d21)', fillOpacity: 0.9 } } : {}),
+            data: { from: wire.from, to: wire.to, sourceAnnotation, targetAnnotation, mismatch, ...(warning ? { warning } : {}) } satisfies SlateEdgeData,
         }];
     });
 }
@@ -260,10 +384,7 @@ function buildRoot(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edge
         main.instances.filter(instance => instance.kind === 'value')
             .forEach((instance, index) => nodes.push(valueNode(instance.id, instance.value ?? '', layout[instance.id] ?? { x: 760, y: 600 + index * 90 })));
         const byId = new Map(nodes.map(node => [node.id, node]));
-        edges.push(...dataEdges(main, new Set(byId.keys()), endpoint => {
-            const { instance, port } = parseEndpoint(endpoint);
-            return typeColor(byId.get(instance ?? '')?.data.outputs?.find(item => item.id === port)?.annotation);
-        }));
+        edges.push(...dataEdges(main, byId));
     }
 }
 
@@ -289,14 +410,14 @@ function buildFlow(snapshot: HarnessSnapshot, flowId: string, nodes: Node<SlateN
             : callerNode(snapshot, targets, instance.id, instance.node!, 'instance', position));
     });
     const byId = new Map(nodes.map(node => [node.id, node]));
-    edges.push(...dataEdges(flow, new Set(byId.keys()), endpoint => {
-        const { instance, port } = parseEndpoint(endpoint);
-        if (instance === null) return typeColor(flow.inputs.find(input => `input:${input.name}` === port)?.annotation);
-        return typeColor(byId.get(instance)?.data.outputs?.find(item => item.id === port)?.annotation);
-    }));
+    edges.push(...dataEdges(flow, byId));
 }
 
-export function buildGraph(snapshot: HarnessSnapshot, scope: CanvasScope = ROOT_SCOPE): { nodes: Node<SlateNodeData>[]; edges: Edge[] } {
+export function buildGraph(
+    snapshot: HarnessSnapshot,
+    scope: CanvasScope = ROOT_SCOPE,
+    options?: BuildGraphOptions,
+): { nodes: Node<SlateNodeData>[]; edges: Edge[]; totalContextEdges?: number } {
     const nodes: Node<SlateNodeData>[] = [];
     const edges: Edge[] = [];
     if (scope.flow) {
@@ -308,11 +429,16 @@ export function buildGraph(snapshot: HarnessSnapshot, scope: CanvasScope = ROOT_
         return { nodes, edges };
     }
     buildRoot(snapshot, nodes, edges);
-    addNotesAndEdges(snapshot, nodes, edges);
-    return { nodes, edges };
+    const totalContextEdges = addNotesAndEdges(snapshot, nodes, edges, options?.contextFilter ?? 'all');
+    return { nodes, edges, ...(options?.contextFilter && options.contextFilter !== 'all' ? { totalContextEdges } : {}) };
 }
 
-function addNotesAndEdges(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edges: Edge[]): void {
+function addNotesAndEdges(
+    snapshot: HarnessSnapshot,
+    nodes: Node<SlateNodeData>[],
+    edges: Edge[],
+    contextFilter: 'all' | 'none' | ReadonlySet<string>,
+): number {
     for (const [index, note] of (snapshot.notes ?? []).entries()) {
         nodes.push({
             id: note.id,
@@ -344,8 +470,12 @@ function addNotesAndEdges(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[
     for (const edge of snapshot.contextEdges ?? []) {
         if (edge.kind === 'context') contextEdges.set(`${edge.sourceId}:${edge.targetId}`, edge);
     }
+    let validContextCount = 0;
     for (const [id, edge] of contextEdges) {
         if (!nodeIds.has(edge.sourceId) || !nodeIds.has(edge.targetId)) continue;
+        validContextCount++;
+        if (contextFilter === 'none') continue;
+        if (contextFilter !== 'all' && !contextFilter.has(edge.sourceId) && !contextFilter.has(edge.targetId)) continue;
         edges.push({
             id: `context:${id}`,
             source: edge.sourceId,
@@ -371,4 +501,5 @@ function addNotesAndEdges(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[
             className: 'slate-edge slate-edge--note',
         });
     }
+    return validContextCount;
 }
