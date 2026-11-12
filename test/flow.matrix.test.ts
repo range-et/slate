@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     FlowFormatError, connect, disconnect, emptyFlow, extractFlow, flowIdForPath,
-    flowSignature, inputPorts, outputPorts, parseEndpoint, parseFlow, pathForFlowId,
+    flowSignature, inputPorts, migrateRootOccurrences, outputPorts, parseEndpoint, parseFlow, pathForFlowId,
     removeInstances, serializeFlow, uniqueName, unitSignature,
 } from '../vscode-extension/src/flow';
 import { parseModule } from '../vscode-extension/src/python_adapter';
@@ -173,5 +173,32 @@ describe('flow identifier type boundaries', () => {
             expect(read).toThrow(FlowFormatError);
             expect(read).toThrow('instances need an id without dots');
         }
+    });
+
+    it('migrates root refs, pruned wire endpoints, and implied flow/node instances without mutating inputs', () => {
+        const original = {
+            ...emptyFlow('main'),
+            instances: [{ id: 'v', kind: 'value' as const, value: '7' }, { id: 'clamp', node: 'clamp' }],
+            wires: [{ from: 'v.out', to: 'clamp.in:value' }, { from: 'clamp.out', to: 'flow:pipe.in:x' }, { from: 'lib:mod:fn.out', to: 'clamp.in:lower' }],
+        };
+        const snapshot = structuredClone(original);
+        const refs = [{ id: 'ref-1', target: 'clamp' }];
+        const positions = { clamp: { x: 10, y: 20 } };
+        const migrated = migrateRootOccurrences(original, refs, positions, ['clamp'], ['pipe']);
+        expect(original).toEqual(snapshot);
+        expect(migrated.changed).toBe(true);
+        expect(migrated.main?.instances).toEqual([
+            { id: 'v', kind: 'value', value: '7' },
+            { id: 'ref_clamp', node: 'clamp' },
+            { id: 'ref-1', node: 'clamp' },
+            { id: 'ref_pipe', node: 'pipe' },
+            { id: 'lib:mod:fn', node: 'lib:mod:fn' },
+        ]);
+        expect(migrated.main?.wires).toEqual([
+            { from: 'v.out', to: 'ref_clamp.in:value' },
+            { from: 'ref_clamp.out', to: 'ref_pipe.in:x' },
+            { from: 'lib:mod:fn.out', to: 'ref_clamp.in:lower' },
+        ]);
+        expect(migrated.positions).toEqual({ clamp: { x: 10, y: 20 }, ref_clamp: { x: 330, y: 20 } });
     });
 });

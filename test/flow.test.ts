@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { compilePython } from '../vscode-extension/src/compile/python';
-import { connect, extractFlow, inputPorts, outputPorts, parseFlow, serializeFlow, unitSignature, type Port } from '../vscode-extension/src/flow';
+import { connect, extractFlow, inputPorts, migrateRootOccurrences, outputPorts, parseFlow, serializeFlow, unitSignature, type Port } from '../vscode-extension/src/flow';
 import type { SlateFlow } from '../vscode-extension/src/harness_protocol';
 import { parseModule } from '../vscode-extension/src/python_adapter';
 import type { SlateNode } from '../vscode-extension/src/slate_folder';
@@ -171,4 +171,73 @@ it('rejects multiple drivers for the same flow input rather than silently pickin
     const output = [...result.files.values()].join('\n');
     expect(output).not.toContain('def duplicate_driver(');
     expect(output).toContain('def double(');
+});
+
+describe('one occurrence model and root migration', () => {
+    it('leaves empty root projects untouched so showing a definition on the canvas does not make it run', () => {
+        const migrated = migrateRootOccurrences(null, [], { 'math/double': { x: 10, y: 20 } }, ['math/double', 'math/add'], ['report']);
+        expect(migrated).toEqual({
+            main: null,
+            positions: { 'math/double': { x: 10, y: 20 } },
+            changed: false,
+        });
+        const compiled = compile([]);
+        expect(compiled.diagnostics).toEqual([]);
+        expect(compiled.files.get('math.py')).toContain('def double(x: int) -> int:');
+        expect([...compiled.files.values()].join('\n')).not.toContain('def main(');
+    });
+
+    it('migrates layout.refs and implied/pruned root instances into main.json without breaking wires', () => {
+        const legacyMain = flow({
+            name: 'main',
+            instances: [
+                { id: 'value', kind: 'value', value: '21' },
+                { id: 'math/double', node: 'math/double' },
+                { id: 'flow:report', node: 'report' },
+            ],
+            wires: [
+                { from: 'value.out', to: 'math/double.in:x' },
+                { from: 'math/double.out', to: 'flow:report.in:score' },
+                { from: 'ref-add.out', to: 'math/add.in:a' },
+            ],
+        });
+        const migrated = migrateRootOccurrences(
+            legacyMain,
+            [{ id: 'ref-add', target: 'math/add' }, { id: 'ref-unwired', target: 'math/double' }],
+            { 'math/double': { x: 100, y: 80 }, 'flow:report': { x: 400, y: 80 }, 'ref-add': { x: 200, y: 300 } },
+            ['math/double', 'math/add', 'math/stats'],
+            ['report'],
+        );
+        expect(migrated.changed).toBe(true);
+        expect(migrated.main?.instances).toEqual([
+            { id: 'value', kind: 'value', value: '21' },
+            { id: 'ref_double', node: 'math/double' },
+            { id: 'ref_report', node: 'report' },
+            { id: 'ref-add', node: 'math/add' },
+            { id: 'ref-unwired', node: 'math/double' },
+            { id: 'ref_add', node: 'math/add' },
+        ]);
+        expect(migrated.main?.wires).toEqual([
+            { from: 'value.out', to: 'ref_double.in:x' },
+            { from: 'ref_double.out', to: 'ref_report.in:score' },
+            { from: 'ref-add.out', to: 'ref_add.in:a' },
+        ]);
+        expect(migrated.positions).toMatchObject({
+            'math/double': { x: 100, y: 80 },
+            'ref_double': { x: 420, y: 80 },
+            'flow:report': { x: 400, y: 80 },
+            'ref_report': { x: 720, y: 80 },
+            'ref-add': { x: 200, y: 300 },
+        });
+
+        // Re-running migration on an already-migrated main flow is a no-op.
+        const second = migrateRootOccurrences(migrated.main, [], migrated.positions, ['math/double', 'math/add', 'math/stats'], ['report']);
+        expect(second.changed).toBe(false);
+        expect(second.main).toEqual(migrated.main);
+
+        // Re-migrating an unsaved legacy main flow against already-migrated positions reuses ref_* IDs without minting duplicates.
+        const repeatLegacy = migrateRootOccurrences(legacyMain, [], migrated.positions, ['math/double', 'math/add', 'math/stats'], ['report']);
+        expect(repeatLegacy.main?.instances.map(item => item.id)).toEqual(['value', 'ref_double', 'ref_report', 'ref_add']);
+        expect(repeatLegacy.positions).toEqual(migrated.positions);
+    });
 });

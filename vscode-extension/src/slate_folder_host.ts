@@ -1,8 +1,8 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { FLOWS_DIR, flowIdForPath, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
-import type { HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
+import { FLOWS_DIR, flowIdForPath, MAIN_FLOW, migrateRootOccurrences, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
+import type { CanvasRef, HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
 import { parseModule } from './python_adapter';
 import {
     CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
@@ -21,6 +21,10 @@ export interface FolderIndex {
 /** Filesystem side of the decoupled slate/ folder. The panel owns the webview. */
 export class SlateFolderHost {
     layout: SlateLayout = emptyLayout();
+    private deferredRefs: CanvasRef[] = [];
+    private pendingUnindexedRefs = false;
+    private layoutVersion: number | null = null;
+    private readonly flowVersions = new Map<string, number | null>();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
     constructor(readonly root: vscode.Uri) {}
@@ -58,10 +62,12 @@ export class SlateFolderHost {
     /** Parsed flows by id; unreadable flow files are reported with a problem. */
     async readFlows(): Promise<HarnessFlow[]> {
         const flows: HarnessFlow[] = [];
+        this.flowVersions.clear();
         for (const uri of await vscode.workspace.findFiles(this.flowPattern())) {
             const id = flowIdForPath(this.relative(uri));
             const file = id ? await this.read(pathForFlowId(id)) : undefined;
             if (!id || !file) continue;
+            this.flowVersions.set(id, file.version);
             try {
                 flows.push({ id, flow: parseFlow(file.text) });
             } catch (error) {
@@ -72,9 +78,21 @@ export class SlateFolderHost {
     }
 
     async writeFlow(flowId: string, flow: SlateFlow): Promise<void> {
+        if (flowId === MAIN_FLOW && this.pendingUnindexedRefs && this.deferredRefs.length > 0) {
+            const migrated = migrateRootOccurrences(flow, this.deferredRefs, this.layout.positions, [], []);
+            if (migrated.main) flow = migrated.main;
+            this.layout.positions = migrated.positions;
+            this.pendingUnindexedRefs = false;
+        }
         const uri = this.uri(pathForFlowId(flowId));
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
-        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(serializeFlow(flow)));
+        await this.writeText(uri, serializeFlow(flow));
+        if (flowId === MAIN_FLOW && (this.deferredRefs.length > 0 || this.layout.refs.length > 0)) {
+            // main.json now holds the migrated root instances; drop the deferred legacy refs.
+            this.deferredRefs = [];
+            this.layout.refs = [];
+            await this.writeLayout();
+        }
     }
 
     /** Library files from slate.json `library` (files or folders of .py), with top-level ids `lib:<path>:<name>`. */
@@ -118,12 +136,21 @@ export class SlateFolderHost {
         return signatures;
     }
 
+    async readLayout(): Promise<SlateLayout> {
+        return parseLayout((await this.read(LAYOUT_PATH))?.text);
+    }
+
+    private isDirty(relativePath: string): boolean {
+        const uri = this.uri(relativePath);
+        return vscode.workspace.textDocuments.some(document => document.uri.toString() === uri.toString() && document.isDirty);
+    }
+
     private async read(relativePath: string): Promise<{ text: string; version: number | null } | undefined> {
         const uri = this.uri(relativePath);
         const open = vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
-        if (open) return { text: open.getText(), version: open.version };
+        if (open?.isDirty) return { text: open.getText(), version: open.version };
         try {
-            return { text: new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)), version: null };
+            return { text: new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)), version: open?.version ?? null };
         } catch {
             return undefined;
         }
@@ -133,12 +160,6 @@ export class SlateFolderHost {
         const configFile = await this.read(CONFIG_PATH);
         if (!configFile) throw new Error(`${CONFIG_PATH} is missing.`);
         const config = parseConfig(configFile.text);
-        try {
-            // In place, so actions holding `layout` keep writing the live object.
-            Object.assign(this.layout, parseLayout((await this.read(LAYOUT_PATH))?.text));
-        } catch (error) {
-            throw new Error(`${LAYOUT_PATH}: ${(error as Error).message}`);
-        }
         const uris = await vscode.workspace.findFiles(this.nodePattern());
         const documents: HarnessDocument[] = [];
         const sources = new Map<string, string>();
@@ -158,7 +179,49 @@ export class SlateFolderHost {
             documents.push(document);
         }
         documents.sort((left, right) => left.path.localeCompare(right.path));
-        return { config, documents, sources, flows: await this.readFlows(), library: await this.readLibrary(config) };
+        const flows = await this.readFlows();
+        try {
+            const layoutFile = await this.read(LAYOUT_PATH);
+            this.layoutVersion = layoutFile?.version ?? null;
+            this.pendingUnindexedRefs = false;
+            // In place, so actions holding `layout` keep writing the live object.
+            Object.assign(this.layout, parseLayout(layoutFile?.text));
+        } catch (error) {
+            throw new Error(`${LAYOUT_PATH}: ${(error as Error).message}`);
+        }
+        const mainEntry = flows.find(item => item.id === MAIN_FLOW);
+        if (!mainEntry || mainEntry.flow !== null) {
+            const definitionIds = documents.flatMap(document => [
+                ...(document.nodeKind ? [nodeIdForPath(document.path)!] : []),
+                ...document.units.map(unit => unit.id),
+            ]).filter(Boolean);
+            const flowIds = flows.filter(item => item.id !== MAIN_FLOW).map(item => item.id);
+            const migrated = migrateRootOccurrences(mainEntry?.flow ?? null, this.layout.refs, this.layout.positions, definitionIds, flowIds);
+            this.deferredRefs = [];
+            if (migrated.changed) {
+                if (!this.isDirty(LAYOUT_PATH) && !this.isDirty(pathForFlowId(MAIN_FLOW))) {
+                    // main.json first: legacy refs leave layout.json only once main.json holds them.
+                    if (migrated.main) await this.writeFlow(MAIN_FLOW, migrated.main);
+                    this.layout.positions = migrated.positions;
+                    this.layout.refs = [];
+                    await this.writeLayout();
+                } else {
+                    // Dirty buffer: migrate in memory only; layout writes keep the legacy refs
+                    // until main.json is written, so they are never dropped from disk early.
+                    this.deferredRefs = this.layout.refs;
+                    this.layout.positions = migrated.positions;
+                    this.layout.refs = [];
+                }
+                if (migrated.main) {
+                    if (mainEntry) mainEntry.flow = migrated.main;
+                    else {
+                        flows.push({ id: MAIN_FLOW, flow: migrated.main });
+                        flows.sort((left, right) => left.id.localeCompare(right.id));
+                    }
+                }
+            }
+        }
+        return { config, documents, sources, flows, library: await this.readLibrary(config) };
     }
 
     /** Every node file, parsed (dirty buffers included); unreadable files are reported, not thrown. */
@@ -186,8 +249,49 @@ export class SlateFolderHost {
         return file.text;
     }
 
+    hasUnsyncedDirtyFlow(): boolean {
+        if (this.pendingUnindexedRefs) return true;
+        return vscode.workspace.textDocuments.some(document => {
+            if (!document.isDirty) return false;
+            const relative = this.relative(document.uri);
+            if (relative === LAYOUT_PATH) return this.layoutVersion !== document.version;
+            const id = flowIdForPath(relative);
+            return id !== null && this.flowVersions.get(id) !== document.version;
+        });
+    }
+
+    async syncDirtyLayout(): Promise<void> {
+        if (!this.isDirty(LAYOUT_PATH)) return;
+        const file = await this.read(LAYOUT_PATH);
+        const latest = parseLayout(file?.text);
+        if (latest.refs.length > 0 && file?.version !== this.layoutVersion) {
+            this.pendingUnindexedRefs = true;
+        }
+        this.deferredRefs = latest.refs;
+        Object.assign(this.layout, {
+            ...latest,
+            refs: [],
+            positions: { ...this.layout.positions, ...latest.positions },
+        });
+    }
+
     async writeLayout(): Promise<void> {
-        await vscode.workspace.fs.writeFile(this.uri(LAYOUT_PATH), new TextEncoder().encode(serializeLayout(this.layout)));
+        const refs = [...this.deferredRefs, ...this.layout.refs.filter(ref => !this.deferredRefs.some(item => item.id === ref.id))];
+        await this.writeText(this.uri(LAYOUT_PATH), serializeLayout({ ...this.layout, refs }));
+    }
+
+    private async writeText(uri: vscode.Uri, text: string): Promise<void> {
+        const open = vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
+        if (open?.isDirty) {
+            if (text !== open.getText()) {
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(open.uri, new vscode.Range(open.positionAt(0), open.positionAt(open.getText().length)), text);
+                if (!await vscode.workspace.applyEdit(edit)) throw new Error(`VS Code rejected the edit to ${this.relative(uri)}.`);
+            }
+            if (!await open.save()) throw new Error(`VS Code could not save ${this.relative(uri)}.`);
+            return;
+        }
+        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
     }
 
     /** Current node from its (possibly dirty) document. */
@@ -224,6 +328,7 @@ export class SlateFolderHost {
         edit.insert(uri, new vscode.Position(0, 0), serializeNode(node));
         if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the new node.');
         await (await vscode.workspace.openTextDocument(uri)).save();
+        await this.syncDirtyLayout();
         this.layout.positions[nodeId] = position;
         await this.writeLayout();
         return nodeId;

@@ -1,4 +1,4 @@
-import type { FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow, UnitParam } from './harness_protocol';
+import type { CanvasRef, FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow, UnitParam } from './harness_protocol';
 
 // Flows (slate/flows/<id>.json): instances of nodes, flows, library units, or
 // literal values, connected by data wires, with named inputs and outputs.
@@ -243,5 +243,98 @@ export function extractFlow(
             wires: childWires,
             extra: {},
         },
+    };
+}
+
+export interface RootMigrationResult {
+    main: SlateFlow | null;
+    positions: Record<string, { x: number; y: number }>;
+    changed: boolean;
+}
+
+/**
+ * Migrate legacy `layout.refs` and implied/pruned root instances into `flows/main.json`
+ * without breaking wires. Showing a definition on the root canvas does not make it run.
+ */
+export function migrateRootOccurrences(
+    main: SlateFlow | null | undefined,
+    refs: ReadonlyArray<CanvasRef> = [],
+    positions: Readonly<Record<string, { x: number; y: number }>> = {},
+    definitionIds: Iterable<string> = [],
+    flowIds: Iterable<string> = [],
+): RootMigrationResult {
+    const defs = new Set(definitionIds);
+    const flows = new Set([...flowIds].filter(id => id !== MAIN_FLOW));
+    const nextPositions: Record<string, { x: number; y: number }> = { ...positions };
+    if (!main && refs.length === 0) return { main: null, positions: nextPositions, changed: false };
+
+    const base = main ?? emptyFlow(MAIN_FLOW);
+    let changed = !main || refs.length > 0;
+    const instances: FlowInstance[] = base.instances.map(item => ({ ...item }));
+    let wires: FlowWire[] = base.wires.map(wire => ({ ...wire }));
+
+    for (const ref of refs) {
+        const existing = instances.find(item => item.id === ref.id);
+        if (!existing) {
+            instances.push({ id: ref.id, node: ref.target });
+            changed = true;
+        } else if (existing.kind !== 'value' && existing.node !== ref.target) {
+            existing.node = ref.target;
+            changed = true;
+        }
+    }
+
+    for (const wire of wires) {
+        for (const endpoint of [wire.from, wire.to]) {
+            const { instance } = parseEndpoint(endpoint);
+            if (instance === null || instances.some(item => item.id === instance)) continue;
+            if (instance.startsWith('flow:')) {
+                const target = instance.slice('flow:'.length);
+                if (flows.size === 0 || flows.has(target)) {
+                    instances.push({ id: instance, node: target });
+                    changed = true;
+                }
+            } else if (defs.has(instance) || flows.has(instance) || instance.startsWith('lib:')) {
+                instances.push({ id: instance, node: instance });
+                changed = true;
+            }
+        }
+    }
+
+    const taken = new Set<string>([
+        ...defs,
+        ...[...flows].map(id => `flow:${id}`),
+        ...instances.map(item => item.id),
+    ]);
+    for (const item of instances) {
+        if (item.kind === 'value') continue;
+        const isFlowCard = item.id.startsWith('flow:');
+        const isDefCard = defs.has(item.id);
+        if (!isFlowCard && !isDefCard) continue;
+        const oldId = item.id;
+        const target = item.node ?? (isFlowCard ? oldId.slice('flow:'.length) : oldId);
+        const short = (target.startsWith('lib:') ? target.split(':').pop()! : target.split('/').pop()!) || 'call';
+        const newId = uniqueName(`ref_${short}`, taken);
+        taken.add(newId);
+        item.id = newId;
+        item.node = target;
+        wires = wires.map(wire => {
+            const from = parseEndpoint(wire.from);
+            const to = parseEndpoint(wire.to);
+            return {
+                from: from.instance === oldId ? `${newId}.${from.port}` : wire.from,
+                to: to.instance === oldId ? `${newId}.${to.port}` : wire.to,
+            };
+        });
+        if (nextPositions[oldId] && !nextPositions[newId]) {
+            nextPositions[newId] = { x: nextPositions[oldId].x + 320, y: nextPositions[oldId].y };
+        }
+        changed = true;
+    }
+
+    return {
+        main: { ...base, instances, wires },
+        positions: nextPositions,
+        changed,
     };
 }

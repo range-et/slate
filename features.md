@@ -136,20 +136,25 @@ keep outstanding tasks on GitHub.
   default), one `out` per return, colored by annotation (untyped is grey).
   Context handles moved to the node's top (in) and bottom (out). The root
   also holds references, placeholders, flow nodes, value literals, and notes.
-- **References** (`layout.json` `refs`). Pills that mirror their target's
-  ports (node, flow, or library unit). Menu: Go to definition, Find
-  references (highlights the target and its refs, and lists the flows that use
-  it), Generate body, Delete reference. Missing targets render BROKEN.
-  Selecting a ref shows the target in the Inspector.
+- **References** (`slate/flows/main.json` `instances`). Root call instances
+  (`{ id, node }`) that mirror their target's ports (node, flow, or library
+  unit), with placement stored in `layout.json` `positions`. Menu: Go to
+  definition, Find references (highlights the target and its root call
+  instances, and lists the nested flows that use it), Generate body, Delete
+  reference. Missing targets render BROKEN. Selecting a ref shows the target
+  in the Inspector.
 - **Placeholders** (`layout.json` `placeholders`). Name-only stand-ins.
   When exactly one node has the name: **Convert to reference**; otherwise
   **Create node…** (signature prompt) puts the new node where the placeholder
   was. Created from the canvas menu, the palette, or by typing a name in
   add-node search.
 - **Data wires.** Port-to-port; an input takes one wire (a new one replaces
-  it). Root wires live in `slate/flows/main.json`, whose instances are implied
-  by the wired canvas items and pruned when unwired; `main` compiles to
-  `def main() -> None`. Right-click a wire → Remove wire.
+  it). Root wires and root call instances live in `slate/flows/main.json`, while
+  `layout.json` keeps placement only. Showing a definition on the root canvas
+  does not make it run; wiring a definition card creates an explicit root call
+  instance in `main.json`, and disconnecting a wire never prunes unwired root
+  call instances. `main` compiles to `def main() -> None`. Right-click a wire →
+  Remove wire.
 - **Flows** (`slate/flows/<id>.json`): inputs, outputs, instances (node,
   flow, library unit, or a Python literal value), and wires. Flow nodes on the
   root show the flow's ports; double-click, Tab, or **Open flow** enters, and
@@ -283,6 +288,34 @@ Completed in [PR #1](https://github.com/range-et/slate/pull/1):
 - **Remaining testing target.** Whole-app strict 100% branch/mutation completion
   across every host/UI path remains tracked in [issue #20](https://github.com/range-et/slate/issues/20);
   equivalent and parser-guaranteed survivors are audited in [test/VERIFICATION.md](test/VERIFICATION.md).
+
+## Shipped — one occurrence model (Phase 5, S-500, 2026-11-11)
+
+Completed for [issue #3](https://github.com/range-et/slate/issues/3):
+
+- **Root call instances in `main.json`.** Every call occurrence on the root
+  canvas is an instance `{ id, node }` in `slate/flows/main.json` pointing at a
+  definition (`<unitId>`, `flow:<id>`, or `lib:<id>`), matching nested flows.
+  `slate/layout.json` persists placement only (`positions`, `notes`,
+  `placeholders`, `mapPositions`, `flowPositions`) and no longer writes `refs`.
+- **Definitions vs. occurrences.** Showing a definition card on the root canvas
+  does not add it to `main.json` or make it run. Wiring a root definition card
+  creates an explicit call instance (`ref_<short>`) in `main.json` offset from
+  the definition card, and disconnecting a wire preserves unwired root call
+  instances in `main.json`.
+- **Clean migration (`migrateRootOccurrences`).** Indexing (`SlateFolderHost.index`)
+  and compilation (`compileSlateFolder`) automatically migrate legacy
+  `layout.refs`, restore pruned wire endpoints (`ref_`, `lib:`), and rewrite
+  implied root definition instances (whose IDs collided with definition cards
+  `<unitId>` or `flow:<id>`) into dedicated `main.json` call instances while
+  rewriting connected wires and preserving positions without breaking existing
+  flows.
+- **Verification.** Covered by Vitest unit and matrix suites (`test/flow.test.ts`,
+  `test/flow.matrix.test.ts`, `test/slate_format.matrix.test.ts`,
+  `test/harness_graph.test.ts`), Playwright browser interaction chains
+  (`test/e2e/interaction_chains.playwright.ts`), and VS Code Extension Host
+  persistence and migration tests (`vscode-extension/src/test/suite/extension.test.ts`),
+  verified through `npm run verify:launch`.
 
 ## Shipped — Node health report and canvas fixes (2026-11-11, S-504)
 

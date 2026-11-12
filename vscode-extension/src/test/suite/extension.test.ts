@@ -202,24 +202,56 @@ suite('Slate Extension Host', () => {
             await waitForSnapshot(snapshot => snapshot.documents.length === 2);
 
             await act({ kind: 'createRef', target: 'clamp', x: 10, y: 20 });
-            const [ref] = (await read(layoutUri)).refs;
-            assert.equal(ref.target, 'clamp');
+            const mainUri = vscode.Uri.joinPath(folder, 'flows', 'main.json');
+            const [ref] = (await read(mainUri)).instances;
+            assert.equal(ref.node, 'clamp');
+            assert.equal((await read(layoutUri)).refs, undefined);
             assert.deepEqual((await read(layoutUri)).positions[ref.id], { x: 10, y: 20 });
 
-            // A root wire implies main-flow instances for a ref and a definition; unwiring prunes them.
+            // Wiring to a definition on the root canvas instantiates a root call instance in main.json; unwiring keeps both instances.
             await act({ kind: 'connectData', from: `${ref.id}.out`, to: 'normalize.in:score' });
-            const main = await read(vscode.Uri.joinPath(folder, 'flows', 'main.json'));
-            assert.deepEqual(main.instances, [{ id: ref.id, node: 'clamp' }, { id: 'normalize', node: 'normalize' }]);
-            assert.deepEqual(main.wires, [{ from: `${ref.id}.out`, to: 'normalize.in:score' }]);
-            await act({ kind: 'disconnectData', from: `${ref.id}.out`, to: 'normalize.in:score' });
-            assert.deepEqual((await read(vscode.Uri.joinPath(folder, 'flows', 'main.json'))).instances, []);
+            const main = await read(mainUri);
+            assert.deepEqual(main.instances, [{ id: ref.id, node: 'clamp' }, { id: 'ref_normalize', node: 'normalize' }]);
+            assert.deepEqual(main.wires, [{ from: `${ref.id}.out`, to: 'ref_normalize.in:score' }]);
+            await act({ kind: 'disconnectData', from: `${ref.id}.out`, to: 'ref_normalize.in:score' });
+            assert.deepEqual((await read(mainUri)).instances, [{ id: ref.id, node: 'clamp' }, { id: 'ref_normalize', node: 'normalize' }]);
+            assert.deepEqual((await read(mainUri)).wires, []);
 
             await act({ kind: 'createPlaceholder', name: 'clamp', x: 1, y: 2 });
             const placeholder = (await read(layoutUri)).placeholders[0];
             await act({ kind: 'placeholderToRef', id: placeholder.id });
-            const converted = await read(layoutUri);
-            assert.equal(converted.placeholders, undefined);
-            assert.deepEqual(converted.refs.map((item: { target: string }) => item.target), ['clamp', 'clamp']);
+            const convertedLayout = await read(layoutUri);
+            assert.equal(convertedLayout.placeholders, undefined);
+            assert.equal(convertedLayout.refs, undefined);
+            const afterConvert = await read(mainUri);
+            assert.deepEqual(afterConvert.instances.map((item: { node: string }) => item.node), ['clamp', 'normalize', 'clamp']);
+            await act({ kind: 'deleteItems', ids: afterConvert.instances.map((item: { id: string }) => item.id) });
+            assert.deepEqual((await read(mainUri)).instances, []);
+
+            // Legacy layout.refs and implied root instances migrate cleanly on refresh without breaking wires.
+            await vscode.workspace.fs.writeFile(layoutUri, new TextEncoder().encode(JSON.stringify({
+                positions: { 'ref-legacy': { x: 40, y: 50 }, normalize: { x: 100, y: 120 } },
+                notes: [],
+                refs: [{ id: 'ref-legacy', target: 'clamp' }],
+            }, null, 2) + '\n'));
+            await vscode.workspace.fs.writeFile(mainUri, new TextEncoder().encode(JSON.stringify({
+                slate: 3, name: 'main', inputs: [], outputs: [],
+                instances: [{ id: 'normalize', node: 'normalize' }],
+                wires: [{ from: 'ref-legacy.out', to: 'normalize.in:score' }],
+            }, null, 2) + '\n'));
+            await act({ kind: 'refreshIndex' });
+            const migratedLayout = await read(layoutUri);
+            assert.equal(migratedLayout.refs, undefined);
+            assert.deepEqual(migratedLayout.positions['ref-legacy'], { x: 40, y: 50 });
+            assert.deepEqual(migratedLayout.positions.ref_normalize, { x: 420, y: 120 });
+            const migratedMain = await read(mainUri);
+            assert.deepEqual(migratedMain.instances, [
+                { id: 'ref_normalize', node: 'normalize' },
+                { id: 'ref-legacy', node: 'clamp' },
+            ]);
+            assert.deepEqual(migratedMain.wires, [{ from: 'ref-legacy.out', to: 'ref_normalize.in:score' }]);
+            await act({ kind: 'deleteItems', ids: ['ref-legacy', 'ref_normalize'] });
+            assert.deepEqual((await read(mainUri)).instances, []);
 
             // A flow built port by port: dropping on the group's empty slots creates typed inputs and outputs.
             await act({ kind: 'createFlow', name: 'pipe', x: 0, y: 0 });

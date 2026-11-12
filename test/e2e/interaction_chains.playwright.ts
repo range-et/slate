@@ -204,8 +204,10 @@ test('chain context picker excludes self, existing context and methods; keyboard
 for (const mode of ['resolved', 'ambiguous', 'broken'] as const) {
     test(`chain ${mode} references and placeholders`, async ({ page }) => {
         await snapshot(page, value => {
-            if (mode === 'broken') value.refs![0].target = 'gone';
-            else {
+            if (mode === 'broken') {
+                const main = value.flows!.find(flow => flow.id === 'main')!.flow!;
+                main.instances.find(instance => instance.id === 'ref-clamp')!.node = 'gone';
+            } else {
                 value.placeholders![0].name = 'clamp';
                 if (mode === 'ambiguous') {
                     const doc = structuredClone(value.documents[0]);
@@ -227,6 +229,22 @@ for (const mode of ['resolved', 'ambiguous', 'broken'] as const) {
         }
     });
 }
+
+test('chain root call instances in main.json render, wire, and count references without double-counting legacy refs', async ({ page }) => {
+    await snapshot(page, value => {
+        const main = value.flows!.find(flow => flow.id === 'main')!.flow!;
+        main.instances.push({ id: 'ref-norm', node: 'scoring/normalize_score' });
+        value.refs = [{ id: 'ref-clamp', target: 'clamp' }];
+        value.layout!['ref-norm'] = { x: 760, y: 500 };
+    });
+    await expect(node(page, 'ref-norm')).toBeVisible();
+    await node(page, 'ref-norm').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Find references' }).click();
+    await expect(page.getByRole('status')).toContainText('scoring/normalize_score: 1 reference on the canvas; used in flows report.');
+    await node(page, 'ref-clamp').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Find references' }).click();
+    await expect(page.getByRole('status')).toContainText('clamp: 1 reference on the canvas.');
+});
 
 test('chain flow value Enter saves once; instance deletion and empty grouping are scoped', async ({ page }) => {
     await command(page, 'Flow: report');

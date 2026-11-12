@@ -1098,8 +1098,14 @@ function HarnessApp() {
     };
     const findReferences = (target: string) => {
         setHighlight(target);
-        const refs = (snapshot.refs ?? []).filter(ref => ref.target === target).length;
-        const flows = (snapshot.flows ?? []).filter(item => item.flow?.instances.some(instance => instance.node === target)).map(item => item.id);
+        const rootRefs = new Map<string, string>();
+        const main = snapshot.flows?.find(item => item.id === 'main')?.flow;
+        for (const instance of main?.instances ?? []) {
+            if (instance.kind !== 'value' && instance.node) rootRefs.set(instance.id, instance.node);
+        }
+        for (const ref of snapshot.refs ?? []) rootRefs.set(ref.id, ref.target);
+        const refs = [...rootRefs.values()].filter(node => node === target).length;
+        const flows = (snapshot.flows ?? []).filter(item => item.id !== 'main' && item.flow?.instances.some(instance => instance.node === target)).map(item => item.id);
         setCommandResult(`${target}: ${refs} reference${refs === 1 ? '' : 's'} on the canvas${flows.length ? `; used in flows ${flows.join(', ')}` : ''}.`);
     };
     const endpointOf = (nodeId: string, handle: string | null | undefined) =>

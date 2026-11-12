@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
 import { compilePython, GENERATED_HEADER, type CompileDiagnostic } from './compile/python';
+import { MAIN_FLOW, migrateRootOccurrences } from './flow';
 import { formatPortReport, portPythonProject } from './port/python_importer';
 import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, pathForNodeId, serializeLayout, serializeNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
@@ -95,6 +96,18 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
     const { config, nodes, errors } = await host.readNodes();
     const flowFiles = await host.readFlows();
     const flows = new Map(flowFiles.filter(item => item.flow).map(item => [item.id, item.flow!]));
+    let layout = emptyLayout();
+    try {
+        layout = await host.readLayout();
+    } catch { /* layout errors are surfaced when opening the folder */ }
+    const migrated = migrateRootOccurrences(
+        flows.get(MAIN_FLOW) ?? null,
+        layout.refs,
+        layout.positions,
+        nodes.keys(),
+        [...flows.keys()].filter(id => id !== MAIN_FLOW),
+    );
+    if (migrated.main) flows.set(MAIN_FLOW, migrated.main);
     const result = compilePython(nodes, config, flows, SlateFolderHost.librarySignatures(await host.readLibrary(config)));
     const diagnostics: CompileDiagnostic[] = [
         ...errors.map(message => ({ severity: 'error' as const, message })),

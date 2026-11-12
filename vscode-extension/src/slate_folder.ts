@@ -137,7 +137,7 @@ export function parseLayout(text: string | undefined): SlateLayout {
     return { positions, notes, refs, placeholders, mapPositions: points(value.mapPositions), flowPositions };
 }
 
-/** Empty sections are omitted so older layout files stay unchanged. */
+/** Empty sections are omitted so older layout files stay unchanged; layout keeps placement only. */
 export function serializeLayout(layout: SlateLayout): string {
     const value: Record<string, unknown> = { positions: layout.positions, notes: layout.notes };
     if (layout.refs.length) value.refs = layout.refs;

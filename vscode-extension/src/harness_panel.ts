@@ -11,7 +11,7 @@ import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
 import { searchUnits } from './search';
 import {
-    connect, disconnect, emptyFlow, extractFlow, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
+    connect, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
     removeInstances, uniqueName, unitSignature, type Port,
 } from './flow';
 import { checkNodeCode, codeLines, CONFIG_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId } from './slate_folder';
@@ -149,7 +149,8 @@ export class HarnessPanel implements vscode.Disposable {
         }
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (this.folder.nodeId(event.document.uri) !== null) this.scheduleRefresh();
+                const relative = this.folder.relative(event.document.uri);
+                if (this.folder.nodeId(event.document.uri) !== null || flowIdForPath(relative) !== null) this.scheduleRefresh();
             }),
             vscode.window.onDidChangeTextEditorSelection(event => this.selectFromEditor(event.textEditor)),
             vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -449,6 +450,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     private async updateFolderLayout(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
         if (!this.snapshot || !message.positions || typeof message.positions !== 'object') return;
+        await folder.syncDirtyLayout();
         // scope: undefined = root canvas, 'map' = Map view, otherwise a flow id.
         const scope = typeof message.scope === 'string' ? message.scope : null;
         const flow = scope && scope !== 'map' ? this.flow(scope) : null;
@@ -479,7 +481,7 @@ export class HarnessPanel implements vscode.Disposable {
             ...this.folder.layout.refs.map(ref => ref.id),
             ...this.folder.layout.placeholders.map(item => item.id),
             ...(snapshot.flows ?? []).filter(item => item.id !== MAIN_FLOW).map(item => `flow:${item.id}`),
-            ...this.flow(MAIN_FLOW).instances.filter(instance => instance.kind === 'value').map(instance => instance.id),
+            ...this.flow(MAIN_FLOW).instances.map(instance => instance.id),
         ];
     }
 
@@ -513,14 +515,31 @@ export class HarnessPanel implements vscode.Disposable {
         return { inputs: inputPorts(signature), outputs: outputPorts(signature) };
     }
 
-    /** A root canvas id as a main-flow instance: existing, or implied by a node, ref, or flow node. */
-    private rootInstance(canvasId: string): FlowInstance {
-        const existing = this.flow(MAIN_FLOW).instances.find(instance => instance.id === canvasId);
-        if (existing) return existing;
-        const ref = this.folder.layout.refs.find(item => item.id === canvasId);
-        const target = canvasId.startsWith('flow:') ? canvasId.slice('flow:'.length) : ref ? ref.target : canvasId;
-        if (!this.targetExists(target)) throw new Error(`${canvasId} cannot be wired.`);
-        return { id: canvasId, node: target };
+    /** Resolve a root canvas endpoint to an explicit main-flow instance without turning definitions into uses. */
+    private resolveRootEndpoint(flow: SlateFlow, scope: string | null, endpoint: string): { flow: SlateFlow; endpoint: string } {
+        const { instance, port } = parseEndpoint(endpoint);
+        if (scope !== null || instance === null || flow.instances.some(item => item.id === instance)) {
+            return { flow, endpoint };
+        }
+        const ref = this.folder.layout.refs.find(item => item.id === instance);
+        if (ref) {
+            return {
+                flow: { ...flow, instances: [...flow.instances, { id: ref.id, node: ref.target }] },
+                endpoint,
+            };
+        }
+        const target = instance.startsWith('flow:') ? instance.slice('flow:'.length) : instance;
+        if (!this.targetExists(target)) throw new Error(`${instance} cannot be wired.`);
+        const short = (target.startsWith('lib:') ? target.split(':').pop()! : target.split('/').pop()!) || 'call';
+        const id = uniqueName(`ref_${short}`, [...this.rootCanvasIds(), ...flow.instances.map(item => item.id)]);
+        const basePosition = this.folder.layout.positions[instance];
+        if (basePosition && !this.folder.layout.positions[id]) {
+            this.folder.layout.positions[id] = { x: basePosition.x + 320, y: basePosition.y };
+        }
+        return {
+            flow: { ...flow, instances: [...flow.instances, { id, node: target }] },
+            endpoint: `${id}.${port}`,
+        };
     }
 
     private placeAt(scope: string | null, id: string, x: unknown, y: unknown): void {
@@ -532,7 +551,16 @@ export class HarnessPanel implements vscode.Disposable {
 
     /** Canvas actions for refs, placeholders, flows, and data wires. Returns false when not one of them. */
     private async handleCanvasAction(action: Record<string, unknown>): Promise<boolean> {
+        if (![
+            'createRef', 'createPlaceholder', 'placeholderToRef', 'placeholderToNode',
+            'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
+            'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
+        ].includes(String(action.kind))) {
+            return false;
+        }
         const folder = this.folder;
+        if (folder.hasUnsyncedDirtyFlow()) await this.refresh();
+        await folder.syncDirtyLayout();
         const layout = folder.layout;
         const scope = typeof action.flow === 'string' && action.flow !== MAIN_FLOW ? action.flow : null;
         const flowId = scope ?? MAIN_FLOW;
@@ -543,11 +571,6 @@ export class HarnessPanel implements vscode.Disposable {
             this.postCommandResult(true, message);
         };
         const saveFlow = async (id: string, flow: SlateFlow) => {
-            if (id === MAIN_FLOW) {
-                // Root wires imply instances; drop wireless ones that the canvas shows anyway.
-                const wired = new Set(flow.wires.flatMap(wire => [parseEndpoint(wire.from).instance, parseEndpoint(wire.to).instance]));
-                flow = { ...flow, instances: flow.instances.filter(instance => instance.kind === 'value' || wired.has(instance.id)) };
-            }
             await folder.writeFlow(id, flow);
         };
         const ask = async (title: string, value = '', validate?: (text: string) => string | null) =>
@@ -560,7 +583,8 @@ export class HarnessPanel implements vscode.Disposable {
                 const target = String(action.target);
                 if (!this.targetExists(target)) throw new Error(`${target} does not exist.`);
                 const id = `ref-${randomUUID().slice(0, 8)}`;
-                layout.refs.push({ id, target });
+                const main = this.flow(MAIN_FLOW);
+                await saveFlow(MAIN_FLOW, { ...main, instances: [...main.instances, { id, node: target }] });
                 this.placeAt(null, id, action.x, action.y);
                 await finish(`Added a reference to ${target}.`, id);
                 return true;
@@ -584,7 +608,8 @@ export class HarnessPanel implements vscode.Disposable {
                     const target = resolvePlaceholder(placeholder.name, this.snapshot!.documents.map(document => nodeIdForPath(document.path)!));
                     if (!target) throw new Error(`No single node is named ${placeholder.name}.`);
                     const id = `ref-${randomUUID().slice(0, 8)}`;
-                    layout.refs.push({ id, target });
+                    const main = this.flow(MAIN_FLOW);
+                    await saveFlow(MAIN_FLOW, { ...main, instances: [...main.instances, { id, node: target }] });
                     layout.positions[id] = position;
                     layout.placeholders = layout.placeholders.filter(item => item !== placeholder);
                     delete layout.positions[placeholder.id];
@@ -612,27 +637,29 @@ export class HarnessPanel implements vscode.Disposable {
                     if (!this.targetExists(target)) throw new Error(`${target} does not exist.`);
                     if (scope === null) {
                         id = `ref-${randomUUID().slice(0, 8)}`;
-                        layout.refs.push({ id, target });
                     } else {
                         if (target === scope) throw new Error('A flow cannot contain itself.');
                         id = uniqueName(target.split(/[/:]/).pop()!, flow.instances.map(instance => instance.id));
-                        flow = { ...flow, instances: [...flow.instances, { id, node: target }] };
                     }
+                    flow = { ...flow, instances: [...flow.instances, { id, node: target }] };
                 }
                 this.placeAt(scope, id, action.x, action.y);
                 const connectFrom = typeof action.connectFrom === 'string' ? action.connectFrom : null;
                 const connectTo = typeof action.connectTo === 'string' ? action.connectTo : null;
                 if (connectFrom || connectTo) {
-                    const instance = scope === null ? this.rootInstanceAfter(flow, id) : flow.instances.find(item => item.id === id)!;
-                    if (scope === null && !flow.instances.some(item => item.id === id)) flow = { ...flow, instances: [...flow.instances, instance] };
+                    const instance = flow.instances.find(item => item.id === id)!;
                     const ports = this.portsOf(instance);
                     // The webview picks the type-matching port; fall back to the first one.
                     const pick = (list: Port[]) => list.find(item => item.id === action.connectPort) ?? list[0];
                     if (connectFrom) {
                         const port = pick(ports.inputs);
-                        if (port) flow = connect(this.withRootEndpoints(flow, scope, connectFrom), connectFrom, `${id}.${port.id}`);
+                        if (port) {
+                            const resolved = this.resolveRootEndpoint(flow, scope, connectFrom);
+                            flow = connect(resolved.flow, resolved.endpoint, `${id}.${port.id}`);
+                        }
                     } else if (pick(ports.outputs)) {
-                        flow = connect(this.withRootEndpoints(flow, scope, connectTo!), `${id}.${pick(ports.outputs).id}`, connectTo!);
+                        const resolved = this.resolveRootEndpoint(flow, scope, connectTo!);
+                        flow = connect(resolved.flow, `${id}.${pick(ports.outputs).id}`, resolved.endpoint);
                     }
                 }
                 await saveFlow(flowId, flow);
@@ -656,7 +683,13 @@ export class HarnessPanel implements vscode.Disposable {
                     await finish(`Removed wire ${from} → ${to}.`);
                     return true;
                 }
-                flow = this.withRootEndpoints(this.withRootEndpoints(flow, scope, from), scope, to);
+                if (parseEndpoint(from).instance !== null && parseEndpoint(from).instance === parseEndpoint(to).instance) throw new Error('A node cannot feed itself.');
+                const fromResolved = this.resolveRootEndpoint(flow, scope, from);
+                flow = fromResolved.flow;
+                from = fromResolved.endpoint;
+                const toResolved = this.resolveRootEndpoint(flow, scope, to);
+                flow = toResolved.flow;
+                to = toResolved.endpoint;
                 // Dropping on the group's empty slot creates a port named after the other end.
                 if (from === 'input:+') {
                     const target = parseEndpoint(to);
@@ -674,7 +707,6 @@ export class HarnessPanel implements vscode.Disposable {
                     flow = { ...flow, outputs: [...flow.outputs, { name, annotation: port?.annotation ?? null }] };
                     to = `output:${name}`;
                 }
-                if (parseEndpoint(from).instance !== null && parseEndpoint(from).instance === parseEndpoint(to).instance) throw new Error('A node cannot feed itself.');
                 await saveFlow(flowId, connect(flow, from, to));
                 await finish(`Wired ${from} → ${to}.`);
                 return true;
@@ -686,7 +718,11 @@ export class HarnessPanel implements vscode.Disposable {
                     layout.placeholders = layout.placeholders.filter(item => !ids.has(item.id));
                     for (const id of ids) delete layout.positions[id];
                 } else for (const id of ids) delete layout.flowPositions[scope]?.[id];
-                await saveFlow(flowId, removeInstances(this.flow(flowId), ids));
+                const current = this.flow(flowId);
+                const next = removeInstances(current, ids);
+                if (scope !== null || this.snapshot?.flows?.some(item => item.id === MAIN_FLOW) || current.instances.length > 0 || current.wires.length > 0) {
+                    await saveFlow(flowId, next);
+                }
                 await finish(`Removed ${ids.size} item(s).`);
                 return true;
             }
@@ -704,20 +740,35 @@ export class HarnessPanel implements vscode.Disposable {
                 }
                 let parent = this.flow(flowId);
                 const ids = (Array.isArray(action.ids) ? action.ids.map(String) : []);
+                const mappedIds: string[] = [];
                 for (const id of ids) {
                     if (scope === null && !parent.instances.some(item => item.id === id)) {
-                        try { parent = { ...parent, instances: [...parent.instances, this.rootInstance(id)] }; } catch { /* notes, placeholders */ }
+                        try {
+                            const resolved = this.resolveRootEndpoint(parent, null, `${id}.out`);
+                            parent = resolved.flow;
+                            const instId = parseEndpoint(resolved.endpoint).instance;
+                            if (instId) mappedIds.push(instId);
+                        } catch { /* notes, placeholders */ }
+                    } else if (parent.instances.some(item => item.id === id)) {
+                        mappedIds.push(id);
                     }
                 }
-                const selected = ids.filter(id => parent.instances.some(item => item.id === id));
+                const selected = mappedIds.filter(id => parent.instances.some(item => item.id === id));
                 if (!selected.length) throw new Error('Select nodes, references, or values to group.');
-                const instanceId = scope === null ? `flow:${name}` : uniqueName(name, parent.instances.map(item => item.id));
+                const instanceId = scope === null
+                    ? uniqueName(`ref_${name}`, [...this.rootCanvasIds(), ...parent.instances.map(item => item.id)])
+                    : uniqueName(name, parent.instances.map(item => item.id));
                 const result = extractFlow(parent, selected, { id: name, name, instanceId }, instance => this.portsOf(instance));
                 const positions = scope === null ? layout.positions : layout.flowPositions[scope] ?? {};
                 const points = selected.map(id => positions[id]).filter(Boolean);
                 layout.flowPositions[name] = Object.fromEntries(selected.filter(id => positions[id]).map(id => [id, positions[id]]));
-                if (points.length) this.placeAt(scope, instanceId, points.reduce((sum, point) => sum + point.x, 0) / points.length, points.reduce((sum, point) => sum + point.y, 0) / points.length);
-                if (scope !== null) for (const id of selected) delete positions[id];
+                if (points.length) {
+                    const avgX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+                    const avgY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+                    this.placeAt(scope, instanceId, avgX, avgY);
+                    if (scope === null) this.placeAt(null, `flow:${name}`, avgX + 320, avgY);
+                }
+                for (const id of selected) delete positions[id];
                 await folder.writeFlow(name, result.child);
                 await saveFlow(flowId, result.parent);
                 await finish(`Grouped ${selected.length} item(s) into flow ${name}.`, instanceId);
@@ -753,23 +804,12 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
-    /** At the root, endpoints name canvas items; make sure each is a main-flow instance. */
-    private withRootEndpoints(flow: SlateFlow, scope: string | null, endpoint: string): SlateFlow {
-        const instance = parseEndpoint(endpoint).instance;
-        if (scope !== null || instance === null || flow.instances.some(item => item.id === instance)) return flow;
-        return { ...flow, instances: [...flow.instances, this.rootInstance(instance)] };
-    }
-
-    /** rootInstance for an id that may have just been added to layout.refs. */
-    private rootInstanceAfter(flow: SlateFlow, id: string): FlowInstance {
-        return flow.instances.find(item => item.id === id) ?? this.rootInstance(id);
-    }
-
     private async updateFolderNotes(folder: SlateFolderHost, message: Record<string, unknown>): Promise<void> {
         const attachment = message.attachedTo === null || message.attachedTo === undefined
             ? null
             : typeof message.attachedTo === 'string' && this.validUnitId(message.attachedTo) ? message.attachedTo : null;
         try {
+            await folder.syncDirtyLayout();
             let select: string | null = null;
             if (message.type === 'noteCreate') {
                 if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) throw new Error('invalid board position');

@@ -83,10 +83,30 @@ describe('Python harness graph', () => {
 
     it('draws root data wires from main.json between canvas items, colored by type', () => {
         const edge = buildGraph(demoSnapshot).edges.find(item => item.id.startsWith('data:'))!;
-        expect(edge).toMatchObject({ source: 'value', sourceHandle: 'out', target: 'scoring/normalize_score', targetHandle: 'in:score' });
+        expect(edge).toMatchObject({ source: 'value', sourceHandle: 'out', target: 'ref-clamp', targetHandle: 'in:value' });
         expect(edge.style?.stroke).toBe(typeColor(null));
         expect(typeColor('int')).toBe(typeColor(' int '));
         expect(typeColor('int')).not.toBe(typeColor('str'));
+    });
+
+    it('renders root call instances from main.json without double-counting legacy refs or colliding with definitions', () => {
+        const snapshot = structuredClone(demoSnapshot);
+        snapshot.refs = [{ id: 'ref-clamp', target: 'clamp' }, { id: 'legacy-ref', target: 'scoring/normalize_score' }];
+        const main = snapshot.flows!.find(item => item.id === 'main')!.flow!;
+        main.instances.push({ id: 'main-call', node: 'report' }, { id: 'clamp', node: 'clamp' }, { id: 'flow:report', node: 'report' });
+        snapshot.layout = { ...snapshot.layout, 'main-call': { x: 500, y: 500 }, 'legacy-ref': { x: 600, y: 600 } };
+        const graph = buildGraph(snapshot);
+        expect(graph.nodes.filter(node => node.id === 'ref-clamp')).toHaveLength(1);
+        expect(graph.nodes.filter(node => node.id === 'clamp')).toHaveLength(1);
+        expect(graph.nodes.filter(node => node.id === 'flow:report')).toHaveLength(1);
+        expect(graph.nodes.find(node => node.id === 'main-call')).toMatchObject({
+            position: { x: 500, y: 500 },
+            data: { kind: 'ref', target: 'report', flowId: 'report', broken: false },
+        });
+        expect(graph.nodes.find(node => node.id === 'legacy-ref')).toMatchObject({
+            position: { x: 600, y: 600 },
+            data: { kind: 'ref', target: 'scoring/normalize_score', broken: false },
+        });
     });
 
     it('shows a flow with group input/output (plus empty slots), instances, and wires from the group', () => {

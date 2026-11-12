@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as http from 'http';
 import * as vscode from 'vscode';
 import type { HarnessSnapshot } from '../../harness_protocol';
+import { compileSlateFolder } from '../../port_compile_host';
 
 const candidate = 'def normalize(score: int, maximum: int) -> int:\n    return score * 100 // maximum';
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value, null, 2) + '\n');
@@ -206,10 +207,11 @@ suite('Slate native persistence and proposal QA', () => {
         await open();
         assert.equal((await snapshot()).library?.[0].units[0].id, 'lib:vendor/tools.py:double');
         await act({ kind: 'addInstance', target: 'lib:vendor/tools.py:double', x: 25, y: 35, connectTo: 'normalize.in:score' });
-        const libRef = (await snapshot()).refs?.[0];
-        assert.equal(libRef?.target, 'lib:vendor/tools.py:double');
-        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
-            { from: `${libRef!.id}.out`, to: 'normalize.in:score' },
+        const libMain = await read('slate', 'flows', 'main.json');
+        const libRef = libMain.instances[0];
+        assert.equal(libRef?.node, 'lib:vendor/tools.py:double');
+        assert.deepEqual(libMain.wires, [
+            { from: `${libRef!.id}.out`, to: 'ref_normalize.in:score' },
         ]);
         replaceMethod(vscode.window, 'showOpenDialog', async () => undefined);
         const before = await read('slate', 'slate.json');
@@ -445,6 +447,179 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual((await read('slate', 'layout.json')).positions.normalize, { x: 9, y: 10 });
     });
 
+    test('root migration preserves refs on main.json write failure, defers disk writes for dirty buffers, and compiles dirty or missing layout', async () => {
+        const layoutUri = uri('slate', 'layout.json');
+        const mainUri = uri('slate', 'flows', 'main.json');
+        await vscode.workspace.fs.writeFile(layoutUri, encode({
+            positions: { 'ref-legacy': { x: 40, y: 50 }, normalize: { x: 100, y: 120 } },
+            notes: [],
+            refs: [{ id: 'ref-legacy', target: 'clamp' }],
+        }));
+        // If writing main.json fails during migration, layout.json keeps its legacy refs so they are not lost.
+        await vscode.workspace.fs.createDirectory(mainUri);
+        await act({ kind: 'refreshIndex' });
+        assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        await vscode.workspace.fs.delete(mainUri, { recursive: true, useTrash: false });
+
+        // While main.json has unsaved changes, refresh migrates in-memory without overwriting disk or minting duplicate ref_* IDs.
+        await vscode.workspace.fs.writeFile(mainUri, encode({
+            slate: 3, name: 'main', inputs: [], outputs: [], instances: [], wires: [],
+        }));
+        const mainDoc = await vscode.workspace.openTextDocument(mainUri);
+        const dirtyMainEdit = new vscode.WorkspaceEdit();
+        dirtyMainEdit.replace(
+            mainDoc.uri,
+            new vscode.Range(mainDoc.positionAt(0), mainDoc.positionAt(mainDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                slate: 3, name: 'main', inputs: [], outputs: [],
+                instances: [{ id: 'normalize', node: 'normalize' }],
+                wires: [{ from: 'ref-legacy.out', to: 'normalize.in:score' }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyMainEdit));
+        assert.equal(mainDoc.isDirty, true);
+        await act({ kind: 'refreshIndex' });
+        await act({ kind: 'refreshIndex' });
+        assert.equal(mainDoc.isDirty, true);
+        assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, []);
+        // Moving a card on the canvas while main.json is dirty preserves the deferred legacy refs in layout.json.
+        await post({ type: 'layout', positions: { normalize: { x: 110, y: 130 } } });
+        assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        assert.deepEqual((await read('slate', 'layout.json')).positions.normalize, { x: 110, y: 130 });
+        assert.deepEqual((await snapshot()).flows?.find(item => item.id === 'main')?.flow?.instances, [
+            { id: 'ref_normalize', node: 'normalize' },
+            { id: 'ref-legacy', node: 'clamp' },
+        ]);
+        // Creating a reference while main.json is dirty updates and saves the open document so the new reference is retained on refresh.
+        await act({ kind: 'createRef', target: 'clamp', x: 50, y: 60 });
+        assert.equal(mainDoc.isDirty, false);
+        assert.equal((await read('slate', 'layout.json')).refs, undefined);
+        const snapInstancesAfterDirtyCreate = (await snapshot()).flows?.find(item => item.id === 'main')?.flow?.instances ?? [];
+        assert.equal(snapInstancesAfterDirtyCreate.length, 3);
+        assert.ok(snapInstancesAfterDirtyCreate.some(item => item.id === 'ref_normalize' && item.node === 'normalize'));
+        assert.ok(snapInstancesAfterDirtyCreate.some(item => item.id === 'ref-legacy' && item.node === 'clamp'));
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, snapInstancesAfterDirtyCreate);
+
+        // Moving a card on the canvas while layout.json has unsaved editor changes merges and preserves the unsaved edits.
+        const layoutEditorDoc = await vscode.workspace.openTextDocument(layoutUri);
+        const unsavedLayoutEdit = new vscode.WorkspaceEdit();
+        unsavedLayoutEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                positions: { clamp: { x: 77, y: 88 }, normalize: { x: 110, y: 130 } },
+                notes: [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across drag', attachedTo: null }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(unsavedLayoutEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await post({ type: 'layout', positions: { normalize: { x: 140, y: 160 } } });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        const mergedLayout = await read('slate', 'layout.json');
+        assert.deepEqual(mergedLayout.positions.clamp, { x: 77, y: 88 });
+        assert.deepEqual(mergedLayout.positions.normalize, { x: 140, y: 160 });
+        assert.deepEqual(mergedLayout.notes, [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across drag', attachedTo: null }]);
+
+        // Grouping a legacy reference while layout.json has unsaved edits moves it to the child flow without restoring it to root.
+        const dirtyLegacyGroupEdit = new vscode.WorkspaceEdit();
+        dirtyLegacyGroupEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                positions: { 'ref-grouped': { x: 30, y: 40 }, normalize: { x: 140, y: 160 } },
+                notes: [{ id: 'note-dirty', title: 'Unsaved note', body: 'Kept across group', attachedTo: null }],
+                refs: [{ id: 'ref-grouped', target: 'clamp' }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyLegacyGroupEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await act({ kind: 'refreshIndex' });
+        await act({ kind: 'extractFlow', name: 'grouped_legacy', ids: ['ref-grouped'] });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        assert.equal((await read('slate', 'layout.json')).refs, undefined);
+        assert.deepEqual((await read('slate', 'layout.json')).notes, [
+            { id: 'note-dirty', title: 'Unsaved note', body: 'Kept across group', attachedTo: null },
+        ]);
+        assert.ok(!(await read('slate', 'flows', 'main.json')).instances.some((item: any) => item.id === 'ref-grouped'));
+        assert.deepEqual((await read('slate', 'flows', 'grouped_legacy.json')).instances, [
+            { id: 'ref-grouped', node: 'clamp' },
+        ]);
+        await vscode.workspace.fs.delete(uri('slate', 'flows', 'grouped_legacy.json'));
+
+        // Editing legacy refs in dirty layout.json, dragging a card (saving layout), and then running createRef migrates the edited ref into main.json.
+        const dirtyRefThenDragEdit = new vscode.WorkspaceEdit();
+        dirtyRefThenDragEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                positions: { 'ref-after-drag': { x: 20, y: 30 }, normalize: { x: 140, y: 160 } },
+                notes: [],
+                refs: [{ id: 'ref-after-drag', target: 'clamp' }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyRefThenDragEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await post({ type: 'layout', positions: { normalize: { x: 150, y: 170 } } });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        await act({ kind: 'createRef', target: 'normalize', x: 60, y: 70 });
+        assert.equal((await read('slate', 'layout.json')).refs, undefined);
+        assert.ok((await read('slate', 'flows', 'main.json')).instances.some((item: any) => item.id === 'ref-after-drag' && item.node === 'clamp'));
+
+        // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await vscode.workspace.fs.writeFile(layoutUri, encode({
+            positions: {}, notes: [], refs: [{ id: 'ref_dirty', target: 'missing_target' }],
+        }));
+        await vscode.workspace.fs.writeFile(mainUri, encode({
+            slate: 3, name: 'main',
+            inputs: [{ name: 'x', annotation: 'int' }, { name: 'lo', annotation: 'int' }, { name: 'hi', annotation: 'int' }],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [],
+            wires: [
+                { from: 'input:x', to: 'ref_dirty.in:value' },
+                { from: 'input:lo', to: 'ref_dirty.in:lower' },
+                { from: 'input:hi', to: 'ref_dirty.in:upper' },
+                { from: 'ref_dirty.out', to: 'output:out' },
+            ],
+        }));
+        const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
+        const dirtyLayoutEdit = new vscode.WorkspaceEdit();
+        dirtyLayoutEdit.replace(
+            layoutDoc.uri,
+            new vscode.Range(layoutDoc.positionAt(0), layoutDoc.positionAt(layoutDoc.getText().length)),
+            new TextDecoder().decode(encode({ positions: {}, notes: [], refs: [{ id: 'ref_dirty', target: 'clamp' }] })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyLayoutEdit));
+        assert.equal(layoutDoc.isDirty, true);
+        const outPy = `${root.path.split('/').pop()!.replace(/-/g, '_')}.py`;
+        const dirtyCompiled = await compileSlateFolder(root);
+        assert.deepEqual(dirtyCompiled.files, [outPy]);
+        assert.ok(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri('src', outPy)))
+            .includes('v_ref_dirty = clamp(value=x, lower=lo, upper=hi)'));
+        await vscode.window.showTextDocument(layoutDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+
+        await vscode.workspace.fs.delete(layoutUri);
+        await vscode.workspace.fs.writeFile(mainUri, encode({
+            slate: 3, name: 'main',
+            inputs: [{ name: 'x', annotation: 'int' }, { name: 'lo', annotation: 'int' }, { name: 'hi', annotation: 'int' }],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [],
+            wires: [
+                { from: 'input:x', to: 'clamp.in:value' },
+                { from: 'input:lo', to: 'clamp.in:lower' },
+                { from: 'input:hi', to: 'clamp.in:upper' },
+                { from: 'clamp.out', to: 'output:out' },
+            ],
+        }));
+        const noLayoutCompiled = await compileSlateFolder(root);
+        assert.deepEqual(noLayoutCompiled.files, [outPy]);
+        assert.ok(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri('src', outPy)))
+            .includes('v_ref_clamp = clamp(value=x, lower=lo, upper=hi)'));
+    });
+
     test('protocol search, packetPreview, reveal, createNode, placeholder conversions, root addInstance/extractFlow, and validation guards', async () => {
         await messages();
         const rev = (await snapshot()).revision;
@@ -500,30 +675,31 @@ suite('Slate native persistence and proposal QA', () => {
         await act({ kind: 'createPlaceholder', name: 'clamp', x: 15, y: 25 });
         const clampPhId = (await snapshot()).placeholders![0].id;
         await act({ kind: 'placeholderToRef', id: clampPhId });
-        assert.equal((await snapshot()).refs?.length, 1);
+        const mainInstances = () => read('slate', 'flows', 'main.json').then(flow => flow.instances as Array<{ id: string; node: string }>);
+        assert.equal((await mainInstances()).length, 1);
 
         // Root addInstance with connectFrom and connectTo, plus deleteItems on root.
         await act({ kind: 'addInstance', target: 'clamp', x: 40, y: 50, connectTo: 'normalize.in:score' });
-        const connectToRef = (await snapshot()).refs![1];
-        assert.equal(connectToRef.target, 'clamp');
+        const connectToRef = (await mainInstances()).filter(item => item.id.startsWith('ref-'))[1];
+        assert.equal(connectToRef.node, 'clamp');
         assert.deepEqual((await read('slate', 'layout.json')).positions[connectToRef.id], { x: 40, y: 50 });
         assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
-            { from: `${connectToRef.id}.out`, to: 'normalize.in:score' },
+            { from: `${connectToRef.id}.out`, to: 'ref_normalize.in:score' },
         ]);
         await act({ kind: 'addInstance', target: 'normalize', x: 60, y: 70, connectFrom: 'clamp.out' });
-        const connectFromRef = (await snapshot()).refs![2];
-        assert.equal(connectFromRef.target, 'normalize');
+        const connectFromRef = (await mainInstances()).filter(item => item.id.startsWith('ref-'))[2];
+        assert.equal(connectFromRef.node, 'normalize');
         assert.deepEqual((await read('slate', 'layout.json')).positions[connectFromRef.id], { x: 60, y: 70 });
         assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
-            { from: `${connectToRef.id}.out`, to: 'normalize.in:score' },
-            { from: 'clamp.out', to: `${connectFromRef.id}.in:score` },
+            { from: `${connectToRef.id}.out`, to: 'ref_normalize.in:score' },
+            { from: 'ref_clamp.out', to: `${connectFromRef.id}.in:score` },
         ]);
         await act({ kind: 'deleteItems', ids: [connectToRef.id] });
         const layoutAfterDelete = await read('slate', 'layout.json');
-        assert.ok(!layoutAfterDelete.refs.some((r: { id: string }) => r.id === connectToRef.id));
+        assert.ok(!(await mainInstances()).some(r => r.id === connectToRef.id));
         assert.equal(layoutAfterDelete.positions[connectToRef.id], undefined);
         assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
-            { from: 'clamp.out', to: `${connectFromRef.id}.in:score` },
+            { from: 'ref_clamp.out', to: `${connectFromRef.id}.in:score` },
         ]);
 
         // Note validation errors, valid note creation, and root extractFlow ignoring notes.

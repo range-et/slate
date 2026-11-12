@@ -56,7 +56,6 @@ export const demoSnapshot: HarnessSnapshot = {
         attachedTo: null,
     }],
     layout: { 'board-note-port': { x: 1400, y: 60 }, 'ref-clamp': { x: 760, y: 380 }, 'placeholder-letter': { x: 760, y: 60 }, 'flow:report': { x: 1080, y: 60 }, value: { x: 100, y: 470 } },
-    refs: [{ id: 'ref-clamp', target: 'clamp' }],
     placeholders: [{ id: 'placeholder-letter', name: 'letter_grade' }],
     library: [{
         path: 'vendor/textutil.py',
@@ -67,8 +66,8 @@ export const demoSnapshot: HarnessSnapshot = {
             id: 'main',
             flow: {
                 name: 'main', inputs: [], outputs: [], extra: {},
-                instances: [{ id: 'value', kind: 'value', value: '42' }, { id: 'scoring/normalize_score', node: 'scoring/normalize_score' }],
-                wires: [{ from: 'value.out', to: 'scoring/normalize_score.in:score' }],
+                instances: [{ id: 'value', kind: 'value', value: '42' }, { id: 'ref-clamp', node: 'clamp' }],
+                wires: [{ from: 'value.out', to: 'ref-clamp.in:value' }],
             },
         },
         {

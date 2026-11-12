@@ -256,7 +256,7 @@ test('QA statusbar palette button, selection palette commands, context menu refs
     await command(page, 'Generate normalize_score with llama.cpp');
     await command(page, 'Lock normalize_score');
     await command(page, 'Find references of scoring/normalize_score');
-    await expect(page.getByRole('status')).toContainText('used in flows main, report');
+    await expect(page.getByRole('status')).toContainText('0 references on the canvas; used in flows report');
 
     // Palette commands for library toggle, new note, note navigation, flow enter, and delete selected.
     await command(page, 'Hide library');

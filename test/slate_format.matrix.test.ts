@@ -107,6 +107,7 @@ describe('config, layout, and path matrix', () => {
             refs: [{ id: 'r', target: 'run' }], placeholders: [{ id: 'p', name: 'future', signature: 'def future()' }],
             mapPositions: { run: point }, flowPositions: { main: { run: point } } });
         expect(parseLayout(serializeLayout(layout))).toEqual(layout);
+        expect(JSON.parse(serializeLayout({ ...layout, refs: [] })).refs).toBeUndefined();
         expect(JSON.parse(serializeLayout(emptyLayout()))).toEqual({ positions: {}, notes: [] });
         const other = emptyLayout();
         other.notes.push(layout.notes[0]);
