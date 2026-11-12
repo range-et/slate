@@ -66,18 +66,50 @@ export type SlateNodeData = {
     highlighted?: boolean;
 };
 
+function compactOutsideStrings(text: string): string {
+    let out = '';
+    let quote: string | null = null;
+    for (let index = 0; index < text.length; index++) {
+        const ch = text[index];
+        if (quote) {
+            out += ch;
+            if (ch === '\\' && index + 1 < text.length) {
+                out += text[++index];
+            } else if (ch === quote) {
+                quote = null;
+            }
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+            out += ch;
+        } else if (!/\s/.test(ch)) {
+            out += ch;
+        }
+    }
+    return out;
+}
+
 function unquoteAnnotation(raw: string): string {
     let text = raw.trim();
     while (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"') && !text.slice(1, -1).includes('"'))
         || (text.startsWith("'") && text.endsWith("'") && !text.slice(1, -1).includes("'")))) {
         text = text.slice(1, -1).trim();
     }
-    return text.replace(/(?<!Literal\[)"([^"\\]+)"|'([^'\\]+)'/g, (_, dq, sq) => (dq ?? sq ?? '').trim());
+    // Preserve quotes inside Literal[...] arguments while unquoting forward-reference type names elsewhere.
+    const literalSpans: string[] = [];
+    const masked = text.replace(/\bLiteral\[(?:[^[\]"']|"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*')*\]/g, match => {
+        const idx = literalSpans.length;
+        literalSpans.push(match);
+        return `__SLATE_LIT_${idx}__`;
+    });
+    const unquoted = masked.replace(/"([^"\\]+)"|'([^'\\]+)'/g, (_, dq, sq) => (dq ?? sq ?? '').trim());
+    return unquoted.replace(/__SLATE_LIT_(\d+)__/g, (_, idx) => literalSpans[Number(idx)] ?? '');
 }
 
 /** Stable color per annotation; untyped ("any") is grey. */
 export function typeColor(annotation: string | null | undefined): string {
-    const type = unquoteAnnotation(annotation ?? '').replace(/\s+/g, '');
+    const type = compactOutsideStrings(unquoteAnnotation(annotation ?? ''));
     if (!type || type === 'Any' || type === 'any') return '#7d8590';
     let hash = 0;
     for (const character of type) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
@@ -85,7 +117,7 @@ export function typeColor(annotation: string | null | undefined): string {
 }
 
 function normalizeType(annotation: string | null | undefined): string | null {
-    const compact = unquoteAnnotation(annotation ?? '').replace(/\s+/g, '');
+    const compact = compactOutsideStrings(unquoteAnnotation(annotation ?? ''));
     if (!compact || compact === 'Any' || compact === 'any') return null;
     return compact;
 }
@@ -93,10 +125,17 @@ function normalizeType(annotation: string | null | undefined): string | null {
 function splitTopLevelComma(text: string): string[] {
     const parts: string[] = [];
     let depth = 0;
+    let quote: string | null = null;
     let start = 0;
     for (let index = 0; index < text.length; index++) {
         const ch = text[index];
-        if (ch === '[' || ch === '(' || ch === '{') depth++;
+        if (quote) {
+            if (ch === '\\') index++;
+            else if (ch === quote) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === '[' || ch === '(' || ch === '{') depth++;
         else if (ch === ']' || ch === ')' || ch === '}') depth--;
         else if (ch === ',' && depth === 0) {
             parts.push(text.slice(start, index));
@@ -111,10 +150,17 @@ function splitTopLevelUnion(type: string): string[] {
     const unwrapped = unquoteAnnotation(type);
     const parts: string[] = [];
     let depth = 0;
+    let quote: string | null = null;
     let start = 0;
     for (let index = 0; index < unwrapped.length; index++) {
         const ch = unwrapped[index];
-        if (ch === '[' || ch === '(' || ch === '{') depth++;
+        if (quote) {
+            if (ch === '\\') index++;
+            else if (ch === quote) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === '[' || ch === '(' || ch === '{') depth++;
         else if (ch === ']' || ch === ')' || ch === '}') depth--;
         else if (ch === '|' && depth === 0) {
             parts.push(unwrapped.slice(start, index));
@@ -162,6 +208,23 @@ function baseCompatible(sourceBase: string, targetBase: string): boolean {
     return false;
 }
 
+function normalizeLiteralToken(raw: string): string {
+    const trimmed = raw.trim();
+    if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+        return `"${trimmed.slice(1, -1)}"`;
+    }
+    return trimmed;
+}
+
+function literalPrimitiveType(raw: string): string | null {
+    const token = normalizeLiteralToken(raw);
+    if (token.startsWith('"') && token.endsWith('"')) return 'str';
+    if (token === 'True' || token === 'False') return 'bool';
+    if (token === 'None') return 'None';
+    if (/^-?\d+$/.test(token)) return 'int';
+    return null;
+}
+
 function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
     const source = canonicalAtom(sourceAtom);
     const target = canonicalAtom(targetAtom);
@@ -173,9 +236,25 @@ function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
     const argsOf = (value: string) => value.includes('[') && value.endsWith(']') ? value.slice(value.indexOf('[') + 1, -1) : null;
     const sourceBase = baseOf(source);
     const targetBase = baseOf(target);
-    if (!baseCompatible(sourceBase, targetBase)) return false;
     const sourceArgs = argsOf(source);
     const targetArgs = argsOf(target);
+    if (sourceBase === 'Literal' || targetBase === 'Literal') {
+        if (sourceBase === 'Literal' && targetBase === 'Literal') {
+            if (sourceArgs === null || targetArgs === null) return true;
+            const sLiterals = splitTopLevelComma(sourceArgs).map(normalizeLiteralToken);
+            const tLiterals = new Set(splitTopLevelComma(targetArgs).map(normalizeLiteralToken));
+            return sLiterals.length > 0 && sLiterals.every(lit => tLiterals.has(lit));
+        }
+        if (sourceBase === 'Literal' && sourceArgs !== null) {
+            const sLiterals = splitTopLevelComma(sourceArgs);
+            return sLiterals.length > 0 && sLiterals.every(lit => {
+                const prim = literalPrimitiveType(lit);
+                return prim !== null && atomCompatible(prim, target);
+            });
+        }
+        return false;
+    }
+    if (!baseCompatible(sourceBase, targetBase)) return false;
     if (sourceArgs === null || targetArgs === null) return true;
     const sList = splitTopLevelComma(sourceArgs);
     const tList = splitTopLevelComma(targetArgs);

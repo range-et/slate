@@ -258,4 +258,9 @@ it('marks type-mismatched data wires with warning metadata and styling without b
     expect(typesMismatch('list[str]', 'list[int]')).toBe(true);
     expect(typesMismatch('dict[str, str]', 'dict[str, int]')).toBe(true);
     expect(typesMismatch('tuple[int, str]', 'tuple[int, int]')).toBe(true);
+    expect(typesMismatch('Literal["1"]', 'Literal[1]')).toBe(true);
+    expect(typesMismatch('Literal["a  b"]', 'Literal["a b"]')).toBe(true);
+    expect(typesMismatch("Literal['a']", 'Literal["a", "b"]')).toBe(false);
+    expect(typesMismatch('Literal["a"]', 'str')).toBe(false);
+    expect(typesMismatch('Literal["a"]', 'int')).toBe(true);
 });

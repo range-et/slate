@@ -119,6 +119,17 @@ describe('Node health report and code normalization', () => {
             ],
         }), 'python', null).document;
 
+        const classCaller = indexNode('slate/nodes/Worker.json', JSON.stringify({
+            slate: 3,
+            name: 'Worker',
+            code: [
+                'class Worker:',
+                '    class_shadowed_helper = None',
+                '    def run(self, x: int) -> int:',
+                '        return class_shadowed_helper(x)',
+            ],
+        }), 'python', null).document;
+
         const makeUnused = (name: string) => indexNode(`slate/nodes/${name}.json`, JSON.stringify({
             slate: 3,
             name,
@@ -131,7 +142,9 @@ describe('Node health report and code normalization', () => {
             documents: [
                 orphan,
                 lookalikeCaller,
+                classCaller,
                 makeUnused('used_helper'),
+                makeUnused('class_shadowed_helper'),
                 makeUnused('param_node'),
                 makeUnused('loop_node'),
                 makeUnused('comp_node'),
@@ -145,7 +158,7 @@ describe('Node health report and code normalization', () => {
                     name: 'main',
                     inputs: [],
                     outputs: [],
-                    instances: [{ id: 'call-1', node: 'caller' }],
+                    instances: [{ id: 'call-1', node: 'caller' }, { id: 'call-2', node: 'Worker' }],
                     wires: [],
                     extra: {},
                 },

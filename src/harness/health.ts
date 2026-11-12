@@ -288,6 +288,13 @@ function importBoundNames(statement: string): Set<string> {
 interface Scope {
     bound: Set<string>;
     parent: Scope | null;
+    isClass?: boolean;
+}
+
+function lexicalParent(scope: Scope): Scope | null {
+    let cursor: Scope | null = scope;
+    while (cursor?.isClass) cursor = cursor.parent;
+    return cursor;
 }
 
 function isBoundInScope(scope: Scope | null, name: string): boolean {
@@ -362,7 +369,12 @@ function freeCodeReferences(source: string, imports: string[] = []): Set<string>
         if (node.name === 'FunctionDefinition' || node.name === 'ClassDefinition') {
             const nameNode = children.find(child => child.name === 'VariableName');
             if (nameNode) collectTargetVariables(nameNode, scope);
-            const innerScope: Scope = { bound: new Set<string>(), parent: scope };
+            const isClass = node.name === 'ClassDefinition';
+            const innerScope: Scope = {
+                bound: new Set<string>(),
+                parent: isClass ? scope : lexicalParent(scope),
+                isClass,
+            };
             for (const child of children) {
                 if (child === nameNode) continue;
                 if (child.name === 'ParamList') {
@@ -376,7 +388,7 @@ function freeCodeReferences(source: string, imports: string[] = []): Set<string>
             return;
         }
         if (node.name === 'LambdaExpression') {
-            const innerScope: Scope = { bound: new Set<string>(), parent: scope };
+            const innerScope: Scope = { bound: new Set<string>(), parent: lexicalParent(scope) };
             for (const child of children) {
                 if (child.name === 'ParamList') {
                     collectParamList(child, innerScope, scope);
@@ -387,7 +399,7 @@ function freeCodeReferences(source: string, imports: string[] = []): Set<string>
             return;
         }
         if (['ArrayComprehensionExpression', 'SetComprehensionExpression', 'DictionaryComprehensionExpression', 'GeneratorExpression', 'ComprehensionExpression'].includes(node.name)) {
-            const innerScope: Scope = { bound: new Set<string>(), parent: scope };
+            const innerScope: Scope = { bound: new Set<string>(), parent: lexicalParent(scope) };
             for (let idx = 0; idx < children.length; idx++) {
                 if (children[idx].name === 'for') {
                     for (let cursor = idx + 1; cursor < children.length && children[cursor].name !== 'in'; cursor++) {
