@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+// #!/usr/bin/env node
 /**
  * slate_roundtrip.js — pure CLI proof of compile → rehydrate → compile
  * fixed point.
