@@ -234,5 +234,10 @@ describe('one occurrence model and root migration', () => {
         const second = migrateRootOccurrences(migrated.main, [], migrated.positions, ['math/double', 'math/add', 'math/stats'], ['report']);
         expect(second.changed).toBe(false);
         expect(second.main).toEqual(migrated.main);
+
+        // Re-migrating an unsaved legacy main flow against already-migrated positions reuses ref_* IDs without minting duplicates.
+        const repeatLegacy = migrateRootOccurrences(legacyMain, [], migrated.positions, ['math/double', 'math/add', 'math/stats'], ['report']);
+        expect(repeatLegacy.main?.instances.map(item => item.id)).toEqual(['value', 'ref_double', 'ref_report', 'ref_add']);
+        expect(repeatLegacy.positions).toEqual(migrated.positions);
     });
 });

@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as http from 'http';
 import * as vscode from 'vscode';
 import type { HarnessSnapshot } from '../../harness_protocol';
+import { compileSlateFolder } from '../../port_compile_host';
 
 const candidate = 'def normalize(score: int, maximum: int) -> int:\n    return score * 100 // maximum';
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value, null, 2) + '\n');
@@ -437,6 +438,108 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(await read('slate', 'layout.json'), before);
         await post({ type: 'layout', positions: { normalize: { x: 9, y: 10 } } });
         assert.deepEqual((await read('slate', 'layout.json')).positions.normalize, { x: 9, y: 10 });
+    });
+
+    test('root migration preserves refs on main.json write failure, defers disk writes for dirty buffers, and compiles dirty or missing layout', async () => {
+        const layoutUri = uri('slate', 'layout.json');
+        const mainUri = uri('slate', 'flows', 'main.json');
+        await vscode.workspace.fs.writeFile(layoutUri, encode({
+            positions: { 'ref-legacy': { x: 40, y: 50 }, normalize: { x: 100, y: 120 } },
+            notes: [],
+            refs: [{ id: 'ref-legacy', target: 'clamp' }],
+        }));
+        // If writing main.json fails during migration, layout.json keeps its legacy refs so they are not lost.
+        await vscode.workspace.fs.createDirectory(mainUri);
+        await act({ kind: 'refreshIndex' });
+        assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        await vscode.workspace.fs.delete(mainUri, { recursive: true, useTrash: false });
+
+        // While main.json has unsaved changes, refresh migrates in-memory without overwriting disk or minting duplicate ref_* IDs.
+        await vscode.workspace.fs.writeFile(mainUri, encode({
+            slate: 3, name: 'main', inputs: [], outputs: [], instances: [], wires: [],
+        }));
+        const mainDoc = await vscode.workspace.openTextDocument(mainUri);
+        const dirtyMainEdit = new vscode.WorkspaceEdit();
+        dirtyMainEdit.replace(
+            mainDoc.uri,
+            new vscode.Range(mainDoc.positionAt(0), mainDoc.positionAt(mainDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                slate: 3, name: 'main', inputs: [], outputs: [],
+                instances: [{ id: 'normalize', node: 'normalize' }],
+                wires: [{ from: 'ref-legacy.out', to: 'normalize.in:score' }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyMainEdit));
+        assert.equal(mainDoc.isDirty, true);
+        await act({ kind: 'refreshIndex' });
+        await act({ kind: 'refreshIndex' });
+        assert.equal(mainDoc.isDirty, true);
+        assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, []);
+        assert.deepEqual((await snapshot()).flows?.find(item => item.id === 'main')?.flow?.instances, [
+            { id: 'ref_normalize', node: 'normalize' },
+            { id: 'ref-legacy', node: 'clamp' },
+        ]);
+        assert.ok(await mainDoc.save());
+        await act({ kind: 'refreshIndex' });
+        assert.equal((await read('slate', 'layout.json')).refs, undefined);
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, [
+            { id: 'ref_normalize', node: 'normalize' },
+            { id: 'ref-legacy', node: 'clamp' },
+        ]);
+
+        // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await vscode.workspace.fs.writeFile(layoutUri, encode({
+            positions: {}, notes: [], refs: [{ id: 'ref_dirty', target: 'missing_target' }],
+        }));
+        await vscode.workspace.fs.writeFile(mainUri, encode({
+            slate: 3, name: 'main',
+            inputs: [{ name: 'x', annotation: 'int' }, { name: 'lo', annotation: 'int' }, { name: 'hi', annotation: 'int' }],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [],
+            wires: [
+                { from: 'input:x', to: 'ref_dirty.in:value' },
+                { from: 'input:lo', to: 'ref_dirty.in:lower' },
+                { from: 'input:hi', to: 'ref_dirty.in:upper' },
+                { from: 'ref_dirty.out', to: 'output:out' },
+            ],
+        }));
+        const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
+        const dirtyLayoutEdit = new vscode.WorkspaceEdit();
+        dirtyLayoutEdit.replace(
+            layoutDoc.uri,
+            new vscode.Range(layoutDoc.positionAt(0), layoutDoc.positionAt(layoutDoc.getText().length)),
+            new TextDecoder().decode(encode({ positions: {}, notes: [], refs: [{ id: 'ref_dirty', target: 'clamp' }] })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(dirtyLayoutEdit));
+        assert.equal(layoutDoc.isDirty, true);
+        const outPy = `${root.path.split('/').pop()!.replace(/-/g, '_')}.py`;
+        const dirtyCompiled = await compileSlateFolder(root);
+        assert.deepEqual(dirtyCompiled.files, [outPy]);
+        assert.ok(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri('src', outPy)))
+            .includes('v_ref_dirty = clamp(value=x, lower=lo, upper=hi)'));
+        await vscode.window.showTextDocument(layoutDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+
+        await vscode.workspace.fs.delete(layoutUri);
+        await vscode.workspace.fs.writeFile(mainUri, encode({
+            slate: 3, name: 'main',
+            inputs: [{ name: 'x', annotation: 'int' }, { name: 'lo', annotation: 'int' }, { name: 'hi', annotation: 'int' }],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [],
+            wires: [
+                { from: 'input:x', to: 'clamp.in:value' },
+                { from: 'input:lo', to: 'clamp.in:lower' },
+                { from: 'input:hi', to: 'clamp.in:upper' },
+                { from: 'clamp.out', to: 'output:out' },
+            ],
+        }));
+        const noLayoutCompiled = await compileSlateFolder(root);
+        assert.deepEqual(noLayoutCompiled.files, [outPy]);
+        assert.ok(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri('src', outPy)))
+            .includes('v_ref_clamp = clamp(value=x, lower=lo, upper=hi)'));
     });
 
 });

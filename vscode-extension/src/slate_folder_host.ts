@@ -75,6 +75,11 @@ export class SlateFolderHost {
         const uri = this.uri(pathForFlowId(flowId));
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
         await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(serializeFlow(flow)));
+        if (flowId === MAIN_FLOW && this.deferredRefs.length > 0) {
+            // main.json now holds the migrated root instances; drop the deferred legacy refs.
+            this.deferredRefs = [];
+            await this.writeLayout();
+        }
     }
 
     /** Library files from slate.json `library` (files or folders of .py), with top-level ids `lib:<path>:<name>`. */
@@ -118,12 +123,21 @@ export class SlateFolderHost {
         return signatures;
     }
 
+    async readLayout(): Promise<SlateLayout> {
+        return parseLayout((await this.read(LAYOUT_PATH))?.text);
+    }
+
+    private isDirty(relativePath: string): boolean {
+        const uri = this.uri(relativePath);
+        return vscode.workspace.textDocuments.some(document => document.uri.toString() === uri.toString() && document.isDirty);
+    }
+
     private async read(relativePath: string): Promise<{ text: string; version: number | null } | undefined> {
         const uri = this.uri(relativePath);
         const open = vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
-        if (open) return { text: open.getText(), version: open.version };
+        if (open?.isDirty) return { text: open.getText(), version: open.version };
         try {
-            return { text: new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)), version: null };
+            return { text: new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)), version: open?.version ?? null };
         } catch {
             return undefined;
         }
@@ -133,12 +147,6 @@ export class SlateFolderHost {
         const configFile = await this.read(CONFIG_PATH);
         if (!configFile) throw new Error(`${CONFIG_PATH} is missing.`);
         const config = parseConfig(configFile.text);
-        try {
-            // In place, so actions holding `layout` keep writing the live object.
-            Object.assign(this.layout, parseLayout((await this.read(LAYOUT_PATH))?.text));
-        } catch (error) {
-            throw new Error(`${LAYOUT_PATH}: ${(error as Error).message}`);
-        }
         const uris = await vscode.workspace.findFiles(this.nodePattern());
         const documents: HarnessDocument[] = [];
         const sources = new Map<string, string>();
@@ -159,6 +167,12 @@ export class SlateFolderHost {
         }
         documents.sort((left, right) => left.path.localeCompare(right.path));
         const flows = await this.readFlows();
+        try {
+            // In place, so actions holding `layout` keep writing the live object.
+            Object.assign(this.layout, await this.readLayout());
+        } catch (error) {
+            throw new Error(`${LAYOUT_PATH}: ${(error as Error).message}`);
+        }
         const mainEntry = flows.find(item => item.id === MAIN_FLOW);
         if (!mainEntry || mainEntry.flow !== null) {
             const definitionIds = documents.flatMap(document => [
@@ -167,12 +181,22 @@ export class SlateFolderHost {
             ]).filter(Boolean);
             const flowIds = flows.filter(item => item.id !== MAIN_FLOW).map(item => item.id);
             const migrated = migrateRootOccurrences(mainEntry?.flow ?? null, this.layout.refs, this.layout.positions, definitionIds, flowIds);
+            this.deferredRefs = [];
             if (migrated.changed) {
-                this.layout.positions = migrated.positions;
-                this.layout.refs = [];
-                await this.writeLayout();
+                if (!this.isDirty(LAYOUT_PATH) && !this.isDirty(pathForFlowId(MAIN_FLOW))) {
+                    // main.json first: legacy refs leave layout.json only once main.json holds them.
+                    if (migrated.main) await this.writeFlow(MAIN_FLOW, migrated.main);
+                    this.layout.positions = migrated.positions;
+                    this.layout.refs = [];
+                    await this.writeLayout();
+                } else {
+                    // Dirty buffer: migrate in memory only; layout writes keep the legacy refs
+                    // until main.json is written, so they are never dropped from disk early.
+                    this.deferredRefs = this.layout.refs;
+                    this.layout.positions = migrated.positions;
+                    this.layout.refs = [];
+                }
                 if (migrated.main) {
-                    await this.writeFlow(MAIN_FLOW, migrated.main);
                     if (mainEntry) mainEntry.flow = migrated.main;
                     else {
                         flows.push({ id: MAIN_FLOW, flow: migrated.main });
@@ -210,7 +234,8 @@ export class SlateFolderHost {
     }
 
     async writeLayout(): Promise<void> {
-        await vscode.workspace.fs.writeFile(this.uri(LAYOUT_PATH), new TextEncoder().encode(serializeLayout(this.layout)));
+        const refs = [...this.deferredRefs, ...this.layout.refs.filter(ref => !this.deferredRefs.some(item => item.id === ref.id))];
+        await vscode.workspace.fs.writeFile(this.uri(LAYOUT_PATH), new TextEncoder().encode(serializeLayout({ ...this.layout, refs })));
     }
 
     /** Current node from its (possibly dirty) document. */

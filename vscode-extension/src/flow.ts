@@ -304,7 +304,6 @@ export function migrateRootOccurrences(
     const taken = new Set<string>([
         ...defs,
         ...[...flows].map(id => `flow:${id}`),
-        ...Object.keys(nextPositions),
         ...instances.map(item => item.id),
     ]);
     for (const item of instances) {
