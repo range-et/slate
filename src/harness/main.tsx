@@ -769,6 +769,7 @@ function HarnessApp() {
         const openPalette = (event: KeyboardEvent) => {
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
                 event.preventDefault();
+                event.stopPropagation();
                 setPaletteQuery('');
                 setPaletteOpen(open => !open);
                 return;
@@ -777,11 +778,12 @@ function HarnessApp() {
             if (target?.matches('input, textarea, [contenteditable="true"]') || target?.closest('.cm-editor')) return;
             if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
             event.preventDefault();
+            event.stopPropagation();
             setPaletteQuery('');
             setPaletteOpen(true);
         };
-        window.addEventListener('keydown', openPalette);
-        return () => window.removeEventListener('keydown', openPalette);
+        window.addEventListener('keydown', openPalette, true);
+        return () => window.removeEventListener('keydown', openPalette, true);
     }, []);
 
     useEffect(() => {

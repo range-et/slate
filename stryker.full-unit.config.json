@@ -6,6 +6,7 @@
     "!vscode-extension/src/test/**"
   ],
   "testRunner": "vitest",
+  "buildCommand": "node scripts/prepare-system-mutation.mjs",
   "vitest": {
     "configFile": "vitest.config.js"
   },

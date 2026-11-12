@@ -257,3 +257,119 @@ Final review-fix launch gate: `npm run verify:launch` exited 0 on 2026-11-09
 Extension Host tests and real workbench Generate/Accept/Undo/Save plus native
 creation/cancellation QA. Static checks, palette mutation gate, frozen legacy
 checks/builds and Python round trips passed. `git diff --check` passed.
+
+## Issue #20 cross-platform coverage and mutation expansion (2026-11-11)
+
+Refreshed full-scope three-runner combined coverage (`unit` + `browser` +
+`native` via `scripts/coverage-report.mjs`) and Stryker mutation evidence across
+`src/harness` and `vscode-extension/src`, fixed cross-platform coverage/mutation
+instrumentation bugs, and expanded unit, Playwright browser, and real VS Code
+Extension Host regression suites.
+
+### Cross-platform coverage & mutation tooling fixes
+
+- `scripts/coverage-scope.mjs`: `sourcePath` now falls back to
+  `decodeURIComponent(new URL(name).pathname)` when `fileURLToPath` rejects
+  POSIX `file:///repo/...` URLs on Windows, normalizes path separators, and
+  trims trailing slashes on `root`.
+- `scripts/source-instrumentation.cjs`: `instrumentSource` resolves POSIX paths
+  via `path.posix.resolve(filename)` when `filename.startsWith('/')` so NYC's
+  path-key lookup matches the instrumented source key across platforms.
+- `scripts/prepare-system-mutation.mjs` and `stryker.full-unit.config.json`:
+  uses `'junction'` on Windows and `'dir'` on POSIX when linking tool
+  directories into the Stryker sandbox, and runs
+  `node scripts/prepare-system-mutation.mjs` as `buildCommand` in
+  `stryker.full-unit.config.json` so `vscode-extension/node_modules`
+  (`@lezer/python@1.1.19`) is linked inside full-unit mutation sandboxes.
+- `src/harness/main.tsx` and `package.json`: registered the `openPalette`
+  window `keydown` listener in the capture phase (`true`) with
+  `event.stopPropagation()` on `Cmd/Ctrl+K` and `/` so VS Code's outer webview
+  host does not enter a `Ctrl+K` chord on Windows/Linux, and added `sync-dist`
+  before `test:workbench`.
+
+### Refreshed three-runner combined coverage (`coverage/combined/coverage-summary.json`)
+
+| Metric | Before (2026-11-09) | After (2026-11-11) | Delta |
+| --- | --- | --- | --- |
+| Lines | 94.42% (`2423 / 2566`) | **99.92% (`2566 / 2568`)** | **+5.50%** (`+143` lines; only `2` unreachable/packaging-only lines remain) |
+| Statements | 92.15% (`3077 / 3339`) | **98.71% (`3298 / 3341`)** | **+6.56%** (`+221` statements) |
+| Functions | 92.48% (`763 / 825`) | **98.42% (`812 / 825`)** | **+5.94%** (`+49` functions) |
+| Branches | 87.80% (`2296 / 2615`) | **94.53% (`2473 / 2616`)** | **+6.73%** (`+177` branches) |
+
+Per-file combined coverage across the 17 executable product files (`types.ts` and
+`harness_protocol.ts` are type-only):
+
+| File | Statements | Branches | Functions | Lines | Uncovered lines |
+| --- | --- | --- | --- | --- | --- |
+| `src/harness/demo.ts` | 99.38% (160/161) | 96.47% (82/85) | 100% (45/45) | 100% (121/121) | none |
+| `src/harness/graph.ts` | 98.78% (243/246) | 92.17% (212/230) | 100% (53/53) | 100% (192/192) | none |
+| `src/harness/main.tsx` | 97.69% (635/650) | 92.90% (537/578) | 100% (204/204) | 100% (481/481) | none |
+| `src/harness/palette.ts` | 100% (52/52) | 100% (45/45) | 100% (18/18) | 100% (31/31) | none |
+| `vscode-extension/src/extension.ts` | 100% (86/86) | 100% (40/40) | 100% (18/18) | 100% (76/76) | none |
+| `vscode-extension/src/flow.ts` | 100% (263/263) | 100% (261/261) | 100% (53/53) | 100% (201/201) | none |
+| `vscode-extension/src/generation.ts` | 100% (152/152) | 100% (129/129) | 100% (28/28) | 100% (126/126) | none |
+| `vscode-extension/src/harness_panel.ts` | 97.65% (415/425) | 90.08% (327/363) | 89.26% (108/121) | 99.45% (363/365) | `39, 499` |
+| `vscode-extension/src/llama_transport.ts` | 99.13% (114/115) | 88.04% (81/92) | 100% (18/18) | 100% (95/95) | none |
+| `vscode-extension/src/port_compile_host.ts` | 97.83% (135/138) | 91.67% (99/108) | 100% (32/32) | 100% (109/109) | none |
+| `vscode-extension/src/python_adapter.ts` | 98.58% (277/281) | 92.59% (200/216) | 100% (63/63) | 100% (223/223) | none |
+| `vscode-extension/src/search.ts` | 100% (44/44) | 100% (32/32) | 100% (11/11) | 100% (36/36) | none |
+| `vscode-extension/src/slate_folder.ts` | 100% (214/214) | 100% (169/169) | 100% (44/44) | 100% (163/163) | none |
+| `vscode-extension/src/slate_folder_host.ts` | 97.67% (126/129) | 82.98% (39/47) | 100% (34/34) | 100% (104/104) | none |
+| `vscode-extension/src/compile/python.ts` | 98.48% (130/132) | 96.49% (110/114) | 100% (26/26) | 100% (97/97) | none |
+| `vscode-extension/src/port/describe.ts` | 100% (95/95) | 100% (53/53) | 100% (28/28) | 100% (70/70) | none |
+| `vscode-extension/src/port/python_importer.ts` | 99.37% (157/158) | 96.61% (57/59) | 100% (29/29) | 100% (78/78) | none |
+
+Audit of the 2 remaining uncovered lines in `vscode-extension/src/harness_panel.ts`:
+- Line `39`: fallback HTML returned only when `dist/webview/harness.js` is absent
+  from the packaged extension directory (`!fs.existsSync(scriptPath)`). In a
+  valid build/test environment `sync-dist` always populates `dist/webview/harness.js`.
+- Line `499`: `return this.folder.libraryNodes().some(node => node.id === target);`
+  inside `targetExists(target)` when `createNode` checks for a conflicting
+  existing definition node id (`if (this.targetExists(nodeId))`). Because
+  `createNode` validates `nodeId` via `parseNodeId` (which rejects `lib:`
+  prefixes) and `libraryNodes()` always have `id: "lib:..."`, `targetExists` is
+  only reached with non-`lib:` ids where `this.folder.hasNode(target)` handles
+  every project node.
+
+### Refreshed mutation audit (`python_adapter.ts` & `palette.ts`)
+
+- Scoped palette mutation gate (`npx stryker run stryker.config.json`):
+  **94.44% (`85 / 90` killed, `5` audited equivalent mutants, `0` timeouts, `0` errors)**.
+- Targeted `vscode-extension/src/python_adapter.ts:65-81,332-390` mutation audit
+  (`npx stryker run stryker.full-unit.config.json --mutate "vscode-extension/src/python_adapter.ts:65-81,vscode-extension/src/python_adapter.ts:332-390"`):
+  improved from **68.24% (`101 / 148` killed, `45` survived, `2` no-coverage)**
+  to **86.52% (`122 / 141` killed, `17` survived, `2` no-coverage)** before adding
+  the final 4 cases (`\r`-only multiline params, 3-line trailing-indent params,
+  nested-function replacement rejection, and non-string `nodeId` replacement),
+  which kill 4 more of the 17 survivors (`line 70:66`, `line 74:38`,
+  `line 371:24`, and `line 379:33`), leaving only audited equivalent,
+  parser-guaranteed, or unindexed-annotation mutants:
+  - `declarationIndent` (`lines 65–66`): `from - 1` vs `from + 1` (equivalent
+    because `target.from` is the start of `def`/`@decorator`, never `\n`), and
+    `.match(/^[ \t]*/)?.[0] ?? ''` optional-chaining/regex/fallback mutants
+    (equivalent because `/^[ \t]*/` matches every string at index 0).
+  - `normalizeParameters` (`lines 74–76`): `lines.at(-1)?.trim()` optional
+    chaining (equivalent after `if (lines.length === 1) return` since `lines`
+    always has `>= 1` element) and `line.match(/^[ \t]*/)?.[0]` optional
+    chaining / `^` anchor on filtered non-empty lines (equivalent where leading
+    whitespace is the only whitespace before parameter identifiers).
+  - `replaceUnit` (`lines 375–383`): `unit.annotation?.locked === true` (not
+    reachable through `parseDetailed`, which always sets `annotation: null`),
+    `'<replacement>'` path label in `parseDetailed` (internal parse diagnostic
+    path is not returned when `replaceUnit` throws its fixed `AdapterError`),
+    `!candidate.valid && candidate.units.length !== 1` / `parentId !== null`
+    (equivalent because `topLevelStatements[0].name !== 'FunctionDefinition'`
+    and syntax checks already reject invalid or non-root units), and
+    `candidate.units[0].name !== unit.name` / `decorators.length > 0`
+    (equivalent because `unit.signature` includes `unit.name` and Lezer wraps
+    decorated functions in `DecoratedStatement`, caught at line 380).
+
+### Final launch gate verification
+
+`npm run verify:launch` in `c:\Users\range\Desktop\slate-wt-issue-20`:
+- `477` unit tests across `24` Vitest files (`0` failures)
+- `94.44%` Stryker palette mutation gate (`>= 85%` threshold)
+- `89` Playwright browser tests (`0` failures)
+- `41` real VS Code Extension Host integration tests (`0` failures)
+- Real VS Code workbench Generate / Accept / Undo / Save + native creation/cancellation QA (`0` failures)
+- Frozen legacy tests (`62` passed) and Python/port/compile/flow round trips (`0` failures)

@@ -34,6 +34,8 @@ describe('llama request and stream matrix', () => {
     it.each([
         ['empty body', () => new Response(null), /empty stream/],
         ['HTTP failure', () => new Response('unavailable', { status: 503 }), /HTTP 503: unavailable/],
+        ['HTTP failure with empty body', () => new Response('', { status: 500 }), /^llama\.cpp returned HTTP 500$/],
+        ['non-Error fetch rejection', () => Promise.reject('socket hang up') as unknown as Response, /socket hang up/],
         ['malformed JSON', () => stream('data: nope\n\n'), /malformed streaming JSON/],
         ['missing done', () => stream(token), /disconnected/],
         ['no implementation', () => stream(done), /no implementation/],

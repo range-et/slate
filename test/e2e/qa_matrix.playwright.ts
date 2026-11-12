@@ -224,7 +224,145 @@ test('QA palette keyboard navigation, Escape, clear selection and reference navi
     await input.press('ArrowDown');
     await expect(options.nth(1)).toHaveAttribute('aria-selected', 'true');
     await input.press('ArrowUp');
+    await input.press('ArrowUp');
     await expect(options.nth(0)).toHaveAttribute('aria-selected', 'true');
     await input.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('QA statusbar palette button, selection palette commands, context menu refs, library flow pick, search dblclick, and inspector diagnostics', async ({ page }) => {
+    await host(page, null);
+    await host(page, { type: 'selectUnit', unitId: 'clamp' });
+    await expect(page.locator('.react-flow__node[data-id="clamp"]')).toHaveClass(/selected/);
+
+    // Double-click on inline intent paragraph stops propagation without revealing source.
+    await page.locator('.react-flow__node[data-id="clamp"] .slate-node__intent').dispatchEvent('dblclick');
+
+    // Empty ContextPicker Enter is a safe no-op.
+    await select(page, 'clamp');
+    const contextInput = page.getByLabel('Add context');
+    await contextInput.fill('zzzz_no_match');
+    await contextInput.press('Enter');
+
+    // Statusbar button opens the command palette; run Add context from it.
+    await page.getByRole('button', { name: '⌘K Commands' }).click();
+    await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible();
+    await page.getByLabel('Command palette input').fill('Add context: Grader');
+    await page.getByRole('option').filter({ has: page.getByText('Add context: Grader', { exact: true }) }).click();
+
+    // Palette commands for selected unit: Generate, Lock, Find references.
+    await page.locator('.react-flow__node[data-id="scoring/normalize_score"] strong').click();
+    await expect(page.locator('.react-flow__node[data-id="scoring/normalize_score"]')).toHaveClass(/selected/);
+    await command(page, 'Generate normalize_score with llama.cpp');
+    await command(page, 'Lock normalize_score');
+    await command(page, 'Find references of scoring/normalize_score');
+    await expect(page.getByRole('status')).toContainText('used in flows main, report');
+
+    // Palette commands for library toggle, new note, note navigation, flow enter, and delete selected.
+    await command(page, 'Hide library');
+    await expect(page.getByRole('complementary', { name: 'Library' })).toHaveCount(0);
+    await command(page, 'New board note');
+    await command(page, 'Note: Port the grading script next');
+    await expect(page.locator('.react-flow__node[data-id="board-note-port"]')).toHaveClass(/selected/);
+    await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: 'Fit View' }).click();
+
+    await select(page, 'ref-clamp');
+    await command(page, 'Delete selected (1)');
+    await command(page, 'Clear selection');
+
+    // Context menu: Find references on unit and flow, Go to definition on ref.
+    await page.locator('.react-flow__node[data-id="clamp"] strong').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Find references', exact: true }).click();
+    await page.locator('.react-flow__node[data-id="flow:report"] strong').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Find references', exact: true }).click();
+    await page.locator('.react-flow__node[data-id="ref-clamp"] strong').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Go to definition', exact: true }).click();
+
+    // Clear selection so the inspector does not cover flow:report on the right edge, then select and open via Command Palette.
+    await command(page, 'Clear selection');
+    await select(page, 'flow:report');
+    await command(page, 'Open flow report');
+    await expect(page.locator('.react-flow__node[data-id="shout"]')).toBeVisible();
+
+    // Library sidebar inside a flow: Show library via palette, Add library file button, and picking an instance inside the flow.
+    await command(page, 'Show library');
+    const library = page.getByRole('complementary', { name: 'Library' });
+    await expect(library).toBeVisible();
+    await library.getByRole('button', { name: 'Add library file…' }).click();
+    await library.getByText('shout', { exact: true }).click();
+    await expect(page.locator('.react-flow__node[data-id="shout"]')).toHaveClass(/selected/);
+
+    // Go to definition on a read-only library instance shows status message.
+    await page.locator('.react-flow__node[data-id="shout"]').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Go to definition', exact: true }).click();
+    await expect(page.getByRole('status')).toContainText('is read-only library code.');
+
+    // Empty Add-node palette Enter is a safe no-op.
+    await command(page, 'Add node…');
+    const addInput = page.getByLabel('Add node input');
+    await addInput.fill('123_no_match');
+    await addInput.press('Enter');
+    await addInput.press('Escape');
+
+    // Return to root canvas and double-click a search result.
+    await command(page, 'Hide library');
+    await page.getByRole('navigation', { name: 'Canvas path' }).getByRole('button', { name: 'llama-demo' }).click();
+    await host(page, {
+        type: 'searchResults',
+        query: 'clamp',
+        stale: false,
+        results: [{ unitId: 'clamp', path: 'slate/nodes/clamp.json', qualifiedName: 'clamp', signature: null, snippet: 'def clamp', reason: 'exact name', score: 100 }],
+    });
+    await page.locator('.harness-search-result').dblclick();
+
+    // Snapshot with diagnostics on both a unit node and a module node, plus a ref to a flow.
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 2,
+                projectName: 'diag-demo',
+                refs: [{ id: 'ref-flow', target: 'report' }],
+                flows: [{ id: 'report', flow: { name: 'report', inputs: [], outputs: [], instances: [], wires: [], extra: {} } }],
+                documents: [
+                    {
+                        id: 'node:clamp',
+                        path: 'slate/nodes/clamp.json',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:clamp',
+                        version: null,
+                        diagnostics: [{ code: 'node-name-mismatch', message: 'File name mismatch', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }],
+                        source: 'def clamp(x: int) -> int:\n    return x\n',
+                        units: [{
+                            id: 'clamp', identity: 'durable', kind: 'function', name: 'clamp', qualifiedName: 'clamp', parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 12 } } },
+                            annotation: { intent: '', contract: '', dependencies: [], examples: [], locked: false }, decorators: [],
+                            signature: 'def clamp(x: int) -> int', parameters: 'x: int', returnAnnotation: 'int',
+                            params: [{ name: 'x', annotation: 'int', default: null, kind: 'keyword' }],
+                        }],
+                    },
+                    {
+                        id: 'node:broken',
+                        path: 'slate/nodes/broken.json',
+                        nodeKind: 'prelude',
+                        nodeTitle: 'broken',
+                        valid: false,
+                        stale: false,
+                        sourceHash: 'sha256:broken',
+                        version: null,
+                        diagnostics: [{ code: 'node-format', message: 'Broken node JSON', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }],
+                        units: [],
+                    },
+                ],
+            },
+        }, '*');
+    });
+    await select(page, 'clamp');
+    await expect(page.locator('.harness-inspector__diagnostic')).toContainText('File name mismatch');
+    await select(page, 'broken');
+    await expect(page.locator('.harness-inspector__diagnostic')).toContainText('Broken node JSON');
+    await page.locator('.react-flow__node[data-id="ref-flow"]').click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Open flow', exact: true }).click();
 });

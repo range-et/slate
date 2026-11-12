@@ -257,15 +257,24 @@ Completed in [PR #1](https://github.com/range-et/slate/pull/1):
 - **Portable coverage and narrow panes.** Extension coverage filtering supports
   Windows and POSIX paths. Narrow headers scroll without status text covering
   Compose/Map/Library controls.
-- **Validation.** The local launch gate passed with 463 unit tests, 88 browser
-  cases, 33 Extension Host cases and workbench QA for the review fixes. Regressions
-  reproduced the defects before the fixes. See [verification evidence](test/VERIFICATION.md).
-  The Linux run subsequently exposed a native-prompt test synchronization issue;
-  its unmerged follow-up is tracked in [issue #21](https://github.com/range-et/slate/issues/21).
-  These local results do not assert that remote CI is green.
-- **Remaining testing target.** Whole-app 100% code coverage and mutation
-  detection are not complete; track that work in [issue #20](https://github.com/range-et/slate/issues/20).
-  Shipping measurement tools is not completion of that target.
+- **Cross-platform coverage and mutation expansion (2026-11-11, [issue #20](https://github.com/range-et/slate/issues/20)).**
+  Fixed Windows `file:///repo/...` URL normalization in `scripts/coverage-scope.mjs`,
+  POSIX/Windows instrumentation path resolution in `scripts/source-instrumentation.cjs`,
+  and Windows junction creation in `scripts/prepare-system-mutation.mjs` (linked into
+  `stryker.full-unit.config.json`). Expanded unit, Playwright browser, and real
+  Extension Host regression suites to 477 unit tests, 89 browser tests, and 41
+  Extension Host tests, raising combined 3-runner active-source coverage to
+  99.92% lines (2566/2568), 98.71% statements (3298/3341), 98.42% functions
+  (812/825), and 94.53% branches (2473/2616), with 16 of 17 executable product
+  modules at 100% line and function coverage and 7 modules (`palette.ts`,
+  `extension.ts`, `flow.ts`, `generation.ts`, `search.ts`, `slate_folder.ts`,
+  `port/describe.ts`) at 100% across all four metrics.
+- **Validation.** The local launch gate passed with 477 unit tests, 89 browser
+  cases, 41 Extension Host cases and workbench QA. Regressions reproduced the
+  defects before the fixes. See [verification evidence](test/VERIFICATION.md).
+- **Remaining testing target.** Whole-app strict 100% branch/mutation completion
+  across every host/UI path remains tracked in [issue #20](https://github.com/range-et/slate/issues/20);
+  equivalent and parser-guaranteed survivors are audited in [test/VERIFICATION.md](test/VERIFICATION.md).
 
 ## Partially done
 

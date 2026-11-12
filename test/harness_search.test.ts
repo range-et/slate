@@ -26,6 +26,12 @@ describe('harness-owned search', () => {
     it('returns no broad fallback for an empty query', () => {
         expect(searchUnits(demoSnapshot.documents, sources, '  ')).toEqual([]);
     });
+
+    it('falls back to an empty snippet when a multiline query spans annotation lines', () => {
+        const results = searchUnits(demoSnapshot.documents, sources, 'inclusive lower and upper bounds\nraise valueerror');
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({ unitId: 'clamp', reason: 'annotation', snippet: '' });
+    });
 });
 
 it('uses name, path, and durable ID to order tied search results before applying a limit', () => {

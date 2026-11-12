@@ -6,8 +6,12 @@ import { createHash } from 'node:crypto';
 /** Normalize mapped browser/Node source URLs into repository-relative paths. */
 export function sourcePath(value, root = process.cwd()) {
     let name = value.replaceAll('\\', '/').split(/[?#]/, 1)[0];
-    if (name.startsWith('file:')) name = fileURLToPath(name);
-    if (name.startsWith(root.replaceAll('\\', '/') + '/')) return name.slice(root.length + 1);
+    if (name.startsWith('file:')) {
+        try { name = fileURLToPath(name).replaceAll('\\', '/'); }
+        catch { name = decodeURIComponent(new URL(name).pathname); }
+    }
+    const normalizedRoot = root.replaceAll('\\', '/').replace(/\/+$/, '');
+    if (name.startsWith(normalizedRoot + '/')) return name.slice(normalizedRoot.length + 1);
     if (/^(?:https?:\/\/[^/]+\/)?harness\//.test(name)) return 'src/' + name.replace(/^https?:\/\/[^/]+\//, '');
     for (const prefix of ['vscode-extension/src/', 'src/harness/']) {
         const at = name.indexOf(prefix);
