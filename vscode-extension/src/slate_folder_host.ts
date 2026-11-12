@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { FLOWS_DIR, flowIdForPath, MAIN_FLOW, migrateRootOccurrences, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
-import type { HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
+import type { CanvasRef, HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
 import { parseModule } from './python_adapter';
 import {
     CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
@@ -21,6 +21,7 @@ export interface FolderIndex {
 /** Filesystem side of the decoupled slate/ folder. The panel owns the webview. */
 export class SlateFolderHost {
     layout: SlateLayout = emptyLayout();
+    private deferredRefs: CanvasRef[] = [];
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
     constructor(readonly root: vscode.Uri) {}

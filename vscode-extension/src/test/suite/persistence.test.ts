@@ -206,6 +206,13 @@ suite('Slate native persistence and proposal QA', () => {
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
         await open();
         assert.equal((await snapshot()).library?.[0].units[0].id, 'lib:vendor/tools.py:double');
+        await act({ kind: 'addInstance', target: 'lib:vendor/tools.py:double', x: 25, y: 35, connectTo: 'normalize.in:score' });
+        const libMain = await read('slate', 'flows', 'main.json');
+        const libRef = libMain.instances[0];
+        assert.equal(libRef?.node, 'lib:vendor/tools.py:double');
+        assert.deepEqual(libMain.wires, [
+            { from: `${libRef!.id}.out`, to: 'ref_normalize.in:score' },
+        ]);
         replaceMethod(vscode.window, 'showOpenDialog', async () => undefined);
         const before = await read('slate', 'slate.json');
         await act({ kind: 'addLibrary' });
@@ -476,6 +483,10 @@ suite('Slate native persistence and proposal QA', () => {
         assert.equal(mainDoc.isDirty, true);
         assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
         assert.deepEqual((await read('slate', 'flows', 'main.json')).instances, []);
+        // Moving a card on the canvas while main.json is dirty preserves the deferred legacy refs in layout.json.
+        await post({ type: 'layout', positions: { normalize: { x: 110, y: 130 } } });
+        assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        assert.deepEqual((await read('slate', 'layout.json')).positions.normalize, { x: 110, y: 130 });
         assert.deepEqual((await snapshot()).flows?.find(item => item.id === 'main')?.flow?.instances, [
             { id: 'ref_normalize', node: 'normalize' },
             { id: 'ref-legacy', node: 'clamp' },
@@ -540,6 +551,217 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(noLayoutCompiled.files, [outPy]);
         assert.ok(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri('src', outPy)))
             .includes('v_ref_clamp = clamp(value=x, lower=lo, upper=hi)'));
+    });
+
+    test('protocol search, packetPreview, reveal, createNode, placeholder conversions, root addInstance/extractFlow, and validation guards', async () => {
+        await messages();
+        const rev = (await snapshot()).revision;
+        await post({ type: 'search', query: 'normalize', revision: rev });
+        await post({ type: 'search', query: 'normalize', revision: -1 });
+        await post({ type: 'packetPreview', unitId: 'normalize' });
+        await post({ type: 'packetPreview', unitId: 'missing_unit' });
+        await post({ type: 'reveal', unitId: 'normalize', focus: true });
+        await assert.rejects(Promise.resolve(vscode.commands.executeCommand('slate.test.revealUnit', 'missing_unit')));
+
+        const searchAndPreview = await messages();
+        assert.ok(searchAndPreview.some((m: any) => m.type === 'searchResults' && m.stale === false && m.results.length > 0));
+        assert.ok(searchAndPreview.some((m: any) => m.type === 'searchResults' && m.stale === true));
+        assert.ok(searchAndPreview.some((m: any) => m.type === 'packetPreview' && m.unitId === 'normalize' && m.packet));
+        assert.ok(searchAndPreview.some((m: any) => m.type === 'packetPreview' && m.unitId === 'missing_unit' && m.error));
+
+        // createNode success, duplicate error, and WorkspaceEdit rejection.
+        let step = 0;
+        replaceMethod(vscode.window, 'showInputBox', async () => ++step % 2 === 1 ? 'def extra(x: int) -> int' : 'Extra intent');
+        await act({ kind: 'createNode', x: 10, y: 20 });
+        assert.equal((await read(...nodePath('extra'))).intent, 'Extra intent');
+        await act({ kind: 'createNode', x: 10, y: 20 });
+        assert.ok((await messages()).some(m => m.ok === false && m.message?.includes('already exists')));
+
+        step = 0;
+        replaceMethod(vscode.window, 'showInputBox', async () => ++step === 1 ? 'def rejected_node(x: int) -> int' : 'Intent');
+        replaceMethod(vscode.workspace, 'applyEdit', async () => false);
+        await act({ kind: 'createNode', x: 10, y: 20 });
+        assert.ok((await messages()).some(m => m.ok === false && m.message?.includes('rejected the new node')));
+        restores.pop()!();
+
+        // Unchanged writeNode returns existing version without editing.
+        const currentExtra = await read(...nodePath('extra'));
+        await act({ kind: 'setLock', target: 'extra', locked: Boolean(currentExtra.locked) });
+
+        // Placeholders: placeholderToRef (missing, unmatched, matched) and placeholderToNode (cancelled, confirmed).
+        await act({ kind: 'placeholderToRef', id: 'missing-ph' });
+        await act({ kind: 'createPlaceholder', name: 'unmatched_ph', x: 5, y: 5 });
+        const unmatchedId = (await snapshot()).placeholders![0].id;
+        await act({ kind: 'placeholderToRef', id: unmatchedId });
+        assert.ok((await messages()).some(m => m.ok === false && m.message?.includes('No single node is named unmatched_ph')));
+
+        replaceMethod(vscode.window, 'showInputBox', async (options: vscode.InputBoxOptions) => {
+            assert.ok(await options.validateInput?.('not valid'));
+            assert.equal(await options.validateInput?.('def unmatched_ph(x: int) -> int'), null);
+            return undefined;
+        });
+        await act({ kind: 'placeholderToNode', id: unmatchedId });
+        replaceMethod(vscode.window, 'showInputBox', async () => 'def unmatched_ph(x: int) -> int');
+        await act({ kind: 'placeholderToNode', id: unmatchedId });
+        assert.equal((await read(...nodePath('unmatched_ph'))).name, 'unmatched_ph');
+
+        await act({ kind: 'createPlaceholder', name: 'clamp', x: 15, y: 25 });
+        const clampPhId = (await snapshot()).placeholders![0].id;
+        await act({ kind: 'placeholderToRef', id: clampPhId });
+        const mainInstances = () => read('slate', 'flows', 'main.json').then(flow => flow.instances as Array<{ id: string; node: string }>);
+        assert.equal((await mainInstances()).length, 1);
+
+        // Root addInstance with connectFrom and connectTo, plus deleteItems on root.
+        await act({ kind: 'addInstance', target: 'clamp', x: 40, y: 50, connectTo: 'normalize.in:score' });
+        const connectToRef = (await mainInstances()).filter(item => item.id.startsWith('ref-'))[1];
+        assert.equal(connectToRef.node, 'clamp');
+        assert.deepEqual((await read('slate', 'layout.json')).positions[connectToRef.id], { x: 40, y: 50 });
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: `${connectToRef.id}.out`, to: 'ref_normalize.in:score' },
+        ]);
+        await act({ kind: 'addInstance', target: 'normalize', x: 60, y: 70, connectFrom: 'clamp.out' });
+        const connectFromRef = (await mainInstances()).filter(item => item.id.startsWith('ref-'))[2];
+        assert.equal(connectFromRef.node, 'normalize');
+        assert.deepEqual((await read('slate', 'layout.json')).positions[connectFromRef.id], { x: 60, y: 70 });
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: `${connectToRef.id}.out`, to: 'ref_normalize.in:score' },
+            { from: 'ref_clamp.out', to: `${connectFromRef.id}.in:score` },
+        ]);
+        await act({ kind: 'deleteItems', ids: [connectToRef.id] });
+        const layoutAfterDelete = await read('slate', 'layout.json');
+        assert.ok(!(await mainInstances()).some(r => r.id === connectToRef.id));
+        assert.equal(layoutAfterDelete.positions[connectToRef.id], undefined);
+        assert.deepEqual((await read('slate', 'flows', 'main.json')).wires, [
+            { from: 'ref_clamp.out', to: `${connectFromRef.id}.in:score` },
+        ]);
+
+        // Note validation errors, valid note creation, and root extractFlow ignoring notes.
+        await post({ type: 'noteCreate', x: 'bad', y: 0 });
+        await post({ type: 'noteUpdate', noteId: 'missing', title: 't', body: 'b' });
+        await post({ type: 'noteCreate', x: 10, y: 20, attachedTo: 'clamp' });
+        const noteId = (await snapshot()).notes![0].id;
+        await act({ kind: 'createPlaceholder', name: 'temp_ph', x: 12, y: 22 });
+        await post({ type: 'layout', positions: { normalize: { x: 11, y: 21 } } });
+
+        await act({ kind: 'extractFlow', name: 'bad name', ids: ['clamp'] });
+        await act({ kind: 'extractFlow', name: 'empty_extract', ids: [noteId] });
+        await act({ kind: 'extractFlow', name: 'root_flow', ids: ['clamp', noteId] });
+        assert.ok((await snapshot()).flows?.some(f => f.id === 'root_flow'));
+
+        // Flow-scoped error guards, self-wiring, self-context, and unknown action.
+        await act({ kind: 'addInstance', flow: 'root_flow', target: 'root_flow', x: 0, y: 0 });
+        await act({ kind: 'addInstance', flow: 'root_flow', target: 'missing_target', x: 0, y: 0 });
+        await act({ kind: 'createRef', target: 'missing_target', x: 0, y: 0 });
+        await act({ kind: 'connectData', from: 'clamp.out', to: 'clamp.in:value' });
+        await act({ kind: 'connectData', from: 'missing_canvas_node.out', to: 'clamp.in:value' });
+        await act({ kind: 'setContext', target: 'normalize', dependency: 'normalize', enabled: true });
+        await act({ kind: 'setContext', target: 'normalize', dependency: 'clamp', enabled: false });
+        await act({ kind: 'setContext', target: 'normalize', dependency: 'clamp', enabled: true });
+        await act({ kind: 'setAnnotationField', target: 'missing_node', field: 'intent', text: 'x' });
+        await act({ kind: 'unknownFolderAction', target: 'normalize' });
+
+        const errs = (await messages()).filter(m => m.ok === false).map(m => m.message);
+        assert.ok(errs.some(m => m?.includes('cannot contain itself')));
+        assert.ok(errs.some(m => m?.includes('cannot feed itself')));
+        assert.ok(errs.some(m => m?.includes('cannot be its own context')));
+        assert.ok(errs.some(m => m?.includes('not available for slate/ node folders')));
+    });
+
+    test('concurrent generation/describe guards, cancellation, compile action, stale lastGood graph, and layout error reporting', async () => {
+        // Hold server response to test concurrent generate guard + cancelGeneration.
+        let releaseServer!: () => void;
+        let serverEntered = false;
+        const listeners = server.listeners('request') as Array<(...args: any[]) => void>;
+        server.removeAllListeners('request');
+        server.on('request', (req, res) => {
+            serverEntered = true;
+            const held = new Promise<void>(resolve => { releaseServer = resolve; });
+            req.on('data', () => {});
+            req.on('end', () => {
+                void held.then(() => {
+                    res.writeHead(200, { 'content-type': 'text/event-stream' });
+                    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'intent: Auto intent\ncontract: Auto contract' } }] })}\n\n`);
+                    res.end('data: [DONE]\n\n');
+                });
+            });
+        });
+
+        await messages();
+        const gen1 = post({ type: 'generate', unitId: 'normalize' });
+        await eventually(async () => serverEntered, 'generation request reached server');
+        await post({ type: 'generate', unitId: 'normalize' });
+        await post({ type: 'cancelGeneration' });
+        releaseServer();
+        await gen1;
+        const genMsgs = await messages();
+        assert.ok(genMsgs.some(m => m.ok === false && m.message?.includes('already running')));
+        assert.ok(genMsgs.some(m => m.type === 'generationFailed'));
+
+        // Undescribed node + oversized undescribed node: test describeNodes concurrent guard, skip report, and completion.
+        await editBuffer('normalize', node => { node.intent = ''; node.contract = ''; });
+        await (await vscode.workspace.openTextDocument(uri(...nodePath('normalize')))).save();
+        const clampOriginal = await read(...nodePath('clamp'));
+        await editBuffer('clamp', node => { node.intent = ''; node.code = ['def clamp(value: int, lower: int, upper: int) -> int:', ...Array.from({ length: 1200 }, () => '    value = value + 0'), '    return value']; });
+        await (await vscode.workspace.openTextDocument(uri(...nodePath('clamp')))).save();
+
+        serverEntered = false;
+        const desc1 = act({ kind: 'describeNodes' });
+        await eventually(async () => serverEntered, 'describe request reached server');
+        await act({ kind: 'describeNodes' });
+        releaseServer();
+        await desc1;
+        const descMsgs = await messages();
+        assert.ok(descMsgs.some(m => m.ok === false && m.message?.includes('Describing is already running')));
+        assert.equal((await read(...nodePath('normalize'))).intent, 'Auto intent');
+        assert.equal((await read(...nodePath('normalize'))).describedBy, 'llama');
+        await vscode.workspace.fs.writeFile(uri(...nodePath('clamp')), encode(clampOriginal));
+
+        // Test cancelDescribe while describing is in flight, and describe catch block when writeNode rejects.
+        await editBuffer('normalize', node => { node.intent = ''; });
+        await (await vscode.workspace.openTextDocument(uri(...nodePath('normalize')))).save();
+        serverEntered = false;
+        const descCancel = act({ kind: 'describeNodes' });
+        await eventually(async () => serverEntered, 'describe request reached server for cancel');
+        await act({ kind: 'cancelDescribe' });
+        releaseServer();
+        await descCancel;
+
+        replaceMethod(vscode.workspace, 'applyEdit', async () => false);
+        serverEntered = false;
+        const descFail = act({ kind: 'describeNodes' });
+        await eventually(async () => serverEntered, 'describe request reached server for write failure');
+        releaseServer();
+        await descFail;
+        assert.ok((await messages()).some(m => m.ok === false && m.message?.startsWith('Describe:')));
+        restores.pop()!();
+
+        // Restore original server handler.
+        server.removeAllListeners('request');
+        for (const listener of listeners) server.on('request', listener);
+
+        // Compile action from panel: success and error.
+        await messages();
+        await act({ kind: 'compile' });
+        assert.ok((await messages()).some(m => m.ok === true && m.message?.includes('Compiled')));
+
+        // Break normalize.json code in buffer -> lastGood keeps units with stale: true and refreshIndex reports problem.
+        const brokenDoc = await editBuffer('normalize', node => { node.code = ['def broken(:']; });
+        await act({ kind: 'refreshIndex' });
+        const brokenSnap = await snapshot();
+        const brokenNorm = brokenSnap.documents.find(d => d.path === 'slate/nodes/normalize.json')!;
+        assert.equal(brokenNorm.valid, false);
+        assert.equal(brokenNorm.stale, true);
+        assert.equal(brokenNorm.units.length, 1);
+        assert.ok((await messages()).some(m => m.ok === false && m.message?.includes('have problems')));
+        await vscode.window.showTextDocument(brokenDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
+
+        // Corrupt layout.json -> refreshNow reports commandResult(false, 'Slate folder: slate/layout.json: ...').
+        await vscode.workspace.fs.writeFile(uri('slate', 'layout.json'), new TextEncoder().encode('{bad json'));
+        await messages();
+        await act({ kind: 'refreshIndex' });
+        assert.ok((await messages()).some(m => m.ok === false && m.message?.includes('Slate folder: slate/layout.json:')));
+        await vscode.workspace.fs.writeFile(uri('slate', 'layout.json'), encode({ positions: {}, notes: [] }));
     });
 
 });

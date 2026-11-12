@@ -672,6 +672,7 @@ export class HarnessPanel implements vscode.Disposable {
                     await finish(`Removed wire ${from} → ${to}.`);
                     return true;
                 }
+                if (parseEndpoint(from).instance !== null && parseEndpoint(from).instance === parseEndpoint(to).instance) throw new Error('A node cannot feed itself.');
                 const fromResolved = this.resolveRootEndpoint(flow, scope, from);
                 flow = fromResolved.flow;
                 from = fromResolved.endpoint;
@@ -695,7 +696,6 @@ export class HarnessPanel implements vscode.Disposable {
                     flow = { ...flow, outputs: [...flow.outputs, { name, annotation: port?.annotation ?? null }] };
                     to = `output:${name}`;
                 }
-                if (parseEndpoint(from).instance !== null && parseEndpoint(from).instance === parseEndpoint(to).instance) throw new Error('A node cannot feed itself.');
                 await saveFlow(flowId, connect(flow, from, to));
                 await finish(`Wired ${from} → ${to}.`);
                 return true;

@@ -140,6 +140,7 @@ export function parseLayout(text: string | undefined): SlateLayout {
 /** Empty sections are omitted so older layout files stay unchanged; layout keeps placement only. */
 export function serializeLayout(layout: SlateLayout): string {
     const value: Record<string, unknown> = { positions: layout.positions, notes: layout.notes };
+    if (layout.refs.length) value.refs = layout.refs;
     if (layout.placeholders.length) value.placeholders = layout.placeholders;
     if (Object.keys(layout.mapPositions).length) value.mapPositions = layout.mapPositions;
     if (Object.keys(layout.flowPositions).length) value.flowPositions = layout.flowPositions;

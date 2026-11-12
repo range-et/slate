@@ -78,6 +78,10 @@ describe('slate/ folder format', () => {
         const csharp = indexNode('slate/nodes/normalize.json', json({ ...normalize, language: 'csharp' }), 'python', null);
         expect(csharp.document.valid).toBe(false);
         expect(csharp.node?.language).toBe('csharp');
+        const brokenCode = indexNode('custom/normalize.json', json({ ...normalize, code: ['def normalize(:'] }), 'python', null);
+        expect(brokenCode.document.valid).toBe(false);
+        expect(brokenCode.document.id).toBe('node:custom/normalize.json');
+        expect(brokenCode.document.diagnostics[0].code).toBe('python-syntax');
     });
 
     it('accepts replacement code only when it is one definition with the node name', () => {

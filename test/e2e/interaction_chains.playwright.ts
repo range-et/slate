@@ -584,3 +584,29 @@ for (const width of [320, 480]) {
         await page.screenshot({ path: `test-results/qa-narrow-${width}.png` });
     });
 }
+
+test('palette shortcuts stop propagation in capture phase before host bubble listeners see them', async ({ page }) => {
+    await page.addInitScript(() => {
+        const forwarded: string[] = [];
+        Object.defineProperty(window, 'forwardedKeys', { value: forwarded });
+        window.addEventListener('keydown', event => {
+            if (event.key === 'Control' || event.key === 'Meta') return;
+            forwarded.push(`${event.ctrlKey ? 'Ctrl+' : ''}${event.metaKey ? 'Meta+' : ''}${event.key}`);
+        });
+    });
+    await page.goto('/harness.html?demo');
+    await expect(node(page, 'clamp')).toBeVisible();
+    await page.keyboard.press('Control+k');
+    await expect(page.getByLabel('Command palette input')).toBeVisible();
+    await page.keyboard.press('Control+k');
+    await expect(page.getByLabel('Command palette input')).toHaveCount(0);
+    await page.keyboard.press('/');
+    await expect(page.getByLabel('Command palette input')).toBeVisible();
+    await page.getByLabel('Command palette input').press('/');
+    await page.keyboard.press('Escape');
+    await expect(page.getByLabel('Command palette input')).toHaveCount(0);
+    const forwarded = await page.evaluate(() => (window as unknown as { forwardedKeys: string[] }).forwardedKeys);
+    expect(forwarded).not.toContain('Ctrl+k');
+    expect(forwarded).not.toContain('Ctrl+K');
+    expect(forwarded).toEqual(['/', 'Escape']);
+});

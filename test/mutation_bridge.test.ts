@@ -80,3 +80,20 @@ it('shares only installed tools and the editor cache, refusing the original repo
         fs.rmSync(root, { recursive: true, force: true });
     }
 });
+
+it('links unit mutation dependencies without requiring a downloaded .vscode-test cache', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-unit-mutation-'));
+    try {
+        const sandbox = path.join(root, '.stryker-tmp/full-unit/sandbox');
+        fs.mkdirSync(path.join(sandbox, 'vscode-extension'), { recursive: true });
+        fs.mkdirSync(path.join(root, 'node_modules'));
+        fs.mkdirSync(path.join(root, 'vscode-extension/node_modules'), { recursive: true });
+        expect(() => prepareSystemSandbox(root, sandbox)).toThrow();
+        prepareSystemSandbox(root, sandbox, { requireVscodeTest: false });
+        expect(fs.realpathSync(path.join(sandbox, 'node_modules'))).toBe(fs.realpathSync(path.join(root, 'node_modules')));
+        expect(fs.realpathSync(path.join(sandbox, 'vscode-extension/node_modules'))).toBe(fs.realpathSync(path.join(root, 'vscode-extension/node_modules')));
+        expect(fs.existsSync(path.join(sandbox, 'vscode-extension/.vscode-test'))).toBe(false);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});

@@ -194,3 +194,49 @@ Undo/Save claims continue to come from the real host/workbench suites.
 - Narrow 320/480px panes → Map → Compose → Library: browser regression checks
   header hit targets and resulting pressed state. This targets the Linux CI
   workbench failure where status text intercepted the Compose button.
+
+Linux CI prompt follow-up: workbench creation QA now waits for a complete native
+invalid-signature → validation error → valid-signature → cleared error cycle
+before Enter, and `src/harness/main.tsx` stops propagation of `Cmd/Ctrl+K` and `/`
+in the capture phase so VS Code's webview host does not forward `Ctrl+K` into
+workbench chord mode (`Ctrl+K Enter` → `workbench.action.keepEditor`) and swallow
+subsequent native prompt `Enter` presses. Browser regression in
+`interaction_chains.playwright.ts` verifies pre-registered bubble listeners do not
+receive `Ctrl+K` or canvas `/`. Both cancel-at-intent and successful creation
+retain their original assertions; dialog visibility alone is no longer treated as
+readiness.
+
+## Issue #20 UI and Extension Host coverage expansion
+
+- Browser `qa_matrix.playwright.ts` now also covers the status-bar `⌘K Commands`
+  button, command-palette `Add context`, unit-scoped palette actions (`Generate`,
+  `Lock`, `Find references`, `Delete selected`), library show/hide and `Add library
+  file…` inside an open flow, picking a library instance inside a flow, `Go to
+  definition` on a read-only library instance, context-menu `Find references` on
+  both unit and flow nodes, `Open flow` from a flow reference, double-click on
+  inline intent (stopping propagation without revealing source), double-click on a
+  search result, empty `ContextPicker` and `Add node…` `Enter` guards, and
+  inspector diagnostic badges on both unit and module-state nodes.
+- Real Extension Host `project.test.ts` now also covers `slate.newProject` and
+  `slate.portProject` when no workspace folder is open, `slate.openHarness` when no
+  project exists (cancel, `New Project`, `Port Python Project…`) and when opening or
+  revealing an existing `HarnessPanel`, `SlateLauncherView` HTML/CSP rendering and
+  button message routing (`open`, `new`, `port`, `compile`), `deactivate`/`activate`
+  lifecycle, dialog-driven `portPythonFolder` over nested/hidden/skipped/generated
+  and syntax-error files with existing `slate.json`/`layout.json`, `compileSlateFolder`
+  error stops (malformed node/flow JSON and invalid `compile.outDir`) and warning +
+  nested stale generated-file deletion, and `SlateFolderHost` missing-config errors,
+  directory/missing/invalid library entries, and `librarySignatures`.
+- Real Extension Host `persistence.test.ts` now also covers host `search` (fresh and
+  stale revisions), `packetPreview` (valid and missing targets), `reveal` and
+  `revealUnit` missing-unit rejection, `createNode` confirmation, duplicate-node
+  rejection and refused `WorkspaceEdit`, unchanged `writeNode` early return,
+  `placeholderToRef` (missing, unmatched, matched) and `placeholderToNode`
+  (cancelled and confirmed), root-canvas `addInstance` (including `lib:...` targets
+  and persisted `connectFrom`/`connectTo` wire endpoints in `main.json`) and
+  `deleteItems` (verifying removal of the ref, its position in `layout.json`, and
+  its attached wires in `main.json`), root `extractFlow` with mixed unit/note
+  selection, flow self-containment and self-wire guards, self-context rejection,
+  concurrent `generate` and `describeNodes` guards and `cancelGeneration`/`cancelDescribe`,
+  `describeNodes` write-failure reporting, stale `lastGood` graph retention when a
+  node buffer becomes invalid, and malformed `layout.json` error reporting.
