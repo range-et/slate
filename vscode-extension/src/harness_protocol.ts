@@ -204,6 +204,7 @@ export interface HarnessProposal {
 export type HostMessage =
     | { type: 'snapshot'; snapshot: HarnessSnapshot }
     | { type: 'selectUnit'; unitId: string | null }
+    | { type: 'focus'; target?: string; region?: { x: number; y: number; width?: number; height?: number }; zoom?: number; duration?: number }
     | { type: 'commandResult'; ok: boolean; message: string }
     | { type: 'searchResults'; query: string; results: HarnessSearchResult[]; stale: boolean }
     | { type: 'packetPreview'; unitId: string; packet?: PacketPreview; error?: string }

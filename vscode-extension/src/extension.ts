@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { HarnessPanel } from './harness_panel';
 import { compileSlateFolder, portPythonFolder } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
+import { SlateMcpServer } from './mcp/slate_mcp_server';
 import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 
@@ -30,6 +31,17 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand('slate.test.revealUnit', (unitId: string) => HarnessPanel.current?.revealUnit(unitId, true)),
             vscode.commands.registerCommand('slate.test.postMessage', (message: unknown) => HarnessPanel.current?.postMessageForTest(message)),
             vscode.commands.registerCommand('slate.test.takeMessages', () => HarnessPanel.current?.takeMessagesForTest()),
+            vscode.commands.registerCommand('slate.test.focusCamera', (options: unknown) =>
+                HarnessPanel.current?.focusCamera(options as any)),
+            vscode.commands.registerCommand('slate.test.createMcpServer', (rootPath?: string) => {
+                const workspace = rootPath ?? HarnessPanel.current?.folderRoot.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+                return new SlateMcpServer(workspace, {
+                    focusCamera: async opts => (await HarnessPanel.current?.focusCamera(opts)) ?? false,
+                    onStubDefined: async () => { HarnessPanel.current?.scheduleRefresh(0); },
+                    onFlowWired: async () => { HarnessPanel.current?.scheduleRefresh(0); },
+                    onNotesPlaced: async () => { HarnessPanel.current?.scheduleRefresh(0); },
+                });
+            }),
         );
     }
     context.subscriptions.push(...subscriptions);

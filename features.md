@@ -33,6 +33,7 @@ keep outstanding tasks on GitHub.
 | Add-node search (Tab, Shift+A, double-click, wire drop filtered by type) | ✅ shipped |
 | Read-only Node Health Report (unreferenced candidates, exact/near duplicates, diff, caveats) | ✅ shipped |
 | Docked & resizable Inspector, on-demand context links, wire type-mismatch warnings | ✅ shipped |
+| Frontier Architect MCP Server & Live Camera Sync (S-510, Issue #23) | ✅ shipped |
 | Running code / live values on wires | ❌ not started |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
@@ -231,6 +232,17 @@ keep outstanding tasks on GitHub.
   renames, signature changes, or edits outside the function. Acceptance
   rechecks hashes, applies one `WorkspaceEdit`, and supports undo.
 - `npm run demo:llama` + `examples/llama_demo` run the loop end to end.
+
+### Frontier Architect MCP Server and Live Canvas Camera Sync (S-510, Issue #23, 2026-11-12)
+
+- **Two-Tier AI division of labor (Tier 1 Frontier Architect):** Connects frontier models (Claude, Gemini, Antigravity) via a headless stdio Model Context Protocol (MCP) server (`vscode-extension/src/mcp/slate_mcp_server.ts`) to co-architect on the live canvas with strict **zero function bodies** enforcement:
+  - `slate_find`: search nodes, flows, and spatial notes by query, signature, or folder scope.
+  - `slate_focus`: live viewport camera sync dispatching smooth pan/zoom (`setViewport`/`fitView`/`fitBounds`/`setCenter`) to the active webview to track target nodes, notes, or bounding regions.
+  - `slate_place_notes`: create and update spatial design notes in `slate/layout.json`.
+  - `slate_define_stub`: create and update typed atomic stubs with signatures, intents, contracts, and structured cases. Strictly refuses arbitrary implementation body code (only stubs such as `pass`, `...`, or `raise NotImplementedError` are permitted) and supports decomposing oversized (`>60`-line) nodes into smaller atomic stubs (`splitFrom`).
+  - `slate_wire_flow`: connect typed dataflow wires deterministically via `flow.ts` and `layout.json` without self-loops.
+- **Live webview bridge:** `HarnessPanel` provides direct in-process camera focus and an ephemeral local bridge (`.slate/live_bridge.json`) allowing standalone MCP server processes to smoothly pan/zoom the active XYFlow canvas in real time.
+- **Verification:** Unit tests in `test/mcp_server.test.ts`, live camera focus webview tests in `test/e2e/harness.playwright.ts`, Extension Host integration tests in `vscode-extension/src/test/suite/mcp.test.ts`, and full launch gate (`npm run verify:launch`).
 
 ### Test platform
 

@@ -934,6 +934,38 @@ function HarnessApp() {
                     selected: node.id === data.unitId,
                 })));
             }
+            if (data.type === 'focus') {
+                if (data.target) {
+                    const targetId = data.target;
+                    setNodes(current => current.map(node => ({
+                        ...node,
+                        selected: node.id === targetId || node.data?.unit?.id === targetId || node.data?.unit?.name === targetId,
+                    })));
+                    const targetNode = flow.current?.getNode(targetId) || nodes.find(n => n.id === targetId || n.data?.unit?.id === targetId || n.data?.unit?.name === targetId);
+                    const focusId = targetNode?.id ?? targetId;
+                    flow.current?.fitView({
+                        nodes: [{ id: focusId }],
+                        duration: data.duration ?? 300,
+                        maxZoom: data.zoom ?? 1.2,
+                        padding: 0.8,
+                    });
+                } else if (data.region) {
+                    const r = data.region;
+                    if (typeof r.width === 'number' && typeof r.height === 'number' && r.width > 0 && r.height > 0) {
+                        flow.current?.fitBounds({ x: r.x, y: r.y, width: r.width, height: r.height }, {
+                            duration: data.duration ?? 300,
+                            padding: 0.2,
+                        });
+                    } else {
+                        flow.current?.setCenter(r.x, r.y, {
+                            zoom: data.zoom ?? 1.0,
+                            duration: data.duration ?? 300,
+                        });
+                    }
+                } else {
+                    flow.current?.fitView({ duration: data.duration ?? 300, padding: 0.2 });
+                }
+            }
             if (data.type === 'commandResult') setCommandResult(data.message);
             if (data.type === 'searchResults') {
                 if (latestSearch.current !== null && data.query !== latestSearch.current) return;

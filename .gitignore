@@ -148,3 +148,4 @@ reports/mutation/
 
 # Source coverage reports
 coverage/
+.slate/
