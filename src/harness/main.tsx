@@ -690,8 +690,16 @@ function NodeHealthReport({ snapshot, onNavigate, onClose }: {
     const [diffPair, setDiffPair] = useState<{ leftId: string; rightId: string } | null>(null);
     const dialogRef = useRef<HTMLElement | null>(null);
     useEffect(() => {
+        const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         const firstButton = dialogRef.current?.querySelector<HTMLElement>('button');
         (firstButton ?? dialogRef.current)?.focus();
+        return () => {
+            const fallback = document.querySelector<HTMLElement>('.harness-health-toggle');
+            const target = previousActive && previousActive.isConnected && previousActive !== document.body
+                ? previousActive
+                : fallback;
+            target?.focus();
+        };
     }, []);
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {

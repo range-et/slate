@@ -339,6 +339,15 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
     const narrowInspectorBox = (await inspector.boundingBox())!;
     expect(narrowCanvasBox.width).toBeGreaterThanOrEqual(260);
     expect(narrowCanvasBox.x + narrowCanvasBox.width).toBeLessThanOrEqual(narrowInspectorBox.x);
+
+    // At a 750px viewport with the library hidden, the inspector remains docked without covering the canvas.
+    await page.setViewportSize({ width: 750, height: 800 });
+    await page.getByRole('button', { name: 'Library', exact: true }).click();
+    const hiddenLibCanvasBox = (await page.locator('.harness-canvas').boundingBox())!;
+    const hiddenLibInspectorBox = (await inspector.boundingBox())!;
+    expect(hiddenLibCanvasBox.width).toBeGreaterThanOrEqual(260);
+    expect(hiddenLibCanvasBox.x + hiddenLibCanvasBox.width).toBeLessThanOrEqual(hiddenLibInspectorBox.x);
+    await page.getByRole('button', { name: 'Library', exact: true }).click();
     await page.setViewportSize({ width: 1280, height: 800 });
 
     // Clicking the pane clears selection and hides on-demand context links; toggle shows all context links.
@@ -422,7 +431,8 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
     await page.keyboard.press('Escape');
 
     // 3. Read-only Node Health Report shows caveats, unreferenced candidates, duplicates, diff, and navigation.
-    await page.getByRole('button', { name: 'Health', exact: true }).click();
+    const healthBtn = page.getByRole('button', { name: 'Health', exact: true });
+    await healthBtn.click();
     const health = page.getByRole('dialog', { name: 'Node health report' });
     await expect(health).toBeVisible();
     await expect(health.getByRole('button', { name: 'Close health report' })).toBeFocused();
@@ -431,6 +441,11 @@ test('docked resizable inspector, on-demand context links, wire type-mismatch wa
     expect(await health.evaluate(el => el.contains(document.activeElement))).toBe(true);
     await page.keyboard.press('Control+g');
     expect((await actions()).some(a => a.kind === 'extractFlow')).toBe(false);
+    await page.keyboard.press('Escape');
+    await expect(health).toHaveCount(0);
+    await expect(healthBtn).toBeFocused();
+    await healthBtn.click();
+    await expect(health).toBeVisible();
     await expect(health.getByText('Read-only', { exact: true })).toBeVisible();
     const caveats = health.getByRole('note', { name: 'Analysis coverage caveats' });
     await expect(caveats).toContainText('never safe to delete automatically');

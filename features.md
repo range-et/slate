@@ -259,12 +259,16 @@ Completed in [PR #1](https://github.com/range-et/slate/pull/1):
 - **Portable coverage and narrow panes.** Extension coverage filtering supports
   Windows and POSIX paths. Narrow headers scroll without status text covering
   Compose/Map/Library controls.
-- **Validation.** The local launch gate passed with 463 unit tests, 88 browser
+- **Validation.** The local launch gate passed with 463 unit tests, 89 browser
   cases, 33 Extension Host cases and workbench QA for the review fixes. Regressions
   reproduced the defects before the fixes. See [verification evidence](test/VERIFICATION.md).
-  The Linux run subsequently exposed a native-prompt test synchronization issue;
-  its unmerged follow-up is tracked in [issue #21](https://github.com/range-et/slate/issues/21).
-  These local results do not assert that remote CI is green.
+  The workbench native-prompt synchronization follow-up ([issue #21](https://github.com/range-et/slate/issues/21),
+  [PR #29](https://github.com/range-et/slate/pull/29), completed 2026-11-11) stops `Cmd/Ctrl+K` and `/` command-palette keydowns in
+  capture phase so VS Code's webview host does not enter a `Ctrl+K` multi-chord
+  wait that swallows `Enter` on native QuickInput prompts, synchronizes signature
+  prompt QA with an explicit invalid-to-valid validation pass before confirming,
+  and syncs webview assets into `vscode-extension/dist` before standalone
+  `npm run test:workbench` runs.
 - **Remaining testing target.** Whole-app 100% code coverage and mutation
   detection are not complete; track that work in [issue #20](https://github.com/range-et/slate/issues/20).
   Shipping measurement tools is not completion of that target.

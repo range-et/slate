@@ -273,18 +273,33 @@ function importBoundNames(statement: string): Set<string> {
     return names;
 }
 
+interface Scope {
+    bound: Set<string>;
+    parent: Scope | null;
+}
+
+function isBoundInScope(scope: Scope | null, name: string): boolean {
+    let cursor = scope;
+    while (cursor) {
+        if (cursor.bound.has(name)) return true;
+        cursor = cursor.parent;
+    }
+    return false;
+}
+
 /**
  * Collect free variable references from Python syntax, excluding:
  * - String literals and comments
  * - Property accesses (`obj.attr`) and keyword-argument labels (`fn(kw=1)`)
- * - The node's own definition/nested definitions, parameters, local assignments, loop/comprehension/with/except bindings, and imported names
+ * - The node's own definition/nested definitions, parameters, local assignments, loop/comprehension/with/except bindings, and imported names (tracked per lexical Python scope)
  */
 function freeCodeReferences(source: string, imports: string[] = []): Set<string> {
-    const boundNames = new Set<string>();
+    const rootScope: Scope = { bound: new Set<string>(), parent: null };
     for (const line of imports) {
-        for (const bound of importBoundNames(line)) boundNames.add(bound);
+        for (const bound of importBoundNames(line)) rootScope.bound.add(bound);
     }
     const nonRefRanges = new Set<string>();
+    const refScopes = new Map<string, Scope>();
     const tree = parser.parse(source);
 
     const markAllVariablesNonRef = (node: SyntaxNode) => {
@@ -292,78 +307,126 @@ function freeCodeReferences(source: string, imports: string[] = []): Set<string>
         for (const child of directChildren(node)) markAllVariablesNonRef(child);
     };
 
-    const collectTargetVariables = (node: SyntaxNode) => {
+    const collectTargetVariables = (node: SyntaxNode, scope: Scope) => {
         if (node.name === 'VariableName') {
-            boundNames.add(source.slice(node.from, node.to));
+            scope.bound.add(source.slice(node.from, node.to));
             nonRefRanges.add(`${node.from}:${node.to}`);
             return;
         }
         if (['TupleExpression', 'ArrayExpression', 'ParenthesizedExpression'].includes(node.name)) {
-            for (const child of directChildren(node)) collectTargetVariables(child);
+            for (const child of directChildren(node)) collectTargetVariables(child, scope);
         }
     };
 
-    const visit = (node: SyntaxNode) => {
+    const collectParamList = (paramListNode: SyntaxNode, paramScope: Scope, defaultScope: Scope) => {
+        const children = directChildren(paramListNode);
+        let group: SyntaxNode[] = [];
+        const flush = () => {
+            if (group.length === 0) return;
+            const assignAt = group.findIndex(child => child.name === 'AssignOp');
+            const head = assignAt >= 0 ? group.slice(0, assignAt) : group;
+            const tail = assignAt >= 0 ? group.slice(assignAt + 1) : [];
+            const paramName = head.find(child => child.name === 'VariableName');
+            if (paramName) collectTargetVariables(paramName, paramScope);
+            for (const child of head) {
+                if (child !== paramName) visit(child, defaultScope);
+            }
+            for (const child of tail) visit(child, defaultScope);
+            group = [];
+        };
+        for (const child of children) {
+            if (child.name === '(' || child.name === ')') continue;
+            if (child.name === ',') flush();
+            else group.push(child);
+        }
+        flush();
+    };
+
+    const visit = (node: SyntaxNode, scope: Scope) => {
+        if (node.name === 'VariableName') {
+            refScopes.set(`${node.from}:${node.to}`, scope);
+        }
         const children = directChildren(node);
         if (node.name === 'FunctionDefinition' || node.name === 'ClassDefinition') {
             const nameNode = children.find(child => child.name === 'VariableName');
-            if (nameNode) collectTargetVariables(nameNode);
-        } else if (node.name === 'ParamList') {
-            let group: SyntaxNode[] = [];
-            const flush = () => {
-                const assignAt = group.findIndex(child => child.name === 'AssignOp');
-                const head = assignAt >= 0 ? group.slice(0, assignAt) : group;
-                const paramName = head.find(child => child.name === 'VariableName');
-                if (paramName) collectTargetVariables(paramName);
-                group = [];
-            };
+            if (nameNode) collectTargetVariables(nameNode, scope);
+            const innerScope: Scope = { bound: new Set<string>(), parent: scope };
             for (const child of children) {
-                if (child.name === '(' || child.name === ')') continue;
-                if (child.name === ',') flush();
-                else group.push(child);
+                if (child === nameNode) continue;
+                if (child.name === 'ParamList') {
+                    collectParamList(child, innerScope, scope);
+                } else if (child.name === 'Body') {
+                    visit(child, innerScope);
+                } else {
+                    visit(child, scope);
+                }
             }
-            flush();
-        } else if (node.name === 'AssignStatement') {
+            return;
+        }
+        if (node.name === 'LambdaExpression') {
+            const innerScope: Scope = { bound: new Set<string>(), parent: scope };
+            for (const child of children) {
+                if (child.name === 'ParamList') {
+                    collectParamList(child, innerScope, scope);
+                } else {
+                    visit(child, innerScope);
+                }
+            }
+            return;
+        }
+        if (['ArrayComprehensionExpression', 'SetComprehensionExpression', 'DictionaryComprehensionExpression', 'GeneratorExpression', 'ComprehensionExpression'].includes(node.name)) {
+            const innerScope: Scope = { bound: new Set<string>(), parent: scope };
+            for (let idx = 0; idx < children.length; idx++) {
+                if (children[idx].name === 'for') {
+                    for (let cursor = idx + 1; cursor < children.length && children[cursor].name !== 'in'; cursor++) {
+                        collectTargetVariables(children[cursor], innerScope);
+                    }
+                }
+            }
+            for (const child of children) visit(child, innerScope);
+            return;
+        }
+        if (node.name === 'AssignStatement') {
             let lastAssign = -1;
             for (let idx = 0; idx < children.length; idx++) {
                 if (children[idx].name === 'AssignOp') lastAssign = idx;
             }
             if (lastAssign >= 0) {
                 for (const child of children.slice(0, lastAssign)) {
-                    if (child.name !== 'TypeDef' && child.name !== 'AssignOp') collectTargetVariables(child);
+                    if (child.name !== 'TypeDef' && child.name !== 'AssignOp') collectTargetVariables(child, scope);
                 }
             } else {
                 const typeDefAt = children.findIndex(child => child.name === 'TypeDef');
                 if (typeDefAt > 0) {
-                    for (const child of children.slice(0, typeDefAt)) collectTargetVariables(child);
+                    for (const child of children.slice(0, typeDefAt)) collectTargetVariables(child, scope);
                 }
             }
         } else if (node.name === 'UpdateStatement') {
             const updateAt = children.findIndex(child => child.name === 'UpdateOp');
             if (updateAt > 0) {
-                for (const child of children.slice(0, updateAt)) collectTargetVariables(child);
+                for (const child of children.slice(0, updateAt)) collectTargetVariables(child, scope);
             }
         } else if (node.name === 'NamedExpression') {
             const assignAt = children.findIndex(child => child.name === 'AssignOp');
             if (assignAt > 0) {
-                for (const child of children.slice(0, assignAt)) collectTargetVariables(child);
+                for (const child of children.slice(0, assignAt)) collectTargetVariables(child, scope);
             }
-        } else if (['ForStatement', 'ArrayComprehensionExpression', 'SetComprehensionExpression', 'DictionaryComprehensionExpression', 'GeneratorExpression', 'ComprehensionExpression'].includes(node.name)) {
+        } else if (node.name === 'ForStatement') {
             for (let idx = 0; idx < children.length; idx++) {
                 if (children[idx].name === 'for') {
                     for (let cursor = idx + 1; cursor < children.length && children[cursor].name !== 'in'; cursor++) {
-                        collectTargetVariables(children[cursor]);
+                        collectTargetVariables(children[cursor], scope);
                     }
                 }
             }
         } else if (node.name === 'WithStatement' || node.name === 'TryStatement') {
             for (let idx = 0; idx < children.length; idx++) {
                 if (children[idx].name === 'as' && children[idx + 1]) {
-                    collectTargetVariables(children[idx + 1]);
+                    collectTargetVariables(children[idx + 1], scope);
                 }
             }
         } else if (node.name === 'ImportStatement') {
-            for (const bound of importBoundNames(source.slice(node.from, node.to))) boundNames.add(bound);
+            for (const bound of importBoundNames(source.slice(node.from, node.to))) scope.bound.add(bound);
             markAllVariablesNonRef(node);
             return;
         } else if (node.name === 'GlobalStatement' || node.name === 'NonlocalStatement') {
@@ -376,16 +439,18 @@ function freeCodeReferences(source: string, imports: string[] = []): Set<string>
                 }
             }
         }
-        for (const child of children) visit(child);
+        for (const child of children) visit(child, scope);
     };
-    visit(tree.topNode);
+    visit(tree.topNode, rootScope);
 
     const references = new Set<string>();
     const collectRefs = (node: SyntaxNode) => {
         if (node.name === 'VariableName') {
-            if (!nonRefRanges.has(`${node.from}:${node.to}`)) {
+            const key = `${node.from}:${node.to}`;
+            if (!nonRefRanges.has(key)) {
                 const name = source.slice(node.from, node.to);
-                if (!boundNames.has(name) && !PYTHON_KEYWORDS.has(name)) references.add(name);
+                const scope = refScopes.get(key) ?? rootScope;
+                if (!isBoundInScope(scope, name) && !PYTHON_KEYWORDS.has(name)) references.add(name);
             }
             return;
         }

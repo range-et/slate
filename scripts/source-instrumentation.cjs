@@ -8,7 +8,8 @@ function instrumentSource(code, filename) {
         produceSourceMap: true,
         compact: false,
     });
-    const output = instrumenter.instrumentSync(code, path.resolve(filename));
+    const resolved = filename.startsWith('/') ? path.posix.resolve(filename) : path.resolve(filename);
+    const output = instrumenter.instrumentSync(code, resolved);
     return { code: output, map: instrumenter.lastSourceMap(), coverage: instrumenter.lastFileCoverage() };
 }
 

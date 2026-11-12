@@ -100,10 +100,13 @@ describe('Node health report and code normalization', () => {
                 '    # orphan and clamp mentioned in comment',
                 '    label = "orphan"',
                 '    orphan = param_node + 1',
+                '    used_helper(orphan)',
+                '    def inner(used_helper: int) -> int:',
+                '        return used_helper',
                 '    for loop_node in [orphan]:',
                 '        _ = [comp_node for comp_node in (loop_node,)]',
                 '    other.attr_node(kw_node=orphan)',
-                '    shadowed_helper(orphan)',
+                '    shadowed_helper(inner(orphan))',
                 '    return label',
             ],
         }), 'python', null).document;
@@ -120,6 +123,7 @@ describe('Node health report and code normalization', () => {
             documents: [
                 orphan,
                 lookalikeCaller,
+                makeUnused('used_helper'),
                 makeUnused('param_node'),
                 makeUnused('loop_node'),
                 makeUnused('comp_node'),

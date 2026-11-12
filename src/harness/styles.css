@@ -204,8 +204,10 @@ button, input, textarea, select { font: inherit; }
 .harness-inspector--wide { width: min(var(--inspector-width, 360px), calc(100vw - 28px)); }
 .harness-canvas--inspector { right: min(var(--inspector-width, 360px), calc(100vw - 260px)); }
 .harness-canvas--library.harness-canvas--inspector { right: min(var(--inspector-width, 360px), calc(100vw - 500px)); }
-@media (max-width: 780px) {
-    .harness-canvas--inspector,
+@media (max-width: 539px) {
+    .harness-canvas--inspector { right: 0; }
+}
+@media (max-width: 779px) {
     .harness-canvas--library.harness-canvas--inspector { right: 0; }
 }
 .node-code { margin: 14px 0; padding-top: 12px; border-top: 1px solid var(--strata-border, #343a40); }

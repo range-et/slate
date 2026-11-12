@@ -85,6 +85,9 @@ async function main() {
         const prompt = page.locator('.quick-input-widget:visible input');
         const promptMessage = page.locator('.quick-input-message');
         const enterSignature = async () => {
+            // Observe a complete validation cycle before accepting the prompt.
+            // Visibility alone does not prove that the native prompt has
+            // processed the current value. Keep error-to-valid checks explicit.
             await expect(promptMessage).toContainText('Typed function signature');
             await prompt.fill('not a function');
             await expect(promptMessage).toContainText('enter one function signature');
@@ -100,12 +103,9 @@ async function main() {
 
         // End-to-end: real webview buttons -> Extension Host -> fake HTTP model ->
         // WorkspaceEdit/save -> native Undo -> Save. No injected host messages.
-        const readJson = (filePath) => {
-            try {
-                return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-            } catch {
-                return null;
-            }
+        const readJson = file => {
+            try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+            catch { return null; }
         };
         const normalizeFile = path.join(project, 'slate', 'nodes', 'normalize.json');
         const normalizeBefore = JSON.parse(fs.readFileSync(normalizeFile, 'utf8'));

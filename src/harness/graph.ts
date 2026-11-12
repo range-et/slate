@@ -184,7 +184,7 @@ function atomCompatible(sourceAtom: string, targetAtom: string): boolean {
             return sList.filter(item => item !== '...').every(item => !typesMismatch(item, tList[0]));
         }
         if (sList.length === 2 && sList[1] === '...') {
-            return tList.filter(item => item !== '...').every(item => !typesMismatch(sList[0], item));
+            return false;
         }
     }
     if ((targetBase === 'Iterable' || targetBase === 'Collection') && sourceBase === 'dict' && tList.length === 1 && sList.length === 2) {

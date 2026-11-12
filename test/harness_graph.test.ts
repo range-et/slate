@@ -245,6 +245,7 @@ it('marks type-mismatched data wires with warning metadata and styling without b
     expect(typesMismatch('list[int]', 'Sequence[float]')).toBe(false);
     expect(typesMismatch('dict[str, int]', 'dict[str, Any]')).toBe(false);
     expect(typesMismatch('tuple[int, int]', 'tuple[int, ...]')).toBe(false);
+    expect(typesMismatch('tuple[int, ...]', 'tuple[int, int]')).toBe(true);
     expect(typesMismatch('list[str]', 'list[int]')).toBe(true);
     expect(typesMismatch('dict[str, str]', 'dict[str, int]')).toBe(true);
     expect(typesMismatch('tuple[int, str]', 'tuple[int, int]')).toBe(true);
