@@ -984,8 +984,15 @@ function HarnessApp() {
 
     useEffect(() => {
         setNodes(current => {
-            const selectedIds = new Set(current.filter(node => node.selected).map(node => node.id));
-            return graph.nodes.map(node => ({ ...node, selected: selectedIds.has(node.id) }));
+            const byId = new Map(current.map(node => [node.id, node]));
+            return graph.nodes.map(node => {
+                const existing = byId.get(node.id);
+                return {
+                    ...node,
+                    ...(existing?.measured ? { measured: existing.measured } : {}),
+                    selected: Boolean(existing?.selected),
+                };
+            });
         });
     }, [graph.nodes, setNodes]);
 
