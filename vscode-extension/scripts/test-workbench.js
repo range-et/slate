@@ -103,6 +103,10 @@ async function main() {
 
         // End-to-end: real webview buttons -> Extension Host -> fake HTTP model ->
         // WorkspaceEdit/save -> native Undo -> Save. No injected host messages.
+        const readJson = file => {
+            try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+            catch { return null; }
+        };
         const normalizeFile = path.join(project, 'slate', 'nodes', 'normalize.json');
         const normalizeBefore = JSON.parse(fs.readFileSync(normalizeFile, 'utf8'));
         await command('normalize');
@@ -112,13 +116,13 @@ async function main() {
         await expect(harnessFrame.getByRole('button', { name: 'Accept WorkspaceEdit', exact: true })).toBeEnabled();
         expect(JSON.parse(fs.readFileSync(normalizeFile, 'utf8'))).toEqual(normalizeBefore);
         await harnessFrame.getByRole('button', { name: 'Accept WorkspaceEdit', exact: true }).click();
-        await expect.poll(() => JSON.parse(fs.readFileSync(normalizeFile, 'utf8')).code).toEqual(candidate.split('\n'));
+        await expect.poll(() => readJson(normalizeFile)?.code).toEqual(candidate.split('\n'));
         expect(requests).toHaveLength(1);
         expect(requests[0].messages[1].content).toContain('def clamp(');
         await harnessFrame.getByRole('button', { name: 'Undo accepted edit', exact: true }).click();
         await expect(harnessFrame.getByRole('status')).toContainText('UNDO: reverted');
         await command('Save all files');
-        await expect.poll(() => JSON.parse(fs.readFileSync(normalizeFile, 'utf8'))).toEqual(normalizeBefore);
+        await expect.poll(() => readJson(normalizeFile)).toEqual(normalizeBefore);
 
         // Exercise VS Code's actual validation UI and Escape, not a mocked input box.
         await command('New node file…');

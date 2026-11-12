@@ -3,16 +3,24 @@ import { sourceCoveragePlugin } from '../scripts/coverage-vite-plugin.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { sourcePath, isActiveSource, activeSources, sourceFingerprint, requireCompleteCoverage } from '../scripts/coverage-scope.mjs';
+
+const nativeRepoRoot = join(tmpdir(), 'slate-repo');
 
 describe('coverage source inventory', () => {
     it.each([
-        ['/repo/src/harness/main.tsx', 'src/harness/main.tsx'],
-        ['file:///repo/vscode-extension/src/flow.ts', 'vscode-extension/src/flow.ts'],
-        ['http://localhost:4178/harness/main.tsx', 'src/harness/main.tsx'],
-        ['/repo/src/harness/palette.ts?x=1', 'src/harness/palette.ts'],
-        ['C:\\repo\\src\\harness\\palette.ts', 'src/harness/palette.ts'],
-    ])('normalizes %s', (value, expected) => expect(sourcePath(value, '/repo')).toBe(expected));
+        ['/repo/src/harness/main.tsx', '/repo', 'src/harness/main.tsx'],
+        ['file:///repo/vscode-extension/src/flow.ts', '/repo', 'vscode-extension/src/flow.ts'],
+        ['file:///repo/scripts/coverage%20scope.mjs', '/repo/', 'scripts/coverage scope.mjs'],
+        [pathToFileURL(join(nativeRepoRoot, 'scripts', 'coverage scope.mjs')).href, `${nativeRepoRoot}\\`, 'scripts/coverage scope.mjs'],
+        ['file:///repo/scripts%2Fcoverage-scope.mjs', '/repo/', 'scripts/coverage-scope.mjs'],
+        ['http://localhost:4178/harness/main.tsx', '/repo', 'src/harness/main.tsx'],
+        ['/repo/src/harness/palette.ts?x=1', '/repo', 'src/harness/palette.ts'],
+        ['/repo/scripts/coverage-scope.mjs', '/repo///', 'scripts/coverage-scope.mjs'],
+        ['C:\\repo\\scripts\\coverage-scope.mjs', 'C:\\repo\\', 'scripts/coverage-scope.mjs'],
+        ['C:\\repo\\src\\harness\\palette.ts', '/repo', 'src/harness/palette.ts'],
+    ])('normalizes %s against %s', (value, root, expected) => expect(sourcePath(value, root)).toBe(expected));
     it.each([
         ['src/harness/main.tsx', true], ['vscode-extension/src/extension.ts', true],
         ['vscode-extension/src/test/runTest.ts', false], ['src/harness/types.d.ts', false],
