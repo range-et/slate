@@ -246,6 +246,7 @@ export function indexNode(
     text: string,
     defaultLanguage: string,
     version: number | null,
+    options?: { checkJpl60?: boolean },
 ): { document: HarnessDocument; node: SlateNode | null; code: string } {
     const nodeId = nodeIdForPath(relativePath) ?? relativePath;
     const base = { id: `node:${nodeId}`, path: relativePath, version, stale: false };
@@ -306,20 +307,93 @@ export function indexNode(
         if (nodeId.split('/').pop() !== node.name) {
             diagnostics.push({ code: 'node-name-mismatch', message: `File name must match name "${node.name}".`, range: ZERO_RANGE });
         }
+        if (options?.checkJpl60 && !node.kind) {
+            const jpl = checkJpl60(node, code);
+            for (const diag of jpl.diagnostics) {
+                diagnostics.push({ code: diag.code, message: diag.message, range: ZERO_RANGE });
+            }
+        }
     }
     return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, diagnostics }, node, code };
 }
 
+export interface Jpl60CheckResult {
+    valid: boolean;
+    lineCount: number;
+    executableLines: number;
+    diagnostics: Array<{ code: string; message: string }>;
+}
+
+/** Check JPL-60 rules: <=60 lines, explicit parameter & return type annotations, contract documentation. */
+export function checkJpl60(node: SlateNode, code?: string): Jpl60CheckResult {
+    const rawLines = code !== undefined ? codeLines(code) : node.code;
+    const lines = rawLines.flatMap(line => line.split(/\r?\n/));
+    const executable = lines.filter(l => l.trim().length > 0 && !l.trim().startsWith('#')).length;
+    const diagnostics: Array<{ code: string; message: string }> = [];
+
+    if (!node.kind && lines.length > 60) {
+        diagnostics.push({
+            code: 'jpl60-line-count',
+            message: `Node "${node.name}" exceeds JPL-60 limit: ${lines.length} lines (>60). Split or refactor into stubs and a flow composition.`,
+        });
+    }
+
+    if (!node.kind) {
+        const source = `${lines.join('\n')}\n`;
+        const parsed = parseModule(source, '<node>', node.name);
+        if (parsed.valid) {
+            const def = parsed.units.find(u => u.parentId === null && u.name === node.name);
+            if (def && def.kind === 'function') {
+                if (def.params) {
+                    for (const p of def.params) {
+                        if (!p.annotation || !p.annotation.trim()) {
+                            diagnostics.push({
+                                code: 'jpl60-param-annotation',
+                                message: `Parameter "${p.name}" in "${node.name}" is missing a type annotation.`,
+                            });
+                        }
+                    }
+                }
+                if (!def.returnAnnotation || !def.returnAnnotation.trim()) {
+                    diagnostics.push({
+                        code: 'jpl60-return-annotation',
+                        message: `Function "${node.name}" is missing a return type annotation (-> ReturnType).`,
+                    });
+                }
+            }
+        }
+    }
+
+    if (!node.contract || !node.contract.trim()) {
+        diagnostics.push({
+            code: 'jpl60-contract-missing',
+            message: `Node "${node.name}" is missing contract documentation.`,
+        });
+    }
+
+    return {
+        valid: diagnostics.length === 0,
+        lineCount: lines.length,
+        executableLines: executable,
+        diagnostics,
+    };
+}
+
 /** Validate replacement code for a node: one definition with the node's name (any statements for module state). */
-export function checkNodeCode(node: SlateNode, nodeId: string, code: string): void {
+export function checkNodeCode(node: SlateNode, nodeId: string, code: string, options?: { enforceJpl60?: boolean }): Jpl60CheckResult {
     const source = `${codeLines(code).join('\n')}\n`;
     const parsed = parseModule(source, '<node>', nodeId);
     if (!parsed.valid) throw new SlateFormatError('code is not valid Python');
-    if (node.kind) return;
+    if (node.kind) return { valid: true, lineCount: codeLines(code).length, executableLines: codeLines(code).length, diagnostics: [] };
     const topLevel = parsed.units.filter(unit => unit.parentId === null);
     if (topLevel.length !== 1 || topLevel[0].name !== node.name || extraPythonStatements(source) > 0) {
         throw new SlateFormatError(`code must contain exactly one definition named ${node.name} (put imports in "imports")`);
     }
+    const result = checkJpl60(node, code);
+    if (options?.enforceJpl60 && !result.valid) {
+        throw new SlateFormatError(result.diagnostics[0].message);
+    }
+    return result;
 }
 
 /** A new node from a typed Python signature such as `def clamp(x: int) -> int`. */

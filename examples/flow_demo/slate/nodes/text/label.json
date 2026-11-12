@@ -2,6 +2,7 @@
   "slate": 3,
   "name": "label",
   "intent": "Format a percentage for display",
+  "contract": "Format numeric percentage value as string ending with %",
   "locked": false,
   "code": [
     "def label(value: int) -> str:",

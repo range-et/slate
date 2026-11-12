@@ -823,6 +823,16 @@ suite('Slate native persistence and proposal QA', () => {
         await vscode.window.showTextDocument(brokenDoc);
         await vscode.commands.executeCommand('workbench.action.files.revert');
 
+        // JPL-60 guardrail: >60 lines in buffer produces jpl60-line-count diagnostic in snapshot.
+        const longLines = ['def normalize(score: int, maximum: int) -> int:', ...Array.from({ length: 60 }, (_, i) => `    x${i} = ${i}`), '    return 1'];
+        const longDoc = await editBuffer('normalize', node => { node.code = longLines; });
+        await act({ kind: 'refreshIndex' });
+        const longSnap = await snapshot();
+        const longNorm = longSnap.documents.find(d => d.path === 'slate/nodes/normalize.json')!;
+        assert.ok(longNorm.diagnostics.some(d => d.code === 'jpl60-line-count'));
+        await vscode.window.showTextDocument(longDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
+
         // Corrupt layout.json -> refreshNow reports commandResult(false, 'Slate folder: slate/layout.json: ...').
         await vscode.workspace.fs.writeFile(uri('slate', 'layout.json'), new TextEncoder().encode('{bad json'));
         await messages();

@@ -23,6 +23,7 @@ npm test
 npm run test:mutation
 npm run build
 npm --prefix vscode-extension run compile
+npm run verify:contracts
 
 # Frozen legacy notebook: still deployed to GitHub Pages, so keep it green.
 npm run legacy:test
