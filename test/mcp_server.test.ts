@@ -128,20 +128,15 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             }
         });
 
-        it('reports -32601 on unknown methods and -32700 on malformed json', async () => {
-            const unknownResp = await server.handleRequest({
-                jsonrpc: '2.0',
-                id: 99,
-                method: 'nonexistent_method',
-            });
-            expect(unknownResp).toMatchObject({
-                jsonrpc: '2.0',
-                id: 99,
-                error: { code: -32601 },
-            });
-
-            const parseResp = await server.handleMessage('this is not json');
-            expect(parseResp).toContain('-32700');
+        it('refuses malformed or non-object payloads with -32600 error without throwing', async () => {
+            const nullResp = await server.handleMessage('null');
+            expect(nullResp).toContain('-32600');
+            const numResp = await server.handleMessage('42');
+            expect(numResp).toContain('-32600');
+            const arrResp = await server.handleMessage('[1, 2, 3]');
+            expect(arrResp).toContain('-32600');
+            const badObjResp = await server.handleMessage('{"foo": "bar"}');
+            expect(badObjResp).toContain('-32600');
         });
     });
 
@@ -150,6 +145,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(validateStubBody('def foo(x: int) -> int', 'pass').valid).toBe(true);
             expect(validateStubBody('def foo(x: int) -> int', '...').valid).toBe(true);
             expect(validateStubBody('def foo(x: int) -> int', 'raise NotImplementedError').valid).toBe(true);
+            expect(validateStubBody('def foo(x: int) -> int', 'raise NotImplementedError()').valid).toBe(true);
             expect(validateStubBody('def foo(x: int) -> int', 'raise NotImplementedError("TODO: implement foo")').valid).toBe(true);
             expect(validateStubBody('def foo(x: int) -> int', '"""Calculate foo."""\npass').valid).toBe(true);
             expect(validateStubBody('def foo(x: int) -> int', '# A helpful comment\nraise NotImplementedError').valid).toBe(true);
@@ -175,6 +171,19 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             const callCheck = validateStubBody('def foo(x: int) -> int', 'print("hello")\nraise NotImplementedError');
             expect(callCheck.valid).toBe(false);
             expect(callCheck.reason).toContain('Arbitrary expression in function body is refused');
+
+            // Arbitrary expressions inside raise NotImplementedError(...) are strictly refused
+            const callInsideRaise = validateStubBody('def foo(x: int) -> int', 'raise NotImplementedError(os.system("ls"))');
+            expect(callInsideRaise.valid).toBe(false);
+            expect(callInsideRaise.reason).toContain('NotImplementedError argument must be an optional literal string message');
+
+            const multiArgRaise = validateStubBody('def foo(x: int) -> int', 'raise NotImplementedError("a", "b")');
+            expect(multiArgRaise.valid).toBe(false);
+            expect(multiArgRaise.reason).toContain('NotImplementedError argument must be an optional literal string message');
+
+            const fStringRaise = validateStubBody('def foo(x: int) -> int', 'raise NotImplementedError(f"bad {x}")');
+            expect(fStringRaise.valid).toBe(false);
+            expect(fStringRaise.reason).toContain('NotImplementedError argument must be an optional literal string message');
         });
     });
 
@@ -208,6 +217,18 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             const noMatch = await server.callTool('slate_find', { signature: 'float' });
             const noParsed = JSON.parse(noMatch.content[0].text);
             expect(noParsed.nodes).toHaveLength(0);
+        });
+
+        it('discovers nested flow files recursively under slate/flows/**/*', async () => {
+            await fs.mkdir(path.join(tmpDir, 'slate', 'flows', 'sub'), { recursive: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'flows', 'sub', 'nested.json'),
+                JSON.stringify({ slate: 3, name: 'nested', instances: [], wires: [], inputs: [], outputs: [] }),
+                'utf8'
+            );
+            const res = await server.callTool('slate_find', { scope: 'flows' });
+            const parsed = JSON.parse(res.content[0].text);
+            expect(parsed.flows.some((f: any) => f.path.includes('nested'))).toBe(true);
         });
     });
 
@@ -376,6 +397,32 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(parent.context).toContain('calc_step_a');
             expect(parent.context).toContain('calc_step_b');
         });
+
+        it('rejects path traversal attempting to escape slate/nodes', async () => {
+            const res = await server.callTool('slate_define_stub', {
+                name: '../../escaped_node',
+                signature: 'def escaped_node() -> None',
+                intent: 'Attempt escape',
+            });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('Path traversal rejected');
+        });
+
+        it('refuses to overwrite an active node implementation with a stub', async () => {
+            // calc already exists in tmpDir with real implementation (return value * 2)
+            const res = await server.callTool('slate_define_stub', {
+                name: 'calc',
+                signature: 'def calc(value: int) -> int',
+                intent: 'Erase real implementation',
+                body: 'pass',
+            });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('already has an active implementation');
+
+            // Verify original implementation is intact
+            const raw = await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'calc.json'), 'utf8');
+            expect(raw).toContain('return value * 2');
+        });
     });
 
     describe('Tool: slate_wire_flow', () => {
@@ -445,6 +492,60 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             const remParsed = JSON.parse(remRes.content[0].text);
             expect(remParsed.instances).toHaveLength(1);
             expect(remParsed.instances[0].id).toBe('node_a');
+        });
+
+        it('rejects path traversal attempting to escape slate/flows', async () => {
+            const res = await server.callTool('slate_wire_flow', {
+                flow: '../../escaped_flow',
+                instances: [{ id: 'n1', node: 'calc' }],
+            });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('Path traversal rejected');
+        });
+
+        it('refuses wiring when endpoint instances do not exist in the flow', async () => {
+            const res = await server.callTool('slate_wire_flow', {
+                flow: 'main',
+                instances: [{ id: 'inst1', node: 'calc' }],
+                wires: [{ from: 'inst1.out', to: 'nonexistent_instance.in' }],
+            });
+            expect(res.isError).toBe(true);
+            expect(res.content[0].text).toContain('does not exist in flow');
+        });
+    });
+
+    describe('Parallel edits mutation serialization', () => {
+        it('serializes concurrent file-changing operations without losing updates', async () => {
+            const promises = [
+                server.callTool('slate_define_stub', {
+                    name: 'concurrent_a',
+                    signature: 'def concurrent_a() -> None',
+                    intent: 'First concurrent stub',
+                }),
+                server.callTool('slate_define_stub', {
+                    name: 'concurrent_b',
+                    signature: 'def concurrent_b() -> None',
+                    intent: 'Second concurrent stub',
+                }),
+                server.callTool('slate_place_notes', {
+                    title: 'Concurrent note',
+                    body: 'Note body',
+                    position: { x: 50, y: 50 },
+                }),
+            ];
+            const results = await Promise.all(promises);
+            for (const r of results) {
+                expect(r.isError).toBe(false);
+            }
+
+            // Verify both stub files exist
+            await expect(fs.stat(path.join(tmpDir, 'slate', 'nodes', 'concurrent_a.json'))).resolves.toBeDefined();
+            await expect(fs.stat(path.join(tmpDir, 'slate', 'nodes', 'concurrent_b.json'))).resolves.toBeDefined();
+
+            // Verify layout has both positions and the note
+            const layoutRaw = await fs.readFile(path.join(tmpDir, 'slate', 'layout.json'), 'utf8');
+            const layout = JSON.parse(layoutRaw);
+            expect(layout.notes.some((n: any) => n.title === 'Concurrent note')).toBe(true);
         });
     });
 

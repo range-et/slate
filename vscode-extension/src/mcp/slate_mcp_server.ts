@@ -94,13 +94,69 @@ export function validateStubBody(signature: string, bodyText: string): StubValid
         }
         if (stmt.name === 'RaiseStatement') {
             const raisedText = fullCode.slice(stmt.from, stmt.to).trim();
-            if (/^raise\s+NotImplementedError(\(.*\))?$/.test(raisedText)) {
+            let exprNode: SyntaxNode | null = null;
+            for (let c = stmt.firstChild; c; c = c.nextSibling) {
+                if (c.name === 'raise' || c.name === 'Comment') continue;
+                exprNode = c;
+                break;
+            }
+            if (!exprNode) {
+                return {
+                    valid: false,
+                    reason: 'Bare "raise" statement without exception is not a valid stub.',
+                };
+            }
+
+            // Case 1: raise NotImplementedError
+            if (exprNode.name === 'VariableName') {
+                const nameText = fullCode.slice(exprNode.from, exprNode.to).trim();
+                if (nameText === 'NotImplementedError') {
+                    hasStubStatement = true;
+                    continue;
+                }
+                return {
+                    valid: false,
+                    reason: `Only NotImplementedError may be raised in an atomic stub (found: "${nameText}").`,
+                };
+            }
+
+            // Case 2: raise NotImplementedError(...)
+            if (exprNode.name === 'CallExpression') {
+                const callee = exprNode.firstChild;
+                if (!callee || fullCode.slice(callee.from, callee.to).trim() !== 'NotImplementedError') {
+                    return {
+                        valid: false,
+                        reason: `Only NotImplementedError may be raised in an atomic stub (found: "${raisedText}").`,
+                    };
+                }
+                // Check arguments inside ArgList
+                const argList = callee.nextSibling;
+                if (argList && argList.name === 'ArgList') {
+                    let argCount = 0;
+                    let invalidArg = false;
+                    for (let arg = argList.firstChild; arg; arg = arg.nextSibling) {
+                        if (arg.name === '(' || arg.name === ')' || arg.name === ',' || arg.name === 'Comment') continue;
+                        argCount++;
+                        // Argument MUST be an optional literal String only!
+                        if (arg.name !== 'String') {
+                            invalidArg = true;
+                            break;
+                        }
+                    }
+                    if (invalidArg || argCount > 1) {
+                        return {
+                            valid: false,
+                            reason: `NotImplementedError argument must be an optional literal string message; arbitrary expressions or calls are refused in stubs (found: "${raisedText}").`,
+                        };
+                    }
+                }
                 hasStubStatement = true;
                 continue;
             }
+
             return {
                 valid: false,
-                reason: `Only NotImplementedError may be raised in an atomic stub (found: "${raisedText}").`,
+                reason: `Only NotImplementedError (or NotImplementedError("message")) may be raised in an atomic stub (found: "${raisedText}").`,
             };
         }
         return {
@@ -400,6 +456,8 @@ export const MCP_TOOLS = [
 export class SlateMcpServer {
     private rl?: readline.Interface;
     private bridge?: SlateMcpBridge;
+    private mutationQueue: Promise<unknown> = Promise.resolve();
+    private streamQueue: Promise<void> = Promise.resolve();
 
     constructor(
         public readonly workspaceRoot: string,
@@ -408,12 +466,33 @@ export class SlateMcpServer {
         this.bridge = bridge;
     }
 
+    private runSerialized<T>(operation: () => Promise<T>): Promise<T> {
+        const next = this.mutationQueue.then(operation, operation);
+        this.mutationQueue = next.then(() => {}, () => {});
+        return next;
+    }
+
     setBridge(bridge: SlateMcpBridge | undefined): void {
         this.bridge = bridge;
     }
 
     private absPath(rel: string): string {
-        return path.resolve(this.workspaceRoot, rel);
+        const resolved = path.resolve(this.workspaceRoot, rel);
+        const relFromRoot = path.relative(this.workspaceRoot, resolved);
+        if (relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) {
+            throw new Error(`Path traversal rejected: "${rel}" escapes workspace root.`);
+        }
+        return resolved;
+    }
+
+    private assertSafePath(targetRelOrAbs: string, allowedParentDir: string): string {
+        const resolvedAllowed = path.resolve(this.workspaceRoot, allowedParentDir);
+        const resolved = path.resolve(this.workspaceRoot, targetRelOrAbs);
+        const rel = path.relative(resolvedAllowed, resolved);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+            throw new Error(`Path traversal rejected: "${targetRelOrAbs}" escapes allowed directory "${allowedParentDir}".`);
+        }
+        return resolved;
     }
 
     private async readJsonFile<T>(rel: string): Promise<T | null> {
@@ -457,12 +536,16 @@ export class SlateMcpServer {
             }
             for (const entry of entries) {
                 const full = path.join(dir, entry);
-                const stat = await fs.stat(full);
-                if (stat.isDirectory()) {
-                    await scan(full);
-                } else if (stat.isFile() && entry.endsWith('.json')) {
-                    const rel = path.relative(this.workspaceRoot, full).replace(/\\/g, '/');
-                    results.push(rel);
+                try {
+                    const stat = await fs.stat(full);
+                    if (stat.isDirectory()) {
+                        await scan(full);
+                    } else if (stat.isFile() && entry.endsWith('.json')) {
+                        const rel = path.relative(this.workspaceRoot, full).replace(/\\/g, '/');
+                        results.push(rel);
+                    }
+                } catch {
+                    // Ignore stat errors
                 }
             }
         };
@@ -470,22 +553,33 @@ export class SlateMcpServer {
         return results.sort();
     }
 
-    /** Find all flow files under slate/flows/ */
+    /** Find all flow files under slate/flows/ recursively */
     private async findFlowFiles(): Promise<string[]> {
         const flowsDir = this.absPath('slate/flows');
         const results: string[] = [];
-        let entries: string[] = [];
-        try {
-            entries = await fs.readdir(flowsDir);
-        } catch {
-            return [];
-        }
-        for (const entry of entries) {
-            if (entry.endsWith('.json')) {
-                const rel = `slate/flows/${entry}`.replace(/\\/g, '/');
-                results.push(rel);
+        const scan = async (dir: string) => {
+            let entries: string[];
+            try {
+                entries = await fs.readdir(dir);
+            } catch {
+                return;
             }
-        }
+            for (const entry of entries) {
+                const full = path.join(dir, entry);
+                try {
+                    const stat = await fs.stat(full);
+                    if (stat.isDirectory()) {
+                        await scan(full);
+                    } else if (stat.isFile() && entry.endsWith('.json')) {
+                        const rel = path.relative(this.workspaceRoot, full).replace(/\\/g, '/');
+                        results.push(rel);
+                    }
+                } catch {
+                    // Ignore stat errors
+                }
+            }
+        };
+        await scan(flowsDir);
         return results.sort();
     }
 
@@ -562,6 +656,7 @@ export class SlateMcpServer {
                         flows.push({
                             id,
                             name: flow.name,
+                            path: file,
                             inputs: flow.inputs.map(i => i.name),
                             outputs: flow.outputs.map(o => o.name),
                             instanceCount: flow.instances.length,
@@ -773,6 +868,28 @@ export class SlateMcpServer {
 
         for (const item of stubList) {
             const name = item.name.trim();
+            if (!name) throw new Error('Stub "name" is required.');
+            const nodeId = name;
+            const nodeRelPath = pathForNodeId(nodeId);
+            this.assertSafePath(nodeRelPath, NODES_DIR);
+
+            // Check if node already exists
+            const existingNode = await this.readJsonFile<SlateNode>(nodeRelPath);
+            if (existingNode) {
+                if (existingNode.locked) {
+                    throw new Error(`Node "${nodeId}" is locked and cannot be modified.`);
+                }
+                const existingBody = existingNode.code.slice(1).join('\n');
+                const existingSig = existingNode.code[0] ?? '';
+                const existingValidation = validateStubBody(existingSig, existingBody);
+                if (!existingValidation.valid) {
+                    throw new Error(
+                        `Node "${nodeId}" already has an active implementation and cannot be overwritten with a stub. ` +
+                        `Frontier Architect only authors stubs for unimplemented nodes. Existing implementation: ${existingValidation.reason}`
+                    );
+                }
+            }
+
             const signature = item.signature.trim();
             const intent = item.intent.trim();
             const contract = (item.contract ?? '').trim();
@@ -803,17 +920,15 @@ export class SlateMcpServer {
                 contract,
                 context,
                 cases,
-                examples: [],
-                describedBy: 'human',
+                examples: existingNode?.examples ?? [],
+                describedBy: existingNode?.describedBy ?? 'human',
                 locked: false,
-                imports: [],
-                uses: [],
+                imports: existingNode?.imports ?? [],
+                uses: existingNode?.uses ?? [],
                 code,
-                extra: {},
+                extra: existingNode?.extra ?? {},
             };
 
-            const nodeId = name;
-            const nodeRelPath = pathForNodeId(nodeId);
             await this.writeJsonFile(nodeRelPath, serializeNode(node));
 
             if (item.position && Number.isFinite(item.position.x) && Number.isFinite(item.position.y)) {
@@ -827,6 +942,7 @@ export class SlateMcpServer {
         // If this was a split operation, update the original node's context or note if it exists
         if (args.splitFrom) {
             const originalPath = pathForNodeId(args.splitFrom);
+            this.assertSafePath(originalPath, NODES_DIR);
             try {
                 const origText = await fs.readFile(this.absPath(originalPath), 'utf8');
                 const origNode = parseNode(origText);
@@ -856,6 +972,7 @@ export class SlateMcpServer {
     }): Promise<Record<string, unknown>> {
         const flowId = args.flow || MAIN_FLOW;
         const flowRelPath = pathForFlowId(flowId);
+        this.assertSafePath(flowRelPath, 'slate/flows');
         let flow: SlateFlow;
 
         try {
@@ -920,6 +1037,12 @@ export class SlateMcpServer {
                 if (fromEp.instance !== null && fromEp.instance === toEp.instance) {
                     throw new Error(`Self-loop rejected: node instance "${fromEp.instance}" cannot wire into itself.`);
                 }
+                if (fromEp.instance !== null && !flow.instances.some(i => i.id === fromEp.instance)) {
+                    throw new Error(`Instance "${fromEp.instance}" does not exist in flow "${flowId}". Define or add the instance before connecting wires.`);
+                }
+                if (toEp.instance !== null && !flow.instances.some(i => i.id === toEp.instance)) {
+                    throw new Error(`Instance "${toEp.instance}" does not exist in flow "${flowId}". Define or add the instance before connecting wires.`);
+                }
                 flow = connect(flow, from, to);
             }
         }
@@ -951,13 +1074,13 @@ export class SlateMcpServer {
                     result = await this.toolFocus(args);
                     break;
                 case 'slate_place_notes':
-                    result = await this.toolPlaceNotes(args);
+                    result = await this.runSerialized(() => this.toolPlaceNotes(args));
                     break;
                 case 'slate_define_stub':
-                    result = await this.toolDefineStub(args);
+                    result = await this.runSerialized(() => this.toolDefineStub(args));
                     break;
                 case 'slate_wire_flow':
-                    result = await this.toolWireFlow(args);
+                    result = await this.runSerialized(() => this.toolWireFlow(args));
                     break;
                 default:
                     return {
@@ -979,6 +1102,17 @@ export class SlateMcpServer {
 
     /** Handle a JSON-RPC request object */
     async handleRequest(request: JsonRpcRequest): Promise<JsonRpcSuccessResponse | JsonRpcErrorResponse | null> {
+        if (!request || request.jsonrpc !== '2.0' || typeof request.method !== 'string') {
+            return {
+                jsonrpc: '2.0',
+                id: (request && (typeof request.id === 'string' || typeof request.id === 'number')) ? request.id : null,
+                error: {
+                    code: -32600,
+                    message: 'Invalid Request: missing or invalid "jsonrpc" or "method" field.',
+                },
+            };
+        }
+
         const id = request.id !== undefined ? request.id : null;
 
         if (request.method === 'initialize') {
@@ -1066,6 +1200,18 @@ export class SlateMcpServer {
             return JSON.stringify(errResp);
         }
 
+        if (!request || typeof request !== 'object' || Array.isArray(request)) {
+            const errResp: JsonRpcErrorResponse = {
+                jsonrpc: '2.0',
+                id: null,
+                error: {
+                    code: -32600,
+                    message: 'Invalid Request: payload must be a non-null JSON-RPC object.',
+                },
+            };
+            return JSON.stringify(errResp);
+        }
+
         const response = await this.handleRequest(request);
         return response ? JSON.stringify(response) : null;
     }
@@ -1074,11 +1220,13 @@ export class SlateMcpServer {
     connectStreams(input: NodeJS.ReadableStream, output: NodeJS.WritableStream): void {
         const rl = readline.createInterface({ input, terminal: false });
         this.rl = rl;
-        rl.on('line', async line => {
-            const reply = await this.handleMessage(line);
-            if (reply) {
-                output.write(`${reply}\n`);
-            }
+        rl.on('line', line => {
+            this.streamQueue = this.streamQueue.then(async () => {
+                const reply = await this.handleMessage(line);
+                if (reply) {
+                    output.write(`${reply}\n`);
+                }
+            }).catch(() => {});
         });
     }
 

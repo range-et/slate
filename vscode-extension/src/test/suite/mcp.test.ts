@@ -215,4 +215,42 @@ suite('Slate Frontier Architect MCP Suite', () => {
             }
         }
     });
+
+    test('slate_define_stub refuses to overwrite existing implementation', async () => {
+        const result = await mcpServer.callTool('slate_define_stub', {
+            name: 'clamp',
+            signature: 'def clamp(value: int, lower: int, upper: int) -> int',
+            intent: 'Try to erase clamp implementation',
+            body: 'pass',
+        });
+        assert.equal(result.isError, true);
+        assert.ok(result.content[0].text.includes('already has an active implementation'));
+    });
+
+    test('slate_define_stub and slate_wire_flow reject path traversal', async () => {
+        const stubEscape = await mcpServer.callTool('slate_define_stub', {
+            name: '../../evil_stub',
+            signature: 'def evil_stub() -> None',
+            intent: 'Escape',
+        });
+        assert.equal(stubEscape.isError, true);
+        assert.ok(stubEscape.content[0].text.includes('Path traversal rejected'));
+
+        const flowEscape = await mcpServer.callTool('slate_wire_flow', {
+            flow: '../../evil_flow',
+            instances: [{ id: 'x', node: 'clamp' }],
+        });
+        assert.equal(flowEscape.isError, true);
+        assert.ok(flowEscape.content[0].text.includes('Path traversal rejected'));
+    });
+
+    test('slate_wire_flow refuses wiring nonexistent instances', async () => {
+        const result = await mcpServer.callTool('slate_wire_flow', {
+            flow: 'main',
+            instances: [{ id: 'valid_inst', node: 'clamp' }],
+            wires: [{ from: 'valid_inst.out', to: 'missing_inst.in' }],
+        });
+        assert.equal(result.isError, true);
+        assert.ok(result.content[0].text.includes('does not exist in flow'));
+    });
 });

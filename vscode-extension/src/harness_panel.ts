@@ -1042,8 +1042,20 @@ export class HarnessPanel implements vscode.Disposable {
             const server = http.createServer((req, res) => {
                 if (req.method === 'POST' && req.url === '/focus') {
                     let body = '';
-                    req.on('data', chunk => { body += chunk; });
+                    let bodyLength = 0;
+                    const MAX_BODY_BYTES = 64 * 1024; // 64KB
+                    req.on('data', chunk => {
+                        bodyLength += chunk.length;
+                        if (bodyLength > MAX_BODY_BYTES) {
+                            res.writeHead(413, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: false, error: 'Payload Too Large' }));
+                            req.destroy();
+                            return;
+                        }
+                        body += chunk;
+                    });
                     req.on('end', async () => {
+                        if (bodyLength > MAX_BODY_BYTES) return;
                         try {
                             const parsed = JSON.parse(body || '{}');
                             await this.focusCamera(parsed);

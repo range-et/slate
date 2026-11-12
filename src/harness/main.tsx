@@ -936,13 +936,22 @@ function HarnessApp() {
             }
             if (data.type === 'focus') {
                 if (data.target) {
-                    const targetId = data.target;
+                    const target = data.target;
+                    const matchesTarget = (node: Node<SlateNodeData>) =>
+                        node.id === target ||
+                        node.data?.unit?.id === target ||
+                        node.data?.unit?.name === target ||
+                        (node.data as any)?.name === target ||
+                        (node.data as any)?.label === target ||
+                        (node.data as any)?.target === target;
+
                     setNodes(current => current.map(node => ({
                         ...node,
-                        selected: node.id === targetId || node.data?.unit?.id === targetId || node.data?.unit?.name === targetId,
+                        selected: matchesTarget(node),
                     })));
-                    const targetNode = flow.current?.getNode(targetId) || nodes.find(n => n.id === targetId || n.data?.unit?.id === targetId || n.data?.unit?.name === targetId);
-                    const focusId = targetNode?.id ?? targetId;
+                    const allNodes = flow.current?.getNodes() ?? nodes;
+                    const targetNode = flow.current?.getNode(target) || allNodes.find(matchesTarget);
+                    const focusId = targetNode?.id ?? target;
                     flow.current?.fitView({
                         nodes: [{ id: focusId }],
                         duration: data.duration ?? 300,
