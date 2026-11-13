@@ -1633,7 +1633,7 @@ suite('Slate native persistence and proposal QA', () => {
         const port = (server.address() as { port: number }).port;
         await post({ type: 'setLlamaConfig', endpoint: `http://127.0.0.1:${port}`, model: 'test-model-v2' });
         msgs = await messages();
-        healthMsg = msgs.find(m => m.type === 'llamaHealth') as any;
+        healthMsg = msgs.filter(m => m.type === 'llamaHealth').pop() as any;
         assert.ok(healthMsg?.status, 'broadcasted llamaHealth after setLlamaConfig');
         assert.equal(healthMsg.status.model, 'test-model-v2');
 
