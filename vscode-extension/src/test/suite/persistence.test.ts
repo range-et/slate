@@ -712,6 +712,7 @@ suite('Slate native persistence and proposal QA', () => {
         const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
         await vscode.window.showTextDocument(layoutDoc);
         await vscode.commands.executeCommand('workbench.action.files.revert');
+        await eventually(async () => !layoutDoc.isDirty && layoutDoc.getText().includes('missing_target'), 'layoutDoc reloaded from disk');
         const dirtyLayoutEdit = new vscode.WorkspaceEdit();
         dirtyLayoutEdit.replace(
             layoutDoc.uri,
@@ -727,6 +728,7 @@ suite('Slate native persistence and proposal QA', () => {
             .includes('v_ref_dirty = clamp(value=x, lower=lo, upper=hi)'));
         await vscode.window.showTextDocument(layoutDoc);
         await vscode.commands.executeCommand('workbench.action.files.revert');
+        await eventually(async () => !layoutDoc.isDirty, 'layoutDoc reverted');
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 
         await vscode.workspace.fs.delete(layoutUri);
@@ -1603,6 +1605,9 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(previewMsg.packet.occurrence, { flowId: 'flow_two', instanceId: 'inst_c2' });
         assert.equal(previewMsg.packet.neighbors?.length ?? 0, 0, 'flow_two has no neighbor node instances for clamp');
         assert.ok(!previewMsg.packet.prompt.includes('Dependency: normalize'), 'flow_two prompt does not leak normalize from flow_one');
+
+        try { await vscode.workspace.fs.delete(flowOneUri); } catch {}
+        try { await vscode.workspace.fs.delete(flowTwoUri); } catch {}
     });
 
 });
