@@ -88,7 +88,7 @@ design per phase.
 | Demo snapshot | `src/harness/demo.ts` | `?demo` (any value) loads it; Playwright uses it |
 | Gate scripts | `scripts/port-compile.js`, `scripts/compile-slate.js` | port + compile a Python folder; compile a `slate/` project (flows, library); both use `vscode-extension/out` |
 | Tests | `test/*.test.ts` (Vitest), `test/e2e/*.playwright.ts`, `vscode-extension/src/test/suite/extension.test.ts` (Extension Host) | fixtures in `vscode-extension/test-fixtures/electron/` (`folder_project/`, `port_source/`) |
-| Legacy notebook | `legacy/` | frozen; Pages deploys it; keep `verify:baseline` green |
+| Product landing page & demo | `src/index.html`, `dist/` | Monad-styled project showcase + web canvas demo deployed to GitHub Pages |
 
 ### Folder-mode snapshot contract
 
@@ -140,7 +140,7 @@ design per phase.
 npx vitest run                         # harness unit tests (~1s)
 npx playwright test                    # webview with fake host (~4s); uses ?demo
 npm run test:electron                  # Extension Host (~45s); builds + compiles first
-npm run verify:baseline                # CI gate incl. legacy, port → compile → pytest of the examples
+npm run verify:baseline                # CI gate: unit, build, port → compile → pytest of the examples
 npm run package-extension              # VSIX smoke (needs network for npx vsce)
 ```
 
@@ -194,11 +194,7 @@ that states the expected result.
   `HighlightStyle` defined in `main.tsx`.
 - Don't call `selectFromEditor` after every refresh in folder mode. It snaps
   the canvas selection back to whatever editor was last active.
-- The checked-in `legacy/examples/tic_tac_toe/game.py` lacks its imports, so
-  the gate ports the legacy compile output (`$TMP/tic_tac_toe`) instead.
-  Calculator is ported from the checked-in files. When `legacy/` is deleted
-  (S-001), move those Python sources and their tests somewhere the gate can
-  still reach.
+- Calculator and tic-tac-toe examples live in `examples/calculator` and `examples/tic_tac_toe`. The gate ports both directly into `slate/` nodes, compiles them back to Python, and runs their pytest suites. S-001 retired `legacy/` and moved the examples to `examples/`.
 - Compile uses absolute imports rooted at `outDir` (not the relative imports
   this plan first proposed): the example suites load modules as top-level
   files, and absolute imports keep the original project's import paths

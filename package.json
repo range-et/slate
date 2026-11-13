@@ -1,7 +1,7 @@
 {
   "name": "slate",
   "version": "1.0.0",
-  "description": "Slate: a node-graph harness for composing Python with local LLMs (VS Code webview + legacy browser notebook)",
+  "description": "Slate: a visual node canvas for composing Python with local LLMs (VS Code custom editor + web showcase)",
   "scripts": {
     "clean": "rimraf dist/",
     "prebuild": "npm run clean",
@@ -21,9 +21,6 @@
     "verify:launch": "npm run verify:baseline && npm run test:qa",
     "package-extension": "node scripts/package-extension.js",
     "demo:llama": "bash scripts/start-llama-demo.sh",
-    "legacy:dev": "node legacy/scripts/ensure-config.js && vite --config legacy/vite.config.js --open",
-    "legacy:build": "node legacy/scripts/ensure-config.js && vite build --config legacy/vite.config.js",
-    "legacy:test": "node legacy/scripts/ensure-config.js && vitest run --config legacy/vitest.config.js",
     "typecheck": "tsc -p tsconfig.json && tsc -p vscode-extension/tsconfig.json --noEmit",
     "lint": "eslint src/harness vscode-extension/src --max-warnings 0",
     "verify:static": "npm run typecheck && npm run lint",
@@ -58,16 +55,10 @@
     "vitest": "^4.1.5"
   },
   "dependencies": {
-    "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/lang-python": "^6.2.1",
-    "@google/genai": "^1.0.0",
     "@xyflow/react": "^12.8.4",
     "codemirror": "^6.0.2",
-    "d3": "^7.9.0",
-    "marked": "^11.2.0",
-    "openai": "^5.15.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "uuid": "^11.1.0"
+    "react-dom": "^19.1.1"
   }
 }

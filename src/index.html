@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en" data-strata="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Slate — Visual Node Canvas for Composing Software</title>
+  <meta name="description" content="Grasshopper where you forge the atomic components as you build the software. Deterministically compiled Python flows, JPL-60 verification, and a two-tier division of labor between frontier architects and local LLMs." />
+  <link rel="stylesheet" href="./monad.css" />
+  <style>
+    /* Custom landing page polish built on Monad tokens */
+    :root {
+      --hero-glow: radial-gradient(circle at 50% -20%, rgba(30, 136, 200, 0.18) 0%, rgba(15, 17, 19, 0) 70%);
+      --card-hover-trans: border-color var(--threshold-duration-base) var(--threshold-ease-out), transform var(--threshold-duration-base) var(--threshold-ease-out);
+    }
+    html[data-strata="light"] {
+      --hero-glow: radial-gradient(circle at 50% -20%, rgba(30, 136, 200, 0.12) 0%, rgba(244, 246, 248, 0) 70%);
+    }
+    body {
+      margin: 0;
+      background: var(--strata-bg);
+      color: var(--strata-text-primary);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .landing-header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+      padding-inline: var(--space-4);
+      background: var(--strata-layer-01);
+      border-bottom: 1px solid var(--strata-border);
+      backdrop-filter: blur(8px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
+      font-size: var(--type-base);
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-decoration: none;
+      color: var(--strata-text-primary);
+    }
+    .brand-mark {
+      color: var(--strata-interactive);
+      font-size: 1.2rem;
+    }
+    .nav-group {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+    }
+    .nav-link {
+      font-size: var(--type-sm);
+      color: var(--strata-text-secondary);
+      text-decoration: none;
+      transition: color var(--threshold-duration-fast) var(--threshold-ease-linear);
+    }
+    .nav-link:hover {
+      color: var(--strata-text-primary);
+    }
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+    .hero-container {
+      position: relative;
+      background: var(--hero-glow);
+      padding: var(--space-8) var(--space-4) var(--space-6);
+      text-align: center;
+      border-bottom: 1px solid var(--strata-border-subtle);
+    }
+    .hero-badge-wrap {
+      margin-bottom: var(--space-3);
+    }
+    .hero-title {
+      font-size: clamp(2rem, 5vw, var(--type-5xl));
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      margin: 0 auto var(--space-3);
+      max-width: 900px;
+    }
+    .hero-title .highlight {
+      color: var(--strata-interactive);
+    }
+    .hero-subtitle {
+      font-size: clamp(var(--type-base), 2vw, var(--type-lg));
+      color: var(--strata-text-secondary);
+      max-width: 720px;
+      margin: 0 auto var(--space-4);
+      font-weight: 400;
+    }
+    .hero-cta {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: var(--space-2);
+      margin-bottom: var(--space-6);
+    }
+    .stat-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: var(--space-2);
+      max-width: 1100px;
+      margin: 0 auto;
+      text-align: left;
+    }
+    .interactive-canvas-showcase {
+      max-width: 1200px;
+      margin: var(--space-6) auto 0;
+      background: var(--strata-layer-01);
+      border: 1px solid var(--strata-border);
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+    }
+    .showcase-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: var(--space-1) var(--space-3);
+      background: var(--strata-layer-02);
+      border-bottom: 1px solid var(--strata-border);
+      font-family: var(--font-mono);
+      font-size: var(--type-xs);
+      color: var(--strata-text-secondary);
+    }
+    .canvas-visual {
+      position: relative;
+      height: 380px;
+      background-color: var(--strata-bg);
+      background-image: radial-gradient(var(--strata-border) 1px, transparent 0);
+      background-size: 24px 24px;
+      padding: var(--space-4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-6);
+    }
+    .mock-node {
+      background: var(--strata-layer-01);
+      border: 1px solid var(--strata-border);
+      width: 250px;
+      padding: var(--space-2);
+      border-radius: 4px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    }
+    .mock-node-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: var(--space-2);
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--strata-border-subtle);
+      font-family: var(--font-mono);
+      font-size: var(--type-xs);
+    }
+    .mock-port-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: var(--type-xs);
+    }
+    .mock-port-row {
+      display: flex;
+      justify-content: space-between;
+      color: var(--strata-text-secondary);
+    }
+    .port-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--strata-interactive);
+      margin-right: 6px;
+    }
+    .port-dot-out {
+      margin-right: 0;
+      margin-left: 6px;
+      background: var(--strata-success);
+    }
+    .section-wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: var(--space-8) var(--space-4);
+    }
+    .section-eyebrow {
+      font-family: var(--font-mono);
+      font-size: var(--type-xs);
+      color: var(--strata-interactive);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: var(--space-1);
+    }
+    .section-title {
+      font-size: var(--type-3xl);
+      font-weight: 700;
+      margin: 0 0 var(--space-2);
+      letter-spacing: -0.02em;
+    }
+    .section-desc {
+      color: var(--strata-text-secondary);
+      font-size: var(--type-base);
+      max-width: 700px;
+      margin-bottom: var(--space-6);
+    }
+    .pillar-card {
+      transition: var(--card-hover-trans);
+    }
+    .pillar-card:hover {
+      border-color: var(--strata-interactive);
+      transform: translateY(-2px);
+    }
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: var(--space-4) 0;
+      font-size: var(--type-sm);
+    }
+    .comparison-table th,
+    .comparison-table td {
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid var(--strata-border);
+      text-align: left;
+    }
+    .comparison-table th {
+      background: var(--strata-layer-02);
+      color: var(--strata-text-primary);
+      font-family: var(--font-mono);
+      font-size: var(--type-xs);
+    }
+    .comparison-table td {
+      background: var(--strata-layer-01);
+      color: var(--strata-text-secondary);
+    }
+    .code-box {
+      background: var(--strata-layer-01);
+      border: 1px solid var(--strata-border);
+      border-left: 3px solid var(--strata-interactive);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: var(--type-sm);
+      overflow-x: auto;
+      margin: var(--space-3) 0;
+      color: var(--strata-text-primary);
+    }
+    .footer-wrap {
+      background: var(--strata-layer-01);
+      border-top: 1px solid var(--strata-border);
+      padding: var(--space-6) var(--space-4);
+      font-size: var(--type-sm);
+      color: var(--strata-text-secondary);
+    }
+    .footer-grid {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: var(--space-4);
+    }
+    .footer-links {
+      display: flex;
+      gap: var(--space-3);
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .footer-links a {
+      color: var(--strata-text-secondary);
+      text-decoration: none;
+    }
+    .footer-links a:hover {
+      color: var(--strata-text-primary);
+    }
+    @media (max-width: 768px) {
+      .nav-group { display: none; }
+      .stat-bar { grid-template-columns: 1fr; }
+      .canvas-visual { flex-direction: column; height: auto; }
+      .interactive-canvas-showcase { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Monad Header -->
+  <header class="landing-header">
+    <a href="#" class="brand">
+      <span class="brand-mark">◆</span>
+      <span>SLATE</span>
+    </a>
+
+    <nav class="nav-group">
+      <a href="#mental-model" class="nav-link">Mental Model</a>
+      <a href="#pillars" class="nav-link">Pillars</a>
+      <a href="#division-of-labor" class="nav-link">Two-Tier AI</a>
+      <a href="#unbundled-llm" class="nav-link">Local LLM</a>
+      <a href="#quickstart" class="nav-link">Quickstart</a>
+    </nav>
+
+    <div class="nav-actions">
+      <button class="atomos-btn atomos-btn--ghost atomos-btn--sm" data-mn-theme-toggle aria-label="Toggle theme">◐</button>
+      <a href="https://github.com/range-et/slate" class="atomos-btn atomos-btn--ghost atomos-btn--sm" target="_blank" rel="noopener">GitHub</a>
+      <a href="./harness.html?demo" class="atomos-btn atomos-btn--primary atomos-btn--sm">Launch Demo</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero Section -->
+    <section class="hero-container">
+      <div class="hero-badge-wrap">
+        <span class="atomos-tag atomos-tag--info">Grasshopper for Software</span>
+      </div>
+
+      <h1 class="hero-title">
+        Forge atomic components.<br />
+        <span class="highlight">Compose verified software.</span>
+      </h1>
+
+      <p class="hero-subtitle">
+        A visual node canvas for building robust software with local models. Every atomic component is strictly bounded by JPL-60, composed visually into deterministic flows without generative glue code, and powered by a two-tier division of labor between frontier architects and local LLMs.
+      </p>
+
+      <div class="hero-cta">
+        <a href="./harness.html?demo" class="atomos-btn atomos-btn--primary atomos-btn--lg">Open Interactive Web Demo</a>
+        <a href="https://github.com/range-et/slate" class="atomos-btn atomos-btn--secondary atomos-btn--lg" target="_blank" rel="noopener">View on GitHub</a>
+        <a href="#quickstart" class="atomos-btn atomos-btn--ghost atomos-btn--lg">Get VS Code Extension</a>
+      </div>
+
+      <!-- Hero Stats Strip -->
+      <div class="stat-bar">
+        <div class="atomos-stat atomos-stat--signal">
+          <div class="atomos-stat__eyebrow">JPL-60 RULE</div>
+          <div class="atomos-stat__value">≤ 60 Lines</div>
+          <div class="atomos-stat__label">Per atomic function node</div>
+        </div>
+
+        <div class="atomos-stat atomos-stat--signal">
+          <div class="atomos-stat__eyebrow">LOCAL FORGE PACKET</div>
+          <div class="atomos-stat__value">≤ 600 Tokens</div>
+          <div class="atomos-stat__label">Focused micro-context per body</div>
+        </div>
+
+        <div class="atomos-stat atomos-stat--success">
+          <div class="atomos-stat__eyebrow">DETERMINISTIC COMPILATION</div>
+          <div class="atomos-stat__value">0 Guesswork</div>
+          <div class="atomos-stat__label">No LLMs writing runtime glue code</div>
+        </div>
+
+        <div class="atomos-stat atomos-stat--success">
+          <div class="atomos-stat__eyebrow">MODULAR RUNTIME</div>
+          <div class="atomos-stat__value">100% Unbundled</div>
+          <div class="atomos-stat__label">Bring your own llama-server, Ollama, LM Studio</div>
+        </div>
+      </div>
+
+      <!-- Visual Canvas Preview -->
+      <div class="interactive-canvas-showcase">
+        <div class="showcase-toolbar">
+          <span>◆ canvas: flows/main.json</span>
+          <span>Camera: (x: 120, y: 140) · Zoom: 1.0x · Engine: XYFlow + Python Lezer</span>
+          <span class="atomos-tag atomos-tag--success" style="font-size: 11px;">JPL-60 Verified</span>
+        </div>
+        <div class="canvas-visual">
+          <!-- Node 1 -->
+          <div class="mock-node">
+            <div class="mock-node-header">
+              <span style="font-weight:600;color:var(--strata-text-primary);">fn clamp</span>
+              <span class="atomos-tag atomos-tag--neutral">atomic</span>
+            </div>
+            <div class="mock-port-list">
+              <div class="mock-port-row">
+                <span><span class="port-dot"></span>val: float</span>
+                <span></span>
+              </div>
+              <div class="mock-port-row">
+                <span><span class="port-dot"></span>low: float</span>
+                <span></span>
+              </div>
+              <div class="mock-port-row">
+                <span><span class="port-dot"></span>high: float</span>
+                <span>out: float <span class="port-dot port-dot-out"></span></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Connecting Wire Indicator -->
+          <div style="color:var(--strata-interactive);font-family:var(--font-mono);font-size:12px;display:flex;align-items:center;gap:4px;">
+            <span>───[out ➔ score]───►</span>
+          </div>
+
+          <!-- Node 2 -->
+          <div class="mock-node" style="border-color:var(--strata-interactive);">
+            <div class="mock-node-header">
+              <span style="font-weight:600;color:var(--strata-interactive);">fn normalize</span>
+              <span class="atomos-tag atomos-tag--info">target</span>
+            </div>
+            <div class="mock-port-list">
+              <div class="mock-port-row">
+                <span><span class="port-dot"></span>score: float</span>
+                <span></span>
+              </div>
+              <div class="mock-port-row">
+                <span><span class="port-dot"></span>scale: float</span>
+                <span>normalized: float <span class="port-dot port-dot-out"></span></span>
+              </div>
+            </div>
+            <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--strata-border-subtle);font-size:11px;color:var(--strata-text-secondary);">
+              <span>pytest: 4 passed · mutmut: 0 survivors</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Mental Model Section -->
+    <section id="mental-model" class="section-wrap">
+      <div class="section-eyebrow">The Mental Model</div>
+      <h2 class="section-title">Grasshopper where you forge atomic components</h2>
+      <p class="section-desc">
+        Traditional LLM coding environments trap developers in sprawling chat windows, sliding-context drift, and 1,000-line monolithic diffs where errors cascade. Slate flips this paradigm.
+      </p>
+
+      <div class="monad-grid">
+        <div class="monad-col-8 monad-col-md-full">
+          <div class="atomos-card atomos-card--flat" style="height: 100%;">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">The Flaw of Chat-Driven Monoliths</span>
+              <span class="atomos-tag atomos-tag--error">Status Quo</span>
+            </div>
+            <div class="atomos-card__body">
+              <p>
+                LLMs are stateless predictors. Sliding context windows forget early architectural invariants. When asked to edit large files, models rewrite glue code, reintroduce regression bugs, and hallucinate dependencies.
+              </p>
+              <p>
+                Developers spend more time refereeing AI diff conflicts than composing clean software architectures.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="monad-col-8 monad-col-md-full">
+          <div class="atomos-card" style="border-color: var(--strata-interactive); height: 100%;">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">The Slate Formulation</span>
+              <span class="atomos-tag atomos-tag--success">Slate</span>
+            </div>
+            <div class="atomos-card__body">
+              <p>
+                <strong>Atomic Library Units (`slate/nodes/**/*.json`):</strong> The only place where raw code lives. Strictly bounded by JPL-60 (&le;60 lines, typed signatures, Pydantic contracts, pytest, and mutmut mutation tests).
+              </p>
+              <p>
+                <strong>Compositions & Flows (`slate/flows/**/*.json`):</strong> Everything above 60 lines is a visual graph. Instances connect through typed ports. Compilation to Python is 100% deterministic — no generative model guesses glue code.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Core Pillars Grid -->
+    <section id="pillars" class="section-wrap" style="background: var(--strata-layer-01); border-top: 1px solid var(--strata-border); border-bottom: 1px solid var(--strata-border);">
+      <div class="section-eyebrow">Architectural Pillars</div>
+      <h2 class="section-title">Engineered for Verifiability</h2>
+      <p class="section-desc">
+        Slate enforces constraints that make automated verification mathematical rather than probabilistic.
+      </p>
+
+      <div class="monad-grid">
+        <!-- Pillar 1 -->
+        <div class="monad-col-4 monad-col-md-half pillar-card">
+          <div class="atomos-card" style="height: 100%;">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">1. JPL-60 Discipline</span>
+              <span class="atomos-tag atomos-tag--info">&le;60 Lines</span>
+            </div>
+            <div class="atomos-card__body">
+              Inspired by NASA JPL's Rules for Safety-Critical Code. Every function node is constrained to &le;60 lines of code, explicit parameter and return type annotations, bounded loops, and strict Pydantic contract validation.
+            </div>
+          </div>
+        </div>
+
+        <!-- Pillar 2 -->
+        <div class="monad-col-4 monad-col-md-half pillar-card">
+          <div class="atomos-card" style="height: 100%;">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">2. Flow Composition</span>
+              <span class="atomos-tag atomos-tag--success">Deterministic</span>
+            </div>
+            <div class="atomos-card__body">
+              Programs are graphs of atomic instances wired together. The compiler deterministically generates runtime Python modules directly from flow graphs (`flowToNode`), eliminating hallucinated integration code.
+            </div>
+          </div>
+        </div>
+
+        <!-- Pillar 3 -->
+        <div class="monad-col-4 monad-col-md-half pillar-card">
+          <div class="atomos-card" style="height: 100%;">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">3. Two-Tier Labor</span>
+              <span class="atomos-tag atomos-tag--info">Architect / Forge</span>
+            </div>
+            <div class="atomos-card__body">
+              Frontier models act as spatial architects via the Model Context Protocol (MCP), designing stubs and wiring graphs. Local LLMs act as component blacksmiths, forging 60-line bodies from 600-token packets.
+            </div>
+          </div>
+        </div>
+
+        <!-- Pillar 4 -->
+        <div class="monad-col-4 monad-col-md-half pillar-card">
+          <div class="atomos-card" style="height: 100%;">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">4. Verified Candidates</span>
+              <span class="atomos-tag atomos-tag--warning">Guardrails</span>
+            </div>
+            <div class="atomos-card__body">
+              Generated code is never blindly accepted. Candidate implementations undergo automated pytest checks and mutmut mutation tests. Candidates are inspected, iteratively revised, or instantly reverted.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Two-Tier Division of Labor Section -->
+    <section id="division-of-labor" class="section-wrap">
+      <div class="section-eyebrow">Two-Tier AI Division of Labor</div>
+      <h2 class="section-title">Frontier Architect vs. Local Forge</h2>
+      <p class="section-desc">
+        Slate cleanly separates high-level architectural reasoning from local code synthesis.
+      </p>
+
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th>Attribute</th>
+            <th>Tier 1: Frontier Architect (MCP)</th>
+            <th>Tier 2: Local Component Forge (llama.cpp)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Target Models</strong></td>
+            <td>Claude 3.7 / Gemini 2.5 / GPT-4o (Frontier)</td>
+            <td>Qwen 2.5 Coder, Llama 3.2, DeepSeek-R1 (Local)</td>
+          </tr>
+          <tr>
+            <td><strong>Interface</strong></td>
+            <td>Model Context Protocol (Slate MCP Server)</td>
+            <td>Local HTTP API (OpenAI-compatible / llama-server)</td>
+          </tr>
+          <tr>
+            <td><strong>Responsibility</strong></td>
+            <td>Search codebase, place notes, focus canvas camera, define typed stubs, wire flows, split oversized nodes (&gt;60 lines)</td>
+            <td>Forge &le;60-line function bodies and unit checks for atomic stubs</td>
+          </tr>
+          <tr>
+            <td><strong>Allowed Scope</strong></td>
+            <td><strong>Zero function body authoring</strong>. Defines intent, contracts, and wires only.</td>
+            <td>Implements single bounded atomic body and test cases.</td>
+          </tr>
+          <tr>
+            <td><strong>Token Budget</strong></td>
+            <td>Standard frontier context window</td>
+            <td><strong>&le; 600 tokens</strong> micro-packet per forge task</td>
+          </tr>
+          <tr>
+            <td><strong>Verification Gate</strong></td>
+            <td>Contract linting & typed port compatibility</td>
+            <td>Pydantic contract validation + pytest + mutmut mutation tests</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Unbundled Local LLM Section -->
+    <section id="unbundled-llm" class="section-wrap" style="background: var(--strata-layer-01); border-top: 1px solid var(--strata-border); border-bottom: 1px solid var(--strata-border);">
+      <div class="section-eyebrow">Privacy & Extensibility</div>
+      <h2 class="section-title">Unbundled Local LLM Architecture</h2>
+      <p class="section-desc">
+        Slate is not bundled with a heavy LLM server. You bring your own local model, runtime, and hardware acceleration.
+      </p>
+
+      <div class="monad-grid">
+        <div class="monad-col-8 monad-col-md-full">
+          <p>
+            Many AI developer tools force you to download gigabytes of pre-packaged runtimes or require proprietary cloud subscriptions. Slate takes the opposite approach:
+          </p>
+          <ul style="color: var(--strata-text-secondary); padding-left: 20px;">
+            <li><strong>Zero Server Bloat:</strong> The VS Code extension and web canvas are lightweight, running natively on Lezer and React.</li>
+            <li><strong>Any OpenAI-Compatible Engine:</strong> Connect to <code>llama.cpp</code> (<code>llama-server</code>), Ollama, LM Studio, vLLM, or any local inference server.</li>
+            <li><strong>Architect-Configured:</strong> Your frontier model or agentic assistant configures and monitors the local forge endpoint on demand.</li>
+            <li><strong>100% Offline & Private:</strong> Atomic code generation never leaves your workstation unless you choose to use a remote endpoint.</li>
+          </ul>
+        </div>
+
+        <div class="monad-col-8 monad-col-md-full">
+          <div class="code-box">
+            <div style="color: var(--strata-text-secondary); margin-bottom: 8px;"># Example: Start local llama.cpp forge server</div>
+            <div>llama-server \</div>
+            <div>  --model Qwen2.5-Coder-7B-Instruct.Q4_K_M.gguf \</div>
+            <div>  --port 8080 \</div>
+            <div>  --ctx-size 2048 \</div>
+            <div>  --n-gpu-layers 99</div>
+            <div style="margin-top: 12px; color: var(--strata-text-secondary);"># Slate automatically connects to http://127.0.0.1:8080/v1</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quickstart Section -->
+    <section id="quickstart" class="section-wrap">
+      <div class="section-eyebrow">Get Started</div>
+      <h2 class="section-title">Ready in Seconds</h2>
+      <p class="section-desc">
+        Try the interactive web canvas now or install the native VS Code custom editor.
+      </p>
+
+      <div class="monad-grid">
+        <div class="monad-col-8 monad-col-md-full">
+          <div class="atomos-card">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">Option 1: Interactive Web Demo</span>
+              <span class="atomos-tag atomos-tag--success">Immediate</span>
+            </div>
+            <div class="atomos-card__body">
+              <p>Explore the full XYFlow canvas directly in your browser with sample flows, node inspectors, and mock local LLM transport.</p>
+              <a href="./harness.html?demo" class="atomos-btn atomos-btn--primary atomos-btn--sm">Launch Browser Canvas Demo</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="monad-col-8 monad-col-md-full">
+          <div class="atomos-card">
+            <div class="atomos-card__header">
+              <span class="atomos-card__title">Option 2: Native VS Code Extension</span>
+              <span class="atomos-tag atomos-tag--info">Production</span>
+            </div>
+            <div class="atomos-card__body">
+              <p>Build and install the VSIX package to edit any project with a <code>slate/</code> directory:</p>
+              <pre style="margin: 8px 0; font-size: 12px;">git clone https://github.com/range-et/slate.git
+cd slate
+npm install && npm run build
+npm run package-extension
+code --install-extension vscode-extension/*.vsix</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Monad Footer -->
+  <footer class="footer-wrap">
+    <div class="footer-grid">
+      <div>
+        <div style="font-weight: 700; color: var(--strata-text-primary); margin-bottom: 4px;">
+          <span style="color:var(--strata-interactive);margin-right:4px;">◆</span> SLATE
+        </div>
+        <div>Visual node canvas for composing software.</div>
+        <div style="margin-top: 8px; font-size: 12px; color: var(--strata-text-disabled);">
+          Dual-licensed: <a href="https://github.com/range-et/slate/blob/main/LICENSE.md" style="color:inherit;" target="_blank">PolyForm Noncommercial 1.0.0</a> (code) & <a href="https://creativecommons.org/licenses/by-nc/4.0/" style="color:inherit;" target="_blank">CC BY-NC 4.0</a> (media/docs).
+        </div>
+      </div>
+
+      <div>
+        <ul class="footer-links">
+          <li><a href="./harness.html?demo">Web Demo</a></li>
+          <li><a href="https://github.com/range-et/slate" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="https://github.com/range-et/slate/issues" target="_blank" rel="noopener">Issues</a></li>
+          <li><a href="https://github.com/range-et/slate/blob/main/docs/motivation.md" target="_blank" rel="noopener">Philosophy</a></li>
+        </ul>
+      </div>
+    </div>
+  </footer>
+
+  <script src="./monad.js"></script>
+</body>
+</html>

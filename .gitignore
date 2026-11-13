@@ -115,7 +115,6 @@ instance/
 .env
 .env.local
 
-legacy/src/config.js
 scratch/scatch_notes.txt
 
 # AI / agent session artifacts

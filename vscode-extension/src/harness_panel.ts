@@ -48,7 +48,7 @@ function buildHtml(context: vscode.ExtensionContext, webview: vscode.Webview): s
         const pattern = new RegExp(`${attribute}="([^"]+)"`, 'g');
         html = html.replace(pattern, (match, url: string) => {
             if (/^https?:\/\//.test(url) || url.startsWith('data:') || url.startsWith('#')) return match;
-            const diskUri = vscode.Uri.joinPath(distRoot, url.replace(/^\/+/, ''));
+            const diskUri = vscode.Uri.joinPath(distRoot, url.replace(/^(\.\/|\/)+/, ''));
             return `${attribute}="${webview.asWebviewUri(diskUri)}"`;
         });
     }

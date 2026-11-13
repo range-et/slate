@@ -4,7 +4,7 @@ This document provides instructions and architectural context for autonomous AI 
 
 ## Scope
 
-The active product is the React/XYFlow canvas in `src/harness/` and the VS Code extension in `vscode-extension/src/`. Read `BUILD_PLAN.md`, `SLATE_HARNESS_PLAN.md`, and the relevant source before changing behavior. `legacy/` is frozen but still deployed; keep its existing tests and builds passing. Preserve unrelated user changes.
+The active product is the React/XYFlow canvas in `src/harness/` and the VS Code extension in `vscode-extension/src/`. Read `BUILD_PLAN.md`, `SLATE_HARNESS_PLAN.md`, and the relevant source before changing behavior. Preserve unrelated user changes.
 
 ## Project Overview
 
@@ -40,17 +40,15 @@ Documentation map:
 - Build plan and phase learnings: [BUILD_PLAN.md](BUILD_PLAN.md)
 - Development loop: [DEV.md](DEV.md); local llama.cpp demo: [DEMO.md](DEMO.md)
 
-`legacy/` holds the frozen original browser notebook, which GitHub Pages still deploys. Do not build on it; see [legacy/AGENTS.md](legacy/AGENTS.md).
-
 ## Common Commands
 
 ```bash
 npm run dev               # Vite dev server, opens /harness.html?demo
-npm run build             # Harness webview -> dist/ (served by the extension)
+npm run build             # Build landing page and harness webview -> dist/
 npm test                  # Vitest unit tests (test/)
 npm run test:webview      # Playwright against harness.html with a fake host
 npm run test:harness      # All suites incl. Extension Host + workbench
-npm run verify:baseline   # CI gate: port → compile → pytest, and keeps legacy/ green
+npm run verify:baseline   # CI gate: port → compile → pytest of examples
 npm run verify:launch     # Full launch gate (verify:baseline + test:qa)
 npm run package-extension # Build a VSIX
 npm run demo:llama        # Start the local llama.cpp demo server
@@ -82,7 +80,7 @@ npm run verify:launch
 
 This is fail-fast and requires all of:
 
-1. `verify:baseline`: all unit/matrix tests, active webview build, extension TypeScript compile, frozen legacy tests/build, Python example round trips, port/compile round trips, and flow/library execution tests.
+1. `verify:baseline`: all unit/matrix tests, active webview/landing page build, extension TypeScript compile, Python example round trips, port/compile round trips, and flow/library execution tests.
 2. `test:qa`: Playwright browser interactions, real VS Code Extension Host tests, and real workbench/webview generation, undo/save, and native creation-dialog QA.
 
 Use focused tests while developing, then run the full gate on the final changes. If any required suite fails or cannot run, fix the issue or report the exact blocker; the change is not launch-ready. Report the command and outcome at handoff.
