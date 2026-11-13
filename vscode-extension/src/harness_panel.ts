@@ -4,7 +4,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal } from './harness_protocol';
+import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
 import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
@@ -20,6 +20,7 @@ import { SlateFolderHost } from './slate_folder_host';
 import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
 import { buildUsageIndex } from './usage_index';
 import { runFlow } from './flow_runner';
+import { runNodeGuardrails } from './guardrails_runner';
 
 function nonce(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -599,10 +600,34 @@ export class HarnessPanel implements vscode.Disposable {
         const nodeId = nodeIdForPath(pending.path)!;
         const node = await folder.readNode(nodeId);
         if (node.locked) throw new Error('This function is locked. Unlock it before accepting a proposal.');
-        node.code = codeLines(pending.proposal.proposedSource);
+
+        // Guardrails check (S-602): If node or affected flows have cases, test candidate before accepting!
+        const proposedCode = codeLines(pending.proposal.proposedSource);
+        const originalCode = [...node.code];
+        const originalCheck = node.check ? [...node.check] : undefined;
+        node.code = proposedCode;
         if (pending.check) {
             node.check = codeLines(pending.check);
         }
+
+        const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+        const guardrailReport = await runNodeGuardrails({
+            nodeId,
+            folder: this.folder,
+            workspaceRoot: this.folder.root.fsPath,
+            nodeOverride: node,
+            pythonPath,
+            isTrusted: vscode.workspace.isTrusted,
+        });
+
+        if (!guardrailReport.passed) {
+            node.code = originalCode;
+            node.check = originalCheck;
+            const failingFlow = guardrailReport.affectedFlows.find(f => f.failedCases > 0);
+            const detail = failingFlow?.failures[0]?.error || guardrailReport.nodeCases.failures[0] || 'A saved case failed';
+            throw new Error(`Guardrail failure: ${failingFlow ? `Flow "${failingFlow.flowId}"` : `Node "${nodeId}"`} failed: ${detail}. The proposal was rejected to protect existing guardrails.`);
+        }
+
         const appliedVersion = await folder.writeNode(nodeId, node);
         this.lastAcceptedUnitId = pending.packet.targetId;
         this.lastAcceptedVersion = appliedVersion;
@@ -835,6 +860,32 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
+    private async runGuardrails(nodeId: string): Promise<NodeGuardrailsReport> {
+        const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+        const report = await runNodeGuardrails({
+            nodeId,
+            folder: this.folder,
+            workspaceRoot: this.folder.root.fsPath,
+            pythonPath,
+            isTrusted: vscode.workspace.isTrusted,
+        });
+
+        if (this.snapshot) {
+            this.snapshot.guardrails = { ...this.snapshot.guardrails, [nodeId]: report };
+        }
+
+        await this.postMessage({ type: 'guardrailsStatus', report });
+        const totalFlowCases = report.affectedFlows.reduce((sum, f) => sum + f.totalCases, 0);
+        const passedFlowCases = report.affectedFlows.reduce((sum, f) => sum + f.passedCases, 0);
+        this.postCommandResult(
+            report.passed,
+            report.passed
+                ? `Guardrails passed for ${nodeId} (${report.nodeCases.passed} node check(s), ${passedFlowCases}/${totalFlowCases} flow case(s) across ${report.affectedFlows.length} flow(s)).`
+                : `Guardrails failed for ${nodeId}. A test case or affected flow broke.`,
+        );
+        return report;
+    }
+
     private async executeFlow(flowId?: string, inputs?: Record<string, unknown>): Promise<void> {
         if (this.activeRunController) {
             this.activeRunController.abort();
@@ -1048,7 +1099,7 @@ export class HarnessPanel implements vscode.Disposable {
             'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
             'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
             'pasteItems', 'makeUnique', 'forkDefinition', 'renameFlowPort', 'deleteFlowPort',
-            'addViewer', 'pinViewer', 'captureCase',
+            'addViewer', 'pinViewer', 'captureCase', 'runGuardrails', 'saveCase', 'deleteCase',
         ].includes(String(action.kind))) {
             return false;
         }
@@ -1192,26 +1243,83 @@ export class HarnessPanel implements vscode.Disposable {
                 await finish(`Pinned viewer ${id}.`, id);
                 return true;
             }
+            case 'runGuardrails': {
+                const target = String(action.targetNodeId || action.target || action.id || '');
+                if (!target) throw new Error('runGuardrails requires target');
+                const targetNodeId = this.folderNodeId(target);
+                await this.runGuardrails(targetNodeId);
+                return true;
+            }
             case 'captureCase': {
                 const inputs = (action.inputs && typeof action.inputs === 'object' && !Array.isArray(action.inputs)) ? action.inputs as Record<string, unknown> : {};
                 const expected = action.output ?? action.expected;
+                const description = typeof action.description === 'string' ? action.description : undefined;
+                const error = typeof action.error === 'string' ? action.error : undefined;
                 const targetNode = typeof action.targetNodeId === 'string' ? action.targetNodeId : null;
+                const caseId = typeof action.id === 'string' ? action.id : `case_${Date.now().toString(36)}`;
+                const newCase: TestCase = { id: caseId, inputs, expected, description, error };
+
                 if (targetNode) {
-                    const doc = this.snapshot?.documents.find(d => d.path === targetNode || d.path.replace(/\.json$/, '') === targetNode);
-                    if (doc) {
-                        const nodeData = await this.folder.readNode(doc.path);
-                        const existingCases = Array.isArray(nodeData.cases) ? [...nodeData.cases] : [];
-                        existingCases.push({ inputs, expected });
-                        await this.folder.writeNode(doc.path, { ...nodeData, cases: existingCases });
-                        await finish(`Captured case for node ${targetNode}.`);
-                        return true;
-                    }
+                    const targetNodeId = this.folderNodeId(targetNode);
+                    const nodeData = await this.folder.readNode(targetNodeId);
+                    const existingCases = Array.isArray(nodeData.cases) ? [...nodeData.cases] : [];
+                    existingCases.push(newCase);
+                    await this.folder.writeNode(targetNodeId, { ...nodeData, cases: existingCases });
+                    await finish(`Captured case for node ${targetNodeId}.`);
+                    return true;
                 }
                 const flow = this.flow(flowId);
-                const existingCases = Array.isArray((flow.extra as Record<string, unknown>)?.cases) ? [...((flow.extra as Record<string, unknown>).cases as unknown[])] : [];
-                existingCases.push({ inputs, expected });
-                await saveFlow(flowId, { ...flow, extra: { ...flow.extra, cases: existingCases } });
+                const existingCases = Array.isArray(flow.cases) ? [...flow.cases] : (Array.isArray((flow.extra as Record<string, unknown>)?.cases) ? [...(flow.extra as Record<string, unknown>).cases as TestCase[]] : []);
+                existingCases.push(newCase);
+                await saveFlow(flowId, { ...flow, cases: existingCases });
                 await finish(`Captured case for flow ${flowId}.`);
+                return true;
+            }
+            case 'saveCase': {
+                const targetCase = action.case as TestCase;
+                if (!targetCase || typeof targetCase !== 'object') throw new Error('saveCase requires case object');
+                const targetNode = typeof action.targetNodeId === 'string' ? action.targetNodeId : null;
+                if (targetNode) {
+                    const targetNodeId = this.folderNodeId(targetNode);
+                    const nodeData = await this.folder.readNode(targetNodeId);
+                    const cases = Array.isArray(nodeData.cases) ? [...nodeData.cases] as TestCase[] : [];
+                    const idx = cases.findIndex(c => c && typeof c === 'object' && (c as TestCase).id === targetCase.id);
+                    if (idx >= 0) {
+                        cases[idx] = targetCase;
+                    } else {
+                        cases.push(targetCase);
+                    }
+                    await this.folder.writeNode(targetNodeId, { ...nodeData, cases });
+                    await finish(`Saved case for node ${targetNodeId}.`);
+                    return true;
+                }
+                const flow = this.flow(flowId);
+                const cases = Array.isArray(flow.cases) ? [...flow.cases] : [];
+                const idx = cases.findIndex(c => c.id === targetCase.id);
+                if (idx >= 0) {
+                    cases[idx] = targetCase;
+                } else {
+                    cases.push(targetCase);
+                }
+                await saveFlow(flowId, { ...flow, cases });
+                await finish(`Saved case for flow ${flowId}.`);
+                return true;
+            }
+            case 'deleteCase': {
+                const caseId = String(action.caseId);
+                const targetNode = typeof action.targetNodeId === 'string' ? action.targetNodeId : null;
+                if (targetNode) {
+                    const targetNodeId = this.folderNodeId(targetNode);
+                    const nodeData = await this.folder.readNode(targetNodeId);
+                    const cases = (Array.isArray(nodeData.cases) ? nodeData.cases : []).filter(c => !c || typeof c !== 'object' || (c as TestCase).id !== caseId);
+                    await this.folder.writeNode(targetNodeId, { ...nodeData, cases });
+                    await finish(`Deleted case from node ${targetNodeId}.`);
+                    return true;
+                }
+                const flow = this.flow(flowId);
+                const cases = (flow.cases ?? []).filter(c => c.id !== caseId);
+                await saveFlow(flowId, { ...flow, cases });
+                await finish(`Deleted case from flow ${flowId}.`);
                 return true;
             }
             case 'connectData':
@@ -1800,7 +1908,24 @@ export class HarnessPanel implements vscode.Disposable {
                     throw new Error('The node changed since you started editing; your draft is kept. Reload the node and reapply.');
                 }
                 checkNodeCode(node, nodeId, action.code);
-                node.code = codeLines(action.code);
+                const candidateNode: SlateNode = { ...node, code: codeLines(action.code) };
+                if (action.force !== true && (node.cases?.length || node.check?.length)) {
+                    const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                    const guardrailReport = await runNodeGuardrails({
+                        nodeId,
+                        folder: this.folder,
+                        workspaceRoot: this.folder.root.fsPath,
+                        nodeOverride: candidateNode,
+                        pythonPath,
+                        isTrusted: vscode.workspace.isTrusted,
+                    });
+                    if (!guardrailReport.passed) {
+                        const failingFlow = guardrailReport.affectedFlows.find(f => f.failedCases > 0);
+                        const detail = failingFlow?.failures[0]?.error || guardrailReport.nodeCases.failures[0] || 'A saved case failed';
+                        throw new Error(`Guardrail failure: ${failingFlow ? `Flow "${failingFlow.flowId}"` : `Node "${nodeId}"`} failed: ${detail}. Edit rejected to protect existing guardrails.`);
+                    }
+                }
+                node.code = candidateNode.code;
             } else {
                 throw new Error('That action is not available for slate/ node folders.');
             }

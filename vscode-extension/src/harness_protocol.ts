@@ -71,6 +71,47 @@ export interface HarnessDocument extends ParseModuleResult {
     verification?: NodeVerificationResult;
     /** Derived usage info across instances and dependencies (S-502). */
     usage?: NodeUsageInfo;
+    /** Structured cases on this node (S-602). */
+    cases?: TestCase[];
+    /** Guardrails report covering node cases and all affected flow cases (S-602). */
+    guardrails?: NodeGuardrailsReport;
+}
+
+export interface TestCase {
+    id: string;
+    description?: string;
+    inputs: Record<string, unknown>;
+    expected?: unknown;
+    error?: string;
+    status?: 'passed' | 'failed' | 'untested';
+    actual?: unknown;
+    failureReason?: string;
+}
+
+export interface FlowGuardrailSummary {
+    flowId: string;
+    flowName: string;
+    totalCases: number;
+    passedCases: number;
+    failedCases: number;
+    failures: Array<{
+        caseId?: string;
+        description?: string;
+        error: string;
+    }>;
+}
+
+export interface NodeGuardrailsReport {
+    nodeId: string;
+    passed: boolean;
+    timestamp: number;
+    nodeCases: {
+        total: number;
+        passed: number;
+        failed: number;
+        failures: string[];
+    };
+    affectedFlows: FlowGuardrailSummary[];
 }
 
 export interface NodeUsageSite {
@@ -164,6 +205,8 @@ export interface HarnessSnapshot {
     usages?: Record<string, NodeUsageInfo>;
     /** Active or latest flow execution snapshot (S-600). */
     execution?: FlowExecutionSnapshot;
+    /** Guardrails reports by node id (S-602). */
+    guardrails?: Record<string, NodeGuardrailsReport>;
 }
 
 /** A canvas alias of a node, flow, or library unit (stored in layout.json). */
@@ -205,6 +248,7 @@ export interface SlateFlow {
     outputs: FlowPort[];
     instances: FlowInstance[];
     wires: FlowWire[];
+    cases?: TestCase[];
     /** Unknown keys, preserved on write. */
     extra: Record<string, unknown>;
 }
@@ -298,4 +342,5 @@ export type HostMessage =
     | { type: 'describeState'; running: boolean }
     | { type: 'verificationStatus'; result: NodeVerificationResult }
     | { type: 'verificationBatch'; results: Record<string, NodeVerificationResult> }
-    | { type: 'executionStatus'; execution: FlowExecutionSnapshot };
+    | { type: 'executionStatus'; execution: FlowExecutionSnapshot }
+    | { type: 'guardrailsStatus'; report: NodeGuardrailsReport };

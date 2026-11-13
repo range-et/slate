@@ -47,7 +47,21 @@
       "type": "array",
       "description": "Structured verification cases/checks readiness indicator",
       "items": {
-        "type": ["object", "string"]
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "description": { "type": "string" },
+              "inputs": { "type": ["object", "array"] },
+              "expected": { "type": ["string", "number", "boolean", "null", "array", "object"] },
+              "error": { "type": "string" },
+              "code": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        ]
       }
     },
     "check": {

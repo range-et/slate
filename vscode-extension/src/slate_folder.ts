@@ -325,7 +325,7 @@ export function indexNode(
             }
         }
     }
-    return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, verification: node.verification, diagnostics }, node, code };
+    return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, verification: node.verification, cases: (node.cases as any), diagnostics }, node, code };
 }
 
 export interface Jpl60CheckResult {

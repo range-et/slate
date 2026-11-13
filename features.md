@@ -41,7 +41,8 @@ keep outstanding tasks on GitHub.
 | Used by N and shared-edit awareness (S-502, Issue #5) | ✅ shipped |
 | Trusted flow runner on real compiler (S-600, Issue #8) | ✅ shipped |
 | Running code / live values on wires (S-601, Issue #9) | ✅ shipped |
-| Cases as guardrails (S-602, Issue #10) | 🟡 next |
+| Cases as guardrails (S-602, Issue #10) | ✅ shipped |
+| Live mode (S-603, Issue #11) | 🟡 next |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -428,6 +429,20 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
 
+## Shipped — Cases as Guardrails (2026-11-13, S-602)
+
+Completed for [issue #10](https://github.com/range-et/slate/issues/10):
+
+- **Formalized Case Schema.** `contracts/slate-flow.schema.json` and `contracts/slate-node.schema.json` codify structured regression test cases (`cases?: TestCase[]`), defining test case identifiers, optional descriptive names, input port bindings (`inputs: Record<string, unknown>`), expected outputs (`expected?: unknown | Record<string, unknown>`), or expected runtime error matching (`error?: string`), and captured timestamps (`capturedAt`).
+- **Capture to Case.** Viewers and execution outputs can be promoted directly into durable regression test cases via `captureCase`. Users can also view, add (`saveCase`), and remove (`deleteCase`) cases directly from the Inspector.
+- **Guardrails Execution Runner (`vscode-extension/src/guardrails_runner.ts`).**
+  - Flow test runner (`runFlowCase`, `runFlowGuardrails`) executes flow cases on the real compiler runtime and evaluates outputs/exceptions with type-tolerant value matching (`deepValueEqual`, `matchFlowOutputs`).
+  - Node guardrails runner (`runNodeGuardrails`) runs the node's own verification (pytest/contracts) plus the regression test cases across all affected flows referencing the node (via flow instances or `uses` code dependencies).
+- **Inspector Guardrails UI & Affected Flows Awareness.**
+  - Inspector provides a **Guardrails & Cases** section showing pass/fail status, detailed failure diagnostics, a case editor/viewer, and an **Affected Flows** summary with pass/fail counts and one-click flow navigation.
+  - Canvas nodes display real-time guardrail status badges (`GUARDRAILS ✓` / `GUARDRAIL ✗`).
+- **Breaking Edit Protection.** Both manual code edits (`setNodeCode`) and model proposals (`acceptProposal`) are pre-validated against all guardrails using in-memory candidate overrides (`nodeOverride`) before touching disk. Any breaking change to a shared node that fails existing unit tests or affected flow regression cases is rejected, ensuring bad edits never replace working definitions on disk.
+
 ## Shipped — Values, Inputs & Pinned Viewers (2026-11-13, S-601)
 
 Completed for [issue #9](https://github.com/range-et/slate/issues/9):
@@ -502,7 +517,7 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 
 ## Not started
 
-- Cases as guardrails (flow/node regression assertions captured from live runs).
+- Live mode (continuous re-execution of chosen flow on committed edits).
 - Repeat / for-each / branch zones.
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.

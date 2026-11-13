@@ -3,7 +3,7 @@ import type { Edge, Node } from '@xyflow/react';
 import {
     flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature, type Port,
 } from '../../vscode-extension/src/flow';
-import type { BoardNote, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow } from './types';
+import type { BoardNote, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeGuardrailsReport, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow, TestCase } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
@@ -78,6 +78,10 @@ export type SlateNodeData = {
     observedInputs?: Record<string, ObservedValue>;
     /** Pinned viewer observing a port or wire (S-601). */
     viewerTarget?: string;
+    /** Structured cases on this node or flow (S-602). */
+    cases?: TestCase[];
+    /** Guardrails report (S-602). */
+    guardrails?: NodeGuardrailsReport;
 };
 
 function compactOutsideStrings(text: string): string {
@@ -404,6 +408,8 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
                 problem: document.diagnostics[0]?.message,
                 verification: snapshot.verifications?.[nodeId] ?? document.verification,
                 usage: snapshot.usages?.[nodeId] ?? document.usage,
+                cases: document.cases,
+                guardrails: snapshot.guardrails?.[nodeId] ?? document.guardrails,
                 execution: snapshot.execution?.observations.find(obs => obs.instanceId === nodeId || obs.instanceId === id),
                 observedOutputs: snapshot.execution?.observations.find(obs => obs.instanceId === nodeId || obs.instanceId === id)?.outputs,
                 ...ports,
@@ -450,6 +456,8 @@ function callerNode(
             kind, broken: !callable, path: callable?.group === 'node' ? target : '', unit: callable?.group === 'node' ? callable.unit : undefined,
             target, flowId, groupColor: flowId ? '#f6c453' : callable?.group === 'library' ? '#9da5ad' : undefined,
             usage: callable?.group === 'node' ? snapshot.usages?.[target] : undefined,
+            guardrails: callable?.group === 'node' ? snapshot.guardrails?.[target] : undefined,
+            cases: flowId ? snapshot.flows?.find(f => f.id === flowId)?.flow?.cases : undefined,
             execution,
             observedOutputs: execution?.outputs,
             ...portsOf(callable?.signature),

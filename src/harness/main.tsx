@@ -25,7 +25,7 @@ import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, typesMismatch, 
 import { buildNodeHealthReport, diffNodeCode } from './health';
 import { compileValueToPython, inferValueType, inputPorts, outputPorts, parseValueLiteral, type Port } from '../../vscode-extension/src/flow';
 import { rankPalette, type Rankable } from './palette';
-import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, NodeVerificationResult, PacketPreview } from './types';
+import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, NodeGuardrailsReport, NodeVerificationResult, PacketPreview, TestCase } from './types';
 import './styles.css';
 
 interface VsCodeApi {
@@ -321,6 +321,17 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                             title={data.execution.error ? `Execution error: ${data.execution.error}` : `Execution: ${data.execution.status}`}
                         >
                             {data.execution.status === 'executed' ? '● run' : data.execution.status === 'failed' ? '✖ err' : '○ skip'}
+                        </span>
+                    )}
+                    {data.guardrails && (
+                        <span
+                            className={`slate-node__gbadge slate-node__gbadge--${data.guardrails.passed ? 'passed' : 'failed'}`}
+                            data-testid={`guardrail-badge-${data.guardrails.passed ? 'passed' : 'failed'}`}
+                            title={data.guardrails.passed
+                                ? `Guardrails passed: ${data.guardrails.nodeCases.passed} node check(s), ${data.guardrails.affectedFlows.reduce((sum, f) => sum + f.passedCases, 0)} flow case(s)`
+                                : `Guardrail failure in ${data.guardrails.affectedFlows.find(f => f.failedCases > 0)?.flowName ?? data.label}`}
+                        >
+                            {data.guardrails.passed ? 'GUARDRAILS ✓' : 'GUARDRAIL ✗'}
                         </span>
                     )}
                 </span>
@@ -761,6 +772,111 @@ function Inspector({
                                 Try up to 3 revisions
                             </button>
                         </div>
+                    </section>
+                    <section className="harness-inspector__guardrails" data-testid="inspector-guardrails-section">
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                            <h3 style={{ margin: 0 }}>Guardrails & Cases</h3>
+                            <button
+                                className="secondary"
+                                data-testid="btn-run-guardrails"
+                                onClick={() => vscode?.postMessage({ type: 'action', action: { kind: 'runGuardrails', targetNodeId: unit.id } })}
+                                style={{ padding: '2px 8px', fontSize: '11px' }}
+                            >
+                                ▶ Run Guardrails
+                            </button>
+                        </div>
+                        {node.data.guardrails && (
+                            <div className={`guardrails-banner guardrails-banner--${node.data.guardrails.passed ? 'passed' : 'failed'}`} data-testid="guardrails-banner">
+                                <strong>{node.data.guardrails.passed ? 'All Guardrails Pass ✓' : 'Guardrails Failed ✗'}</strong>
+                                <span style={{ fontSize: '11px', display: 'block', marginTop: '2px' }}>
+                                    {node.data.guardrails.nodeCases.passed}/{node.data.guardrails.nodeCases.total} node checks passed,
+                                    {' '}{node.data.guardrails.affectedFlows.reduce((a, f) => a + f.passedCases, 0)}/{node.data.guardrails.affectedFlows.reduce((a, f) => a + f.totalCases, 0)} flow cases passed
+                                </span>
+                                {!node.data.guardrails.passed && (
+                                    <ul className="guardrails-failures">
+                                        {node.data.guardrails.nodeCases.failures.map((f, i) => <li key={`n_${i}`}>{f}</li>)}
+                                        {node.data.guardrails.affectedFlows.flatMap(f => f.failures.map((fail, i) => <li key={`f_${f.flowId}_${i}`}>{f.flowName}: {fail.error}</li>))}
+                                    </ul>
+                                )}
+                            </div>
+                        )}
+                        <div className="guardrails-cases">
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '8px 0 4px' }}>
+                                <strong style={{ fontSize: '11px' }}>Node Cases ({node.data.cases?.length ?? 0})</strong>
+                                <button
+                                    className="secondary"
+                                    data-testid="btn-add-node-case"
+                                    onClick={() => {
+                                        const caseId = `case_${Date.now().toString(36)}`;
+                                        vscode?.postMessage({
+                                            type: 'action',
+                                            action: {
+                                                kind: 'saveCase',
+                                                targetNodeId: unit.id,
+                                                case: { id: caseId, inputs: {}, expected: null, description: 'New test case' },
+                                            },
+                                        });
+                                    }}
+                                    style={{ padding: '1px 6px', fontSize: '10px' }}
+                                >
+                                    + Add Case
+                                </button>
+                            </div>
+                            {(!node.data.cases || node.data.cases.length === 0) ? (
+                                <p style={{ color: 'var(--strata-text-secondary)', fontSize: '11px', margin: '2px 0 6px' }}>No cases saved on this node.</p>
+                            ) : (
+                                <ul className="guardrails-case-list" data-testid="node-case-list">
+                                    {node.data.cases.map((c, i) => {
+                                        const caseObj = typeof c === 'object' && c !== null ? c as TestCase : { id: `case_${i + 1}`, inputs: {}, expected: c };
+                                        return (
+                                            <li key={caseObj.id ?? i} className="guardrails-case-item">
+                                                <div className="guardrails-case-item__header">
+                                                    <span className="case-title">{caseObj.description || caseObj.id || `Case ${i + 1}`}</span>
+                                                    <button
+                                                        className="secondary"
+                                                        data-testid={`btn-delete-case-${caseObj.id}`}
+                                                        onClick={() => vscode?.postMessage({ type: 'action', action: { kind: 'deleteCase', targetNodeId: unit.id, caseId: caseObj.id } })}
+                                                        style={{ padding: '0 4px', fontSize: '10px' }}
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                </div>
+                                                <div className="case-detail">
+                                                    <code>inputs: {JSON.stringify(caseObj.inputs)}</code>
+                                                    {caseObj.expected !== undefined && <code>expected: {JSON.stringify(caseObj.expected)}</code>}
+                                                    {caseObj.error && <code className="case-error">error: {caseObj.error}</code>}
+                                                </div>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                        </div>
+                        {node.data.usage?.callSites?.some(s => s.flowId) && (
+                            <div className="guardrails-affected-flows" data-testid="guardrails-affected-flows">
+                                <strong style={{ fontSize: '11px', display: 'block', margin: '8px 0 4px' }}>
+                                    Affected Flows ({[...new Set(node.data.usage.callSites.filter(s => s.flowId).map(s => s.flowId))].length})
+                                </strong>
+                                <ul className="affected-flow-list">
+                                    {[...new Set(node.data.usage.callSites.filter(s => s.flowId).map(s => s.flowId))].map(fId => {
+                                        const flowDoc = snapshot.flows?.find(f => f.id === fId);
+                                        const flowCaseCount = flowDoc?.flow?.cases?.length ?? (Array.isArray((flowDoc?.flow?.extra as any)?.cases) ? (flowDoc?.flow?.extra as any).cases.length : 0);
+                                        const flowSummary = node.data.guardrails?.affectedFlows.find(f => f.flowId === fId);
+                                        return (
+                                            <li key={fId} className="affected-flow-item" onClick={() => onEnterFlow(fId!)}>
+                                                <span className="flow-name">{flowDoc?.flow?.name || fId}</span>
+                                                <span className="flow-case-count">{flowCaseCount} case(s)</span>
+                                                {flowSummary && (
+                                                    <span className={`flow-status flow-status--${flowSummary.failedCases === 0 ? 'passed' : 'failed'}`}>
+                                                        {flowSummary.failedCases === 0 ? '✓' : `✗ (${flowSummary.failedCases} failed)`}
+                                                    </span>
+                                                )}
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            </div>
+                        )}
                     </section>
                 </>
             )}
@@ -1486,6 +1602,16 @@ function HarnessApp() {
                     return {
                         ...current,
                         execution: exec,
+                    };
+                });
+            }
+            if (data.type === 'guardrailsStatus') {
+                const report = data.report;
+                setSnapshot(current => {
+                    if (!current) return current;
+                    return {
+                        ...current,
+                        guardrails: { ...current.guardrails, [report.nodeId]: report },
                     };
                 });
             }
