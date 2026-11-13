@@ -3,7 +3,7 @@
 ## Required launch gate
 
 Run `npm run verify:launch` before handing off code as launch-ready. It runs the
-unit matrices, builds, legacy and Python round-trip checks, browser interaction
+unit matrices, builds, Python round-trip checks, browser interaction
 QA, real VS Code Extension Host tests, and workbench generation/undo/save and
 native-dialog tests. Any failed
 stage stops the gate. `npm run package-extension` runs this gate before packaging;
@@ -139,8 +139,7 @@ Vite dev server with HMR; opens `http://localhost:5173/harness.html?demo`
 with a built-in demo snapshot (no host, so host actions are inert). The
 Playwright tests use the same demo.
 
-The frozen legacy notebook lives in `legacy/` and runs with
-`npm run legacy:dev`.
+The landing page lives in `src/index.html` and is served alongside the harness demo.
 
 ---
 
@@ -150,12 +149,13 @@ The frozen legacy notebook lives in `legacy/` and runs with
 |---|---|---|
 | Harness webview source | `src/harness/` | React + TypeScript, vite-built |
 | Harness built bundle | `dist/` | Vite output; symlinked into extension |
+| Landing page source | `src/index.html` | Monad-styled project landing page |
 | Extension host code | `vscode-extension/src/extension.ts` | TS, tsc-built |
 | Extension built JS | `vscode-extension/out/` | tsc output |
 | Extension webview src | `vscode-extension/dist/` → `../dist` | symlink |
 | llama.cpp demo | `examples/llama_demo/slate/` | node JSON format |
 | Folder format + loader | `vscode-extension/src/slate_folder.ts` | pure; host side in `slate_folder_host.ts` |
-| Legacy notebook | `legacy/` | frozen; GitHub Pages only |
+| Web showcase | `dist/` | GitHub Pages product showcase and web demo |
 | Spec | `SLATE_HARNESS_PLAN.md` | source of truth |
 | Open work | [GitHub Issues](https://github.com/range-et/slate/issues) | triage, priorities, dependencies and acceptance criteria |
 | Inventory | `features.md` | shipped / partial / not started |

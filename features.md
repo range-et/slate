@@ -45,10 +45,10 @@ keep outstanding tasks on GitHub.
 | Live mode (S-603, Issue #11) | ✅ shipped |
 | Occurrence-aware micro packets (S-700, Issue #12) | ✅ shipped |
 | Verified candidates & revision loop (S-701, Issue #13) | ✅ shipped |
+| Retire legacy notebook & product landing page (S-001, Issue #2) | ✅ shipped |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
-| Legacy browser notebook (`legacy/`) | 🧊 frozen, still deployed to GitHub Pages |
 
 ## Shipped — `slate/` folder (decoupled JSON workspace)
 
@@ -541,17 +541,21 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
   Intent/contract/context/lock edits apply immediately without review.
 - **Local LLM.** Unbundled architecture with topbar health dot, config modal,
   and Frontier Architect MCP tools (`slate_llm_status`, `slate_configure_llm`).
-- **Examples.** Only `examples/llama_demo` ships a `slate/` folder.
-  Calculator and tic-tac-toe stay in `legacy/examples/` as Python and are
-  ported on the fly by the gate. Their legacy `## @slate …` comment lines are
-  kept verbatim as ordinary comments in the ported nodes.
+- **Examples.** Calculator and tic-tac-toe live in `examples/calculator` and `examples/tic_tac_toe` as clean Python modules with unit tests, ported on the fly by the baseline gate. `examples/llama_demo` ships a full `slate/` folder.
 - **Port fidelity.** Module docstrings land in the prelude (after imports), so
   compiled modules lose `__doc__`. `import pkg` style references to ported
   modules stay plain imports (no `uses`). Bare-name resolution in compile
   does not know about local shadowing, so a local variable named like a node
   elsewhere imports that node (harmless unless it forms a cycle).
-- **Retirement.** The extension, VSIX, and root build are harness-only. The
-  legacy notebook is isolated in `legacy/` and still deployed by GitHub Pages.
+- **Retirement.** The legacy notebook (`legacy/`) has been completely removed (S-001, Issue #2). The extension, VSIX, web demo, and product landing page are all harness- and Monad-native.
+
+## Shipped — Product Landing Page & Web Showcase (S-001)
+
+- **Monad Design System.** Built with Monad System design tokens (`monad.css`, `monad.js`, Strata semantic colors, Atomos components: cards, stats, buttons, tags).
+- **Theme Toggle.** Instant switching between Akasha dark (`data-strata="dark"`) and light (`data-strata="light"`) modes via `[data-mn-theme-toggle]`, persisted in `localStorage`.
+- **Architectural Storytelling.** Explains the mental model ("Grasshopper where you forge atomic components as you build software"), JPL-60 constraints (&le;60 lines, typed signatures, Pydantic contracts, pytest + mutmut), deterministic flow compilation, and two-tier AI division of labor.
+- **Unbundled Local LLM Architecture.** Prominently documents the bring-your-own model/server philosophy (llama.cpp, Ollama, LM Studio, vLLM) with zero server bloat.
+- **Live Showcase & Dual Artifacts.** Deploys both `dist/index.html` (product landing page) and `dist/harness.html` (interactive web demo with `?demo` parameter) to GitHub Pages.
 
 ## Not started
 
@@ -559,23 +563,12 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
 - Dependency-ordered queue / generate-all for the harness.
-- Static product page replacing the GitHub Pages authoring app; clean-profile
-  VSIX install/update/restart test.
+- Clean-profile VSIX install/update/restart test.
 - Any language other than Python (Slate cannot map its own TypeScript code).
 
-## Legacy browser notebook (frozen)
-
-`legacy/` holds the original card notebook (`legacy/src/`, tests, scripts,
-examples, and its docs: README, ARCHITECTURE, DEPLOYMENT, motivation): Project → Document → Card JSON, markdown/code/
-header cards, `@` references with bibliography, OpenAI/Gemini/OpenAI-compatible
-agents, Generate All, Compile All to Python, `## @slate` round-trip, a D3
-graph, and the calculator/tic-tac-toe compile fixtures. Run it with
-`npm run legacy:dev`, `legacy:build`, and `legacy:test`;
-`npm run verify:baseline` keeps it green and `.github/workflows/pages.yml`
-deploys `legacy/dist`. It is not shipped in the extension and receives no new
-work. Delete the folder once the harness replaces the site.
-
 ## Removed
+
+- 2026-11-13 (S-001, Issue #2): Retired and deleted the legacy browser notebook (`legacy/`), its dependencies (`@codemirror/lang-markdown`, `@google/genai`, `d3`, `marked`, `openai`, `uuid`), and scripts (`legacy:dev`, `legacy:build`, `legacy:test`). Moved `calculator` and `tic_tac_toe` examples to `examples/` with direct Python port-compile round-trips. Moved philosophy document to `docs/motivation.md`. Replaced GitHub Pages deployment with a Monad-themed product landing page (`src/index.html`) and live web canvas demo (`harness.html?demo`).
 
 - 2026-10-13 (S-203): the project-v2 source-map mode — `project_v2.ts`,
   `contracts/project-v2.schema.json`, `*.slate.json` custom editor, `## @slate`

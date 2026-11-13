@@ -1,6 +1,6 @@
 # Slate UX / QA interaction matrix
 
-This inventory covers the active Slate canvas and VS Code extension, inspected against `src/harness/main.tsx`, `harness_protocol.ts`, the host handlers, and the current test suites. It excludes the frozen legacy notebook. It is a maintained checklist of exposed controls, state transitions, and meaningful interaction chains—not a claim to cover every permutation of user actions.
+This inventory covers the active Slate canvas and VS Code extension, inspected against `src/harness/main.tsx`, `harness_protocol.ts`, the host handlers, and the current test suites (the legacy browser notebook has been retired per S-001 / Issue #2). It is a maintained checklist of exposed controls, state transitions, and meaningful interaction chains—not a claim to cover every permutation of user actions.
 
 ## Gates and evidence
 
@@ -95,6 +95,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Compile | Command dispatch → host result; exported Python reflects nodes/flows/imports | Q command matrix; H port/compile; U pipeline and baseline pytest |
 | Refresh/save | Palette dispatches index refresh and save-all; host emits result | Q command matrix; H indexing dirty buffers |
 | Native extension | Open project/editor, port Python folder, describe imported nodes, compile to disk | H port/describe/compile; W open project smoke |
+| Web landing page | Product landing page (`/index.html`) renders hero, Grasshopper mental model, JPL-60 stat strip, Two-Tier AI table, unbundled local LLM architecture, and quickstart; Monad theme toggle switches `data-strata="dark"` and `data-strata="light"` with state persistence; CTA links to `./harness.html?demo` | Playwright `landing_page.playwright.ts`; Vitest `landing_page.test.ts` |
 
 ## Required interaction chains when extending a feature
 

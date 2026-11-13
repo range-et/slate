@@ -12,7 +12,7 @@ llama.cpp loop. Wiring, reference nodes, groups, and live values are planned.
 - What exists: [features.md](features.md)
 - Where it's going and why: [SLATE_HARNESS_PLAN.md](SLATE_HARNESS_PLAN.md)
 - Tasks: [GitHub Issues](https://github.com/range-et/slate/issues)
-- Philosophy: [legacy/motivation.md](legacy/motivation.md)
+- Philosophy: [docs/motivation.md](docs/motivation.md)
 
 ## Try it
 
@@ -25,10 +25,9 @@ npm run demo:llama          # local llama.cpp loop; see DEMO.md
 
 Development workflow: [DEV.md](DEV.md).
 
-## Legacy notebook
+## Web Showcase & Landing Page
 
-The original browser card notebook is frozen in [legacy/](legacy/README.md).
-GitHub Pages keeps deploying it until the harness replaces it.
+GitHub Pages deploys the Monad-themed product page and interactive web canvas demo at [https://range-et.github.io/slate/](https://range-et.github.io/slate/). You can explore the full XYFlow node canvas directly in your browser without local installation via `./harness.html?demo`.
 
 ## License
 

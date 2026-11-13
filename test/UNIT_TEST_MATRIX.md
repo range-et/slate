@@ -42,6 +42,7 @@ coverage. Existing focused tests remain in the gate alongside these matrices.
 | `deepValueEqual`, `matchFlowOutputs`, `runFlowCase`, `runFlowGuardrails`, `runNodeGuardrails`, `cases` | Deep equality with type/repr tolerance, output matching across single/multiple/named ports, flow test case execution, expected exception matching, flow guardrail summaries, multi-flow affected dependency tracking, guardrail rejection of breaking hand edits and proposals, flow/node case roundtrip serialization (S-602) | `cases_guardrails.matrix.test.ts`, `persistence.test.ts` |
 | `buildUsageIndex`, `isSharedDefinition` | Derived usage index across instances in flows and `main.json`, compiler-resolved code dependencies in `doc.uses`, prompt-only context dependencies in `annotation.dependencies` (strictly isolated without inflating total uses), legacy `layout.refs` deduplication, self-reference exclusion, multi-flow call sites | `usage_index.matrix.test.ts`, `persistence.test.ts` |
 | `checkLlamaHealth`, `LlamaHealthResult`, `verifyCandidate`, `createStub`, `setLlamaConfig`, `runRevisionLoop` | Local LLM health check via `/v1/models` and `/health`, timeout/unreachable handling, dynamic endpoint/model configuration via MCP and host, candidate review editing, scratch-overlay isolated guardrail verification, bounded revision loop (up to 3 attempts) with failure feedback, and typed stub creation on root canvas and wire drops | `verified_candidates.matrix.test.ts`, `persistence.test.ts`, `mcp_server.test.ts` |
+| Product landing page (`src/index.html`) | HTML5 structure, Monad System design tokens (`monad.css`, `monad.js`), Akasha dark/light theme toggle, Grasshopper mental model storytelling, JPL-60 stat strip, Two-Tier AI division of labor, unbundled local LLM architecture, demo and documentation links | `landing_page.test.ts`, `landing_page.playwright.ts` |
 | Fake model server | Request recording/deterministic streaming | `fake_llama_server.test.ts` |
 
 ## Host and UI boundaries
@@ -62,10 +63,7 @@ root/flow values and layout scopes, and cancelled/confirmed native prompt paths.
 `test-workbench.js` now also verifies actual Generate/Accept/Undo/Save clicks and
 native creation dialogs against saved files in an isolated project copy.
 
-The frozen legacy notebook has its own suite (`npm run legacy:test`) and Python
-round-trip execution checks inside `verify:baseline`. Python output is also
-executed against example behavior in that gate; parser acceptance alone does not
-prove generated programs behave correctly.
+The legacy browser notebook has been retired (S-001, Issue #2). Example Python projects (`examples/calculator` and `examples/tic_tac_toe`) are ported to `slate/` nodes on the fly by `verify:baseline` and executed against their original unit test suites.
 
 When adding a function or changing behavior, update its row and tests, including
 affected interaction chains. Constants and TypeScript-only interfaces are covered
