@@ -1157,3 +1157,128 @@ test('Occurrence-aware micro packets: exact packet Inspector view, occurrence ba
         occurrence: { flowId: 'flow_alpha', instanceId: 'inst_calc_1' },
     }));
 });
+
+test('Verified candidates, revision loop, scratch overlay and local LLM health controls (S-701)', async ({ page }) => {
+    // 1. LLM health dot and configuration modal
+    await host(page, {
+        type: 'llamaHealth',
+        status: {
+            ok: true,
+            endpoint: 'http://127.0.0.1:8080',
+            model: 'qwen2.5-coder:7b',
+            statusText: 'Connected (1 model available)',
+            models: ['qwen2.5-coder:7b'],
+        },
+    });
+
+    const healthDot = page.locator('[data-testid="llama-health-dot"]');
+    await expect(healthDot).toBeVisible();
+    await expect(healthDot).toContainText('LLM: qwen2.5-coder:7b');
+
+    // Click health dot to open configuration modal
+    await healthDot.click();
+    const modal = page.locator('[data-testid="llama-modal"]');
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('[data-testid="llama-modal-status"]')).toContainText('Connected');
+
+    // Change endpoint and test connection
+    const endpointInput = page.locator('[data-testid="llama-endpoint-input"]');
+    await endpointInput.fill('http://127.0.0.1:11434/v1');
+    await page.locator('[data-testid="llama-test-btn"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'checkLlamaHealth',
+        endpoint: 'http://127.0.0.1:11434/v1',
+    }));
+
+    // Save configuration
+    await page.locator('[data-testid="llama-save-btn"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'setLlamaConfig',
+        endpoint: 'http://127.0.0.1:11434/v1',
+    }));
+    await expect(modal).toHaveCount(0);
+
+    // 2. Select node and review proposal with candidate editor
+    await select(page, 'scoring/normalize_score');
+    await host(page, {
+        type: 'packetPreview',
+        unitId: 'scoring/normalize_score',
+        packet: {
+            items: [],
+            estimatedInputTokens: 100,
+            inputBudgetTokens: 1000,
+            outputBudgetTokens: 200,
+        },
+    });
+    await host(page, {
+        type: 'proposalReady',
+        proposal: {
+            id: 'prop-701',
+            unitId: 'scoring/normalize_score',
+            path: 'slate/nodes/scoring/normalize_score.json',
+            candidate: 'def normalize_score(score: int, maximum: int) -> int:\n    return int((score / maximum) * 100)',
+            checks: ['Valid Python', 'JPL-60 compliant', 'Pytest unit check generated'],
+            retryCount: 2,
+            maxRevisions: 3,
+        },
+    });
+
+    // Verify attempt banner
+    const attemptBanner = page.locator('[data-testid="proposal-attempt-banner"]');
+    await expect(attemptBanner).toBeVisible();
+    await expect(attemptBanner).toContainText('Attempt 2 of 3');
+
+    // Verify editable candidate textarea
+    const candidateEditor = page.locator('[data-testid="proposal-candidate-editor"]');
+    await expect(candidateEditor).toBeVisible();
+    await expect(candidateEditor).toHaveValue(/normalize_score/);
+
+    // Edit candidate
+    const editedCandidate = 'def normalize_score(score: int, maximum: int) -> int:\n    if maximum == 0: return 0\n    return int((score / maximum) * 100)';
+    await candidateEditor.fill(editedCandidate);
+
+    // 3. Scratch-overlay candidate verification
+    await page.locator('[data-testid="verify-candidate-button"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'verifyCandidate',
+        proposalId: 'prop-701',
+        candidate: editedCandidate,
+    }));
+
+    // Host sends candidate verification result
+    await host(page, {
+        type: 'candidateVerification',
+        proposalId: 'prop-701',
+        passed: true,
+        details: 'All scratch-overlay cases passed.',
+    });
+    const verifBadge = page.locator('[data-testid="candidate-verification-badge"]');
+    await expect(verifBadge).toBeVisible();
+    await expect(verifBadge).toContainText('Scratch verification passed');
+
+    // 4. Regenerate with bounded feedback
+    const feedbackInput = page.locator('[data-testid="proposal-feedback-input"]');
+    await feedbackInput.fill('Handle negative scores safely');
+    await page.locator('[data-testid="regenerate-feedback-button"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'generate',
+        unitId: 'scoring/normalize_score',
+        retryFeedback: 'Handle negative scores safely',
+    }));
+
+    // 5. Try up to 3 revisions button
+    await page.locator('[data-testid="try-revisions-button"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'tryRevisions',
+        nodeId: 'scoring/normalize_score',
+        maxRevisions: 3,
+    }));
+
+    // 6. Accept edited candidate
+    await page.locator('[data-testid="accept-candidate-button"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'acceptProposal',
+        proposalId: 'prop-701',
+        editedCandidate,
+    }));
+});

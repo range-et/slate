@@ -40,6 +40,20 @@ export function activate(context: vscode.ExtensionContext): void {
                     onStubDefined: async () => { HarnessPanel.current?.scheduleRefresh(0); },
                     onFlowWired: async () => { HarnessPanel.current?.scheduleRefresh(0); },
                     onNotesPlaced: async () => { HarnessPanel.current?.scheduleRefresh(0); },
+                    getLlamaConfig: () => {
+                        const config = vscode.workspace.getConfiguration('slate.llama');
+                        return {
+                            endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
+                            model: config.get('model', 'local'),
+                            timeoutSeconds: config.get('timeoutSeconds', 120),
+                        };
+                    },
+                    setLlamaConfig: async cfg => {
+                        const config = vscode.workspace.getConfiguration('slate.llama');
+                        if (cfg.endpoint) await config.update('endpoint', cfg.endpoint, vscode.ConfigurationTarget.Global);
+                        if (cfg.model) await config.update('model', cfg.model, vscode.ConfigurationTarget.Global);
+                        if (cfg.timeoutSeconds) await config.update('timeoutSeconds', cfg.timeoutSeconds, vscode.ConfigurationTarget.Global);
+                    },
                 });
             }),
         );

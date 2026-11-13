@@ -28,6 +28,11 @@ export async function startFakeLlamaServer(
             response.end(JSON.stringify({ status: 'ok' }));
             return;
         }
+        if (request.method === 'GET' && (request.url === '/v1/models' || request.url === '/models')) {
+            response.writeHead(200, { 'content-type': 'application/json' });
+            response.end(JSON.stringify({ data: [{ id: 'tiny-local' }, { id: 'qwen2.5-coder' }] }));
+            return;
+        }
         if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
             response.writeHead(404).end();
             return;

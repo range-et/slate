@@ -25,7 +25,7 @@ import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, typesMismatch, 
 import { buildNodeHealthReport, diffNodeCode } from './health';
 import { compileValueToPython, inferValueType, inputPorts, outputPorts, parseValueLiteral, type Port } from '../../vscode-extension/src/flow';
 import { rankPalette, type Rankable } from './palette';
-import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, NodeGuardrailsReport, NodeVerificationResult, PacketPreview, TestCase } from './types';
+import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, PacketPreview, TestCase } from './types';
 import './styles.css';
 
 interface VsCodeApi {
@@ -413,6 +413,7 @@ const clampInspectorWidth = (value: number, viewportWidth = window.innerWidth, l
 
 function Inspector({
     node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, onNavigateToInstance, visible, width, maxWidth, onResize,
+    candidateVerification, onDiscardProposal,
 }: {
     visible: boolean;
     width: number;
@@ -429,6 +430,8 @@ function Inspector({
     generation: string | null;
     proposal: HarnessProposal | null;
     accepted: boolean;
+    candidateVerification?: { proposalId: string; passed: boolean; details?: string } | null;
+    onDiscardProposal?(): void;
 }) {
     const unit = node.data.unit;
     const note = node.data.note;
@@ -444,8 +447,11 @@ function Inspector({
     const [noteAttachment, setNoteAttachment] = useState(note?.attachedTo ?? '');
     const nodeCode = unit?.parentId === null || node.data.kind === 'module' ? document?.source ?? '' : null;
     const [codeDraft, setCodeDraft] = useState(nodeCode ?? '');
+    const [candidateCode, setCandidateCode] = useState(proposal?.candidate ?? '');
+    const [revisionFeedback, setRevisionFeedback] = useState('');
     const usage = node.data.usage ?? document?.usage ?? (node.data.path ? snapshot.usages?.[node.data.path] : undefined);
     useEffect(() => { setCodeDraft(nodeCode ?? ''); }, [unit?.id, document?.sourceHash]);
+    useEffect(() => { setCandidateCode(proposal?.candidate ?? ''); }, [proposal?.id, proposal?.candidate]);
     useEffect(() => { setIntentDraft(intent); setContractDraft(contract); }, [unit?.id, intent, contract]);
     useEffect(() => {
         setNoteTitle(note?.title ?? '');
@@ -743,12 +749,119 @@ function Inspector({
                     {generation && <div className="generation-activity"><span className="spinner" />{generation}<button className="secondary" onClick={() => vscode?.postMessage({ type: 'cancelGeneration' })}>Cancel</button></div>}
                     {proposal?.unitId === unit.id && <section className="proposal-review">
                         <h3>Confined proposal</h3>
+                        {(proposal.retryCount !== undefined || proposal.maxRevisions !== undefined) && (
+                            <div className="proposal-attempt-banner" data-testid="proposal-attempt-banner">
+                                Attempt {proposal.retryCount ?? 1} of {proposal.maxRevisions ?? 3}
+                            </div>
+                        )}
                         {proposal.staleMessage && <p className="error">{proposal.staleMessage}</p>}
-                        <pre>{proposal.candidate}</pre>
-                        <ul>{proposal.checks.map(check => <li key={check}>✓ {check}</li>)}</ul>
-                        <button disabled={Boolean(proposal.staleMessage)} onClick={() => vscode?.postMessage({ type: 'acceptProposal', proposalId: proposal.id })}>Accept WorkspaceEdit</button>
+                        <textarea
+                            className="slate-proposal-candidate-editor"
+                            data-testid="proposal-candidate-editor"
+                            value={candidateCode}
+                            onChange={e => setCandidateCode(e.target.value)}
+                            spellCheck={false}
+                            rows={Math.min(18, Math.max(6, candidateCode.split('\n').length + 1))}
+                        />
+                        {candidateVerification && candidateVerification.proposalId === proposal.id && (
+                            <div
+                                className={`candidate-verification-status candidate-verification-status--${candidateVerification.passed ? 'passed' : 'failed'}`}
+                                data-testid="candidate-verification-badge"
+                            >
+                                <span>{candidateVerification.passed ? '✓ Scratch verification passed' : '✗ Scratch verification failed'}</span>
+                                {candidateVerification.details && <p className="candidate-verification-details">{candidateVerification.details}</p>}
+                            </div>
+                        )}
+                        <ul className="proposal-checks">{proposal.checks.map(check => <li key={check}>✓ {check}</li>)}</ul>
+                        <div className="proposal-actions">
+                            <button
+                                type="button"
+                                className="primary"
+                                data-testid="accept-candidate-button"
+                                disabled={Boolean(proposal.staleMessage)}
+                                onClick={() => vscode?.postMessage({
+                                    type: 'acceptProposal',
+                                    proposalId: proposal.id,
+                                    ...(candidateCode !== proposal.candidate ? { editedCandidate: candidateCode } : {}),
+                                })}
+                            >
+                                Accept WorkspaceEdit
+                            </button>
+                            <button
+                                type="button"
+                                className="secondary"
+                                data-testid="verify-candidate-button"
+                                onClick={() => vscode?.postMessage({
+                                    type: 'verifyCandidate',
+                                    proposalId: proposal.id,
+                                    candidate: candidateCode,
+                                })}
+                            >
+                                Verify Draft (Scratch)
+                            </button>
+                            {onDiscardProposal && (
+                                <button
+                                    type="button"
+                                    className="secondary danger"
+                                    data-testid="discard-candidate-button"
+                                    onClick={onDiscardProposal}
+                                >
+                                    Discard
+                                </button>
+                            )}
+                        </div>
+                        <div className="proposal-revision-section">
+                            <h4>Regenerate with feedback</h4>
+                            <textarea
+                                className="proposal-feedback-input"
+                                data-testid="proposal-feedback-input"
+                                placeholder="Revision guidance or notes (e.g. handle negative numbers, keep <=60 lines)..."
+                                value={revisionFeedback}
+                                onChange={e => setRevisionFeedback(e.target.value)}
+                                rows={2}
+                            />
+                            <div className="proposal-revision-buttons">
+                                <button
+                                    type="button"
+                                    className="secondary"
+                                    data-testid="regenerate-feedback-button"
+                                    disabled={!packet}
+                                    onClick={() => vscode?.postMessage({
+                                        type: 'generate',
+                                        unitId: unit.id,
+                                        forge: true,
+                                        boundInputs: true,
+                                        retryFeedback: revisionFeedback,
+                                        occurrence: packet?.occurrence,
+                                    })}
+                                >
+                                    Regenerate with feedback
+                                </button>
+                                <button
+                                    type="button"
+                                    className="secondary"
+                                    data-testid="try-revisions-button"
+                                    onClick={() => vscode?.postMessage({
+                                        type: 'tryRevisions',
+                                        nodeId: unit.id,
+                                        maxRevisions: 3,
+                                    })}
+                                >
+                                    Try up to 3 revisions
+                                </button>
+                            </div>
+                        </div>
                     </section>}
-                    {!generation && (!proposal || proposal.unitId !== unit.id) && <button disabled={!packet} onClick={() => vscode?.postMessage({ type: 'generate', unitId: unit.id, occurrence: packet?.occurrence })}>Generate with llama.cpp</button>}
+                    {!generation && (!proposal || proposal.unitId !== unit.id) && (
+                        <div className="generation-launch-actions" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', margin: '8px 0' }}>
+                            <button disabled={!packet} onClick={() => vscode?.postMessage({ type: 'generate', unitId: unit.id, occurrence: packet?.occurrence })}>
+                                Generate with llama.cpp
+                            </button>
+                            <button className="secondary" data-testid="try-revisions-initial-button" onClick={() => vscode?.postMessage({ type: 'tryRevisions', nodeId: unit.id, maxRevisions: 3 })}>
+                                Try up to 3 revisions
+                            </button>
+                        </div>
+                    )}
                     {accepted && <button className="secondary" onClick={() => vscode?.postMessage({ type: 'undoAccepted' })}>Undo accepted edit</button>}
                     <button className="secondary" onClick={() => vscode?.postMessage({ type: 'reveal', unitId: unit.id, focus: true })}>
                         Open node file
@@ -1447,6 +1560,11 @@ function HarnessApp() {
     const [generation, setGeneration] = useState<{ unitId: string; message: string } | null>(null);
     const [proposal, setProposal] = useState<HarnessProposal | null>(null);
     const [acceptedUnitId, setAcceptedUnitId] = useState<string | null>(null);
+    const [llamaHealth, setLlamaHealth] = useState<LlamaHealthStatus | null>(null);
+    const [llamaModalOpen, setLlamaModalOpen] = useState(false);
+    const [llamaEndpointDraft, setLlamaEndpointDraft] = useState('');
+    const [llamaModelDraft, setLlamaModelDraft] = useState('');
+    const [candidateVerification, setCandidateVerification] = useState<{ proposalId: string; passed: boolean; details?: string } | null>(null);
     const [boardMenu, setBoardMenu] = useState<BoardMenuState | null>(null);
     const [clipboard, setClipboard] = useState<Array<{ id: string; kind: string; node?: string; value?: string; x?: number; y?: number }> | null>(null);
     const [view, setView] = useState<'compose' | 'map'>('compose');
@@ -1669,6 +1787,14 @@ function HarnessApp() {
                         liveMode: live,
                     };
                 });
+            }
+            if (data.type === 'llamaHealth') {
+                setLlamaHealth(data.status);
+                setLlamaEndpointDraft(data.status.endpoint);
+                setLlamaModelDraft(data.status.model);
+            }
+            if (data.type === 'candidateVerification') {
+                setCandidateVerification(data);
             }
         };
         window.addEventListener('message', onMessage);
@@ -2157,8 +2283,55 @@ function HarnessApp() {
         }
         if (!wantInput) items.push({ id: 'add:value', group: 'node', label: 'Value', detail: 'A Python literal', run: () => place({ value: '0' }, [{ id: 'out', name: 'value', annotation: null }]) });
         const text = paletteQuery.trim();
-        if (!scope.flow && /^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
-            items.push({ id: 'add:placeholder', group: 'search', always: true, label: `New placeholder “${text}”`, run: () => post({ kind: 'createPlaceholder', name: text, x: adding.x, y: adding.y }) });
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+            const isWireDrop = Boolean(adding.connectFrom || adding.connectTo);
+            const canCreateStub = isWireDrop || !scope.flow;
+            if (canCreateStub) {
+                const exists = snapshot.documents.some(doc => {
+                    const u = doc.units[0];
+                    return u?.name === text || doc.id === `node:${text}`;
+                });
+                if (!exists) {
+                    let defaultSig = `def ${text}() -> None:`;
+                    let detail = 'Create typed atomic stub';
+                    if (wantInput && adding.annotation) {
+                        defaultSig = `def ${text}(data: ${adding.annotation}) -> object:`;
+                        detail = `Typed stub taking ${adding.annotation}`;
+                    } else if (adding.connectTo && adding.annotation) {
+                        defaultSig = `def ${text}() -> ${adding.annotation}:`;
+                        detail = `Typed stub returning ${adding.annotation}`;
+                    } else if (wantInput) {
+                        defaultSig = `def ${text}(data: object) -> object:`;
+                        detail = 'Typed stub with input';
+                    }
+                    items.push({
+                        id: 'add:stub',
+                        group: 'search',
+                        always: true,
+                        label: `New typed stub “${text}”`,
+                        detail,
+                        run: () => post({
+                            kind: 'createStub',
+                            name: text,
+                            signature: defaultSig,
+                            annotation: adding.annotation,
+                            x: adding.x,
+                            y: adding.y,
+                            connectFrom: adding.connectFrom,
+                            connectTo: adding.connectTo,
+                        }),
+                    });
+                }
+            }
+            if (!scope.flow) {
+                items.push({
+                    id: 'add:placeholder',
+                    group: 'search',
+                    always: true,
+                    label: `New placeholder “${text}”`,
+                    run: () => post({ kind: 'createPlaceholder', name: text, x: adding.x, y: adding.y }),
+                });
+            }
         }
         return items;
     }, [adding, snapshot, scope, paletteQuery]);
@@ -2252,6 +2425,18 @@ function HarnessApp() {
                     {mismatchEdges.length > 0 && <span className="status-warning">{mismatchEdges.length} type mismatch{mismatchEdges.length === 1 ? '' : 'es'}</span>}
                     {staleCount > 0 && <span className="status-warning">{staleCount} stale</span>}
                     {invalidCount > 0 && <span className="status-error">{invalidCount} invalid</span>}
+                    <div className="harness-llama-health" title={`Local LLM: ${llamaHealth?.statusText || 'Connecting…'}`}>
+                        <button
+                            type="button"
+                            className={`harness-llama-health__dot ${llamaHealth?.ok ? 'is-ok' : llamaHealth === null ? 'is-checking' : 'is-error'}`}
+                            onClick={() => setLlamaModalOpen(true)}
+                            data-testid="llama-health-dot"
+                            aria-label="Local LLM status and settings"
+                        >
+                            <span className="harness-llama-health__circle" />
+                            <span className="harness-llama-health__label">LLM: {llamaHealth?.ok ? (llamaHealth.model || 'local') : 'offline'}</span>
+                        </button>
+                    </div>
                 </div>
             </header>
             {libraryOpen && <LibrarySidebar
@@ -2447,6 +2632,8 @@ function HarnessApp() {
                         generation={generation && generation.unitId === selected.data.unit?.id ? generation.message : null}
                         proposal={proposal}
                         accepted={acceptedUnitId === selected.data.unit?.id}
+                        candidateVerification={candidateVerification}
+                        onDiscardProposal={() => { setProposal(null); setCandidateVerification(null); }}
                     />
                 );
             })()}
@@ -2524,6 +2711,74 @@ function HarnessApp() {
                                 onClick={confirmLiveConsent}
                             >
                                 Authorize & Enable Live Mode
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {llamaModalOpen && (
+                <div className="llama-modal-backdrop" data-testid="llama-modal-backdrop" onClick={() => setLlamaModalOpen(false)}>
+                    <div className="llama-modal" data-testid="llama-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
+                        <h3>Local LLM Configuration</h3>
+                        <p className="muted" style={{ fontSize: '11px', margin: '0 0 10px' }}>
+                            Slate does not bundle an LLM binary. Connect to your local OpenAI-compatible endpoint (llama-server, Ollama, LM Studio, vLLM).
+                        </p>
+                        <label htmlFor="llama-endpoint-input">Endpoint URL</label>
+                        <input
+                            id="llama-endpoint-input"
+                            data-testid="llama-endpoint-input"
+                            value={llamaEndpointDraft}
+                            onChange={e => setLlamaEndpointDraft(e.target.value)}
+                            placeholder="http://127.0.0.1:8080"
+                        />
+                        <label htmlFor="llama-model-input">Model Name</label>
+                        <input
+                            id="llama-model-input"
+                            data-testid="llama-model-input"
+                            value={llamaModelDraft}
+                            onChange={e => setLlamaModelDraft(e.target.value)}
+                            placeholder="local"
+                        />
+                        <div className="llama-modal__status" data-testid="llama-modal-status">
+                            Status: {llamaHealth?.statusText || 'Unknown'}
+                            {llamaHealth?.models && llamaHealth.models.length > 0 && (
+                                <div>Available: {llamaHealth.models.join(', ')}</div>
+                            )}
+                        </div>
+                        <div className="llama-modal__actions">
+                            <button
+                                type="button"
+                                className="secondary"
+                                data-testid="llama-test-btn"
+                                onClick={() => vscode?.postMessage({
+                                    type: 'checkLlamaHealth',
+                                    endpoint: llamaEndpointDraft,
+                                    model: llamaModelDraft,
+                                })}
+                            >
+                                Test Connection
+                            </button>
+                            <button
+                                type="button"
+                                className="primary"
+                                data-testid="llama-save-btn"
+                                onClick={() => {
+                                    vscode?.postMessage({
+                                        type: 'setLlamaConfig',
+                                        endpoint: llamaEndpointDraft,
+                                        model: llamaModelDraft,
+                                    });
+                                    setLlamaModalOpen(false);
+                                }}
+                            >
+                                Save
+                            </button>
+                            <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => setLlamaModalOpen(false)}
+                            >
+                                Close
                             </button>
                         </div>
                     </div>

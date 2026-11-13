@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     SlateMcpServer, validateStubBody, MCP_TOOLS
 } from '../vscode-extension/src/mcp/slate_mcp_server';
+import { startFakeLlamaServer } from './support/fake_llama_server';
 
 describe('Frontier Architect MCP Server (S-510)', () => {
     let tmpDir: string;
@@ -105,7 +106,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
         });
 
-        it('tools/list enumerates all 5 required frontier architect tools', async () => {
+        it('tools/list enumerates all 7 required frontier architect tools', async () => {
             const resp = await server.handleRequest({
                 jsonrpc: '2.0',
                 id: 3,
@@ -113,7 +114,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
             expect(resp).not.toBeNull();
             const tools = (resp as any).result.tools;
-            expect(tools).toHaveLength(5);
+            expect(tools).toHaveLength(7);
             const toolNames = tools.map((t: any) => t.name);
             expect(toolNames).toEqual([
                 'slate_find',
@@ -121,6 +122,8 @@ describe('Frontier Architect MCP Server (S-510)', () => {
                 'slate_place_notes',
                 'slate_define_stub',
                 'slate_wire_flow',
+                'slate_llm_status',
+                'slate_configure_llm',
             ]);
             for (const tool of tools) {
                 expect(tool.description).toBeTruthy();
@@ -653,6 +656,56 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(parsed.result.isError).toBe(false);
             const content = JSON.parse(parsed.result.content[0].text);
             expect(content.nodes[0].name).toBe('calc');
+        });
+
+        it('slate_llm_status reports reachability against a local server and offline when unreachable', async () => {
+            const unreachableResult = await server.callTool('slate_llm_status', { endpoint: 'http://127.0.0.1:1', timeoutMs: 200 });
+            expect(unreachableResult.isError).toBe(false);
+            const unreachableParsed = JSON.parse(unreachableResult.content[0].text);
+            expect(unreachableParsed.ok).toBe(false);
+
+            const fakeServer = await startFakeLlamaServer();
+            try {
+                const healthyResult = await server.callTool('slate_llm_status', { endpoint: fakeServer.url });
+                expect(healthyResult.isError).toBe(false);
+                const healthyParsed = JSON.parse(healthyResult.content[0].text);
+                expect(healthyParsed.ok).toBe(true);
+                expect(healthyParsed.models).toContain('tiny-local');
+            } finally {
+                await fakeServer.close();
+            }
+        });
+
+        it('slate_configure_llm updates settings through bridge and validates URL format', async () => {
+            let configured: any = null;
+            server.setBridge({
+                setLlamaConfig: async cfg => { configured = cfg; },
+                getLlamaConfig: () => configured ?? { endpoint: 'http://127.0.0.1:8080', model: 'local' },
+            });
+
+            const invalidResult = await server.callTool('slate_configure_llm', { endpoint: 'invalid-url' });
+            expect(invalidResult.isError).toBe(true);
+            expect(invalidResult.content[0].text).toContain('valid HTTP/HTTPS');
+
+            const fakeServer = await startFakeLlamaServer();
+            try {
+                const validResult = await server.callTool('slate_configure_llm', {
+                    endpoint: fakeServer.url,
+                    model: 'qwen2.5-coder',
+                    timeoutSeconds: 60,
+                });
+                expect(validResult.isError).toBe(false);
+                const parsed = JSON.parse(validResult.content[0].text);
+                expect(parsed.updated).toBe(true);
+                expect(parsed.reachable).toBe(true);
+                expect(configured).toEqual({
+                    endpoint: fakeServer.url,
+                    model: 'qwen2.5-coder',
+                    timeoutSeconds: 60,
+                });
+            } finally {
+                await fakeServer.close();
+            }
         });
     });
 });
