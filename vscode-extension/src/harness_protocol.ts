@@ -235,6 +235,39 @@ export interface FlowPort {
     annotation: string | null;
 }
 
+export type FlowRegionKind = 'branch' | 'foreach' | 'repeat';
+
+export interface BaseFlowRegion {
+    id: string;
+    label?: string;
+}
+
+export interface FlowBranchRegion extends BaseFlowRegion {
+    kind: 'branch';
+    conditionPort?: string;
+    thenFlow: string;
+    elseFlow?: string;
+}
+
+export interface FlowForeachRegion extends BaseFlowRegion {
+    kind: 'foreach';
+    bodyFlow: string;
+    collectionPort?: string;
+    itemPort?: string;
+    indexPort?: string;
+    maxIterations?: number;
+}
+
+export interface FlowRepeatRegion extends BaseFlowRegion {
+    kind: 'repeat';
+    bodyFlow: string;
+    maxIterations: number;
+    statePorts?: string[];
+    conditionPort?: string;
+}
+
+export type FlowRegion = FlowBranchRegion | FlowForeachRegion | FlowRepeatRegion;
+
 /** An instance calls a node, flow, or library unit (`node`), is a literal value (`kind: 'value'`), or is a pinned viewer (`kind: 'viewer'`). */
 export interface FlowInstance {
     id: string;
@@ -256,6 +289,7 @@ export interface SlateFlow {
     outputs: FlowPort[];
     instances: FlowInstance[];
     wires: FlowWire[];
+    regions?: FlowRegion[];
     cases?: TestCase[];
     /** Unknown keys, preserved on write. */
     extra: Record<string, unknown>;
