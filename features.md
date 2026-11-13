@@ -43,7 +43,8 @@ keep outstanding tasks on GitHub.
 | Running code / live values on wires (S-601, Issue #9) | ✅ shipped |
 | Cases as guardrails (S-602, Issue #10) | ✅ shipped |
 | Live mode (S-603, Issue #11) | ✅ shipped |
-| Occurrence-aware micro packets (S-700, Issue #12) | 🟡 next |
+| Occurrence-aware micro packets (S-700, Issue #12) | ✅ shipped |
+| Verified candidates & revision loop (S-701, Issue #13) | 🟡 next |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -430,6 +431,18 @@ Completed for [issue #4](https://github.com/range-et/slate/issues/4) and [issue 
   caller wires across all parent flows and `main.json`. Deleting a port safely
   unplugs connected internal wires and caller wires.
 
+## Shipped — Occurrence-Aware Micro Packets (2026-11-13, S-700)
+
+Completed for [issue #12](https://github.com/range-et/slate/issues/12):
+
+- **Occurrence-Aware Neighbor Derivation.** Micro packets derive dependency context from the target definition and the specific occurrence it was reached from (`{ flowId: string; instanceId: string }`). Derives immediate neighbors strictly from the incoming and outgoing data wires connected to that specific instance in that flow. Crucially never aggregates every linked use's neighborhood into the packet, eliminating cross-flow context leakage.
+- **Strict Micro-Context Discipline.** Dependencies and neighbors are formatted as bounded reference signatures (`def ...(...) -> Any:`) + intent + contract summary without full function bodies. Full dependency bodies are included in packet items only on explicit inclusion (`fullContextIds`).
+- **Structured Test Cases in Prompt.** Structured test cases (`TestCase` with `inputs`, `expected`, `error`, `description`) are rendered directly into the forge prompt under `Structured Cases:`, guiding the local model to satisfy exact input-output expectations.
+- **Refusal of Oversized Targets.** When the target stub + cases + retry feedback alone exceeds the micro-packet budget (`FORGE_INPUT_BUDGET_TOKENS = 600`), the generator refuses generation with a `PacketError` rather than silently truncating the target code or cases.
+- **Budget-Bounded Neighbor Trimming.** Reference neighbor signatures are prioritized and iteratively included up to the 600-token input budget; neighbors that exceed the remaining headroom are omitted cleanly and listed in `omittedNeighbors`.
+- **Exact Packet Inspector View.** Inspector displays an `Exact packet` section with an occurrence badge (`<instanceId>` in `<flowId>`), token counts (estimated vs budget), cases count, target and context items, bounded neighbor signatures with intent summaries, budget omission notes, and an expandable `<details>` Exact Forge Prompt viewer with raw prompt contents.
+- **Occurrence-Bound Generation Dispatch.** Triggering `Generate with llama.cpp` automatically binds and passes the selected occurrence to the host for generation and proposal fingerprinting.
+
 ## Shipped — Live Mode (2026-11-13, S-603)
 
 Completed for [issue #11](https://github.com/range-et/slate/issues/11):
@@ -530,7 +543,7 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 ## Not started
 
 - Repeat / for-each / branch zones.
-- Occurrence-aware micro packets (S-700).
+- Verified candidates and revision loop (S-701).
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
 - Dependency-ordered queue / generate-all for the harness.

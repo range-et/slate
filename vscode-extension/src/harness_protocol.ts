@@ -321,6 +321,16 @@ export interface PacketPreview {
     inputBudgetTokens: number;
     outputBudgetTokens: number;
     omittedNeighbors?: string[];
+    occurrence?: { flowId: string; instanceId: string };
+    prompt?: string;
+    neighbors?: Array<{
+        id: string;
+        qualifiedName: string;
+        signature: string;
+        intent?: string;
+        contract?: string;
+    }>;
+    casesCount?: number;
 }
 
 export interface HarnessProposal {

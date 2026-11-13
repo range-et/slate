@@ -121,6 +121,80 @@ button, input, textarea, select { font: inherit; }
 .packet-preview li { margin: 5px 0; }
 .packet-preview li strong { display: inline; color: var(--strata-info, #62d9ff); font-size: 8px; }
 .packet-preview li small { display: block; color: var(--strata-text-secondary, #9da5ad); }
+.packet-occurrence {
+    margin: 6px 0;
+    padding: 4px 8px;
+    background: var(--strata-bg, #101214);
+    border: 1px solid var(--strata-border, #343a40);
+    border-radius: 2px;
+    font-size: 10px;
+    color: var(--strata-text-secondary, #9da5ad);
+}
+.packet-occurrence__label {
+    color: var(--strata-info, #62d9ff);
+    font-weight: 600;
+}
+.packet-occurrence code {
+    color: var(--strata-text-primary, #f3f4f6);
+    font-size: 10px;
+}
+.packet-tokens {
+    margin: 6px 0;
+}
+.packet-neighbors {
+    margin: 8px 0;
+    padding: 6px;
+    background: var(--strata-bg, #101214);
+    border: 1px solid var(--strata-border, #343a40);
+}
+.packet-neighbors h4 {
+    margin: 0 0 4px;
+    font-size: 10px;
+    color: var(--strata-text-secondary, #9da5ad);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+}
+.packet-neighbors-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.packet-neighbor-item {
+    margin: 3px 0;
+    font-size: 9px;
+    line-height: 1.4;
+}
+.packet-neighbor-item code {
+    color: var(--strata-info, #62d9ff);
+}
+.packet-neighbor-intent {
+    color: var(--strata-text-secondary, #9da5ad);
+}
+.packet-prompt-details {
+    margin-top: 8px;
+    border: 1px solid var(--strata-border, #343a40);
+    padding: 4px 8px;
+    background: var(--strata-bg, #101214);
+}
+.packet-prompt-details summary {
+    font-size: 10px;
+    cursor: pointer;
+    color: var(--strata-info, #62d9ff);
+    outline: none;
+}
+.exact-prompt-preview {
+    max-height: 200px;
+    overflow: auto;
+    margin: 6px 0 0;
+    padding: 6px;
+    background: #0b0d0f;
+    border: 1px solid var(--strata-border, #343a40);
+    color: #e5e7eb;
+    font-size: 9px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
 .generation-activity { margin: 10px 0; padding: 9px; border: 1px solid var(--strata-info, #62d9ff); }
 .generation-activity button { margin-top: 7px; }
 .proposal-review pre { max-height: 240px; overflow: auto; padding: 9px; color: #f3f4f6; border: 1px solid var(--strata-border, #343a40); background: #0b0d0f; font-size: 9px; line-height: 1.5; white-space: pre-wrap; }

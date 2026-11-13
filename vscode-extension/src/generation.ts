@@ -19,6 +19,7 @@ export interface NeighborSignatureContext {
     qualifiedName: string;
     signature: string;
     intent: string;
+    contract?: string;
     sourceHash: `sha256:${string}`;
 }
 
@@ -34,6 +35,7 @@ export interface TargetFingerprint {
     context: string[];
     uses: string[];
     neighborSignatures: Record<string, { signature: string; sourceHash: string }>;
+    occurrence?: { flowId: string; instanceId: string };
 }
 
 export interface GenerationPacket {
@@ -45,6 +47,7 @@ export interface GenerationPacket {
     items: PacketItem[];
     neighbors?: NeighborSignatureContext[];
     omittedNeighbors?: string[];
+    occurrence?: { flowId: string; instanceId: string };
     estimatedInputTokens: number;
     inputBudgetTokens: number;
     outputBudgetTokens: number;
@@ -60,6 +63,8 @@ export interface ForgeOptions {
     inputBudgetTokens?: number;
     boundInputs?: boolean;
     neighbors?: Array<{ id: string; signature: string; intent: string }>;
+    occurrence?: { flowId: string; instanceId: string };
+    fullContextIds?: string[];
 }
 
 export interface ForgeCandidate {
@@ -92,6 +97,53 @@ function unitSource(source: string, unit: ParsedUnit): string {
     return source.slice(offsetAt(source, unit.ranges.declaration.start), offsetAt(source, unit.ranges.declaration.end)).trimEnd();
 }
 
+export function getOccurrenceNeighbors(
+    snapshot: HarnessSnapshot,
+    occurrence: { flowId: string; instanceId: string },
+): string[] {
+    const targetFlow = snapshot.flows?.find(f => f.id === occurrence.flowId)?.flow;
+    if (!targetFlow) return [];
+
+    const instanceId = occurrence.instanceId;
+    const neighborNodeIds = new Set<string>();
+
+    for (const wire of targetFlow.wires) {
+        const fromParts = wire.from.split('.');
+        const toParts = wire.to.split('.');
+
+        const fromInstId = fromParts[0];
+        const toInstId = toParts[0];
+
+        if (toInstId === instanceId && fromInstId && !wire.from.startsWith('input:')) {
+            const srcInst = targetFlow.instances.find(i => i.id === fromInstId);
+            if (srcInst?.node) neighborNodeIds.add(srcInst.node);
+        }
+
+        if (fromInstId === instanceId && toInstId && !wire.to.startsWith('output:')) {
+            const dstInst = targetFlow.instances.find(i => i.id === toInstId);
+            if (dstInst?.node) neighborNodeIds.add(dstInst.node);
+        }
+    }
+
+    return Array.from(neighborNodeIds);
+}
+
+function findAnyUnit(snapshot: HarnessSnapshot, id: string): { document: HarnessDocument | { path: string; sourceHash: string }; unit: ParsedUnit } | undefined {
+    for (const doc of snapshot.documents) {
+        for (const unit of doc.units) {
+            if (unit.id === id) return { document: doc, unit };
+        }
+    }
+    if (snapshot.library) {
+        for (const doc of snapshot.library) {
+            for (const unit of doc.units) {
+                if (unit.id === id) return { document: { path: doc.path, sourceHash: 'sha256:library' }, unit };
+            }
+        }
+    }
+    return undefined;
+}
+
 function findUnit(snapshot: HarnessSnapshot, id: string): { document: HarnessDocument; unit: ParsedUnit } {
     const matches = snapshot.documents.flatMap(document => document.units
         .filter(unit => unit.id === id)
@@ -110,12 +162,19 @@ function formatCases(cases: unknown[]): string {
         if (typeof c === 'string') return `- Case ${i + 1}: ${c}`;
         if (c && typeof c === 'object') {
             const rec = c as Record<string, unknown>;
-            const name = typeof rec.name === 'string' ? rec.name : `case_${i + 1}`;
+            const name = typeof rec.description === 'string' ? rec.description
+                : typeof rec.name === 'string' ? rec.name
+                : typeof rec.id === 'string' ? rec.id
+                : `case_${i + 1}`;
+            const inputs = rec.inputs !== undefined ? JSON.stringify(rec.inputs) : undefined;
             const input = rec.input !== undefined ? JSON.stringify(rec.input) : undefined;
             const expected = rec.expected !== undefined ? JSON.stringify(rec.expected) : undefined;
+            const error = rec.error !== undefined ? JSON.stringify(rec.error) : undefined;
             let line = `- Case "${name}":`;
-            if (input !== undefined) line += ` input=${input}`;
+            if (inputs !== undefined) line += ` inputs=${inputs}`;
+            else if (input !== undefined) line += ` input=${input}`;
             if (expected !== undefined) line += ` expected=${expected}`;
+            if (error !== undefined) line += ` error=${error}`;
             return line;
         }
         return `- Case ${i + 1}: ${JSON.stringify(c)}`;
@@ -149,9 +208,6 @@ export function buildGenerationPacket(
     if (target.unit.annotation.locked === true) throw new PacketError('This function is locked.');
     const intent = textField(target.unit, 'intent');
     if (!intent) throw new PacketError('Add an intent before generation.');
-    const dependencies = Array.isArray(target.unit.annotation.dependencies)
-        ? target.unit.annotation.dependencies.filter((value): value is string => typeof value === 'string')
-        : [];
     const targetSource = sources.get(target.document.path);
     if (targetSource === undefined) throw new PacketError(`Source for ${target.document.path} is unavailable.`);
 
@@ -161,12 +217,20 @@ export function buildGenerationPacket(
     const targetImports = Array.isArray(target.unit.annotation.imports)
         ? (target.unit.annotation.imports as string[])
         : [];
-    const targetContext = Array.isArray(target.unit.annotation.context)
-        ? (target.unit.annotation.context as string[])
-        : dependencies;
     const targetUses = Array.isArray(target.unit.annotation.uses)
         ? (target.unit.annotation.uses as string[])
         : [];
+    const occurrenceNeighbors = options?.occurrence
+        ? getOccurrenceNeighbors(snapshot, options.occurrence)
+        : [];
+    const dependencies = options?.occurrence
+        ? occurrenceNeighbors
+        : Array.isArray(target.unit.annotation.dependencies)
+            ? target.unit.annotation.dependencies.filter((value): value is string => typeof value === 'string')
+            : targetUses;
+    const targetContext = Array.isArray(target.unit.annotation.context)
+        ? (target.unit.annotation.context as string[])
+        : dependencies;
 
     const items: PacketItem[] = [{
         id: target.unit.id,
@@ -178,17 +242,33 @@ export function buildGenerationPacket(
     }];
 
     for (const dependencyId of dependencies) {
-        const dependency = findUnit(snapshot, dependencyId);
-        const source = sources.get(dependency.document.path);
-        if (source === undefined) throw new PacketError(`Required context ${dependency.unit.qualifiedName} is unavailable.`);
-        items.push({
-            id: dependency.unit.id,
-            path: dependency.document.path,
-            qualifiedName: dependency.unit.qualifiedName,
-            role: 'required-context',
-            sourceHash: dependency.document.sourceHash,
-            source: unitSource(source, dependency.unit),
-        });
+        if (dependencyId === targetId) continue;
+        if (options?.forge) {
+            const dependency = findAnyUnit(snapshot, dependencyId);
+            if (!dependency) continue;
+            const source = sources.get(dependency.document.path);
+            if (typeof source !== 'string') continue;
+            items.push({
+                id: dependency.unit.id,
+                path: dependency.document.path,
+                qualifiedName: dependency.unit.qualifiedName,
+                role: 'required-context',
+                sourceHash: dependency.document.sourceHash as `sha256:${string}`,
+                source: unitSource(source, dependency.unit),
+            });
+        } else {
+            const dependency = findUnit(snapshot, dependencyId);
+            const source = sources.get(dependency.document.path);
+            if (source === undefined) throw new PacketError(`Required context ${dependency.unit.qualifiedName} is unavailable.`);
+            items.push({
+                id: dependency.unit.id,
+                path: dependency.document.path,
+                qualifiedName: dependency.unit.qualifiedName,
+                role: 'required-context',
+                sourceHash: dependency.document.sourceHash,
+                source: unitSource(source, dependency.unit),
+            });
+        }
     }
 
     if (options?.forge) {
@@ -201,7 +281,7 @@ export function buildGenerationPacket(
         const formatForgePrompt = (neighborList: NeighborSignatureContext[]): string => {
             const neighborSection = neighborList.length > 0
                 ? `### Reference neighbor signatures:\n${neighborList.map(n =>
-                    `### Dependency: ${n.qualifiedName} (${n.path})\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}`
+                    `### Dependency: ${n.qualifiedName} (${n.path})\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}${n.contract ? `\nContract: ${n.contract}` : ''}`
                 ).join('\n\n')}`
                 : '';
 
@@ -245,9 +325,9 @@ export function buildGenerationPacket(
         const neighborSignatures: Record<string, { signature: string; sourceHash: string }> = {};
 
         for (const dependencyId of dependencies) {
-            const dependency = findUnit(snapshot, dependencyId);
-            const source = sources.get(dependency.document.path);
-            if (source === undefined) throw new PacketError(`Required context ${dependency.unit.qualifiedName} is unavailable.`);
+            if (dependencyId === targetId) continue;
+            const dependency = findAnyUnit(snapshot, dependencyId);
+            if (!dependency) continue;
             const depUnit = dependency.unit;
             let sig = depUnit.signature;
             if (!sig) {
@@ -258,6 +338,7 @@ export function buildGenerationPacket(
             if (sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
             const promptSig = `${sig}:`;
             const depIntent = textField(depUnit, 'intent');
+            const depContract = textField(depUnit, 'contract');
             neighborSignatures[dependencyId] = { signature: sig, sourceHash: dependency.document.sourceHash };
 
             const candidateNeighbor: NeighborSignatureContext = {
@@ -266,7 +347,8 @@ export function buildGenerationPacket(
                 qualifiedName: depUnit.qualifiedName,
                 signature: promptSig,
                 intent: depIntent,
-                sourceHash: dependency.document.sourceHash,
+                contract: depContract || undefined,
+                sourceHash: dependency.document.sourceHash as `sha256:${string}`,
             };
 
             const testPrompt = formatForgePrompt([...neighbors, candidateNeighbor]);
@@ -292,6 +374,7 @@ export function buildGenerationPacket(
             context: targetContext,
             uses: targetUses,
             neighborSignatures,
+            occurrence: options?.occurrence,
         };
 
         return {
@@ -303,6 +386,7 @@ export function buildGenerationPacket(
             items,
             neighbors,
             omittedNeighbors,
+            occurrence: options?.occurrence,
             estimatedInputTokens,
             inputBudgetTokens,
             outputBudgetTokens,
