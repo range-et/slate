@@ -46,6 +46,7 @@ keep outstanding tasks on GitHub.
 | Occurrence-aware micro packets (S-700, Issue #12) | ✅ shipped |
 | Verified candidates & revision loop (S-701, Issue #13) | ✅ shipped |
 | Retire legacy notebook & product landing page (S-001, Issue #2) | ✅ shipped |
+| Interactive Monad micro-canvas explainer (S-002, Issue #47) | ✅ shipped |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -549,13 +550,14 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
   elsewhere imports that node (harmless unless it forms a cycle).
 - **Retirement.** The legacy notebook (`legacy/`) has been completely removed (S-001, Issue #2). The extension, VSIX, web demo, and product landing page are all harness- and Monad-native.
 
-## Shipped — Product Landing Page & Web Showcase (S-001)
+## Shipped — Product Landing Page & Web Showcase (S-001, S-002)
 
 - **Monad Design System.** Built with Monad System design tokens (`monad.css`, `monad.js`, Strata semantic colors, Atomos components: cards, stats, buttons, tags).
+- **Interactive Explainer Micro-Studio (S-002, Issue #47).** Lightweight interactive dataflow canvas embedded directly into the Monad landing page (`src/explainer.ts`, `src/index.html`). Live input controls (`raw_score`) interactively propagate values through `clamp` → `normalize` → `evaluate_tier` with reactive port updates. Selecting nodes opens the 3-tab Monad Inspector: (1) Atomic JPL-60 implementation with type annotations and `mutmut` mutation checks, (2) Local LLM Forge micro-packet (≤600 tokens) with interactive simulation button, and (3) deterministic compiled Python (`score_pipeline`). A 4-step walkthrough stepper guides users through the core architecture without requiring VS Code.
 - **Theme Toggle.** Instant switching between Akasha dark (`data-strata="dark"`) and light (`data-strata="light"`) modes via `[data-mn-theme-toggle]`, persisted in `localStorage`.
 - **Architectural Storytelling.** Explains the mental model ("Grasshopper where you forge atomic components as you build software"), JPL-60 constraints (&le;60 lines, typed signatures, Pydantic contracts, pytest + mutmut), deterministic flow compilation, and two-tier AI division of labor.
 - **Unbundled Local LLM Architecture.** Prominently documents the bring-your-own model/server philosophy (llama.cpp, Ollama, LM Studio, vLLM) with zero server bloat.
-- **Live Showcase & Dual Artifacts.** Deploys both `dist/index.html` (product landing page) and `dist/harness.html` (interactive web demo with `?demo` parameter) to GitHub Pages.
+- **Live Showcase & Dual Artifacts.** Deploys both `dist/index.html` (product landing page with interactive micro-studio) and `dist/harness.html` (interactive web demo with `?demo` parameter) to GitHub Pages.
 
 ## Not started
 
