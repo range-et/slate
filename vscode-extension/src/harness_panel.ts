@@ -12,7 +12,7 @@ import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter, sourceHash } from './python_adapter';
 import { searchUnits } from './search';
 import {
-    connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, pathForFlowId,
+    connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, parseValueLiteral, pathForFlowId,
     removeInstances, removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, serializeFlow, uniqueName, unitSignature, type CallableSignature, type Port,
 } from './flow';
 import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
@@ -994,6 +994,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     /** Input and output ports of an instance, from the target's signature. */
     private portsOf(instance: FlowInstance): { inputs: Port[]; outputs: Port[] } {
+        if (instance.kind === 'viewer') return { inputs: [{ id: 'in', name: 'in', annotation: null }], outputs: [] };
         if (instance.kind === 'value' || !instance.node) return { inputs: [], outputs: [{ id: 'out', name: 'value', annotation: null }] };
         const snapshot = this.snapshot!;
         const flow = snapshot.flows?.find(item => item.id === instance.node)?.flow;
@@ -1047,6 +1048,7 @@ export class HarnessPanel implements vscode.Disposable {
             'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
             'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
             'pasteItems', 'makeUnique', 'forkDefinition', 'renameFlowPort', 'deleteFlowPort',
+            'addViewer', 'pinViewer', 'captureCase',
         ].includes(String(action.kind))) {
             return false;
         }
@@ -1056,6 +1058,9 @@ export class HarnessPanel implements vscode.Disposable {
         const layout = folder.layout;
         const scope = typeof action.flow === 'string' && action.flow !== MAIN_FLOW ? action.flow : null;
         const flowId = scope ?? MAIN_FLOW;
+        if (flowId !== MAIN_FLOW && (!this.snapshot?.flows?.some(item => item.id === flowId))) {
+            await this.refresh();
+        }
         const finish = async (message: string, select?: string) => {
             await folder.writeLayout();
             await this.refresh();
@@ -1160,9 +1165,53 @@ export class HarnessPanel implements vscode.Disposable {
             }
             case 'setValue': {
                 const flow = this.flow(flowId);
+                let finalVal: unknown = action.value;
+                if (typeof finalVal === 'string') {
+                    const parsed = parseValueLiteral(finalVal);
+                    if (!parsed.error && parsed.type !== 'expr') {
+                        finalVal = parsed.value;
+                    }
+                }
                 await saveFlow(flowId, { ...flow, instances: flow.instances.map(instance =>
-                    instance.id === action.id && instance.kind === 'value' ? { ...instance, value: String(action.value) } : instance) });
+                    instance.id === action.id && instance.kind === 'value' ? { ...instance, value: finalVal } : instance) });
                 await finish('Saved value.');
+                return true;
+            }
+            case 'addViewer':
+            case 'pinViewer': {
+                let flow = this.flow(flowId);
+                const id = uniqueName('viewer', flow.instances.map(inst => inst.id));
+                flow = { ...flow, instances: [...flow.instances, { id, kind: 'viewer', pinned: true }] };
+                this.placeAt(scope, id, action.x, action.y);
+                const from = typeof action.from === 'string' ? action.from : null;
+                if (from) {
+                    const resolved = this.resolveRootEndpoint(flow, scope, from);
+                    flow = connect(resolved.flow, resolved.endpoint, `${id}.in`);
+                }
+                await saveFlow(flowId, flow);
+                await finish(`Pinned viewer ${id}.`, id);
+                return true;
+            }
+            case 'captureCase': {
+                const inputs = (action.inputs && typeof action.inputs === 'object' && !Array.isArray(action.inputs)) ? action.inputs as Record<string, unknown> : {};
+                const expected = action.output ?? action.expected;
+                const targetNode = typeof action.targetNodeId === 'string' ? action.targetNodeId : null;
+                if (targetNode) {
+                    const doc = this.snapshot?.documents.find(d => d.path === targetNode || d.path.replace(/\.json$/, '') === targetNode);
+                    if (doc) {
+                        const nodeData = await this.folder.readNode(doc.path);
+                        const existingCases = Array.isArray(nodeData.cases) ? [...nodeData.cases] : [];
+                        existingCases.push({ inputs, expected });
+                        await this.folder.writeNode(doc.path, { ...nodeData, cases: existingCases });
+                        await finish(`Captured case for node ${targetNode}.`);
+                        return true;
+                    }
+                }
+                const flow = this.flow(flowId);
+                const existingCases = Array.isArray((flow.extra as Record<string, unknown>)?.cases) ? [...((flow.extra as Record<string, unknown>).cases as unknown[])] : [];
+                existingCases.push({ inputs, expected });
+                await saveFlow(flowId, { ...flow, extra: { ...flow.extra, cases: existingCases } });
+                await finish(`Captured case for flow ${flowId}.`);
                 return true;
             }
             case 'connectData':

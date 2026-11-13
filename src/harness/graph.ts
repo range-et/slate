@@ -18,6 +18,8 @@ export type SlateEdgeData = {
     targetAnnotation: string | null;
     mismatch: boolean;
     warning?: string;
+    observedValue?: ObservedValue;
+    status?: 'executed' | 'failed' | 'not_executed';
 };
 
 export interface BuildGraphOptions {
@@ -33,7 +35,7 @@ export interface BuildGraphOptions {
 export type SlateNodeData = {
     label: string;
     detail: string;
-    kind: 'document' | 'note' | 'module' | 'ref' | 'placeholder' | 'flow' | 'instance' | 'value' | 'group' | 'folder' | HarnessUnit['kind'];
+    kind: 'document' | 'note' | 'module' | 'ref' | 'placeholder' | 'flow' | 'instance' | 'value' | 'viewer' | 'group' | 'folder' | HarnessUnit['kind'];
     identity?: HarnessUnit['identity'];
     invalid?: boolean;
     stale?: boolean;
@@ -72,6 +74,10 @@ export type SlateNodeData = {
     execution?: InstanceRunObservation;
     /** Output values observed during flow execution (S-600). */
     observedOutputs?: Record<string, ObservedValue>;
+    /** Input values observed during flow execution (S-601). */
+    observedInputs?: Record<string, ObservedValue>;
+    /** Pinned viewer observing a port or wire (S-601). */
+    viewerTarget?: string;
 };
 
 function compactOutsideStrings(text: string): string {
@@ -451,12 +457,13 @@ function callerNode(
     };
 }
 
-function valueNode(snapshot: HarnessSnapshot, id: string, value: string, position: { x: number; y: number }): Node<SlateNodeData> {
+function valueNode(snapshot: HarnessSnapshot, id: string, value: unknown, position: { x: number; y: number }): Node<SlateNodeData> {
     const execution = snapshot.execution?.observations.find(obs => obs.instanceId === id);
+    const valueStr = typeof value === 'string' ? value : JSON.stringify(value ?? null);
     return {
         id, type: 'slate', position,
         data: {
-            label: 'value', detail: value, kind: 'value', value, path: '',
+            label: 'value', detail: valueStr, kind: 'value', value: valueStr, path: '',
             outputs: [{ id: 'out', name: 'value', annotation: null }],
             execution,
             observedOutputs: execution?.outputs,
@@ -464,9 +471,24 @@ function valueNode(snapshot: HarnessSnapshot, id: string, value: string, positio
     };
 }
 
+function viewerNode(snapshot: HarnessSnapshot, id: string, targetEndpoint: string | undefined, position: { x: number; y: number }): Node<SlateNodeData> {
+    const execution = snapshot.execution?.observations.find(obs => obs.instanceId === id);
+    return {
+        id, type: 'slate', position,
+        data: {
+            label: 'viewer', detail: targetEndpoint ?? 'Live value viewer', kind: 'viewer', path: '',
+            inputs: [{ id: 'in', name: 'in', annotation: null }],
+            execution,
+            observedInputs: execution?.inputs,
+            viewerTarget: targetEndpoint,
+        },
+    };
+}
+
 function dataEdges(
     flow: SlateFlow,
     byId: ReadonlyMap<string, Node<SlateNodeData>>,
+    snapshot?: HarnessSnapshot,
 ): Edge[] {
     const nodeFor = (endpoint: string, side: 'from' | 'to') => {
         const { instance, port } = parseEndpoint(endpoint);
@@ -489,15 +511,51 @@ function dataEdges(
         const targetAnnotation = annotationOf(wire.to, 'to');
         const mismatch = typesMismatch(sourceAnnotation, targetAnnotation);
         const warning = mismatch ? `${sourceAnnotation} → ${targetAnnotation}` : undefined;
+
+        // Extract live observed value and execution status across wire
+        let observedValue: ObservedValue | undefined;
+        let status: 'executed' | 'failed' | 'not_executed' | undefined;
+        if (snapshot?.execution) {
+            const { instance, port } = parseEndpoint(wire.from);
+            if (instance !== null) {
+                const obs = snapshot.execution.observations.find(o => o.instanceId === instance);
+                if (obs) {
+                    status = obs.status;
+                    const cleanPort = port.replace(/^out:/, '');
+                    observedValue = obs.outputs?.[cleanPort] ?? obs.outputs?.out ?? (obs.outputs ? Object.values(obs.outputs)[0] : undefined);
+                }
+            } else if (wire.from.startsWith('input:')) {
+                const inputName = wire.from.slice('input:'.length);
+                if (snapshot.execution.flowOutputs?.[inputName]) {
+                    observedValue = snapshot.execution.flowOutputs[inputName];
+                    status = 'executed';
+                }
+            }
+        }
+
+        let labelText = warning ? `⚠ ${warning}` : undefined;
+        if (!labelText && observedValue) {
+            labelText = observedValue.repr.length > 24 ? `${observedValue.repr.slice(0, 22)}…` : observedValue.repr;
+        } else if (!labelText && status === 'failed') {
+            labelText = '⚠ error';
+        } else if (!labelText && status === 'not_executed') {
+            labelText = '⊘ skipped';
+        }
+
         return [{
             id: `data:${wire.from}->${wire.to}`,
             source: from.node, sourceHandle: from.handle, target: to.node, targetHandle: to.handle,
-            className: `slate-edge slate-edge--data${mismatch ? ' slate-edge--mismatch' : ''}`,
+            className: `slate-edge slate-edge--data${mismatch ? ' slate-edge--mismatch' : ''}${observedValue ? ' slate-edge--has-value' : ''}`,
             style: mismatch
                 ? { stroke: 'var(--strata-warning)', strokeWidth: 2, strokeDasharray: '6 4' }
-                : { stroke: typeColor(sourceAnnotation), strokeWidth: 2 },
-            ...(warning ? { label: `⚠ ${warning}`, labelStyle: { fill: 'var(--strata-warning)', fontSize: 10, fontWeight: 600 }, labelShowBg: true, labelBgStyle: { fill: 'var(--strata-layer-01)', fillOpacity: 0.9 } } : {}),
-            data: { from: wire.from, to: wire.to, sourceAnnotation, targetAnnotation, mismatch, ...(warning ? { warning } : {}) } satisfies SlateEdgeData,
+                : { stroke: typeColor(sourceAnnotation), strokeWidth: observedValue ? 2.5 : 2 },
+            ...(labelText ? {
+                label: labelText,
+                labelStyle: { fill: warning || status === 'failed' ? 'var(--strata-warning)' : status === 'not_executed' ? 'var(--strata-text-muted)' : 'var(--strata-accent-cyan)', fontSize: 10, fontWeight: 600 },
+                labelShowBg: true,
+                labelBgStyle: { fill: 'var(--strata-layer-01)', fillOpacity: 0.95 }
+            } : {}),
+            data: { from: wire.from, to: wire.to, sourceAnnotation, targetAnnotation, mismatch, ...(warning ? { warning } : {}), observedValue, status } satisfies SlateEdgeData,
         }];
     });
 }
@@ -545,8 +603,13 @@ function buildRoot(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edge
     if (main) {
         main.instances.filter(instance => instance.kind === 'value')
             .forEach((instance, index) => nodes.push(valueNode(snapshot, instance.id, instance.value ?? '', layout[instance.id] ?? { x: 760, y: 600 + index * 90 })));
+        main.instances.filter(instance => instance.kind === 'viewer')
+            .forEach((instance, index) => {
+                const targetWire = main.wires.find(w => w.to === `${instance.id}.in` || w.to === `${instance.id}.in:in`)?.from;
+                nodes.push(viewerNode(snapshot, instance.id, targetWire, layout[instance.id] ?? { x: 760, y: 720 + index * 90 }));
+            });
         const byId = new Map(nodes.map(node => [node.id, node]));
-        edges.push(...dataEdges(main, byId));
+        edges.push(...dataEdges(main, byId, snapshot));
     }
 }
 
@@ -567,12 +630,15 @@ function buildFlow(snapshot: HarnessSnapshot, flowId: string, nodes: Node<SlateN
     });
     flow.instances.forEach((instance, index) => {
         const position = positions[instance.id] ?? { x: 340 + Math.floor(index / 3) * 300, y: 40 + (index % 3) * 190 };
+        const targetWire = flow.wires.find(w => w.to === `${instance.id}.in` || w.to === `${instance.id}.in:in`)?.from;
         nodes.push(instance.kind === 'value'
             ? valueNode(snapshot, instance.id, instance.value ?? '', position)
+            : instance.kind === 'viewer'
+            ? viewerNode(snapshot, instance.id, targetWire, position)
             : callerNode(snapshot, targets, instance.id, instance.node!, 'instance', position));
     });
     const byId = new Map(nodes.map(node => [node.id, node]));
-    edges.push(...dataEdges(flow, byId));
+    edges.push(...dataEdges(flow, byId, snapshot));
 }
 
 export function buildGraph(

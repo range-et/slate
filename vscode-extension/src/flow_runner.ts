@@ -73,10 +73,11 @@ interface RawTraceEvent {
 export function parseTraceLog(
     traceContent: string,
     targetFlow: SlateFlow | undefined,
-): { observations: InstanceRunObservation[]; valuesByUse: Record<string, ObservedValue>; runError?: string } {
+): { observations: InstanceRunObservation[]; valuesByUse: Record<string, ObservedValue>; flowOutputs: Record<string, ObservedValue>; runError?: string } {
     const lines = traceContent.split('\n').filter(line => line.trim().length > 0);
     const obsMap = new Map<string, InstanceRunObservation>();
     const valuesByUse: Record<string, ObservedValue> = {};
+    const flowOutputs: Record<string, ObservedValue> = {};
     let runError: string | undefined;
 
     const getOrCreateObs = (pathList: string[], instanceId: string): InstanceRunObservation => {
@@ -102,6 +103,7 @@ export function parseTraceLog(
             if (event.kind === 'input' && event.instance && event.port && event.val) {
                 const obs = getOrCreateObs(eventPath, event.instance);
                 obs.inputs[event.port] = event.val;
+                if (obs.status !== 'failed') obs.status = 'executed';
                 valuesByUse[makeValueKey(eventPath, event.instance, event.port)] = event.val;
             } else if (event.kind === 'output' && event.instance && event.port && event.val) {
                 const obs = getOrCreateObs(eventPath, event.instance);
@@ -112,6 +114,8 @@ export function parseTraceLog(
                 const obs = getOrCreateObs(eventPath, event.instance);
                 obs.status = 'failed';
                 obs.error = event.error;
+            } else if (event.kind === 'flow_output' && (event as any).name && (event as any).val) {
+                flowOutputs[(event as any).name] = (event as any).val;
             } else if (event.kind === 'flow_error') {
                 runError = event.error;
             }
@@ -139,6 +143,7 @@ export function parseTraceLog(
     return {
         observations: Array.from(obsMap.values()),
         valuesByUse,
+        flowOutputs,
         runError,
     };
 }
@@ -340,7 +345,7 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
             traceContent = fs.readFileSync(traceFilePath, 'utf-8');
         }
 
-        const { observations, valuesByUse, runError } = parseTraceLog(traceContent, targetFlow);
+        const { observations, valuesByUse, flowOutputs, runError } = parseTraceLog(traceContent, targetFlow);
         const durationMs = Date.now() - startTime;
 
         let status: RunStatus = 'completed';
@@ -368,6 +373,7 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
             error: errorMsg,
             observations,
             valuesByUse,
+            flowOutputs,
         };
     } catch (err) {
         if (timeoutTimer) clearTimeout(timeoutTimer);

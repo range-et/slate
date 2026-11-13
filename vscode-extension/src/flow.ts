@@ -52,6 +52,7 @@ export function parseFlow(text: string): SlateFlow {
     const parsedInstances = instances.map((item): FlowInstance => {
         if (!isRecord(item) || typeof item.id !== 'string' || !item.id || item.id.includes('.')) throw new FlowFormatError('instances need an id without dots');
         if (item.kind === 'value') return { id: item.id, kind: 'value', value: typeof item.value === 'string' ? item.value : JSON.stringify(item.value ?? null) };
+        if (item.kind === 'viewer') return { id: item.id, kind: 'viewer', pinned: item.pinned !== false };
         if (typeof item.node !== 'string') throw new FlowFormatError(`instance ${item.id} needs a node`);
         return { id: item.id, node: item.node };
     });
@@ -147,6 +148,132 @@ export function uniqueName(base: string, taken: Iterable<string>): string {
     let index = 2;
     while (used.has(`${clean}_${index}`)) index++;
     return `${clean}_${index}`;
+}
+
+export type ValueType = 'number' | 'boolean' | 'string' | 'json' | 'null' | 'expr';
+
+export function inferValueType(val: unknown): ValueType {
+    if (val === undefined || val === null) return 'null';
+    if (typeof val === 'boolean') return 'boolean';
+    if (typeof val === 'number') return 'number';
+    if (typeof val === 'object') {
+        if (isRecord(val) && 'expr' in val) return 'expr';
+        return 'json';
+    }
+    if (typeof val === 'string') {
+        const trimmed = val.trim();
+        if (trimmed === 'null' || trimmed === 'None') return 'null';
+        if (trimmed === 'true' || trimmed === 'false' || trimmed === 'True' || trimmed === 'False') return 'boolean';
+        if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(trimmed)) return 'number';
+        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+            return 'json';
+        }
+        if (/[+\-*/%&|^<>=]/.test(trimmed) || /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\(.*\)$/.test(trimmed)) {
+            return 'expr';
+        }
+        return 'string';
+    }
+    return 'string';
+}
+
+export function parseValueLiteral(raw: unknown): { type: ValueType; value: unknown; text: string; error?: string } {
+    const type = inferValueType(raw);
+    if (raw === undefined || raw === null) {
+        return { type: 'null', value: null, text: 'null' };
+    }
+    if (typeof raw === 'boolean') {
+        return { type: 'boolean', value: raw, text: raw ? 'true' : 'false' };
+    }
+    if (typeof raw === 'number') {
+        return { type: 'number', value: raw, text: String(raw) };
+    }
+    if (typeof raw === 'object') {
+        if (isRecord(raw) && 'expr' in raw) {
+            return { type: 'expr', value: raw, text: String(raw.expr) };
+        }
+        return { type: 'json', value: raw, text: JSON.stringify(raw) };
+    }
+    if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        if (type === 'null') return { type: 'null', value: null, text: 'null' };
+        if (type === 'boolean') {
+            const b = trimmed.toLowerCase() === 'true';
+            return { type: 'boolean', value: b, text: b ? 'true' : 'false' };
+        }
+        if (type === 'number') {
+            const n = Number(trimmed);
+            return { type: 'number', value: n, text: trimmed };
+        }
+        if (type === 'json') {
+            try {
+                const parsed = JSON.parse(trimmed);
+                return { type: 'json', value: parsed, text: trimmed };
+            } catch (e) {
+                return { type: 'json', value: trimmed, text: trimmed, error: (e as Error).message };
+            }
+        }
+        if (type === 'expr') {
+            return { type: 'expr', value: { expr: trimmed }, text: trimmed };
+        }
+        if ((trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) ||
+            (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2)) {
+            return { type: 'string', value: trimmed.slice(1, -1), text: trimmed };
+        }
+        return { type: 'string', value: raw, text: raw };
+    }
+    return { type: 'string', value: String(raw), text: String(raw) };
+}
+
+export function compileValueToPython(val: unknown): string {
+    if (val === undefined || val === null) return 'None';
+    if (typeof val === 'boolean') return val ? 'True' : 'False';
+    if (typeof val === 'number') {
+        if (Number.isNaN(val)) return 'float("nan")';
+        if (val === Infinity) return 'float("inf")';
+        if (val === -Infinity) return 'float("-inf")';
+        return String(val);
+    }
+    if (typeof val === 'string') {
+        const trimmed = val.trim();
+        if (trimmed === 'True' || trimmed === 'true') return 'True';
+        if (trimmed === 'False' || trimmed === 'false') return 'False';
+        if (trimmed === 'None' || trimmed === 'null') return 'None';
+        if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(trimmed)) return trimmed;
+        if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (typeof parsed === 'string') return JSON.stringify(parsed);
+            } catch {
+                return trimmed;
+            }
+        }
+        if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
+            return JSON.stringify(trimmed.slice(1, -1));
+        }
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                return compileValueToPython(parsed);
+            } catch {
+                return trimmed;
+            }
+        }
+        if (/[+\-*/%&|^<>=]/.test(trimmed) || /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\(.*\)$/.test(trimmed)) {
+            return trimmed;
+        }
+        return JSON.stringify(val);
+    }
+    if (typeof val === 'object') {
+        if (isRecord(val) && 'expr' in val && typeof val.expr === 'string') {
+            return val.expr;
+        }
+        if (Array.isArray(val)) {
+            return `[${val.map(compileValueToPython).join(', ')}]`;
+        }
+        const entries = Object.entries(val).map(([k, v]) => `${JSON.stringify(k)}: ${compileValueToPython(v)}`);
+        return `{${entries.join(', ')}}`;
+    }
+    return String(val);
 }
 
 // Edits (pure; return new flows)

@@ -80,7 +80,10 @@
             "type": "string"
           },
           "value": {
-            "type": "string"
+            "type": ["string", "number", "boolean", "null", "array", "object"]
+          },
+          "pinned": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false

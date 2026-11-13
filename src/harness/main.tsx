@@ -23,7 +23,7 @@ import { tags } from '@lezer/highlight';
 import { demoSnapshot } from './demo';
 import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, typesMismatch, type CanvasScope, type SlateEdgeData, type SlateNodeData } from './graph';
 import { buildNodeHealthReport, diffNodeCode } from './health';
-import { inputPorts, outputPorts, type Port } from '../../vscode-extension/src/flow';
+import { compileValueToPython, inferValueType, inputPorts, outputPorts, parseValueLiteral, type Port } from '../../vscode-extension/src/flow';
 import { rankPalette, type Rankable } from './palette';
 import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, NodeVerificationResult, PacketPreview } from './types';
 import './styles.css';
@@ -104,23 +104,154 @@ function ValueEditor({ id, value }: { id: string; value: string }) {
     const flow = React.useContext(ScopeContext);
     const [draft, setDraft] = useState(value);
     useEffect(() => setDraft(value), [value]);
-    const save = () => {
-        if (draft !== value) vscode?.postMessage({ type: 'action', action: { kind: 'setValue', flow, id, value: draft } });
+
+    const inferredType = inferValueType(draft);
+    const parsed = parseValueLiteral(draft);
+
+    const save = (newVal?: string) => {
+        const valToSave = newVal !== undefined ? newVal : draft;
+        if (valToSave !== value) {
+            vscode?.postMessage({ type: 'action', action: { kind: 'setValue', flow, id, value: valToSave } });
+        }
     };
-    return <input
-        className="slate-node__value nodrag nopan"
-        aria-label={`Value of ${id}`}
-        value={draft}
-        spellCheck={false}
-        onChange={event => setDraft(event.target.value)}
-        onBlur={save}
-        onDoubleClick={event => event.stopPropagation()}
-        onKeyDown={event => {
-            event.stopPropagation();
-            if (event.key === 'Enter') { event.preventDefault(); (event.target as HTMLInputElement).blur(); }
-            if (event.key === 'Escape') setDraft(value);
-        }}
-    />;
+
+    const toggleBool = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        const currentBool = draft.trim().toLowerCase() === 'true';
+        const nextVal = currentBool ? 'false' : 'true';
+        setDraft(nextVal);
+        save(nextVal);
+    };
+
+    const cycleType = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        const types: Array<'number' | 'string' | 'boolean' | 'json'> = ['number', 'string', 'boolean', 'json'];
+        const currentIdx = types.indexOf(inferredType as any);
+        const nextType = types[(currentIdx + 1) % types.length];
+        let nextVal = draft;
+        if (nextType === 'boolean') nextVal = 'true';
+        else if (nextType === 'number') nextVal = '0';
+        else if (nextType === 'string') nextVal = draft.startsWith('"') ? draft : `"${draft}"`;
+        else if (nextType === 'json') nextVal = '[]';
+        setDraft(nextVal);
+        save(nextVal);
+    };
+
+    return (
+        <div className="slate-value-editor" data-testid="value-editor">
+            <div className="slate-value-editor__bar">
+                <span className={`slate-value-editor__type slate-value-editor__type--${inferredType}`} title={`Type: ${inferredType}`}>
+                    {inferredType}
+                </span>
+                <button className="slate-value-editor__type-toggle" onClick={cycleType} title="Click to cycle type (number, string, boolean, json)">
+                    ⚙
+                </button>
+            </div>
+            {inferredType === 'boolean' ? (
+                <button
+                    className={`slate-value-editor__bool-btn ${draft.trim().toLowerCase() === 'true' ? 'slate-value-editor__bool-btn--true' : 'slate-value-editor__bool-btn--false'}`}
+                    onClick={toggleBool}
+                    aria-label={`Boolean value of ${id}`}
+                >
+                    {draft.trim().toLowerCase() === 'true' ? 'True' : 'False'}
+                </button>
+            ) : (
+                <input
+                    className="slate-node__value nodrag nopan"
+                    aria-label={`Value of ${id}`}
+                    value={draft}
+                    spellCheck={false}
+                    onChange={event => setDraft(event.target.value)}
+                    onBlur={() => save()}
+                    onDoubleClick={event => event.stopPropagation()}
+                    onKeyDown={event => {
+                        event.stopPropagation();
+                        if (event.key === 'Enter') { event.preventDefault(); (event.target as HTMLInputElement).blur(); }
+                        if (event.key === 'Escape') setDraft(value);
+                    }}
+                />
+            )}
+            {parsed.error && (
+                <div className="slate-value-editor__error" title={parsed.error}>
+                    ⚠ syntax error
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ViewerNodeView({ id, data }: { id: string; data: SlateNodeData }) {
+    const flow = React.useContext(ScopeContext);
+    const observedVal = data.observedInputs?.['in'] ?? (data.observedInputs ? Object.values(data.observedInputs)[0] : undefined);
+    const status = data.execution?.status;
+    const [copied, setCopied] = useState(false);
+
+    const onCopy = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (observedVal?.repr) {
+            navigator.clipboard?.writeText(observedVal.repr);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        }
+    };
+
+    const onUnpin = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        vscode?.postMessage({ type: 'action', action: { kind: 'deleteItems', flow, ids: [id] } });
+    };
+
+    const onCaptureCase = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (observedVal) {
+            vscode?.postMessage({
+                type: 'action',
+                action: {
+                    kind: 'captureCase',
+                    flow,
+                    output: observedVal.repr,
+                },
+            });
+        }
+    };
+
+    return (
+        <div className="slate-viewer" data-testid="viewer-node">
+            <div className="slate-viewer__header">
+                <span className="slate-viewer__type-badge">{observedVal?.type ?? 'any'}</span>
+                {status && (
+                    <span className={`slate-viewer__status slate-viewer__status--${status}`}>
+                        {status === 'executed' ? 'Live' : status === 'failed' ? 'Error' : 'Skipped'}
+                    </span>
+                )}
+            </div>
+            <div className="slate-viewer__content nodrag nopan">
+                {observedVal ? (
+                    <pre className="slate-viewer__repr" title={`${observedVal.type}: ${observedVal.repr}`}>{observedVal.repr}</pre>
+                ) : status === 'not_executed' ? (
+                    <div className="slate-viewer__placeholder muted">Not executed</div>
+                ) : status === 'failed' && data.execution?.error ? (
+                    <div className="slate-viewer__error" title={data.execution.error}>Error: {data.execution.error}</div>
+                ) : (
+                    <div className="slate-viewer__placeholder">No value yet</div>
+                )}
+            </div>
+            <div className="slate-viewer__footer">
+                {observedVal && (
+                    <button className="slate-viewer__btn" onClick={onCopy} title="Copy value to clipboard">
+                        {copied ? 'Copied!' : 'Copy'}
+                    </button>
+                )}
+                {observedVal && (
+                    <button className="slate-viewer__btn" onClick={onCaptureCase} title="Capture observed value as a flow case">
+                        Case
+                    </button>
+                )}
+                <button className="slate-viewer__btn danger" onClick={onUnpin} title="Unpin this viewer">
+                    Unpin
+                </button>
+            </div>
+        </div>
+    );
 }
 
 function verificationBadgeLabel(state: string): string {
@@ -195,8 +326,9 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                 </span>
             </div>}
             <strong>{data.label}</strong>
-            {!data.container && data.kind !== 'value' && data.detail && <code>{data.detail}</code>}
+            {!data.container && data.kind !== 'value' && data.kind !== 'viewer' && data.detail && <code>{data.detail}</code>}
             {data.kind === 'value' && <ValueEditor id={id} value={data.value ?? ''} />}
+            {data.kind === 'viewer' && <ViewerNodeView id={id} data={data} />}
             {data.editableIntent && data.unit && !data.container
                 ? <InlineIntent unitId={data.unit.id} intent={data.intent ?? ''} />
                 : data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
@@ -352,7 +484,8 @@ function Inspector({
                     : node.data.kind === 'instance' ? `Calls ${node.data.target}.`
                     : node.data.kind === 'flow' ? `Flow slate/flows/${node.data.flowId}.json — compiles to def ${node.data.label}(…).`
                     : node.data.kind === 'placeholder' ? (node.data.resolvesTo ? `Resolves to ${node.data.resolvesTo}; right-click → Convert to reference.` : 'Not defined yet; right-click → Create node….')
-                    : node.data.kind === 'value' ? 'A Python literal; edit it on the node.'
+                    : node.data.kind === 'value' ? 'A literal value; edit it on the node or below.'
+                    : node.data.kind === 'viewer' ? `Live value viewer connected to ${node.data.viewerTarget ?? 'wire'}.`
                     : node.data.detail}</p>
                 {Boolean(node.data.inputs?.length || node.data.outputs?.length) && <dl>
                     {node.data.inputs?.filter(port => port.name !== '+').map(port => <React.Fragment key={port.id}><dt>in</dt><dd><code>{port.name}{port.annotation ? `: ${port.annotation}` : ''}{port.optional ? ' (optional)' : ''}</code></dd></React.Fragment>)}
@@ -364,6 +497,49 @@ function Inspector({
                     {node.data.target && !node.data.broken && !node.data.flowId && !node.data.target.startsWith('lib:') && (node.data.kind === 'ref' || node.data.kind === 'instance') && <button className="secondary" onClick={() => action({ kind: 'makeUnique', id: node.id })}>Make unique</button>}
                 </div>
             </section>}
+            {node.data.kind === 'value' && (
+                <section className="harness-inspector__value" data-testid="inspector-value-section">
+                    <h4>Input Value</h4>
+                    <dl>
+                        <dt>Inferred Type</dt>
+                        <dd><code>{inferValueType(node.data.value ?? '')}</code></dd>
+                        <dt>Python Codegen</dt>
+                        <dd><code>{compileValueToPython(node.data.value ?? '')}</code></dd>
+                    </dl>
+                    {node.data.observedOutputs?.out && (
+                        <div className="harness-inspector__value-live">
+                            <strong>Live Observed Output:</strong>
+                            <pre className="slate-viewer__repr">{node.data.observedOutputs.out.repr}</pre>
+                        </div>
+                    )}
+                </section>
+            )}
+            {node.data.kind === 'viewer' && (
+                <section className="harness-inspector__viewer" data-testid="inspector-viewer-section">
+                    <h4>Viewer</h4>
+                    <dl>
+                        <dt>Source</dt>
+                        <dd><code>{node.data.viewerTarget ?? 'input wire'}</code></dd>
+                        <dt>Observed Type</dt>
+                        <dd><code>{node.data.observedInputs?.in?.type ?? (node.data.observedInputs ? Object.values(node.data.observedInputs)[0]?.type : 'none')}</code></dd>
+                    </dl>
+                    {(node.data.observedInputs?.in || node.data.observedInputs) && (
+                        <div className="harness-inspector__viewer-live">
+                            <strong>Observed Value:</strong>
+                            <pre className="slate-viewer__repr">{(node.data.observedInputs.in ?? Object.values(node.data.observedInputs)[0])?.repr}</pre>
+                        </div>
+                    )}
+                    <div className="harness-inspector__actions">
+                        {(node.data.observedInputs?.in || node.data.observedInputs) && (
+                            <button onClick={() => {
+                                const val = (node.data.observedInputs!.in ?? Object.values(node.data.observedInputs!)[0])?.repr;
+                                if (val) navigator.clipboard?.writeText(val);
+                            }}>Copy value</button>
+                        )}
+                        <button className="danger" onClick={() => action({ kind: 'deleteItems', ids: [node.id] })}>Unpin viewer</button>
+                    </div>
+                </section>
+            )}
             {note && <>
                 <p className="board-note-explainer">Board notes stay in Slate project metadata and never modify Python source.</p>
                 <label className="board-note-field">Title
@@ -748,10 +924,13 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
         {menu.wire && <>
             <div className="board-context-menu__label">{menu.wire.from} → {menu.wire.to}</div>
             {menu.wire.warning && <div className="board-context-menu__warning" role="note">⚠ Type mismatch: {menu.wire.warning}</div>}
+            <button role="menuitem" onClick={() => act({ kind: 'addViewer', from: menu.wire!.from, x: menu.flowX + 40, y: menu.flowY + 20 })}>Pin viewer to this wire</button>
             <button role="menuitem" className="danger" onClick={() => act({ kind: 'disconnectData', from: menu.wire!.from, to: menu.wire!.to })}>Remove wire</button>
         </>}
         {!node && !menu.edge && !menu.wire && <>
             <button role="menuitem" onClick={() => { onAdd(menu.flowX, menu.flowY); onClose(); }}>Add node…</button>
+            <button role="menuitem" onClick={() => act({ kind: 'addInstance', value: '0', x: menu.flowX, y: menu.flowY })}>Add value</button>
+            <button role="menuitem" onClick={() => act({ kind: 'addViewer', x: menu.flowX, y: menu.flowY })}>Add viewer</button>
             {!scope.flow && <>
                 <button role="menuitem" onClick={() => act({ kind: 'createNode', x: menu.flowX, y: menu.flowY })}>New node file…</button>
                 <button role="menuitem" onClick={() => act({ kind: 'createPlaceholder', x: menu.flowX, y: menu.flowY })}>New placeholder…</button>
@@ -820,6 +999,7 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
             <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteFlow', id: data.flowId })}>Delete flow…</button>
         </>}
         {data?.kind === 'value' && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>Delete value</button>}
+        {data?.kind === 'viewer' && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>Unpin viewer</button>}
         {note && <>
             <div className="board-context-menu__label">{note.title}</div>
             <button role="menuitem" onClick={() => { onSelect(note.id); onClose(); }}>Edit board note</button>
@@ -1678,6 +1858,11 @@ function HarnessApp() {
             items.push({ id: 'new-flow', group: 'canvas', label: 'New flow…', run: () => { const point = viewCenter(); post({ kind: 'createFlow', x: point.x, y: point.y }); } });
         }
         items.push({ id: 'library', group: 'canvas', label: libraryOpen ? 'Hide library' : 'Show library', run: () => setLibraryOpen(open => !open) });
+        items.push({ id: 'add-value', group: 'canvas', label: 'Add value', detail: 'Literal value or structured input', run: () => { const point = viewCenter(); post({ kind: 'addInstance', value: '0', x: point.x, y: point.y }); } });
+        items.push({ id: 'add-viewer', group: 'canvas', label: 'Add viewer', detail: 'Live value viewer', run: () => { const point = viewCenter(); post({ kind: 'addViewer', x: point.x, y: point.y }); } });
+        if (selected?.data.kind === 'viewer') {
+            items.push({ id: 'unpin-viewer', group: 'selection', label: 'Unpin viewer', run: () => post({ kind: 'deleteItems', ids: [selected.id] }) });
+        }
         items.push({ id: 'health', group: 'canvas', label: 'Node health report', detail: 'Unreferenced candidates & duplicate code (read-only)', run: () => setHealthOpen(true) });
         items.push({ id: 'context-links', group: 'canvas', label: showAllContext ? 'Show context links on demand' : 'Show all context links', detail: 'Keep ordinary wires focused on dataflow', run: () => setShowAllContext(current => !current) });
         items.push({ id: 'add-library', group: 'canvas', label: 'Add library file…', run: () => post({ kind: 'addLibrary' }) });
