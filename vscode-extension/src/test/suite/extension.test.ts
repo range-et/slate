@@ -297,9 +297,19 @@ suite('Slate Extension Host', () => {
         const appBefore = await read(vscode.Uri.joinPath(source, 'app.py'));
         const replies: string[] = [];
         const server = http.createServer((request, response) => {
+            if (request.method === 'GET') {
+                response.writeHead(200, { 'content-type': 'application/json' });
+                response.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+                return;
+            }
             let body = '';
             request.on('data', chunk => { body += chunk; });
             request.on('end', () => {
+                if (!body) {
+                    response.writeHead(200, { 'content-type': 'application/json' });
+                    response.end('{}');
+                    return;
+                }
                 const prompt = JSON.parse(body).messages[1].content as string;
                 const name = prompt.match(/```python\ndef (\w+)/)?.[1] ?? '?';
                 replies.push(name);

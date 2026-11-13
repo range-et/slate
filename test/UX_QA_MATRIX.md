@@ -24,6 +24,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Startup | Host receives `ready`; snapshot renders definitions, state, diagnostics, refs, placeholders, flows, values, notes | B/Q startup; H indexing; W bundle rendering |
 | JPL-60 & Contracts | Warning badge on node card for >60 lines or missing annotations; inspector displays diagnostics and split/refactor prompt | B inspector diagnostics; Q inspector JPL-60 warning / split action |
 | Node Verification & Quality Badges | Live verification badge on node cards (untested, running, passed, failed, mutant_survived, stale); inspector displays Verification & JPL-60 Quality section with passed/total tests, mutant count, collapsible failure traceback / mutant diff, "Verify Node" trigger and "Try up to 3 revisions" bounded retry loop with micro-packet feedback | Q surfaces live verification badges on canvas nodes and verification inspector controls; P per-node Pydantic + pytest + mutmut verification runner, badges, staleness, cancellation, and bounded retry loop; U verification_runner.matrix.test.ts |
+| Verified Candidates & Revision Loop (S-701) | Local LLM health status dot in top bar with endpoint/model details and test/config modal; candidate review editor allowing edits to proposed code and check before accept; "Verify Draft (Scratch)" runs guardrails in isolated scratch overlay without writing to disk; "Regenerate with feedback" allows user prompt adjustments within micro-packet budget (<=600 tokens); "Try up to 3 revisions" loops on test failures with bounded traceback feedback; typed stubs created from wire drops and canvas search with auto-wiring | Q surfaces local LLM health dot & modal, candidate review editor, scratch verification badge, revision loop banner, feedback regeneration, and typed stub wire creation (S-701); P S-701 createStub action, local LLM health check/config, scratch candidate verification, and accept edited candidate; U verified_candidates.matrix.test.ts |
 | Selection | Node click selects and opens inspector; selected unit requests packet preview | B context workbench; Q inspector / generation |
 | Trusted Flow Runner & Live Execution | Topbar ▶ Run / ⏹ Stop buttons, Ctrl/Cmd+Enter shortcut, and palette commands execute or stop active flow; runs compile Python with trace instrumentation and launch real child runner into isolated `.slate/build/<runId>/`; canvas node badges display execution status (`run`, `err`, `skip`); observed port outputs display directly on nodes and in Inspector Execution & Values section; non-trusted workspaces and invalid graphs refuse execution; Stop cleanly terminates process tree via OS process termination (`taskkill` on Windows); downstream unreached nodes marked not executed | Q surfaces Run/Stop flow controls, execution status badge, node execution badges, observed values, and Inspector execution section (S-600); P trusted runner compiles and executes flow, producing immutable build trace and per-use values (S-600); U flow_runner.matrix.test.ts |
 | Selection | Shift multi-select followed by grouping preserves the selected instance IDs and flow scope | B refs/flows/grouping |
@@ -255,9 +256,13 @@ readiness.
   node buffer becomes invalid, malformed `layout.json` error reporting, and S-512
   local llama.cpp component forge dual body and pytest unit check generation,
   JPL-60 60-line candidate rejection, signature mismatch rejection, generation
-  cancellation, boundInputs proposal staleness verification, and S-603 Live mode
+  cancellation, boundInputs proposal staleness verification, S-603 Live mode
   side-effect consent authorization, re-execution on semantic edits, layout exclusion,
-  and deactivation.
+  and deactivation, and S-701 createStub action on root canvas with wire drops, local
+  LLM health check and config, scratch candidate verification, and accept edited candidate.
 - Browser `qa_matrix.playwright.ts` now also covers Live mode (S-603): topbar `⚡ Live`
   toggle, side-effect warning & consent modal with cancellation and authorization,
-  `liveModeStatus` reflection, active indicators, status-bar badge, and disabling.
+  `liveModeStatus` reflection, active indicators, status-bar badge, and disabling,
+  and S-701 verified candidates, candidate review editing, scratch verification badge,
+  regenerate with feedback, revision loop attempts banner, local LLM health indicator and
+  config modal, and wire drop stub creation.

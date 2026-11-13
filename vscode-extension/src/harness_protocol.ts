@@ -333,6 +333,14 @@ export interface PacketPreview {
     casesCount?: number;
 }
 
+export interface LlamaHealthStatus {
+    ok: boolean;
+    endpoint: string;
+    model: string;
+    statusText: string;
+    models?: string[];
+}
+
 export interface HarnessProposal {
     id: string;
     unitId: string;
@@ -342,6 +350,9 @@ export interface HarnessProposal {
     check?: string;
     checks: string[];
     staleMessage?: string;
+    retryCount?: number;
+    maxRevisions?: number;
+    guardrailsReport?: NodeGuardrailsReport;
 }
 
 export type HostMessage =
@@ -362,4 +373,6 @@ export type HostMessage =
     | { type: 'verificationBatch'; results: Record<string, NodeVerificationResult> }
     | { type: 'executionStatus'; execution: FlowExecutionSnapshot }
     | { type: 'guardrailsStatus'; report: NodeGuardrailsReport }
-    | { type: 'liveModeStatus'; liveMode: LiveModeState };
+    | { type: 'liveModeStatus'; liveMode: LiveModeState }
+    | { type: 'llamaHealth'; status: LlamaHealthStatus }
+    | { type: 'candidateVerification'; proposalId: string; passed: boolean; details?: string; report?: NodeGuardrailsReport };

@@ -19,9 +19,19 @@ async function main() {
     const candidate = 'def normalize(score: int, maximum: int) -> int:\n    return score * 100 // maximum';
     const requests = [];
     const server = http.createServer((request, response) => {
+        if (request.method === 'GET') {
+            response.writeHead(200, { 'content-type': 'application/json' });
+            response.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+            return;
+        }
         let body = '';
         request.on('data', chunk => { body += chunk; });
         request.on('end', () => {
+            if (!body) {
+                response.writeHead(200, { 'content-type': 'application/json' });
+                response.end('{}');
+                return;
+            }
             requests.push(JSON.parse(body));
             response.writeHead(200, { 'content-type': 'text/event-stream' });
             response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: candidate } }] })}\n\n`);

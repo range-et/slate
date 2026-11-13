@@ -17,6 +17,7 @@ import {
     type SlateLayout, type SlateNode
 } from '../slate_folder';
 import type { BoardNote, FlowInstance, FlowWire, SlateFlow } from '../harness_protocol';
+import { checkLlamaHealth } from '../llama_transport';
 
 export interface SlateMcpBridge {
     focusCamera?(options: {
@@ -28,6 +29,8 @@ export interface SlateMcpBridge {
     onStubDefined?(nodeId: string): Promise<void>;
     onFlowWired?(flowId: string): Promise<void>;
     onNotesPlaced?(): Promise<void>;
+    getLlamaConfig?(): { endpoint: string; model: string; timeoutSeconds?: number };
+    setLlamaConfig?(config: { endpoint?: string; model?: string; timeoutSeconds?: number }): Promise<void>;
 }
 
 export interface StubValidationResult {
@@ -449,6 +452,45 @@ export const MCP_TOOLS = [
                     description: 'Instance IDs to remove from the flow.',
                 },
             },
+        },
+    },
+    {
+        name: 'slate_llm_status',
+        description: 'Inspect reachability, endpoint, model, and available models for the local LLM server (llama.cpp, Ollama, LM Studio, etc.).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                endpoint: {
+                    type: 'string',
+                    description: 'Optional override endpoint URL to test reachability against.',
+                },
+                timeoutMs: {
+                    type: 'number',
+                    description: 'Optional timeout in milliseconds (default 3000).',
+                },
+            },
+        },
+    },
+    {
+        name: 'slate_configure_llm',
+        description: 'Configure the local LLM endpoint and model settings for Slate component forge. Allows the frontier architect model to configure the user\'s local LLM (e.g. llama-server, Ollama, LM Studio, vLLM) without bundling an LLM binary.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                endpoint: {
+                    type: 'string',
+                    description: 'The HTTP URL of the local OpenAI-compatible LLM server (e.g. "http://127.0.0.1:8080" or "http://127.0.0.1:11434/v1").',
+                },
+                model: {
+                    type: 'string',
+                    description: 'Optional model identifier (e.g. "qwen2.5-coder:7b" or "local").',
+                },
+                timeoutSeconds: {
+                    type: 'number',
+                    description: 'Optional request timeout in seconds (e.g. 120).',
+                },
+            },
+            required: ['endpoint'],
         },
     },
 ];
@@ -1093,6 +1135,46 @@ export class SlateMcpServer {
         };
     }
 
+    /** Tool: slate_llm_status */
+    async toolLlmStatus(args: { endpoint?: string; timeoutMs?: number }): Promise<Record<string, unknown>> {
+        const config = this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : { endpoint: 'http://127.0.0.1:8080', model: 'local' };
+        const targetEndpoint = typeof args.endpoint === 'string' && args.endpoint.trim() ? args.endpoint.trim() : config.endpoint;
+        const targetModel = config.model;
+        const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : 3000;
+        const health = await checkLlamaHealth(targetEndpoint, targetModel, timeoutMs);
+        return {
+            ok: health.ok,
+            endpoint: targetEndpoint,
+            model: targetModel,
+            statusText: health.statusText,
+            models: health.models ?? [],
+        };
+    }
+
+    /** Tool: slate_configure_llm */
+    async toolConfigureLlm(args: { endpoint: string; model?: string; timeoutSeconds?: number }): Promise<Record<string, unknown>> {
+        if (!args.endpoint || typeof args.endpoint !== 'string' || !args.endpoint.trim().startsWith('http')) {
+            throw new Error('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
+        }
+        const endpoint = args.endpoint.trim();
+        const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : 'local';
+        const timeoutSeconds = typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 120;
+
+        if (this.bridge?.setLlamaConfig) {
+            await this.bridge.setLlamaConfig({ endpoint, model, timeoutSeconds });
+        }
+
+        const health = await checkLlamaHealth(endpoint, model, 3000);
+        return {
+            updated: true,
+            endpoint,
+            model,
+            reachable: health.ok,
+            statusText: health.statusText,
+            models: health.models ?? [],
+        };
+    }
+
     /** Call a tool directly by name and arguments */
     async callTool(name: string, args: Record<string, unknown>): Promise<McpToolCallResult> {
         try {
@@ -1112,6 +1194,12 @@ export class SlateMcpServer {
                     break;
                 case 'slate_wire_flow':
                     result = await this.runSerialized(() => this.toolWireFlow(args));
+                    break;
+                case 'slate_llm_status':
+                    result = await this.toolLlmStatus(args);
+                    break;
+                case 'slate_configure_llm':
+                    result = await this.runSerialized(() => this.toolConfigureLlm(args as any));
                     break;
                 default:
                     return {

@@ -4,9 +4,9 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, LiveModeState, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
+import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, LiveModeState, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
 import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
-import { streamLlamaCompletion } from './llama_transport';
+import { checkLlamaHealth, streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter, sourceHash } from './python_adapter';
@@ -103,6 +103,25 @@ export class HarnessPanel implements vscode.Disposable {
         flowId: MAIN_FLOW,
     };
     private liveDebounceTimer: NodeJS.Timeout | undefined;
+    private lastLlamaHealth: LlamaHealthStatus | undefined;
+
+    async checkAndBroadcastLlamaHealth(endpointOverride?: string, modelOverride?: string): Promise<LlamaHealthStatus> {
+        const config = vscode.workspace.getConfiguration('slate.llama');
+        const endpoint = endpointOverride ?? config.get<string>('endpoint', 'http://127.0.0.1:8080');
+        const model = modelOverride ?? config.get<string>('model', 'local');
+        const timeoutSeconds = config.get<number>('timeoutSeconds', 120);
+        const health = await checkLlamaHealth(endpoint, model, Math.min(timeoutSeconds * 1000, 3000));
+        const status: LlamaHealthStatus = {
+            ok: health.ok,
+            endpoint,
+            model,
+            statusText: health.statusText,
+            models: health.models,
+        };
+        this.lastLlamaHealth = status;
+        await this.postMessage({ type: 'llamaHealth', status });
+        return status;
+    }
 
     static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
@@ -278,6 +297,7 @@ export class HarnessPanel implements vscode.Disposable {
         const value = message as Record<string, unknown>;
         if (value.type === 'ready') {
             this.scheduleRefresh(0);
+            void this.checkAndBroadcastLlamaHealth();
             return;
         }
         if (value.type === 'layout') {
@@ -373,8 +393,31 @@ export class HarnessPanel implements vscode.Disposable {
             await this.setLiveMode(targetEnabled, consented, flowId);
             return;
         }
+        if (value.type === 'checkLlamaHealth') {
+            const endpoint = typeof value.endpoint === 'string' ? value.endpoint : undefined;
+            const model = typeof value.model === 'string' ? value.model : undefined;
+            await this.checkAndBroadcastLlamaHealth(endpoint, model);
+            return;
+        }
+        if (value.type === 'setLlamaConfig' && typeof value.endpoint === 'string') {
+            const config = vscode.workspace.getConfiguration('slate.llama');
+            await config.update('endpoint', value.endpoint, vscode.ConfigurationTarget.Global);
+            if (typeof value.model === 'string') {
+                await config.update('model', value.model, vscode.ConfigurationTarget.Global);
+            }
+            await this.checkAndBroadcastLlamaHealth();
+            this.postCommandResult(true, `Updated local LLM configuration: ${value.endpoint}`);
+            return;
+        }
+        if (value.type === 'verifyCandidate' && typeof value.proposalId === 'string' && typeof value.candidate === 'string') {
+            await this.verifyCandidate(value.proposalId, value.candidate);
+            return;
+        }
         if (value.type === 'acceptProposal' && typeof value.proposalId === 'string') {
-            await this.acceptProposal(value.proposalId);
+            const editedCandidate = typeof (value as { editedCandidate?: unknown }).editedCandidate === 'string'
+                ? (value as { editedCandidate: string }).editedCandidate
+                : undefined;
+            await this.acceptProposal(value.proposalId, editedCandidate);
             return;
         }
         if (value.type === 'undoAccepted') {
@@ -564,14 +607,14 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
-    private async acceptProposal(proposalId: string): Promise<void> {
+    private async acceptProposal(proposalId: string, editedCandidate?: string): Promise<void> {
         const pending = this.pendingProposal;
         if (!pending || pending.id !== proposalId) {
             this.postCommandResult(false, 'That proposal is no longer active.');
             return;
         }
         try {
-            await this.acceptFolderProposal(this.folder, pending);
+            await this.acceptFolderProposal(this.folder, pending, editedCandidate);
         } catch (error) {
             await this.postMessage({
                 type: 'proposalStale', proposalId,
@@ -580,10 +623,97 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
+    private async verifyCandidate(proposalId: string, candidate: string): Promise<void> {
+        const pending = this.pendingProposal;
+        if (!pending || pending.id !== proposalId) {
+            await this.postMessage({
+                type: 'candidateVerification',
+                proposalId,
+                passed: false,
+                details: 'That proposal is no longer active.',
+            });
+            return;
+        }
+
+        try {
+            const target = this.resolveUnit(pending.packet.targetId);
+            if (!target) throw new Error('Target unit not found.');
+            const parsed = parseForgeCandidate(candidate);
+            const validation = validateForgeCandidate(target.unit, parsed);
+            if (!validation.valid) {
+                const diag = validation.diagnostics.join('; ');
+                await this.postMessage({
+                    type: 'candidateVerification',
+                    proposalId,
+                    passed: false,
+                    details: `Validation failed: ${diag}`,
+                });
+                this.postCommandResult(false, `Validation failed: ${diag}`);
+                return;
+            }
+
+            const nodeId = nodeIdForPath(pending.path)!;
+            const originalNode = await this.folder.readNode(nodeId);
+            const candidateNode: SlateNode = {
+                ...originalNode,
+                code: codeLines(parsed.implementation),
+                check: parsed.check ? codeLines(parsed.check) : undefined,
+            };
+
+            const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+            const report = await runNodeGuardrails({
+                nodeId,
+                folder: this.folder,
+                workspaceRoot: this.folder.root.fsPath,
+                nodeOverride: candidateNode,
+                pythonPath,
+                isTrusted: vscode.workspace.isTrusted,
+            });
+
+            const failingFlow = report.affectedFlows.find(f => f.failedCases > 0);
+            const detail = report.passed
+                ? 'All scratch-overlay cases passed.'
+                : (failingFlow?.failures[0]?.error || report.nodeCases.failures[0] || 'Verification case failed.');
+
+            await this.postMessage({
+                type: 'candidateVerification',
+                proposalId,
+                passed: report.passed,
+                details: detail,
+                report,
+            });
+            this.postCommandResult(report.passed, `Candidate verification: ${detail}`);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await this.postMessage({
+                type: 'candidateVerification',
+                proposalId,
+                passed: false,
+                details: msg,
+            });
+            this.postCommandResult(false, `Candidate verification error: ${msg}`);
+        }
+    }
+
     private async acceptFolderProposal(
         folder: SlateFolderHost,
         pending: NonNullable<HarnessPanel['pendingProposal']>,
+        editedCandidate?: string,
     ): Promise<void> {
+        if (editedCandidate && typeof editedCandidate === 'string' && editedCandidate.trim()) {
+            const parsed = parseForgeCandidate(editedCandidate);
+            const target = this.resolveUnit(pending.packet.targetId);
+            if (target) {
+                const validation = validateForgeCandidate(target.unit, parsed);
+                if (!validation.valid) {
+                    throw new Error(`Edited candidate invalid: ${validation.diagnostics.join('; ')}`);
+                }
+            }
+            pending.implementation = parsed.implementation;
+            pending.check = parsed.check;
+            pending.candidate = editedCandidate;
+            pending.proposal.proposedSource = parsed.implementation;
+        }
         if (pending.packet.boundInputs && pending.packet.fingerprint) {
             const fp = pending.packet.fingerprint;
             const targetNodeId = nodeIdForPath(pending.path)!;
@@ -885,6 +1015,8 @@ export class HarnessPanel implements vscode.Disposable {
                         implementation: candidateCode,
                         check: candidateCheck,
                         checks,
+                        retryCount: loopResult.finalResult.retryCount ?? loopResult.attempts.length,
+                        maxRevisions,
                     },
                 });
             }
@@ -1189,7 +1321,7 @@ export class HarnessPanel implements vscode.Disposable {
     /** Canvas actions for refs, placeholders, flows, and data wires. Returns false when not one of them. */
     private async handleCanvasAction(action: Record<string, unknown>): Promise<boolean> {
         if (![
-            'createRef', 'createPlaceholder', 'placeholderToRef', 'placeholderToNode',
+            'createRef', 'createPlaceholder', 'createStub', 'placeholderToRef', 'placeholderToNode',
             'addInstance', 'setValue', 'connectData', 'disconnectData', 'deleteItems',
             'createFlow', 'extractFlow', 'deleteFlow', 'addLibrary',
             'pasteItems', 'makeUnique', 'forkDefinition', 'renameFlowPort', 'deleteFlowPort',
@@ -1266,6 +1398,57 @@ export class HarnessPanel implements vscode.Disposable {
                 layout.placeholders = layout.placeholders.filter(item => item !== placeholder);
                 delete layout.positions[placeholder.id];
                 await finish(`Created slate/nodes/${nodeId}.json`, nodeId);
+                return true;
+            }
+            case 'createStub': {
+                const name = typeof action.name === 'string' && action.name.trim() ? action.name.trim() : 'stub';
+                const signature = typeof action.signature === 'string' && action.signature.trim()
+                    ? action.signature.trim()
+                    : `def ${name}() -> None`;
+                const intent = typeof action.intent === 'string' && action.intent.trim()
+                    ? action.intent.trim()
+                    : `Atomic stub ${name}`;
+                const node = nodeFromSignature(signature, intent);
+                node.contract = typeof action.contract === 'string' && action.contract.trim()
+                    ? action.contract.trim()
+                    : `Contract for ${name}`;
+                const position = {
+                    x: typeof action.x === 'number' && Number.isFinite(action.x) ? (action.x as number) : 100,
+                    y: typeof action.y === 'number' && Number.isFinite(action.y) ? (action.y as number) : 100,
+                };
+                const nodeId = await folder.createNode(node, position);
+
+                let flow = this.flow(flowId);
+                let id: string;
+                if (scope === null) {
+                    id = `ref-${randomUUID().slice(0, 8)}`;
+                } else {
+                    id = uniqueName(name, flow.instances.map(instance => instance.id));
+                }
+                flow = { ...flow, instances: [...flow.instances, { id, node: nodeId }] };
+                this.placeAt(scope, id, action.x, action.y);
+
+                const connectFrom = typeof action.connectFrom === 'string' ? action.connectFrom : null;
+                const connectTo = typeof action.connectTo === 'string' ? action.connectTo : null;
+                if (connectFrom || connectTo) {
+                    const parsed = await this.adapter.parseModule(`${node.code.join('\n')}\n`, nodeId);
+                    const unit = parsed.units[0];
+                    const sig = unit ? unitSignature(unit, parsed.units) : null;
+                    const ports = sig ? { inputs: inputPorts(sig), outputs: outputPorts(sig) } : { inputs: [], outputs: [] };
+                    const pick = (list: Port[]) => list.find(item => item.id === action.connectPort) ?? list[0];
+                    if (connectFrom) {
+                        const port = pick(ports.inputs);
+                        if (port) {
+                            const resolved = this.resolveRootEndpoint(flow, scope, connectFrom);
+                            flow = connect(resolved.flow, resolved.endpoint, `${id}.${port.id}`);
+                        }
+                    } else if (pick(ports.outputs)) {
+                        const resolved = this.resolveRootEndpoint(flow, scope, connectTo!);
+                        flow = connect(resolved.flow, `${id}.${pick(ports.outputs).id}`, resolved.endpoint);
+                    }
+                }
+                await saveFlow(flowId, flow);
+                await finish(`Created atomic stub ${nodeId}.`, id);
                 return true;
             }
             case 'addInstance': {

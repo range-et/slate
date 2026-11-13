@@ -87,9 +87,19 @@ suite('Slate native persistence and proposal QA', () => {
             await vscode.workspace.fs.writeFile(uri(...nodePath(name)), bytes);
         }
         server = http.createServer((request, response) => {
+            if (request.method === 'GET') {
+                response.writeHead(200, { 'content-type': 'application/json' });
+                response.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+                return;
+            }
             let body = '';
             request.on('data', chunk => { body += chunk; });
             request.on('end', () => {
+                if (!body) {
+                    response.writeHead(200, { 'content-type': 'application/json' });
+                    response.end('{}');
+                    return;
+                }
                 requests.push(JSON.parse(body).messages[1].content);
                 const send = () => {
                     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -1610,4 +1620,89 @@ suite('Slate native persistence and proposal QA', () => {
         try { await vscode.workspace.fs.delete(flowTwoUri); } catch {}
     });
 
+    test('S-701: createStub action, local LLM health check/config, scratch candidate verification, and accept edited candidate', async () => {
+        // 1. Local LLM health check and config
+        await post({ type: 'checkLlamaHealth' });
+        let msgs = await messages();
+        let healthMsg = msgs.find(m => m.type === 'llamaHealth') as any;
+        assert.ok(healthMsg?.status, 'broadcasted llamaHealth status');
+        assert.equal(healthMsg.status.ok, true, 'local server is healthy');
+        assert.ok(healthMsg.status.models?.includes('test-model'), 'lists test-model');
+
+        // Configure LLM
+        const port = (server.address() as { port: number }).port;
+        await post({ type: 'setLlamaConfig', endpoint: `http://127.0.0.1:${port}`, model: 'test-model-v2' });
+        msgs = await messages();
+        healthMsg = msgs.find(m => m.type === 'llamaHealth') as any;
+        assert.ok(healthMsg?.status, 'broadcasted llamaHealth after setLlamaConfig');
+        assert.equal(healthMsg.status.model, 'test-model-v2');
+
+        // 2. createStub action on root canvas with wiring
+        await act({
+            kind: 'createStub',
+            name: 'calc_stub',
+            signature: 'def calc_stub(x: int) -> int',
+            intent: 'Calculate atomic stub',
+            x: 45,
+            y: 55,
+            connectTo: 'normalize.in:score',
+        });
+
+        // Verify node file created
+        const stubNode = await read(...nodePath('calc_stub'));
+        assert.equal(stubNode.name, 'calc_stub');
+        assert.equal(stubNode.intent, 'Calculate atomic stub');
+        assert.deepEqual(stubNode.code, ['def calc_stub(x: int) -> int:', '    raise NotImplementedError']);
+
+        // Verify instance placed in main.json and wired
+        const mainFlow = await read('slate', 'flows', 'main.json');
+        const stubInstance = mainFlow.instances.find((i: any) => i.node === 'calc_stub');
+        assert.ok(stubInstance, 'stub instance added to main.json');
+        const layout = await read('slate', 'layout.json');
+        assert.deepEqual(layout.positions[stubInstance.id], { x: 45, y: 55 });
+        assert.ok(mainFlow.wires.some((w: any) => w.from === `${stubInstance.id}.out` && w.to === 'ref_normalize.in:score'), 'wire connected to normalize');
+
+        // 3. Generate proposal on clamp
+        serverResponseContent = 'def clamp(value: int, lower: int, upper: int) -> int:\n    return min(max(value, lower), upper)';
+        await messages();
+        await post({ type: 'generate', unitId: 'clamp' });
+        msgs = await messages();
+        const ready = msgs.find(m => m.type === 'proposalReady');
+        assert.ok(ready?.proposal, 'proposal ready for clamp');
+        const propId = ready.proposal.id;
+
+        // 4. verifyCandidate with scratch overlay
+        await post({
+            type: 'verifyCandidate',
+            proposalId: propId,
+            candidate: serverResponseContent,
+        });
+        msgs = await messages();
+        const verifMsg = msgs.find(m => m.type === 'candidateVerification') as any;
+        assert.ok(verifMsg, 'received candidateVerification message');
+        assert.equal(verifMsg.proposalId, propId);
+        assert.equal(verifMsg.passed, true);
+
+        // 5. acceptProposal with edited candidate
+        const edited = 'def clamp(value: int, lower: int, upper: int) -> int:\n    if lower > upper: raise ValueError("lower > upper")\n    return min(max(value, lower), upper)';
+        await post({
+            type: 'acceptProposal',
+            proposalId: propId,
+            editedCandidate: edited,
+        });
+        msgs = await messages();
+        assert.ok(msgs.some(m => m.type === 'proposalAccepted'), 'proposalAccepted message received');
+
+        // Verify edited candidate was written to disk
+        const savedClamp = await read(...nodePath('clamp'));
+        assert.ok(savedClamp.code.some((l: string) => l.includes('raise ValueError')), 'edited candidate saved to disk');
+
+        // Undo accepted edit
+        await post({ type: 'undoAccepted' });
+        const document = await vscode.workspace.openTextDocument(uri(...nodePath('clamp')));
+        await eventually(async () => !JSON.parse(document.getText()).code.some((l: string) => l.includes('raise ValueError')), 'undo restored clamp');
+        await act({ kind: 'saveWorkspace' });
+        const revertedClamp = await read(...nodePath('clamp'));
+        assert.ok(!revertedClamp.code.some((l: string) => l.includes('raise ValueError')), 'undo successfully reverted edited candidate');
+    });
 });

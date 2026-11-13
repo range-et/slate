@@ -44,7 +44,7 @@ keep outstanding tasks on GitHub.
 | Cases as guardrails (S-602, Issue #10) | ✅ shipped |
 | Live mode (S-603, Issue #11) | ✅ shipped |
 | Occurrence-aware micro packets (S-700, Issue #12) | ✅ shipped |
-| Verified candidates & revision loop (S-701, Issue #13) | 🟡 next |
+| Verified candidates & revision loop (S-701, Issue #13) | ✅ shipped |
 | Loops / zones (repeat, for-each, branch) | ❌ not started |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
@@ -515,6 +515,18 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 - **CI Gate Integration.** Added `npm run verify:contracts` to `package.json`, called in `scripts/verify-baseline.sh` and GitHub Actions `.github/workflows/test.yml`.
 - Closes [#24](https://github.com/range-et/slate/issues/24) (S-511).
 
+## Shipped — Verified Candidates & Revision Loop (S-701, 2026-11-13)
+
+- **Unbundled Local LLM Architecture & Frontier Architect MCP Tools.** Slate never bundles an LLM binary or server. External Frontier Architect agents configure and inspect local model endpoints via MCP tools `slate_llm_status` and `slate_configure_llm`, supporting OpenAI-compatible local servers (llama-server, Ollama, LM Studio, vLLM).
+- **Local LLM Health Indicator & Configuration Modal.** Top bar and Inspector feature a live health dot indicator displaying reachability, active model, and error state. Clicking the health dot opens a modal allowing users to test endpoints, view discovered model names, and update the host endpoint and model.
+- **Candidate Review Editor in Inspector.** Replaced static `<pre>` display with an editable candidate review editor (`slate-proposal-candidate-editor`), enabling direct user edits to proposed function body code and pytest unit checks before accepting.
+- **Scratch-Overlay Guardrail Verification.** Users can click **Verify Draft (Scratch)** (`verify-candidate-button`) to validate syntax/signature and run Pydantic contract validation, pytest cases, and mutmut mutation testing in an isolated scratch build directory (`.slate/scratch/`) without altering project files on disk. A live badge (`candidate-verification-badge`) reflects draft verification status.
+- **Bounded Feedback Regeneration.** Users can provide targeted revision notes or paste test failure tracebacks into the **Regenerate with feedback** textarea (`proposal-feedback-input`). Feedback is injected into the bounded micro-packet (`<=600` tokens) with automatic neighbor context trimming.
+- **Try up to 3 Revisions Loop.** One-click **Try up to 3 revisions** action (`try-revisions-button`) automates up to 3 bounded revision attempts, feeding back failure tracebacks while keeping expectations immutable. All intermediate candidates are inspectable and never auto-accepted.
+- **Strict Acceptance Binding.** Accepted proposals verify that the target node's code hash, imports/uses, intent, contract, lock status, cases, and neighbor signatures have not drifted since generation.
+- **Typed Stubs from Wire Drops & Canvas Search.** Dropping a wire or searching in the add-node dialog offers **New typed stub “<name>”**, generating an atomic typed function node with signature and contract on disk, placing it on the canvas, and connecting dropped wires automatically.
+- Closes [#13](https://github.com/range-et/slate/issues/13) (S-701).
+
 ## Partially done
 
 - **Context entry points.** Wire, palette, and picker are shipped; `@`
@@ -524,10 +536,11 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
   canvas (edit the JSON). Type mismatches on wires are warned (not blocked).
   Node files can't be deleted from the canvas. Instances in a flow can't yet
   show values (Phase 5).
-- **Proposal lifecycle.** Generated code is reviewed, but intent/contract/
-  context/lock edits apply immediately without review. Candidates cannot be
-  edited or regenerated with feedback.
-- **llama.cpp.** No health indicator; no bounded revision loop.
+- **Proposal lifecycle.** Generated code is reviewed, editable, verified in an
+  isolated scratch directory, and regenerable with feedback or a 3-revision loop.
+  Intent/contract/context/lock edits apply immediately without review.
+- **Local LLM.** Unbundled architecture with topbar health dot, config modal,
+  and Frontier Architect MCP tools (`slate_llm_status`, `slate_configure_llm`).
 - **Examples.** Only `examples/llama_demo` ships a `slate/` folder.
   Calculator and tic-tac-toe stay in `legacy/examples/` as Python and are
   ported on the fly by the gate. Their legacy `## @slate …` comment lines are
@@ -543,7 +556,6 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 ## Not started
 
 - Repeat / for-each / branch zones.
-- Verified candidates and revision loop (S-701).
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
 - Dependency-ordered queue / generate-all for the harness.
