@@ -1456,4 +1456,77 @@ suite('Slate native persistence and proposal QA', () => {
         assert.ok(!diskClamp.code.join('\n').includes('-999'), 'clamp code was not replaced on disk');
     });
 
+    test('live mode: requires side-effect consent, reruns on semantic edits, ignores layout, and stops on disable (S-603)', async () => {
+        // 1. Create a flow with value nodes and clamp node
+        const liveFlowUri = uri('slate', 'flows', 'live_demo_flow.json');
+        await vscode.workspace.fs.writeFile(liveFlowUri, encode({
+            slate: 3,
+            name: 'live_demo_flow',
+            inputs: [],
+            outputs: [{ id: 'out:res', name: 'res', annotation: 'int' }],
+            instances: [
+                { id: 'v_val', kind: 'value', value: '40' },
+                { id: 'v_lo', kind: 'value', value: '0' },
+                { id: 'v_hi', kind: 'value', value: '100' },
+                { id: 'inst_clamp', node: 'clamp' },
+            ],
+            wires: [
+                { from: 'v_val.out', to: 'inst_clamp.in:value' },
+                { from: 'v_lo.out', to: 'inst_clamp.in:lower' },
+                { from: 'v_hi.out', to: 'inst_clamp.in:upper' },
+                { from: 'inst_clamp.out', to: 'output:res' },
+            ],
+            extra: {},
+        }));
+
+        await act({ kind: 'refreshIndex' });
+        await eventually(async () => Boolean((await snapshot())?.flows?.some(f => f.id === 'live_demo_flow')), 'flow indexed');
+        await messages();
+
+        // 2. Attempt enabling Live mode without consent -> rejected
+        await post({ type: 'setLiveMode', enabled: true, consented: false, flowId: 'live_demo_flow' });
+        const rejectMsgs = await messages();
+        assert.ok(rejectMsgs.some(m => m.ok === false && (m.message ?? '').includes('explicit side-effect consent')));
+        let snap = await snapshot();
+        assert.equal(snap.liveMode?.enabled, false);
+
+        // 3. Enable Live mode with explicit consent -> succeeds and starts initial run
+        await post({ type: 'setLiveMode', enabled: true, consented: true, flowId: 'live_demo_flow' });
+        const enableMsgs = await messages();
+        assert.ok(enableMsgs.some(m => m.ok === true && (m.message ?? '').includes('Live mode enabled')));
+        snap = await snapshot();
+        assert.equal(snap.liveMode?.enabled, true);
+        assert.equal(snap.liveMode?.consented, true);
+        assert.equal(snap.liveMode?.flowId, 'live_demo_flow');
+
+        // Wait for the initial run to complete
+        await eventually(async () => {
+            const current = await snapshot();
+            return current.execution?.status === 'completed' && current.execution.valuesByUse['::inst_clamp::out']?.repr === '40';
+        }, 'initial live run completed with 40');
+
+        // 4. Moving a node (layout) does NOT trigger a rerun
+        await post({ type: 'layout', scope: 'live_demo_flow', positions: { v_val: { x: 99, y: 88 } } });
+        // Small delay to ensure no rerun was triggered
+        await new Promise(r => setTimeout(r, 400));
+        snap = await snapshot();
+        assert.equal(snap.execution?.status, 'completed');
+        assert.equal(snap.execution?.valuesByUse['::inst_clamp::out']?.repr, '40');
+
+        // 5. Changing value (semantic edit) DOES trigger a live rerun
+        await act({ kind: 'setValue', flow: 'live_demo_flow', id: 'v_val', value: '80' });
+        await eventually(async () => {
+            const current = await snapshot();
+            return current.execution?.status === 'completed' && current.execution.valuesByUse['::inst_clamp::out']?.repr === '80';
+        }, 'live rerun executed after value edit and observed 80');
+
+        // 6. Disable Live mode
+        await post({ type: 'setLiveMode', enabled: false });
+        const disableMsgs = await messages();
+        assert.ok(disableMsgs.some(m => m.ok === true && (m.message ?? '').includes('Live mode disabled')));
+        snap = await snapshot();
+        assert.equal(snap.liveMode?.enabled, false);
+        assert.equal(snap.liveMode?.consented, true); // Consent is remembered
+    });
+
 });

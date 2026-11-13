@@ -4,7 +4,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
+import { BoardNote, FlowExecutionSnapshot, FlowInstance, HarnessDocument, HarnessSnapshot, LiveModeState, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
 import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import { streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
@@ -97,6 +97,12 @@ export class HarnessPanel implements vscode.Disposable {
     private activeVerifications = new Map<string, AbortController>();
     private activeRunController: AbortController | undefined;
     private currentExecution: FlowExecutionSnapshot | undefined;
+    private liveMode: LiveModeState = {
+        enabled: false,
+        consented: false,
+        flowId: MAIN_FLOW,
+    };
+    private liveDebounceTimer: NodeJS.Timeout | undefined;
 
     static async createOrShow(context: vscode.ExtensionContext, adapter: PythonAdapter): Promise<HarnessPanel | undefined> {
         if (HarnessPanel.current) {
@@ -155,15 +161,18 @@ export class HarnessPanel implements vscode.Disposable {
 
         for (const pattern of [folder.nodePattern(), folder.flowPattern()]) {
             const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-            watcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
-            watcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
-            watcher.onDidDelete(() => this.scheduleRefresh(), null, this.disposables);
+            watcher.onDidCreate(() => { this.scheduleRefresh(); this.triggerLiveRerun('file created'); }, null, this.disposables);
+            watcher.onDidChange(() => { this.scheduleRefresh(); this.triggerLiveRerun('file changed'); }, null, this.disposables);
+            watcher.onDidDelete(() => { this.scheduleRefresh(); this.triggerLiveRerun('file deleted'); }, null, this.disposables);
             this.disposables.push(watcher);
         }
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument(event => {
                 const relative = this.folder.relative(event.document.uri);
-                if (this.folder.nodeId(event.document.uri) !== null || flowIdForPath(relative) !== null) this.scheduleRefresh();
+                if (this.folder.nodeId(event.document.uri) !== null || flowIdForPath(relative) !== null) {
+                    this.scheduleRefresh();
+                    this.triggerLiveRerun('text document change');
+                }
             }),
             vscode.window.onDidChangeTextEditorSelection(event => this.selectFromEditor(event.textEditor)),
             vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -243,6 +252,8 @@ export class HarnessPanel implements vscode.Disposable {
                 verifications,
                 usages,
                 execution: this.currentExecution,
+                guardrails: this.snapshot?.guardrails,
+                liveMode: { ...this.liveMode },
             };
             await this.postMessage({ type: 'snapshot', snapshot: this.snapshot });
         } catch (error) {
@@ -335,6 +346,20 @@ export class HarnessPanel implements vscode.Disposable {
         }
         if (value.type === 'stopFlow') {
             this.stopFlow();
+            return;
+        }
+        if (value.type === 'setLiveMode') {
+            const enabled = Boolean(value.enabled);
+            const consented = typeof value.consented === 'boolean' ? value.consented : undefined;
+            const flowId = typeof value.flowId === 'string' ? value.flowId : undefined;
+            await this.setLiveMode(enabled, consented, flowId);
+            return;
+        }
+        if (value.type === 'toggleLiveMode') {
+            const flowId = typeof value.flowId === 'string' ? value.flowId : undefined;
+            const targetEnabled = !this.liveMode.enabled;
+            const consented = typeof value.consented === 'boolean' ? value.consented : undefined;
+            await this.setLiveMode(targetEnabled, consented, flowId);
             return;
         }
         if (value.type === 'acceptProposal' && typeof value.proposalId === 'string') {
@@ -634,6 +659,7 @@ export class HarnessPanel implements vscode.Disposable {
         this.pendingProposal = undefined;
         await this.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
         this.postCommandResult(true, `Wrote the candidate into ${pending.path}. Use Undo to revert it.`);
+        this.triggerLiveRerun('acceptProposal');
     }
 
     private cancelVerification(nodeId?: string): void {
@@ -978,6 +1004,58 @@ export class HarnessPanel implements vscode.Disposable {
         } else {
             this.postCommandResult(false, 'No flow is currently running.');
         }
+    }
+
+    public getLiveMode(): LiveModeState {
+        return { ...this.liveMode };
+    }
+
+    public async setLiveMode(enabled: boolean, consented?: boolean, flowId?: string): Promise<boolean> {
+        if (enabled) {
+            if (!vscode.workspace.isTrusted) {
+                this.postCommandResult(false, 'Live mode requires a trusted workspace.');
+                return false;
+            }
+            if (!consented && !this.liveMode.consented) {
+                this.postCommandResult(false, 'Live mode requires explicit side-effect consent before running.');
+                return false;
+            }
+            if (consented) {
+                this.liveMode.consented = true;
+            }
+            this.liveMode.enabled = true;
+            if (flowId) this.liveMode.flowId = flowId;
+            if (this.snapshot) {
+                this.snapshot.liveMode = { ...this.liveMode };
+            }
+            await this.postMessage({ type: 'liveModeStatus', liveMode: { ...this.liveMode } });
+            this.postCommandResult(true, `Live mode enabled for flow ${this.liveMode.flowId}. Edits will rerun side effects.`);
+            void this.executeFlow(this.liveMode.flowId);
+            return true;
+        } else {
+            this.liveMode.enabled = false;
+            if (this.liveDebounceTimer) {
+                clearTimeout(this.liveDebounceTimer);
+                this.liveDebounceTimer = undefined;
+            }
+            if (this.snapshot) {
+                this.snapshot.liveMode = { ...this.liveMode };
+            }
+            await this.postMessage({ type: 'liveModeStatus', liveMode: { ...this.liveMode } });
+            this.postCommandResult(true, 'Live mode disabled.');
+            return true;
+        }
+    }
+
+    public triggerLiveRerun(reason?: string): void {
+        if (!this.liveMode.enabled || !this.liveMode.consented) return;
+        if (!vscode.workspace.isTrusted) return;
+        if (this.liveDebounceTimer) clearTimeout(this.liveDebounceTimer);
+        this.liveDebounceTimer = setTimeout(() => {
+            this.liveDebounceTimer = undefined;
+            const targetFlow = this.liveMode.flowId || MAIN_FLOW;
+            void this.executeFlow(targetFlow);
+        }, 300);
     }
 
     private folderNodeId(target: unknown): string {
@@ -1820,7 +1898,12 @@ export class HarnessPanel implements vscode.Disposable {
 
     private async handleFolderAction(folder: SlateFolderHost, action: Record<string, unknown>): Promise<void> {
         try {
-            if (await this.handleCanvasAction(action)) return;
+            if (await this.handleCanvasAction(action)) {
+                if (action.kind !== 'runGuardrails') {
+                    this.triggerLiveRerun(String(action.kind));
+                }
+                return;
+            }
             if (action.kind === 'runFlow') {
                 const flowId = typeof action.flowId === 'string' ? action.flowId : typeof action.flow === 'string' ? action.flow : undefined;
                 const inputs = action.inputs && typeof action.inputs === 'object' ? action.inputs as Record<string, unknown> : undefined;
@@ -1829,6 +1912,20 @@ export class HarnessPanel implements vscode.Disposable {
             }
             if (action.kind === 'stopFlow') {
                 this.stopFlow();
+                return;
+            }
+            if (action.kind === 'setLiveMode') {
+                const enabled = Boolean(action.enabled);
+                const consented = typeof action.consented === 'boolean' ? action.consented : undefined;
+                const flowId = typeof action.flowId === 'string' ? action.flowId : undefined;
+                await this.setLiveMode(enabled, consented, flowId);
+                return;
+            }
+            if (action.kind === 'toggleLiveMode') {
+                const flowId = typeof action.flowId === 'string' ? action.flowId : undefined;
+                const targetEnabled = !this.liveMode.enabled;
+                const consented = typeof action.consented === 'boolean' ? action.consented : undefined;
+                await this.setLiveMode(targetEnabled, consented, flowId);
                 return;
             }
             if (action.kind === 'refreshIndex') {
@@ -1886,6 +1983,7 @@ export class HarnessPanel implements vscode.Disposable {
                 await this.refresh();
                 await this.postMessage({ type: 'selectUnit', unitId: nodeId });
                 this.postCommandResult(true, `Created slate/nodes/${nodeId}.json`);
+                this.triggerLiveRerun(`create node ${nodeId}`);
                 return;
             }
             const nodeId = this.folderNodeId(action.target ?? action.consumer);
@@ -1932,6 +2030,7 @@ export class HarnessPanel implements vscode.Disposable {
             await folder.writeNode(nodeId, node);
             this.scheduleRefresh(0);
             this.postCommandResult(true, `Saved slate/nodes/${nodeId}.json`);
+            this.triggerLiveRerun(`edit node ${nodeId}`);
         } catch (error) {
             this.postCommandResult(false, error instanceof Error ? error.message : String(error));
         }
@@ -1996,6 +2095,7 @@ export class HarnessPanel implements vscode.Disposable {
         this.lastAcceptedVersion = undefined;
         this.postCommandResult(true, 'UNDO: reverted the last accepted WorkspaceEdit');
         this.scheduleRefresh(0);
+        this.triggerLiveRerun('undo');
     }
 
     private resolveUnit(query: string): { document: HarnessDocument; unit: ParsedUnit } {
@@ -2119,6 +2219,10 @@ export class HarnessPanel implements vscode.Disposable {
             void vscode.workspace.fs.delete(bridgeFile).then(undefined, () => {});
         }
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
+        if (this.liveDebounceTimer) {
+            clearTimeout(this.liveDebounceTimer);
+            this.liveDebounceTimer = undefined;
+        }
         this.generation?.abort();
         this.describeRun?.abort();
         if (this.activeRunController) {

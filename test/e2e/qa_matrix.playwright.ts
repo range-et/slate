@@ -938,3 +938,105 @@ test('surfaces guardrails, cases list, affected flows, and run-guardrails action
         }),
     }));
 });
+
+test('Live mode topbar toggle, side-effect consent modal, and status badge (S-603)', async ({ page }) => {
+    await page.goto('/harness.html?test=1');
+
+    // 1. Initial snapshot with Live mode inactive and not yet consented
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 1,
+                projectName: 'LiveDemo',
+                documents: [
+                    {
+                        id: 'calc',
+                        path: 'slate/nodes/calc.json',
+                        sourceHash: 'sha256:1111',
+                        valid: true,
+                        stale: false,
+                        units: [{
+                            id: 'calc',
+                            identity: 'durable',
+                            kind: 'function',
+                            name: 'calc',
+                            qualifiedName: 'calc',
+                            parentId: null,
+                            ranges: {
+                                name: { start: { line: 1, character: 4 }, end: { line: 1, character: 8 } },
+                                declaration: { start: { line: 1, character: 0 }, end: { line: 2, character: 16 } },
+                            },
+                            annotation: { intent: 'Perform calculation', contract: 'x: int -> int' },
+                            decorators: [],
+                        }],
+                        diagnostics: [],
+                    },
+                ],
+                flows: [],
+                liveMode: {
+                    enabled: false,
+                    consented: false,
+                    flowId: 'main',
+                },
+            },
+        }, '*');
+    });
+
+    // 2. Check Live toggle button in topbar
+    const liveToggle = page.locator('[data-testid="flow-live-toggle"]');
+    await expect(liveToggle).toBeVisible();
+    await expect(liveToggle).toContainText('⚡ Live');
+    await expect(liveToggle).toHaveAttribute('aria-pressed', 'false');
+
+    // 3. Click Live toggle -> opens Side-Effect Consent Modal
+    await liveToggle.click();
+    const consentModal = page.locator('[data-testid="live-consent-modal"]');
+    await expect(consentModal).toBeVisible();
+    await expect(consentModal).toContainText('Enable Live Execution Mode');
+    await expect(consentModal).toContainText('No Purity Caching');
+    await expect(consentModal).toContainText('Un-sandboxed Execution');
+
+    // 4. Click Cancel button -> closes modal without enabling
+    await page.locator('[data-testid="live-consent-cancel-button"]').click();
+    await expect(consentModal).not.toBeVisible();
+
+    // 5. Click Live toggle again and click Authorize & Enable Live Mode
+    await liveToggle.click();
+    await expect(consentModal).toBeVisible();
+    await page.locator('[data-testid="live-consent-confirm-button"]').click();
+    await expect(consentModal).not.toBeVisible();
+
+    // Verify setLiveMode message dispatched
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'setLiveMode',
+        enabled: true,
+        consented: true,
+        flowId: 'main',
+    }));
+
+    // 6. Update snapshot to reflect Live mode enabled
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'liveModeStatus',
+            liveMode: {
+                enabled: true,
+                consented: true,
+                flowId: 'main',
+            },
+        }, '*');
+    });
+
+    // 7. Verify active state on toggle button and status bar badge
+    await expect(liveToggle).toHaveAttribute('aria-pressed', 'true');
+    const liveBadge = page.locator('[data-testid="status-live-badge"]');
+    await expect(liveBadge).toBeVisible();
+    await expect(liveBadge).toContainText('⚡ Live: main');
+
+    // 8. Click Live toggle while active -> disables Live mode
+    await liveToggle.click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'setLiveMode',
+        enabled: false,
+    }));
+});

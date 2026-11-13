@@ -183,6 +183,12 @@ export interface FlowExecutionSnapshot {
     flowOutputs?: Record<string, ObservedValue>;
 }
 
+export interface LiveModeState {
+    enabled: boolean;
+    consented: boolean;
+    flowId: string;
+}
+
 export interface HarnessSnapshot {
     revision: number;
     projectName: string;
@@ -207,6 +213,8 @@ export interface HarnessSnapshot {
     execution?: FlowExecutionSnapshot;
     /** Guardrails reports by node id (S-602). */
     guardrails?: Record<string, NodeGuardrailsReport>;
+    /** Live mode status (S-603). */
+    liveMode?: LiveModeState;
 }
 
 /** A canvas alias of a node, flow, or library unit (stored in layout.json). */
@@ -343,4 +351,5 @@ export type HostMessage =
     | { type: 'verificationStatus'; result: NodeVerificationResult }
     | { type: 'verificationBatch'; results: Record<string, NodeVerificationResult> }
     | { type: 'executionStatus'; execution: FlowExecutionSnapshot }
-    | { type: 'guardrailsStatus'; report: NodeGuardrailsReport };
+    | { type: 'guardrailsStatus'; report: NodeGuardrailsReport }
+    | { type: 'liveModeStatus'; liveMode: LiveModeState };
