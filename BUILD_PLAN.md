@@ -615,3 +615,17 @@ critical path (before TypeScript self-hosting).
   Usability-First roadmap slices (`S-510`–`S-513` for Python usability, followed
   by `S-850` Prose / Grant & Research Mode `language: "prose"`, keeping Phase 9
   TypeScript self-hosting deferred behind usability).
+- **2026-11-13 — Phase 7 (S-700 & S-701).** Shipped occurrence-aware micro packets
+  (`S-700`, Issue #12) and verified candidates & revision loop (`S-701`, Issue #13).
+  Unbundled local LLM architecture where frontier architect configures endpoints via
+  MCP tools `slate_llm_status` and `slate_configure_llm`. Local LLM health dot and
+  interactive test/config modal dialog in top bar and Inspector. Candidate review editor
+  in Inspector enabling direct editing of proposed body and check before accept.
+  Scratch-overlay guardrail verification in isolated scratch directory (`.slate/scratch/`)
+  running Pydantic, pytest, and mutmut checks without altering disk files. Bounded feedback
+  regeneration within micro-packet budget (`<=600` tokens) with neighbor context trimming.
+  One-click "Try up to 3 revisions" loop with immutable expectations and failure tracebacks.
+  Strict acceptance binding across inputs, hashes, cases, and neighbor signatures.
+  Typed stubs created from wire drops and canvas search with auto-wiring.
+  Full launch gate green (736 Vitest unit tests, 103 Playwright webview tests,
+  66 Extension Host tests, and workbench QA).
