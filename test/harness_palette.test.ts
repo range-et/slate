@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { rankPalette, scoreMatch, type Rankable } from '../src/harness/palette';
 
@@ -49,9 +49,49 @@ describe('mutation regressions for palette boundaries', () => {
         expect(rankPalette([detail, keywords, label], 'run')).toEqual([label, keywords, detail]);
         expect(rankPalette([keywords, detail], 'missing')).toEqual([]);
     });
-    it('orders all four groups on equal scores', () => {
+    it('orders all four groups on equal scores and distinguishes selection from unlisted group', () => {
         const items = ['search', 'node', 'canvas', 'selection'].map(group => item('run', group as Rankable['group']));
         expect(rankPalette(items, 'run').map(entry => entry.group)).toEqual(['selection', 'canvas', 'node', 'search']);
+
+        const unlisted = item('run', '' as Rankable['group']);
+        const selection = item('run', 'selection');
+        expect(rankPalette([selection, unlisted], 'run')).toEqual([unlisted, selection]);
+    });
+    it('guards positive substring index boundaries and zero-score candidate retention', () => {
+        const negativeWithBreak = {
+            toLowerCase: () => ({
+                startsWith: () => false,
+                indexOf: () => -1,
+                [-2]: '_',
+            }),
+        } as unknown as string;
+        expect(scoreMatch(negativeWithBreak, 'run')).toBeNull();
+
+        const zeroWithBreak = {
+            toLowerCase: () => ({
+                startsWith: () => false,
+                indexOf: (needle: string) => (needle === 'run' ? 0 : -1),
+                [-1]: '_',
+            }),
+        } as unknown as string;
+        expect(scoreMatch(zeroWithBreak, 'run')).toBeNull();
+
+        const zeroWithoutBreak = {
+            toLowerCase: () => ({
+                startsWith: () => false,
+                indexOf: (needle: string) => (needle === 'run' ? 0 : -1),
+                [-1]: 'x',
+            }),
+        } as unknown as string;
+        expect(scoreMatch(zeroWithoutBreak, 'run')).toBeNull();
+
+        const minSpy = vi.spyOn(Math, 'min').mockReturnValueOnce(1000);
+        try {
+            const entry = item('run');
+            expect(rankPalette([entry], 'run')).toEqual([entry]);
+        } finally {
+            minSpy.mockRestore();
+        }
     });
 });
 
