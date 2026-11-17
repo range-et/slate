@@ -1,8 +1,12 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { describe, expect, it } from 'vitest';
 import {
     FlowFormatError,
     addRegion,
     emptyFlow,
+    flowSignature,
     groupIntoRegion,
     parseFlow,
     regionPorts,
@@ -10,13 +14,18 @@ import {
     serializeFlow,
     type Port,
 } from '../vscode-extension/src/flow';
+import { compilePython, flowToNode } from '../vscode-extension/src/compile/python';
+import { runFlow } from '../vscode-extension/src/flow_runner';
+import { buildGraph } from '../src/harness/graph';
 import type {
     FlowBranchRegion,
     FlowForeachRegion,
     FlowInstance,
     FlowRepeatRegion,
+    HarnessSnapshot,
     SlateFlow,
 } from '../vscode-extension/src/harness_protocol';
+import type { SlateConfig, SlateNode } from '../vscode-extension/src/slate_folder';
 
 describe('flow regions schema and validation (S-800 Slice 1)', () => {
     it('parses and round-trips branch, foreach, and repeat regions', () => {
@@ -411,5 +420,514 @@ describe('region flow manipulation (add, remove, groupIntoRegion)', () => {
             { from: 'loop_region.out', to: 'post.in:val' },
             { from: 'pre.out', to: 'post.in:trigger' },
         ]));
+    });
+});
+
+function makeNode(name: string, code: string[]): SlateNode {
+    return {
+        name,
+        intent: `Node ${name}`,
+        contract: '',
+        context: [],
+        examples: [],
+        locked: false,
+        order: 0,
+        imports: [],
+        uses: [],
+        code,
+        extra: {},
+    };
+}
+
+const DEFAULT_CONFIG: SlateConfig = {
+    name: 'region_test_proj',
+    language: 'python',
+    target: 'dist',
+    library: [],
+    extra: {},
+};
+
+describe('deterministic Python compilation and execution of regions (S-800)', () => {
+    it('compiles branch region to if/else and only executes the selected branch', async () => {
+        const nodes = new Map<string, SlateNode>([
+            ['safe_double', makeNode('safe_double', ['def safe_double(x: int) -> int:', '    return x * 2'])],
+            ['explode_branch', makeNode('explode_branch', ['def explode_branch(x: int) -> int:', '    raise RuntimeError("unselected branch must not execute")'])],
+            ['add_ten', makeNode('add_ten', ['def add_ten(x: int) -> int:', '    return x + 10'])],
+        ]);
+
+        const thenFlow: SlateFlow = {
+            name: 'then_flow',
+            inputs: [{ name: 'x', annotation: 'int' }],
+            outputs: [{ name: 'result', annotation: 'int' }],
+            instances: [{ id: 'dbl', node: 'safe_double' }],
+            wires: [
+                { from: 'input:x', to: 'dbl.in:x' },
+                { from: 'dbl.out', to: 'output:result' },
+            ],
+            extra: {},
+        };
+
+        const elseFlow: SlateFlow = {
+            name: 'else_flow',
+            inputs: [{ name: 'x', annotation: 'int' }],
+            outputs: [{ name: 'result', annotation: 'int' }],
+            instances: [{ id: 'boom', node: 'explode_branch' }],
+            wires: [
+                { from: 'input:x', to: 'boom.in:x' },
+                { from: 'boom.out', to: 'output:result' },
+            ],
+            extra: {},
+        };
+
+        const mainFlow: SlateFlow = {
+            name: 'main',
+            inputs: [
+                { name: 'flag', annotation: 'bool' },
+                { name: 'val', annotation: 'int' },
+            ],
+            outputs: [{ name: 'final', annotation: 'int' }],
+            instances: [{ id: 'post', node: 'add_ten' }],
+            regions: [
+                {
+                    id: 'br_1',
+                    kind: 'branch',
+                    thenFlow: 'then_flow',
+                    elseFlow: 'else_flow',
+                    conditionPort: 'cond',
+                },
+            ],
+            wires: [
+                { from: 'input:flag', to: 'br_1.in:cond' },
+                { from: 'input:val', to: 'br_1.in:x' },
+                { from: 'br_1.out', to: 'post.in:x' },
+                { from: 'post.out', to: 'output:final' },
+            ],
+            extra: {},
+        };
+
+        const flows = new Map<string, SlateFlow>([
+            ['then_flow', thenFlow],
+            ['else_flow', elseFlow],
+            ['main', mainFlow],
+        ]);
+
+        const compiled = compilePython(nodes, DEFAULT_CONFIG, flows);
+        expect(compiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        const pyCode = compiled.files.get('region_test_proj.py')!;
+        expect(pyCode).toContain('if flag:');
+        expect(pyCode).toContain('v_br_1 = then_flow(x=val)');
+        expect(pyCode).toContain('else:');
+        expect(pyCode).toContain('v_br_1 = else_flow(x=val)');
+
+        // Execute with flag=True: else_flow raises RuntimeError if called, proving only then_flow runs!
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-branch-test-'));
+        try {
+            const snap = await runFlow({
+                workspaceRoot: tmpDir,
+                flowId: 'main',
+                documents: nodes,
+                flows,
+                config: DEFAULT_CONFIG,
+                inputs: { flag: true, val: 21 },
+                isTrusted: true,
+            });
+
+            expect(snap.status).toBe('completed');
+            expect(snap.flowOutputs?.final?.json).toBe(52); // (21 * 2) + 10
+
+            const regionObs = snap.observations.find(o => o.instanceId === 'br_1');
+            expect(regionObs?.status).toBe('executed');
+            expect(regionObs?.outputs.out?.json).toBe(42);
+
+            const thenChildObs = snap.observations.find(o => o.instanceId === 'dbl');
+            expect(thenChildObs?.status).toBe('executed');
+            expect(thenChildObs?.path).toEqual(['br_1', 'then']);
+
+            const elseChildObs = snap.observations.find(o => o.instanceId === 'boom');
+            expect(elseChildObs?.status).toBe('not_executed');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('defaults branch region output to None when elseFlow is omitted and condition is false', async () => {
+        const nodes = new Map<string, SlateNode>([
+            ['inc', makeNode('inc', ['def inc(x: int) -> int:', '    return x + 1'])],
+        ]);
+        const thenFlow: SlateFlow = {
+            name: 'then_only',
+            inputs: [{ name: 'x', annotation: 'int' }],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [{ id: 'step', node: 'inc' }],
+            wires: [
+                { from: 'input:x', to: 'step.in:x' },
+                { from: 'step.out', to: 'output:out' },
+            ],
+            extra: {},
+        };
+        const mainFlow: SlateFlow = {
+            name: 'main',
+            inputs: [
+                { name: 'cond', annotation: 'bool' },
+                { name: 'x', annotation: 'int' },
+            ],
+            outputs: [{ name: 'res', annotation: 'int | None' }],
+            instances: [],
+            regions: [{ id: 'opt_branch', kind: 'branch', thenFlow: 'then_only' }],
+            wires: [
+                { from: 'input:cond', to: 'opt_branch.in:condition' },
+                { from: 'input:x', to: 'opt_branch.in:x' },
+                { from: 'opt_branch.out', to: 'output:res' },
+            ],
+            extra: {},
+        };
+        const flows = new Map<string, SlateFlow>([
+            ['then_only', thenFlow],
+            ['main', mainFlow],
+        ]);
+
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-branch-none-'));
+        try {
+            const snap = await runFlow({
+                workspaceRoot: tmpDir,
+                flowId: 'main',
+                documents: nodes,
+                flows,
+                config: DEFAULT_CONFIG,
+                inputs: { cond: false, x: 10 },
+                isTrusted: true,
+            });
+            expect(snap.status).toBe('completed');
+            expect(snap.flowOutputs?.res?.json).toBeNull();
+            const stepObs = snap.observations.find(o => o.instanceId === 'step');
+            expect(stepObs?.status).toBe('not_executed');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('compiles and executes foreach region with item, index, broadcast inputs, and maxIterations bound', async () => {
+        const nodes = new Map<string, SlateNode>([
+            [
+                'weighted_shift',
+                makeNode('weighted_shift', [
+                    'def weighted_shift(val: int, idx: int, bias: int) -> int:',
+                    '    return val * (idx + 1) + bias',
+                ]),
+            ],
+        ]);
+
+        const bodyFlow: SlateFlow = {
+            name: 'item_body',
+            inputs: [
+                { name: 'elem', annotation: 'int' },
+                { name: 'idx', annotation: 'int' },
+                { name: 'bias', annotation: 'int' },
+            ],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [{ id: 'calc', node: 'weighted_shift' }],
+            wires: [
+                { from: 'input:elem', to: 'calc.in:val' },
+                { from: 'input:idx', to: 'calc.in:idx' },
+                { from: 'input:bias', to: 'calc.in:bias' },
+                { from: 'calc.out', to: 'output:out' },
+            ],
+            extra: {},
+        };
+
+        const mainFlow: SlateFlow = {
+            name: 'main',
+            inputs: [
+                { name: 'nums', annotation: 'list[int]' },
+                { name: 'offset', annotation: 'int' },
+            ],
+            outputs: [{ name: 'results', annotation: 'list[int]' }],
+            instances: [],
+            regions: [
+                {
+                    id: 'fe_loop',
+                    kind: 'foreach',
+                    bodyFlow: 'item_body',
+                    collectionPort: 'records',
+                    itemPort: 'elem',
+                    indexPort: 'idx',
+                    maxIterations: 3,
+                },
+            ],
+            wires: [
+                { from: 'input:nums', to: 'fe_loop.in:records' },
+                { from: 'input:offset', to: 'fe_loop.in:bias' },
+                { from: 'fe_loop.out', to: 'output:results' },
+            ],
+            extra: {},
+        };
+
+        const flows = new Map<string, SlateFlow>([
+            ['item_body', bodyFlow],
+            ['main', mainFlow],
+        ]);
+
+        const compiled = compilePython(nodes, DEFAULT_CONFIG, flows);
+        expect(compiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        const pyCode = compiled.files.get('region_test_proj.py')!;
+        expect(pyCode).toContain('for _idx, _item in enumerate(nums):');
+        expect(pyCode).toContain('if _idx >= 3:');
+        expect(pyCode).toContain('item_body(elem=_item, idx=_idx, bias=offset)');
+
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-foreach-test-'));
+        try {
+            const snap = await runFlow({
+                workspaceRoot: tmpDir,
+                flowId: 'main',
+                documents: nodes,
+                flows,
+                config: DEFAULT_CONFIG,
+                inputs: { nums: [10, 20, 30, 40, 50], offset: 5 },
+                isTrusted: true,
+            });
+
+            expect(snap.status).toBe('completed');
+            // Bounded to first 3 items:
+            // idx 0: 10 * 1 + 5 = 15
+            // idx 1: 20 * 2 + 5 = 45
+            // idx 2: 30 * 3 + 5 = 95
+            expect(snap.flowOutputs?.results?.json).toEqual([15, 45, 95]);
+
+            const iterObs = snap.observations.filter(o => o.instanceId === 'calc');
+            expect(iterObs).toHaveLength(3);
+            expect(iterObs.map(o => o.path)).toEqual([
+                ['fe_loop', 'iter:0'],
+                ['fe_loop', 'iter:1'],
+                ['fe_loop', 'iter:2'],
+            ]);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('compiles and executes repeat region with loop-carried state and early condition termination', async () => {
+        const nodes = new Map<string, SlateNode>([
+            [
+                'step_fn',
+                makeNode('step_fn', [
+                    'def step_fn(acc: int, step: int) -> int:',
+                    '    return acc + step',
+                ]),
+            ],
+            [
+                'keep_going',
+                makeNode('keep_going', [
+                    'def keep_going(acc: int, limit: int) -> bool:',
+                    '    return acc < limit',
+                ]),
+            ],
+        ]);
+
+        const bodyFlow: SlateFlow = {
+            name: 'repeat_body',
+            inputs: [
+                { name: 'acc', annotation: 'int' },
+                { name: 'step', annotation: 'int' },
+                { name: 'limit', annotation: 'int' },
+            ],
+            outputs: [
+                { name: 'acc', annotation: 'int' },
+                { name: 'cont', annotation: 'bool' },
+            ],
+            instances: [
+                { id: 'advance', node: 'step_fn' },
+                { id: 'check', node: 'keep_going' },
+            ],
+            wires: [
+                { from: 'input:acc', to: 'advance.in:acc' },
+                { from: 'input:step', to: 'advance.in:step' },
+                { from: 'advance.out', to: 'check.in:acc' },
+                { from: 'input:limit', to: 'check.in:limit' },
+                { from: 'advance.out', to: 'output:acc' },
+                { from: 'check.out', to: 'output:cont' },
+            ],
+            extra: {},
+        };
+
+        const mainFlow: SlateFlow = {
+            name: 'main',
+            inputs: [
+                { name: 'init_acc', annotation: 'int' },
+                { name: 'step', annotation: 'int' },
+                { name: 'limit', annotation: 'int' },
+            ],
+            outputs: [{ name: 'final_acc', annotation: 'int' }],
+            instances: [],
+            regions: [
+                {
+                    id: 'rep_1',
+                    kind: 'repeat',
+                    bodyFlow: 'repeat_body',
+                    maxIterations: 20,
+                    statePorts: ['acc'],
+                    conditionPort: 'cont',
+                },
+            ],
+            wires: [
+                { from: 'input:init_acc', to: 'rep_1.in:acc' },
+                { from: 'input:step', to: 'rep_1.in:step' },
+                { from: 'input:limit', to: 'rep_1.in:limit' },
+                { from: 'rep_1.out', to: 'output:final_acc' },
+            ],
+            extra: {},
+        };
+
+        const flows = new Map<string, SlateFlow>([
+            ['repeat_body', bodyFlow],
+            ['main', mainFlow],
+        ]);
+
+        const compiled = compilePython(nodes, DEFAULT_CONFIG, flows);
+        expect(compiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        const pyCode = compiled.files.get('region_test_proj.py')!;
+        expect(pyCode).toContain('for _iter in range(20):');
+        expect(pyCode).toContain('if not _cond_rep_1:');
+        expect(pyCode).toContain('break');
+
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-repeat-test-'));
+        try {
+            // Early break: starts at 0, adds 4 each iter, stops when acc >= 10 (after 3 iterations -> 12)
+            const earlySnap = await runFlow({
+                workspaceRoot: tmpDir,
+                flowId: 'main',
+                documents: nodes,
+                flows,
+                config: DEFAULT_CONFIG,
+                inputs: { init_acc: 0, step: 4, limit: 10 },
+                isTrusted: true,
+            });
+            expect(earlySnap.status).toBe('completed');
+            expect(earlySnap.flowOutputs?.final_acc?.json).toBe(12);
+            const earlyIters = earlySnap.observations.filter(o => o.instanceId === 'advance');
+            expect(earlyIters).toHaveLength(3);
+
+            // MaxIterations bound: limit=1000 so cont is always True; stops at maxIterations=20 -> 0 + 20*4 = 80
+            const boundSnap = await runFlow({
+                workspaceRoot: tmpDir,
+                flowId: 'main',
+                documents: nodes,
+                flows,
+                config: DEFAULT_CONFIG,
+                inputs: { init_acc: 0, step: 4, limit: 1000 },
+                isTrusted: true,
+            });
+            expect(boundSnap.status).toBe('completed');
+            expect(boundSnap.flowOutputs?.final_acc?.json).toBe(80);
+            const boundIters = boundSnap.observations.filter(o => o.instanceId === 'advance');
+            expect(boundIters).toHaveLength(20);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('buildGraph region rendering (S-800)', () => {
+    it('renders region nodes on the flow canvas with boundary ports, badges, child flow labels, and wires', () => {
+        const thenFlow: SlateFlow = {
+            name: 'pos_flow',
+            inputs: [{ name: 'x', annotation: 'int' }],
+            outputs: [{ name: 'out', annotation: 'int' }],
+            instances: [],
+            wires: [],
+            extra: {},
+        };
+        const bodyFlow: SlateFlow = {
+            name: 'loop_body',
+            inputs: [
+                { name: 'item', annotation: 'str' },
+                { name: 'prefix', annotation: 'str' },
+            ],
+            outputs: [{ name: 'formatted', annotation: 'str' }],
+            instances: [],
+            wires: [],
+            extra: {},
+        };
+        const pipelineFlow: SlateFlow = {
+            name: 'pipeline',
+            inputs: [
+                { name: 'cond', annotation: 'bool' },
+                { name: 'val', annotation: 'int' },
+                { name: 'words', annotation: 'List[str]' },
+                { name: 'tag', annotation: 'str' },
+            ],
+            outputs: [
+                { name: 'num_out', annotation: 'int' },
+                { name: 'list_out', annotation: 'List[str]' },
+            ],
+            instances: [],
+            regions: [
+                {
+                    id: 'br_node',
+                    kind: 'branch',
+                    label: 'Positive Guard',
+                    thenFlow: 'pos_flow',
+                },
+                {
+                    id: 'fe_node',
+                    kind: 'foreach',
+                    label: 'Format Words',
+                    bodyFlow: 'loop_body',
+                    maxIterations: 25,
+                },
+            ],
+            wires: [
+                { from: 'input:cond', to: 'br_node.in:condition' },
+                { from: 'input:val', to: 'br_node.in:x' },
+                { from: 'br_node.out', to: 'output:num_out' },
+                { from: 'input:words', to: 'fe_node.in:items' },
+                { from: 'input:tag', to: 'fe_node.in:prefix' },
+                { from: 'fe_node.out', to: 'output:list_out' },
+            ],
+            extra: {},
+        };
+
+        const snapshot: HarnessSnapshot = {
+            revision: 1,
+            projectName: 'demo',
+            documents: [],
+            flows: [
+                { id: 'pos_flow', flow: thenFlow },
+                { id: 'loop_body', flow: bodyFlow },
+                { id: 'pipeline', flow: pipelineFlow },
+            ],
+        };
+
+        const graph = buildGraph(snapshot, { view: 'compose', flow: 'pipeline' });
+        const brNode = graph.nodes.find(n => n.id === 'br_node');
+        expect(brNode).toBeDefined();
+        expect(brNode!.data.kind).toBe('region');
+        expect(brNode!.data.regionBadge).toBe('BRANCH');
+        expect(brNode!.data.label).toBe('Positive Guard');
+        expect(brNode!.data.childFlows).toEqual(['pos_flow']);
+        expect(brNode!.data.inputs).toEqual([
+            { id: 'in:condition', name: 'condition', annotation: 'bool', optional: false },
+            { id: 'in:x', name: 'x', annotation: 'int', optional: false },
+        ]);
+        expect(brNode!.data.outputs).toEqual([
+            { id: 'out', name: 'out', annotation: 'int' },
+        ]);
+
+        const feNode = graph.nodes.find(n => n.id === 'fe_node');
+        expect(feNode).toBeDefined();
+        expect(feNode!.data.kind).toBe('region');
+        expect(feNode!.data.regionBadge).toBe('FOREACH');
+        expect(feNode!.data.label).toBe('Format Words');
+        expect(feNode!.data.childFlows).toEqual(['loop_body']);
+        expect(feNode!.data.inputs).toEqual([
+            { id: 'in:items', name: 'items', annotation: 'List[str]', optional: false },
+            { id: 'in:prefix', name: 'prefix', annotation: 'str', optional: false },
+        ]);
+        expect(feNode!.data.outputs).toEqual([
+            { id: 'out', name: 'formatted', annotation: 'List[str]' },
+        ]);
+
+        // All 6 wires connect cleanly without type mismatch
+        expect(graph.edges).toHaveLength(6);
+        expect(graph.edges.every(e => !(e.data as any)?.mismatch)).toBe(true);
     });
 });

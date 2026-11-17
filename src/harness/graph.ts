@@ -1,9 +1,9 @@
 import type { Edge, Node } from '@xyflow/react';
 
 import {
-    flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature, type Port,
+    flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, unitSignature, type CallableSignature, type Port,
 } from '../../vscode-extension/src/flow';
-import type { BoardNote, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeGuardrailsReport, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow, TestCase } from './types';
+import type { BoardNote, FlowRegion, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeGuardrailsReport, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow, TestCase } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
@@ -35,7 +35,7 @@ export interface BuildGraphOptions {
 export type SlateNodeData = {
     label: string;
     detail: string;
-    kind: 'document' | 'note' | 'module' | 'ref' | 'placeholder' | 'flow' | 'instance' | 'value' | 'viewer' | 'group' | 'folder' | HarnessUnit['kind'];
+    kind: 'document' | 'note' | 'module' | 'ref' | 'placeholder' | 'flow' | 'instance' | 'value' | 'viewer' | 'group' | 'folder' | 'region' | HarnessUnit['kind'];
     identity?: HarnessUnit['identity'];
     invalid?: boolean;
     stale?: boolean;
@@ -82,6 +82,12 @@ export type SlateNodeData = {
     cases?: TestCase[];
     /** Guardrails report (S-602). */
     guardrails?: NodeGuardrailsReport;
+    /** Explicit control-flow region definition (S-800). */
+    region?: FlowRegion;
+    /** Control-flow region badge (`BRANCH`, `FOREACH`, `REPEAT`). */
+    regionBadge?: 'BRANCH' | 'FOREACH' | 'REPEAT';
+    /** Referenced child flows for a control-flow region. */
+    childFlows?: string[];
 };
 
 function compactOutsideStrings(text: string): string {
@@ -493,6 +499,80 @@ function viewerNode(snapshot: HarnessSnapshot, id: string, targetEndpoint: strin
     };
 }
 
+function regionNode(
+    snapshot: HarnessSnapshot,
+    targets: ReturnType<typeof callables>,
+    region: FlowRegion,
+    position: { x: number; y: number },
+): Node<SlateNodeData> {
+    const flowLookup = (id: string): SlateFlow | undefined => {
+        const cleanId = id.startsWith('flow:') ? id.slice('flow:'.length) : id;
+        const found = flowOf(snapshot, cleanId);
+        if (found) return found;
+        const callable = targets.get(cleanId) ?? targets.get(id);
+        if (callable) {
+            return {
+                name: callable.signature.name,
+                inputs: callable.signature.params
+                    .filter(p => p.kind === 'positional' || p.kind === 'keyword')
+                    .map(p => ({ name: p.name, annotation: p.annotation })),
+                outputs: callable.signature.outputs ?? [{ name: 'out', annotation: callable.signature.returns }],
+                instances: [],
+                wires: [],
+                extra: {},
+            };
+        }
+        return undefined;
+    };
+
+    let ports: { inputs: Port[]; outputs: Port[] } = { inputs: [], outputs: [] };
+    let broken = false;
+    let problem: string | undefined;
+    try {
+        ports = regionPorts(region, flowLookup);
+    } catch (err) {
+        broken = true;
+        problem = err instanceof Error ? err.message : String(err);
+    }
+
+    const badge = region.kind.toUpperCase() as 'BRANCH' | 'FOREACH' | 'REPEAT';
+    const childFlows = region.kind === 'branch'
+        ? (region.elseFlow ? [region.thenFlow, region.elseFlow] : [region.thenFlow])
+        : [region.bodyFlow];
+    const primaryFlow = region.kind === 'branch' ? region.thenFlow : region.bodyFlow;
+    const detail = region.kind === 'branch'
+        ? `then: ${region.thenFlow}${region.elseFlow ? ` · else: ${region.elseFlow}` : ''}`
+        : region.kind === 'foreach'
+        ? `body: ${region.bodyFlow}${region.maxIterations ? ` (≤${region.maxIterations})` : ''}`
+        : `body: ${region.bodyFlow} (≤${region.maxIterations})`;
+    const groupColor = region.kind === 'branch' ? '#f59e72' : region.kind === 'foreach' ? '#3ecff5' : '#a78bfa';
+    const execution = snapshot.execution?.observations.find(obs => obs.instanceId === region.id);
+
+    return {
+        id: region.id,
+        type: 'slate',
+        position,
+        data: {
+            label: region.label ?? region.id,
+            detail,
+            kind: 'region',
+            region,
+            regionBadge: badge,
+            childFlows,
+            flowId: primaryFlow,
+            target: primaryFlow,
+            broken,
+            problem,
+            path: '',
+            groupColor,
+            execution,
+            observedOutputs: execution?.outputs,
+            observedInputs: execution?.inputs,
+            ...ports,
+        },
+    };
+}
+
 function dataEdges(
     flow: SlateFlow,
     byId: ReadonlyMap<string, Node<SlateNodeData>>,
@@ -500,7 +580,14 @@ function dataEdges(
 ): Edge[] {
     const nodeFor = (endpoint: string, side: 'from' | 'to') => {
         const { instance, port } = parseEndpoint(endpoint);
-        return instance === null ? { node: side === 'from' ? '__input' : '__output', handle: port } : { node: instance, handle: port };
+        if (instance === null) {
+            return { node: side === 'from' ? '__input' : '__output', handle: port };
+        }
+        const ports = side === 'from' ? byId.get(instance)?.data.outputs : byId.get(instance)?.data.inputs;
+        if (side === 'from' && ports && ports.length === 1 && (port === 'out' || port === `out:${ports[0].name}`)) {
+            return { node: instance, handle: ports[0].id };
+        }
+        return { node: instance, handle: port };
     };
     const annotationOf = (endpoint: string, side: 'from' | 'to'): string | null => {
         const { instance, port } = parseEndpoint(endpoint);
@@ -509,6 +596,9 @@ function dataEdges(
             return flow.outputs.find(output => `output:${output.name}` === port)?.annotation ?? null;
         }
         const ports = side === 'from' ? byId.get(instance)?.data.outputs : byId.get(instance)?.data.inputs;
+        if (side === 'from' && ports && ports.length === 1 && (port === 'out' || port === `out:${ports[0].name}`)) {
+            return ports[0].annotation ?? null;
+        }
         return ports?.find(item => item.id === port)?.annotation ?? null;
     };
     return flow.wires.flatMap(wire => {
@@ -616,6 +706,9 @@ function buildRoot(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], edge
                 const targetWire = main.wires.find(w => w.to === `${instance.id}.in` || w.to === `${instance.id}.in:in`)?.from;
                 nodes.push(viewerNode(snapshot, instance.id, targetWire, layout[instance.id] ?? { x: 760, y: 720 + index * 90 }));
             });
+        (main.regions ?? []).forEach((region, index) => {
+            nodes.push(regionNode(snapshot, targets, region, layout[region.id] ?? { x: 760, y: 840 + index * 190 }));
+        });
         const byId = new Map(nodes.map(node => [node.id, node]));
         edges.push(...dataEdges(main, byId, snapshot));
     }
@@ -628,12 +721,13 @@ function buildFlow(snapshot: HarnessSnapshot, flowId: string, nodes: Node<SlateN
     const positions = snapshot.flowPositions?.[flowId] ?? {};
     const groupPort = (prefix: string) => (port: { name: string; annotation: string | null }): Port => ({ id: `${prefix}:${port.name}`, name: port.name, annotation: port.annotation });
     const empty = (prefix: string): Port => ({ id: `${prefix}:+`, name: '+', annotation: null, optional: true });
+    const totalItems = flow.instances.length + (flow.regions?.length ?? 0);
     nodes.push({
         id: '__input', type: 'slate', position: positions.__input ?? { x: 40, y: 120 },
         data: { label: 'Group input', detail: flow.name, kind: 'group', path: '', outputs: [...flow.inputs.map(groupPort('input')), empty('input')] },
     });
     nodes.push({
-        id: '__output', type: 'slate', position: positions.__output ?? { x: 360 + Math.ceil(flow.instances.length / 3) * 300, y: 120 },
+        id: '__output', type: 'slate', position: positions.__output ?? { x: 360 + Math.ceil(totalItems / 3) * 300, y: 120 },
         data: { label: 'Group output', detail: flow.name, kind: 'group', path: '', inputs: [...flow.outputs.map(groupPort('output')), empty('output')] },
     });
     flow.instances.forEach((instance, index) => {
@@ -644,6 +738,11 @@ function buildFlow(snapshot: HarnessSnapshot, flowId: string, nodes: Node<SlateN
             : instance.kind === 'viewer'
             ? viewerNode(snapshot, instance.id, targetWire, position)
             : callerNode(snapshot, targets, instance.id, instance.node!, 'instance', position));
+    });
+    (flow.regions ?? []).forEach((region, rIdx) => {
+        const index = flow.instances.length + rIdx;
+        const position = positions[region.id] ?? { x: 340 + Math.floor(index / 3) * 300, y: 40 + (index % 3) * 190 };
+        nodes.push(regionNode(snapshot, targets, region, position));
     });
     const byId = new Map(nodes.map(node => [node.id, node]));
     edges.push(...dataEdges(flow, byId, snapshot));

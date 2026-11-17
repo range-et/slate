@@ -847,7 +847,7 @@ export function regionPorts(
 
         const outputs: Port[] = [];
         const stateOutputs = bodyFlow.outputs.filter(p => stateNames.has(p.name));
-        if (stateOutputs.length === 1 && bodyFlow.outputs.length === 1) {
+        if (stateOutputs.length === 1) {
             outputs.push({ id: 'out', name: stateOutputs[0].name, annotation: stateOutputs[0].annotation });
         } else {
             for (const port of stateOutputs) {

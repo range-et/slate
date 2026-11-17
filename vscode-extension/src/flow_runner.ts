@@ -73,6 +73,7 @@ interface RawTraceEvent {
 export function parseTraceLog(
     traceContent: string,
     targetFlow: SlateFlow | undefined,
+    flows?: ReadonlyMap<string, SlateFlow>,
 ): { observations: InstanceRunObservation[]; valuesByUse: Record<string, ObservedValue>; flowOutputs: Record<string, ObservedValue>; runError?: string } {
     const lines = traceContent.split('\n').filter(line => line.trim().length > 0);
     const obsMap = new Map<string, InstanceRunObservation>();
@@ -124,7 +125,7 @@ export function parseTraceLog(
         }
     }
 
-    // Ensure all instances of the target flow are represented; if not observed, mark not_executed
+    // Ensure all instances and regions of the target flow are represented; if not observed, mark not_executed
     if (targetFlow) {
         for (const instance of targetFlow.instances) {
             const rootKey = `::${instance.id}`;
@@ -136,6 +137,50 @@ export function parseTraceLog(
                     inputs: {},
                     outputs: {},
                 });
+            }
+        }
+        for (const region of targetFlow.regions ?? []) {
+            const rootKey = `::${region.id}`;
+            if (!obsMap.has(rootKey)) {
+                obsMap.set(rootKey, {
+                    path: [],
+                    instanceId: region.id,
+                    status: 'not_executed',
+                    inputs: {},
+                    outputs: {},
+                });
+            }
+            if (region.kind === 'branch' && flows) {
+                const cleanThen = region.thenFlow.startsWith('flow:') ? region.thenFlow.slice(5) : region.thenFlow;
+                const thenFlow = flows.get(cleanThen) ?? flows.get(region.thenFlow);
+                for (const inst of thenFlow?.instances ?? []) {
+                    const key = `${region.id}/then::${inst.id}`;
+                    if (!obsMap.has(key)) {
+                        obsMap.set(key, {
+                            path: [region.id, 'then'],
+                            instanceId: inst.id,
+                            status: 'not_executed',
+                            inputs: {},
+                            outputs: {},
+                        });
+                    }
+                }
+                if (region.elseFlow) {
+                    const cleanElse = region.elseFlow.startsWith('flow:') ? region.elseFlow.slice(5) : region.elseFlow;
+                    const elseFlow = flows.get(cleanElse) ?? flows.get(region.elseFlow);
+                    for (const inst of elseFlow?.instances ?? []) {
+                        const key = `${region.id}/else::${inst.id}`;
+                        if (!obsMap.has(key)) {
+                            obsMap.set(key, {
+                                path: [region.id, 'else'],
+                                instanceId: inst.id,
+                                status: 'not_executed',
+                                inputs: {},
+                                outputs: {},
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -182,7 +227,7 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
         };
     }
 
-    if (targetFlow.instances.length === 0) {
+    if (targetFlow.instances.length === 0 && (!targetFlow.regions || targetFlow.regions.length === 0)) {
         return {
             runId: '',
             flowId,
@@ -345,7 +390,7 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
             traceContent = fs.readFileSync(traceFilePath, 'utf-8');
         }
 
-        const { observations, valuesByUse, flowOutputs, runError } = parseTraceLog(traceContent, targetFlow);
+        const { observations, valuesByUse, flowOutputs, runError } = parseTraceLog(traceContent, targetFlow, request.flows);
         const durationMs = Date.now() - startTime;
 
         let status: RunStatus = 'completed';

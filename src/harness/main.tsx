@@ -281,7 +281,7 @@ function verificationTooltip(v: NodeVerificationResult): string {
 function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
     const colorStyle = { '--slate-group': data.groupColor } as React.CSSProperties;
     const plainHandles = data.kind === 'note';
-    const kindLabel = data.kind === 'ref' ? 'reference' : data.kind === 'instance' ? (data.flowId ? 'flow' : 'node') : data.kind.replace('_', ' ');
+    const kindLabel = data.kind === 'ref' ? 'reference' : data.kind === 'instance' ? (data.flowId ? 'flow' : 'node') : data.kind === 'region' ? (data.regionBadge ?? data.region?.kind.toUpperCase() ?? 'REGION') : data.kind.replace('_', ' ');
     return (
         <div
             className={`slate-node slate-node--${data.kind} ${data.container ? 'slate-node--container' : ''} ${selected ? 'is-selected' : ''} ${data.invalid || data.broken ? 'is-invalid' : ''} ${data.stale ? 'is-stale' : ''} ${data.highlighted ? 'is-highlighted' : ''}`}
@@ -290,7 +290,7 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
             {data.contextPorts && !data.container && <Handle type="target" position={Position.Top} id="ctx-in" className="slate-node__ctx" title="Context in" />}
             {plainHandles && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
             {data.kind !== 'folder' && <div className="slate-node__kind">
-                <span>{kindLabel}</span>
+                <span data-testid={data.kind === 'region' && data.region ? `region-badge-${data.region.kind}` : undefined}>{kindLabel}</span>
                 <span>
                     {data.problem && <span className="slate-node__problem" data-testid="node-problem-badge" title={data.problem}>!&nbsp;</span>}
                     {data.broken && <span className="slate-node__problem" title="The target no longer exists">BROKEN&nbsp;</span>}
@@ -338,6 +338,13 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
             </div>}
             <strong>{data.label}</strong>
             {!data.container && data.kind !== 'value' && data.kind !== 'viewer' && data.detail && <code>{data.detail}</code>}
+            {data.kind === 'region' && data.childFlows && data.childFlows.length > 0 && (
+                <div className="slate-node__region-flows" data-testid="region-child-flows">
+                    {data.childFlows.map(cf => (
+                        <span key={cf} className="slate-node__region-flow-tag">→ {cf}</span>
+                    ))}
+                </div>
+            )}
             {data.kind === 'value' && <ValueEditor id={id} value={data.value ?? ''} />}
             {data.kind === 'viewer' && <ViewerNodeView id={id} data={data} />}
             {data.editableIntent && data.unit && !data.container
@@ -554,6 +561,67 @@ function Inspector({
                             }}>Copy value</button>
                         )}
                         <button className="danger" onClick={() => action({ kind: 'deleteItems', ids: [node.id] })}>Unpin viewer</button>
+                    </div>
+                </section>
+            )}
+            {node.data.kind === 'region' && node.data.region && (
+                <section className="harness-inspector__region" data-testid="inspector-region-section">
+                    <h4>Control Flow Region ({node.data.regionBadge ?? node.data.region.kind.toUpperCase()})</h4>
+                    <dl>
+                        <dt>Region ID</dt>
+                        <dd><code>{node.data.region.id}</code></dd>
+                        <dt>Kind</dt>
+                        <dd><code>{node.data.region.kind}</code></dd>
+                        {node.data.region.kind === 'branch' && (
+                            <>
+                                <dt>Condition Port</dt>
+                                <dd><code>{node.data.region.conditionPort ?? 'condition'}</code></dd>
+                                <dt>Then Flow</dt>
+                                <dd><code>{node.data.region.thenFlow}</code></dd>
+                                <dt>Else Flow</dt>
+                                <dd><code>{node.data.region.elseFlow ?? 'None'}</code></dd>
+                            </>
+                        )}
+                        {node.data.region.kind === 'foreach' && (
+                            <>
+                                <dt>Body Flow</dt>
+                                <dd><code>{node.data.region.bodyFlow}</code></dd>
+                                <dt>Collection Port</dt>
+                                <dd><code>{node.data.region.collectionPort ?? 'items'}</code></dd>
+                                <dt>Item Port</dt>
+                                <dd><code>{node.data.region.itemPort ?? 'item'}</code></dd>
+                                <dt>Index Port</dt>
+                                <dd><code>{node.data.region.indexPort ?? 'index'}</code></dd>
+                                {node.data.region.maxIterations !== undefined && (
+                                    <>
+                                        <dt>Max Iterations</dt>
+                                        <dd><code>{node.data.region.maxIterations}</code></dd>
+                                    </>
+                                )}
+                            </>
+                        )}
+                        {node.data.region.kind === 'repeat' && (
+                            <>
+                                <dt>Body Flow</dt>
+                                <dd><code>{node.data.region.bodyFlow}</code></dd>
+                                <dt>Max Iterations</dt>
+                                <dd><code>{node.data.region.maxIterations}</code></dd>
+                                <dt>State Ports</dt>
+                                <dd><code>{node.data.region.statePorts?.join(', ') || 'inferred'}</code></dd>
+                                {node.data.region.conditionPort && (
+                                    <>
+                                        <dt>Condition Port</dt>
+                                        <dd><code>{node.data.region.conditionPort}</code></dd>
+                                    </>
+                                )}
+                            </>
+                        )}
+                    </dl>
+                    <div className="harness-inspector__actions">
+                        {(node.data.childFlows ?? []).map(cf => (
+                            <button key={cf} className="secondary" onClick={() => onEnterFlow(cf)}>Open {cf}</button>
+                        ))}
+                        <button className="danger" onClick={() => action({ kind: 'removeRegion', regionId: node.id })}>Remove region</button>
                     </div>
                 </section>
             )}
@@ -1266,6 +1334,13 @@ function BoardContextMenu({ menu, snapshot, scope, onClose, onFit, onSelect, onE
         </>}
         {data?.kind === 'value' && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>Delete value</button>}
         {data?.kind === 'viewer' && <button role="menuitem" className="danger" onClick={() => act({ kind: 'deleteItems', ids: [node!.id] })}>Unpin viewer</button>}
+        {data?.kind === 'region' && <>
+            <div className="board-context-menu__label">{data.regionBadge ?? 'REGION'} · {data.label}</div>
+            {(data.childFlows ?? []).map(cf => (
+                <button key={cf} role="menuitem" onClick={() => { onEnterFlow(cf); onClose(); }}>Open flow {cf}</button>
+            ))}
+            <button role="menuitem" className="danger" onClick={() => act({ kind: 'removeRegion', regionId: node!.id })}>Remove region</button>
+        </>}
         {note && <>
             <div className="board-context-menu__label">{note.title}</div>
             <button role="menuitem" onClick={() => { onSelect(note.id); onClose(); }}>Edit board note</button>
@@ -2147,7 +2222,23 @@ function HarnessApp() {
                 }
             });
             items.push({ id: 'group', group: 'canvas', label: 'Group selection into flow', detail: '⌘G', run: groupSelection });
+            items.push({ id: 'group-foreach', group: 'canvas', label: 'Group selection into foreach region',
+                run: () => post({ kind: 'groupIntoRegion', regionKind: 'foreach', ids: copiableNodes.map(n => n.id) }) });
+            items.push({ id: 'group-branch', group: 'canvas', label: 'Group selection into branch region',
+                run: () => post({ kind: 'groupIntoRegion', regionKind: 'branch', ids: copiableNodes.map(n => n.id) }) });
+            items.push({ id: 'group-repeat', group: 'canvas', label: 'Group selection into repeat region',
+                run: () => post({ kind: 'groupIntoRegion', regionKind: 'repeat', ids: copiableNodes.map(n => n.id) }) });
         }
+        if (selected?.data.kind === 'region') {
+            items.push({ id: 'remove-region', group: 'selection', label: `Remove region ${selected.id}`,
+                run: () => post({ kind: 'removeRegion', regionId: selected.id }) });
+        }
+        items.push({ id: 'add-region-foreach', group: 'canvas', label: 'Add foreach region', detail: 'Bounded collection iteration',
+            run: () => { const point = viewCenter(); post({ kind: 'addRegion', regionKind: 'foreach', x: point.x, y: point.y }); } });
+        items.push({ id: 'add-region-branch', group: 'canvas', label: 'Add branch region', detail: 'Conditional if/else flow execution',
+            run: () => { const point = viewCenter(); post({ kind: 'addRegion', regionKind: 'branch', x: point.x, y: point.y }); } });
+        items.push({ id: 'add-region-repeat', group: 'canvas', label: 'Add repeat region', detail: 'Bounded state-carrying loop',
+            run: () => { const point = viewCenter(); post({ kind: 'addRegion', regionKind: 'repeat', x: point.x, y: point.y }); } });
         if (clipboard && clipboard.length > 0) {
             items.push({ id: 'paste-linked', group: 'canvas', label: `Paste linked (${clipboard.length})`, detail: '⌘V',
                 run: () => {
