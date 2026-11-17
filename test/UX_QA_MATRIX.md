@@ -267,3 +267,12 @@ readiness.
   and S-701 verified candidates, candidate review editing, scratch verification badge,
   regenerate with feedback, revision loop attempts banner, local LLM health indicator and
   config modal, and wire drop stub creation.
+- S-800 Control-Flow Regions (`branch`, `foreach`, `repeat`, Issue #14) and S-850
+  Prose Mode (`language: "prose"`, Issue #27): `test/flow_regions.test.ts` covers
+  canvas region node rendering (`BRANCH`/`FOREACH`/`REPEAT` badges, child flow labels,
+  boundary ports, wire edges), deterministic `if`/`else` and `for` compilation, and
+  live traced execution (`runFlow`); `test/prose_mode.test.ts` and Extension Host
+  `project.test.ts` cover prose contract verification, Markdown/LaTeX compilation,
+  and `slate.compile` prose dispatch; `test/harness_palette.test.ts` and
+  `test/coverage_hardening.test.ts` achieve 100% Stryker mutation score (`90/90`)
+  on `src/harness/palette.ts` and expand pure-module branch coverage (Issue #20).
