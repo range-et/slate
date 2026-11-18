@@ -2,6 +2,7 @@ import { parser } from '@lezer/python';
 
 import type { BoardNote, CanvasRef, HarnessDocument, NodeVerificationResult, Placeholder, Point } from './harness_protocol';
 import { parseModule } from './python_adapter';
+import { parseProseModule } from './prose_adapter';
 
 // The decoupled `slate/` folder: slate.json, layout.json, and one JSON file per
 // node under nodes/. See SLATE_HARNESS_PLAN.md → "Workspace format".
@@ -272,7 +273,7 @@ export function indexNode(
     }
     const code = codeText(node);
     const language = node.language ?? defaultLanguage;
-    if (language !== 'python') {
+    if (language !== 'python' && language !== 'prose') {
         const parsed = parseModule('', relativePath);
         return {
             document: {
@@ -283,7 +284,8 @@ export function indexNode(
             code,
         };
     }
-    const parsed = parseModule(code, relativePath, nodeId);
+    const parsed = language === 'prose' ? parseProseModule(code, relativePath, nodeId, node)
+        : parseModule(code, relativePath, nodeId);
     const diagnostics = [...parsed.diagnostics];
     if (node.kind) {
         // Module state: any statements; conditional definitions inside it are not separate nodes.
@@ -308,7 +310,7 @@ export function indexNode(
                 locked: node.locked,
             };
         }
-        if (topLevel.length > 1 || extraPythonStatements(code) > 0) {
+        if (language === 'python' && (topLevel.length > 1 || extraPythonStatements(code) > 0)) {
             diagnostics.push({
                 code: 'node-extra-statements',
                 message: 'code must contain exactly one definition; put imports in "imports" and other definitions in their own nodes.',
@@ -318,7 +320,7 @@ export function indexNode(
         if (nodeId.split('/').pop() !== node.name) {
             diagnostics.push({ code: 'node-name-mismatch', message: `File name must match name "${node.name}".`, range: ZERO_RANGE });
         }
-        if (options?.checkJpl60 && !node.kind) {
+        if (language === 'python' && options?.checkJpl60 && !node.kind) {
             const jpl = checkJpl60(node, code);
             for (const diag of jpl.diagnostics) {
                 diagnostics.push({ code: diag.code, message: diag.message, range: ZERO_RANGE });

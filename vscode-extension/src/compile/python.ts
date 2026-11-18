@@ -1,5 +1,5 @@
-import { compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, unitSignature, type CallableSignature } from '../flow';
-import type { SlateFlow } from '../harness_protocol';
+import { branchOutputsMatch, compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, repeatStatePortNames, unitSignature, type CallableSignature, type RegionPorts } from '../flow';
+import type { FlowRegion, SlateFlow } from '../harness_protocol';
 import { identifierNames, parseModule, splitImport, topLevelBindings } from '../python_adapter';
 import { checkJpl60, type SlateConfig, type SlateNode } from '../slate_folder';
 import { SLATE_TRACE_PY } from './slate_trace';
@@ -97,6 +97,23 @@ export function flowToNode(
 ): SlateNode | null {
     const label = `flows/${flowId}`;
     const errors: string[] = [];
+    const resolveAny = (target: string) =>
+        resolve(target) ?? (target.startsWith('flow:') ? resolve(target.slice('flow:'.length)) : null);
+    const signatureToFlow = (sig: CallableSignature): SlateFlow => ({
+        name: sig.name,
+        inputs: sig.params
+            .filter(p => p.kind === 'positional' || p.kind === 'keyword')
+            .map(p => ({ name: p.name, annotation: p.annotation })),
+        outputs: sig.outputs ?? [{ name: 'out', annotation: sig.returns }],
+        instances: [],
+        wires: [],
+        extra: {},
+    });
+    const flowLookup = (childFlowId: string): SlateFlow | undefined => {
+        const res = resolveAny(childFlowId);
+        return res ? signatureToFlow(res.signature) : undefined;
+    };
+
     const signatures = new Map<string, CallableSignature | null>();
     for (const instance of flow.instances) {
         if (instance.kind === 'value') { signatures.set(instance.id, null); continue; }
@@ -104,34 +121,94 @@ export function flowToNode(
             signatures.set(instance.id, { name: 'viewer', params: [{ name: 'in', annotation: null, default: null, kind: 'positional' }], returns: null });
             continue;
         }
-        const resolved = resolve(instance.node!);
+        const resolved = resolveAny(instance.node!);
         if (!resolved) errors.push(`instance ${instance.id} calls ${instance.node}, which does not exist`);
         signatures.set(instance.id, resolved?.signature ?? null);
     }
+
+    const regionsById = new Map<string, FlowRegion>();
+    const regionPortMap = new Map<string, RegionPorts>();
+    for (const region of flow.regions ?? []) {
+        regionsById.set(region.id, region);
+        if (region.kind === 'branch') {
+            const thenRes = resolveAny(region.thenFlow);
+            if (!thenRes) errors.push(`region ${region.id} calls ${region.thenFlow}, which does not exist`);
+            if (region.elseFlow && !resolveAny(region.elseFlow)) {
+                errors.push(`region ${region.id} calls ${region.elseFlow}, which does not exist`);
+            }
+        } else {
+            if (!resolveAny(region.bodyFlow)) {
+                errors.push(`region ${region.id} calls ${region.bodyFlow}, which does not exist`);
+            }
+        }
+        try {
+            regionPortMap.set(region.id, regionPorts(region, flowLookup));
+        } catch {
+            // Child flow resolution error already recorded above
+        }
+    }
+
     const names = new Map<string, string>();
     for (const instance of flow.instances) {
         const name = variable(instance.id);
         if (names.has(name) || flow.inputs.some(input => input.name === name)) errors.push(`instance ${instance.id} needs a distinct variable name (${name})`);
         names.set(name, instance.id);
     }
+    for (const region of flow.regions ?? []) {
+        const name = variable(region.id);
+        if (names.has(name) || flow.inputs.some(input => input.name === name)) errors.push(`region ${region.id} needs a distinct variable name (${name})`);
+        names.set(name, region.id);
+    }
+
     const outputsOf = (id: string) => {
+        if (regionsById.has(id)) {
+            return regionPortMap.get(id)?.outputs ?? [];
+        }
         const signature = signatures.get(id);
         return signature ? outputPorts(signature) : [{ id: 'out', name: 'out', annotation: null }];
     };
+
+    const usedNames = new Set([
+        ...flow.inputs.map(input => input.name),
+        ...[...signatures.values()].flatMap(signature => signature ? [signature.name] : []),
+        ...flow.instances.flatMap(instance => [variable(instance.id), ...outputsOf(instance.id)
+            .map(port => variable(instance.id) + '_' + port.name)]),
+        ...(flow.regions ?? []).flatMap(region => {
+            const targets = region.kind === 'branch' ? [region.thenFlow, region.elseFlow] : [region.bodyFlow];
+            return targets.flatMap(target => target ? [resolveAny(target)?.signature.name ?? target] : []);
+        }),
+    ]);
+    const allocate = (preferred: string) => {
+        let name = preferred;
+        for (let n = 2; usedNames.has(name); n++) name = preferred + '_' + n;
+        usedNames.add(name);
+        return name;
+    };
+    const regionVariables = new Map([...regionPortMap].map(([id, ports]) =>
+        [id, new Map(ports.outputs.map(port =>
+            [port.name, allocate(ports.outputs.length === 1 ? variable(id) : variable(id) + '_' + port.name)]))]));
+
     const incoming = new Map<string, string>();
     for (const wire of flow.wires) {
         const from = parseEndpoint(wire.from);
         const to = parseEndpoint(wire.to);
+        const fromRegionPorts = from.instance !== null ? regionPortMap.get(from.instance) : undefined;
         const fromOk = from.instance === null
             ? from.port.startsWith('input:') && flow.inputs.some(input => `input:${input.name}` === from.port)
-            : signatures.has(from.instance) && outputsOf(from.instance).some(port => port.id === from.port);
+            : fromRegionPorts
+                ? fromRegionPorts.outputs.some(port => port.id === from.port) ||
+                  (fromRegionPorts.outputs.length === 1 && (from.port === 'out' || from.port === `out:${fromRegionPorts.outputs[0].name}`))
+                : signatures.has(from.instance) && outputsOf(from.instance).some(port => port.id === from.port);
         const isViewerTo = flow.instances.find(i => i.id === to.instance)?.kind === 'viewer';
+        const toRegionPorts = to.instance !== null ? regionPortMap.get(to.instance) : undefined;
         const toOk = to.instance === null
             ? to.port.startsWith('output:') && flow.outputs.some(output => `output:${output.name}` === to.port)
-            : signatures.has(to.instance) && (
-                (signatures.get(to.instance)?.params ?? []).some(param => `in:${param.name}` === to.port) ||
-                (isViewerTo && (to.port === 'in' || to.port === 'in:in'))
-            );
+            : toRegionPorts
+                ? toRegionPorts.inputs.some(port => port.id === to.port)
+                : signatures.has(to.instance) && (
+                    (signatures.get(to.instance)?.params ?? []).some(param => `in:${param.name}` === to.port) ||
+                    (isViewerTo && (to.port === 'in' || to.port === 'in:in'))
+                );
         if (!fromOk || !toOk) errors.push(`wire ${wire.from} → ${wire.to} has an unknown endpoint`);
         else if (incoming.has(wire.to)) errors.push(`${wire.to} has more than one wire`);
         else incoming.set(wire.to, wire.from);
@@ -139,12 +216,20 @@ export function flowToNode(
     const expression = (endpoint: string) => {
         const { instance, port } = parseEndpoint(endpoint);
         if (instance === null) return port.slice('input:'.length);
+        const rPorts = regionPortMap.get(instance);
+        if (rPorts) {
+            const name = rPorts.outputs.length === 1 ? rPorts.outputs[0].name : port.slice('out:'.length);
+            return regionVariables.get(instance)?.get(name) ?? 'None';
+        }
         return port === 'out' ? variable(instance) : `${variable(instance)}_${port.slice('out:'.length)}`;
     };
 
-    // Kahn's algorithm in instance order; leftovers form a cycle.
+    // Kahn's algorithm in instance and region order; leftovers form a cycle.
     const order: string[] = [];
-    const pending = new Set(flow.instances.map(instance => instance.id));
+    const pending = new Set([
+        ...flow.instances.map(instance => instance.id),
+        ...(flow.regions ?? []).map(region => region.id),
+    ]);
     while (pending.size) {
         const ready = [...pending].find(id => [...incoming].every(([to, from]) =>
             parseEndpoint(to).instance !== id || parseEndpoint(from).instance === null || !pending.has(parseEndpoint(from).instance!)));
@@ -155,6 +240,318 @@ export function flowToNode(
 
     const body: string[] = [];
     for (const id of order) {
+        const region = regionsById.get(id);
+        if (region) {
+            const rPorts = regionPortMap.get(id);
+            if (!rPorts) continue;
+            const slug = id.replace(/[^A-Za-z0-9_]/g, '_');
+            const output = (name: string) => regionVariables.get(id)!.get(name)!;
+            const traceError = options?.trace ? allocate('_slate_err') : '';
+
+            if (region.kind === 'branch') {
+                const thenSig = resolveAny(region.thenFlow)?.signature;
+                const elseSig = region.elseFlow ? resolveAny(region.elseFlow)?.signature : undefined;
+                if (!thenSig || (region.elseFlow && !elseSig)) continue;
+                if (elseSig && !branchOutputsMatch(signatureToFlow(thenSig), signatureToFlow(elseSig))) {
+                    errors.push(`${id} branches must expose compatible outputs by name`);
+                    continue;
+                }
+
+                const condPort = region.conditionPort ?? 'condition';
+                const condSource = incoming.get(`${id}.in:${condPort}`);
+                if (!condSource) errors.push(`${id}.in:${condPort} is not wired and has no default`);
+                const condExpr = condSource ? expression(condSource) : 'False';
+                const wiredInputs: Array<{ portName: string; expr: string }> = [];
+                if (condSource) wiredInputs.push({ portName: condPort, expr: condExpr });
+
+                const buildBranchCall = (sig: CallableSignature) => {
+                    const args: string[] = [];
+                    let skippedPos = false;
+                    for (const param of sig.params) {
+                        if (param.kind === 'var' || param.kind === 'kwvar') continue;
+                        const src = incoming.get(`${id}.in:${param.name}`);
+                        if (!src) {
+                            if (param.default === null) errors.push(`${id}.in:${param.name} is not wired and has no default`);
+                            if (param.kind === 'positional') skippedPos = true;
+                            continue;
+                        }
+                        const expr = expression(src);
+                        if (!wiredInputs.some(w => w.portName === param.name)) {
+                            wiredInputs.push({ portName: param.name, expr });
+                        }
+                        if (param.kind === 'positional') {
+                            if (skippedPos) errors.push(`${id}.in:${param.name} is positional-only after an unwired one`);
+                            args.push(expr);
+                        } else {
+                            args.push(`${param.name}=${expr}`);
+                        }
+                    }
+                    return `${sig.name}(${args.join(', ')})`;
+                };
+
+                const thenCall = buildBranchCall(thenSig);
+                const elseCall = elseSig ? buildBranchCall(elseSig) : null;
+                const outVars = rPorts.outputs.map(port => output(port.name));
+                const lhs = outVars.join(', ');
+                const elseLhs = elseSig ? signatureToFlow(elseSig).outputs.map(port => output(port.name)).join(', ') : '';
+                const defaultRhs = outVars.length <= 1 ? 'None' : outVars.map(() => 'None').join(', ');
+
+                if (options?.trace) {
+                    body.push(`    with _slate_trace.scope("${id}"):`);
+                    body.push(`        try:`);
+                    for (const input of wiredInputs) {
+                        body.push(`            _slate_trace.trace_input("${id}", "in:${input.portName}", ${input.expr})`);
+                    }
+                    body.push(`            if ${condExpr}:`);
+                    body.push(`                with _slate_trace.scope("then"):`);
+                    body.push(`                    ${lhs ? `${lhs} = ${thenCall}` : thenCall}`);
+                    body.push(`            else:`);
+                    if (elseCall) {
+                        body.push(`                with _slate_trace.scope("else"):`);
+                        body.push(`                    ${elseLhs ? `${elseLhs} = ${elseCall}` : elseCall}`);
+                    } else {
+                        body.push(`                ${lhs ? `${lhs} = ${defaultRhs}` : 'pass'}`);
+                    }
+                    for (let i = 0; i < rPorts.outputs.length; i++) {
+                        body.push(`            _slate_trace.trace_output("${id}", "${rPorts.outputs[i].id}", ${outVars[i]})`);
+                    }
+                    body.push(`        except Exception as ${traceError}:`);
+                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
+                    body.push(`            raise`);
+                } else {
+                    body.push(`    if ${condExpr}:`);
+                    body.push(`        ${lhs ? `${lhs} = ${thenCall}` : thenCall}`);
+                    body.push(`    else:`);
+                    if (elseCall) {
+                        body.push(`        ${elseLhs ? `${elseLhs} = ${elseCall}` : elseCall}`);
+                    } else {
+                        body.push(`        ${lhs ? `${lhs} = ${defaultRhs}` : 'pass'}`);
+                    }
+                }
+                continue;
+            }
+
+            if (region.kind === 'foreach') {
+                const bodySig = resolveAny(region.bodyFlow)?.signature;
+                if (!bodySig) continue;
+
+                const itemVar = allocate('_item');
+                const indexVar = allocate('_idx');
+                const collPort = region.collectionPort ?? 'items';
+                const itemPort = region.itemPort ?? 'item';
+                const indexPort = region.indexPort ?? 'index';
+                const collSource = incoming.get(`${id}.in:${collPort}`);
+                if (!collSource) errors.push(`${id}.in:${collPort} is not wired and has no default`);
+                const collExpr = collSource ? expression(collSource) : '[]';
+                const wiredInputs: Array<{ portName: string; expr: string }> = [];
+                if (collSource) wiredInputs.push({ portName: collPort, expr: collExpr });
+
+                const bodyArgs: string[] = [];
+                let skippedPos = false;
+                for (const param of bodySig.params) {
+                    if (param.kind === 'var' || param.kind === 'kwvar') continue;
+                    let argExpr: string | null = null;
+                    if (param.name === itemPort) {
+                        argExpr = itemVar;
+                    } else if (param.name === indexPort) {
+                        argExpr = indexVar;
+                    } else {
+                        const src = incoming.get(`${id}.in:${param.name}`);
+                        if (!src) {
+                            if (param.default === null) errors.push(`${id}.in:${param.name} is not wired and has no default`);
+                            if (param.kind === 'positional') skippedPos = true;
+                            continue;
+                        }
+                        argExpr = expression(src);
+                        wiredInputs.push({ portName: param.name, expr: argExpr });
+                    }
+                    if (param.kind === 'positional') {
+                        if (skippedPos) errors.push(`${id}.in:${param.name} is positional-only after an unwired one`);
+                        bodyArgs.push(argExpr);
+                    } else {
+                        bodyArgs.push(`${param.name}=${argExpr}`);
+                    }
+                }
+                const bodyCall = `${bodySig.name}(${bodyArgs.join(', ')})`;
+                const outVars = rPorts.outputs.map(port => output(port.name));
+
+                const itemVars = rPorts.outputs.map(port => allocate(outVars.length === 1 ? `_item_${slug}` : `_item_${slug}_${port.name}`));
+                if (options?.trace) {
+                    body.push(`    with _slate_trace.scope("${id}"):`);
+                    body.push(`        try:`);
+                    for (const input of wiredInputs) {
+                        body.push(`            _slate_trace.trace_input("${id}", "in:${input.portName}", ${input.expr})`);
+                    }
+                    for (const ov of outVars) {
+                        body.push(`            ${ov} = []`);
+                    }
+                    body.push(`            for ${indexVar}, ${itemVar} in enumerate(${collExpr}):`);
+                    if (region.maxIterations !== undefined) {
+                        body.push(`                if ${indexVar} >= ${region.maxIterations}:`);
+                        body.push(`                    break`);
+                    }
+                    body.push(`                with _slate_trace.scope(f"iter:{${indexVar}}"):`);
+                    body.push(`                    _slate_trace.trace_input("${id}", "in:${itemPort}", ${itemVar})`);
+                    if (outVars.length === 0) {
+                        body.push(`                    ${bodyCall}`);
+                    } else if (outVars.length === 1) {
+                        body.push(`                    ${itemVars[0]} = ${bodyCall}`);
+                        body.push(`                    ${outVars[0]}.append(${itemVars[0]})`);
+                    } else {
+                        body.push(`                    ${itemVars.join(', ')} = ${bodyCall}`);
+                        for (let i = 0; i < outVars.length; i++) {
+                            body.push(`                    ${outVars[i]}.append(${itemVars[i]})`);
+                        }
+                    }
+                    for (let i = 0; i < rPorts.outputs.length; i++) {
+                        body.push(`            _slate_trace.trace_output("${id}", "${rPorts.outputs[i].id}", ${outVars[i]})`);
+                    }
+                    body.push(`        except Exception as ${traceError}:`);
+                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
+                    body.push(`            raise`);
+                } else {
+                    for (const ov of outVars) {
+                        body.push(`    ${ov} = []`);
+                    }
+                    body.push(`    for ${indexVar}, ${itemVar} in enumerate(${collExpr}):`);
+                    if (region.maxIterations !== undefined) {
+                        body.push(`        if ${indexVar} >= ${region.maxIterations}:`);
+                        body.push(`            break`);
+                    }
+                    if (outVars.length === 0) {
+                        body.push(`        ${bodyCall}`);
+                    } else if (outVars.length === 1) {
+                        body.push(`        ${itemVars[0]} = ${bodyCall}`);
+                        body.push(`        ${outVars[0]}.append(${itemVars[0]})`);
+                    } else {
+                        body.push(`        ${itemVars.join(', ')} = ${bodyCall}`);
+                        for (let i = 0; i < outVars.length; i++) {
+                            body.push(`        ${outVars[i]}.append(${itemVars[i]})`);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (region.kind === 'repeat') {
+                const bodySig = resolveAny(region.bodyFlow)?.signature;
+                const bodyFlow = flowLookup(region.bodyFlow);
+                if (!bodySig || !bodyFlow) continue;
+
+                const inputNames = new Set(bodyFlow.inputs.map(p => p.name));
+                const stateNames = new Set(repeatStatePortNames(region, bodyFlow));
+                const stateOutputs = bodyFlow.outputs.filter(p => stateNames.has(p.name));
+
+                if ([...stateNames].some(name => !inputNames.has(name) || !stateOutputs.some(port => port.name === name))) {
+                    errors.push(`${id} state ports must be declared as both inputs and outputs`);
+                    continue;
+                }
+                if (region.conditionPort && !bodyFlow.outputs.some(port => port.name === region.conditionPort)) {
+                    errors.push(`${id} condition port must be a body output`);
+                    continue;
+                }
+                const iterationVar = allocate('_iter');
+                const conditionVar = allocate(`_cond_${slug}`);
+                const stateVarFor = output;
+
+                const wiredInputs: Array<{ portName: string; expr: string }> = [];
+                const initLines: string[] = [];
+                for (const sName of stateNames) {
+                    const src = incoming.get(`${id}.in:${sName}`);
+                    if (!src) errors.push(`${id}.in:${sName} is not wired and has no default`);
+                    const expr = src ? expression(src) : 'None';
+                    if (src) wiredInputs.push({ portName: sName, expr });
+                    initLines.push(`${stateVarFor(sName)} = ${expr}`);
+                }
+
+                const bodyArgs: string[] = [];
+                let skippedPos = false;
+                for (const param of bodySig.params) {
+                    if (param.kind === 'var' || param.kind === 'kwvar') continue;
+                    let argExpr: string | null = null;
+                    if (stateNames.has(param.name)) {
+                        argExpr = stateVarFor(param.name);
+                    } else {
+                        const src = incoming.get(`${id}.in:${param.name}`);
+                        if (!src) {
+                            if (param.default === null) errors.push(`${id}.in:${param.name} is not wired and has no default`);
+                            if (param.kind === 'positional') skippedPos = true;
+                            continue;
+                        }
+                        argExpr = expression(src);
+                        wiredInputs.push({ portName: param.name, expr: argExpr });
+                    }
+                    if (param.kind === 'positional') {
+                        if (skippedPos) errors.push(`${id}.in:${param.name} is positional-only after an unwired one`);
+                        bodyArgs.push(argExpr);
+                    } else {
+                        bodyArgs.push(`${param.name}=${argExpr}`);
+                    }
+                }
+
+                const bodyCall = `${bodySig.name}(${bodyArgs.join(', ')})`;
+                const bodyOutputs = bodyFlow.outputs;
+                let callLine: string;
+                if (bodyOutputs.length === 0) {
+                    callLine = bodyCall;
+                } else if (bodyOutputs.length === 1) {
+                    const outName = bodyOutputs[0].name;
+                    const targetVar = stateNames.has(outName) ? stateVarFor(outName) : conditionVar;
+                    callLine = `${targetVar} = ${bodyCall}`;
+                } else {
+                    const unpackVars = bodyOutputs.map(p => {
+                        if (stateNames.has(p.name)) return stateVarFor(p.name);
+                        if (region.conditionPort === p.name) return conditionVar;
+                        return allocate(`_unused_${slug}_${p.name}`);
+                    });
+                    callLine = `${unpackVars.join(', ')} = ${bodyCall}`;
+                }
+
+                const condCheckVar = region.conditionPort
+                    ? (stateNames.has(region.conditionPort) ? stateVarFor(region.conditionPort) : conditionVar)
+                    : null;
+
+                if (options?.trace) {
+                    body.push(`    with _slate_trace.scope("${id}"):`);
+                    body.push(`        try:`);
+                    for (const input of wiredInputs) {
+                        body.push(`            _slate_trace.trace_input("${id}", "in:${input.portName}", ${input.expr})`);
+                    }
+                    for (const line of initLines) {
+                        body.push(`            ${line}`);
+                    }
+                    body.push(`            for ${iterationVar} in range(${region.maxIterations}):`);
+                    body.push(`                with _slate_trace.scope(f"iter:{${iterationVar}}"):`);
+                    body.push(`                    ${callLine}`);
+                    for (const port of rPorts.outputs) {
+                        body.push(`                    _slate_trace.trace_output("${id}", "${port.id}", ${stateVarFor(port.name)})`);
+                    }
+                    if (condCheckVar) {
+                        body.push(`                if not ${condCheckVar}:`);
+                        body.push(`                    break`);
+                    }
+                    for (const port of rPorts.outputs) {
+                        const outVar = stateVarFor(port.name);
+                        body.push(`            _slate_trace.trace_output("${id}", "${port.id}", ${outVar})`);
+                    }
+                    body.push(`        except Exception as ${traceError}:`);
+                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
+                    body.push(`            raise`);
+                } else {
+                    for (const line of initLines) {
+                        body.push(`    ${line}`);
+                    }
+                    body.push(`    for ${iterationVar} in range(${region.maxIterations}):`);
+                    body.push(`        ${callLine}`);
+                    if (condCheckVar) {
+                        body.push(`        if not ${condCheckVar}:`);
+                        body.push(`            break`);
+                    }
+                }
+                continue;
+            }
+        }
+
         const instance = flow.instances.find(item => item.id === id)!;
         if (instance.kind === 'value') {
             const pyVal = compileValueToPython(instance.value);
@@ -260,9 +657,20 @@ export function flowToNode(
         : annotations.every(Boolean) ? ` -> ${annotations.length === 1 ? annotations[0] : `tuple[${annotations.join(', ')}]`}` : '';
     const code = [`def ${flow.name}(${parameters})${returns}:`, ...body];
     const used = identifierNames(code.join('\n'));
-    const targets = [...new Set(flow.instances.filter(instance => instance.node).map(instance => instance.node!))];
-    const imports = [...new Set(targets.flatMap(target => resolve(target)?.imports ?? []))]
+    const regionTargets = (flow.regions ?? []).flatMap(r => {
+        if (r.kind === 'branch') return r.elseFlow ? [r.thenFlow, r.elseFlow] : [r.thenFlow];
+        return [r.bodyFlow];
+    }).map(t => t.startsWith('flow:') ? t.slice('flow:'.length) : t);
+    const instanceTargets = flow.instances.filter(instance => instance.node).map(instance => instance.node!);
+    const targets = [...new Set([...instanceTargets, ...regionTargets])];
+    const imports = [...new Set(targets.flatMap(target => resolveAny(target)?.imports ?? []))]
         .filter(line => splitImport(line).some(item => item.binding !== null && used.has(item.binding)));
+    const typingNames = ['Any', 'Dict', 'List', 'Optional', 'Set', 'Tuple', 'Union'].filter(
+        name => used.has(name) && !imports.some(line => splitImport(line).some(item => item.binding === name)),
+    );
+    if (typingNames.length > 0) {
+        imports.push(`from typing import ${typingNames.join(', ')}`);
+    }
     if (options?.trace) {
         imports.push('import _slate_trace');
     }
@@ -283,14 +691,15 @@ export function compilePython(
     const error = (message: string) => diagnostics.push({ severity: 'error', message });
     const nodes = new Map(sourceNodes);
     const resolve = (target: string) => {
-        const node = sourceNodes.get(target);
-        const flow = node ? undefined : flows.get(target);
+        const clean = target.startsWith('flow:') ? target.slice('flow:'.length) : target;
+        const node = sourceNodes.get(clean);
+        const flow = node ? undefined : flows.get(clean);
         if (flow) return { signature: flowSignature(flow), imports: [] };
-        const signature = node ? nodeSignature(node) : library.get(target) ?? null;
+        const signature = node ? nodeSignature(node) : library.get(target) ?? library.get(clean) ?? null;
         return signature ? { signature, imports: node?.imports ?? [] } : null;
     };
     for (const [flowId, flow] of [...flows].sort(([left], [right]) => left.localeCompare(right))) {
-        if (flowId === MAIN_FLOW && flow.instances.length === 0) continue;
+        if (flowId === MAIN_FLOW && flow.instances.length === 0 && (!flow.regions || flow.regions.length === 0)) continue;
         if (sourceNodes.has(flowId)) { error(`flows/${flowId} has the same id as a node.`); continue; }
         const node = flowToNode(flowId, flow, resolve, diagnostics, options);
         if (node) nodes.set(flowId, node);

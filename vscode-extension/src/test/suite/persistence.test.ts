@@ -377,6 +377,60 @@ suite('Slate native persistence and proposal QA', () => {
         assert.equal(current.flows?.find(item => item.id === 'pipe')?.flow?.instances[0].value, '456');
     });
 
+    test('region grouping saves the parent, child and layout, then repairs child ports and supports native Undo', async () => {
+        const flows = ['slate', 'flows'];
+        const path = (...parts: string[]) => uri(...flows, ...parts);
+        await vscode.workspace.fs.createDirectory(path());
+        await vscode.workspace.fs.writeFile(path('pipe.json'), encode({
+            slate: 3, name: 'pipe', inputs: [{ name: 'scores', annotation: 'list[int]' }, { name: 'cap', annotation: 'int' }],
+            outputs: [{ name: 'result', annotation: 'list[int]' }],
+            instances: [{ id: 'normalize', node: 'normalize' }],
+            wires: [{ from: 'input:scores', to: 'normalize.in:score' }, { from: 'input:cap', to: 'normalize.in:maximum' },
+                { from: 'normalize.out', to: 'output:result' }],
+        }));
+        await act({ kind: 'refreshIndex' });
+        replaceMethod(vscode.window, 'showQuickPick', async (items: { label: string }[]) => {
+            assert.deepEqual(items.map(item => item.label), ['score', 'maximum']);
+            return undefined;
+        });
+        await act({ kind: 'groupIntoRegion', flow: 'pipe', regionKind: 'foreach', ids: ['normalize'] });
+        await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(path('foreach_body.json'))));
+
+        replaceMethod(vscode.window, 'showQuickPick', async (items: { label: string }[]) => items[0]);
+        await act({ kind: 'groupIntoRegion', flow: 'pipe', regionKind: 'foreach', ids: ['normalize'] });
+        let parent = await read(...flows, 'pipe.json');
+        assert.equal(parent.regions[0].bodyFlow, 'foreach_body');
+        assert.deepEqual(parent.wires, [
+            { from: 'input:scores', to: 'foreach.in:items' }, { from: 'input:cap', to: 'foreach.in:maximum' },
+            { from: 'foreach.out', to: 'output:result' },
+        ]);
+        assert.equal((await read(...flows, 'foreach_body.json')).instances[0].id, 'normalize');
+
+        await act({ kind: 'renameFlowPort', flow: 'foreach_body', direction: 'input', oldName: 'score', newName: 'sample' });
+        await act({ kind: 'renameFlowPort', flow: 'foreach_body', direction: 'input', oldName: 'maximum', newName: 'cap' });
+        parent = await read(...flows, 'pipe.json');
+        assert.equal(parent.regions[0].itemPort, 'sample');
+        assert.ok(parent.wires.some((wire: { to: string }) => wire.to === 'foreach.in:cap'));
+        replaceMethod(vscode.window, 'showWarningMessage', async () => undefined);
+        await act({ kind: 'deleteFlowPort', flow: 'foreach_body', direction: 'input', name: 'cap' });
+        assert.deepEqual(await read(...flows, 'pipe.json'), parent);
+
+        await act({ kind: 'addRegion', regionKind: 'repeat', flow: 'pipe', x: 20, y: 30 });
+        const withRepeat = await read(...flows, 'pipe.json');
+        assert.equal(withRepeat.regions[1].kind, 'repeat');
+        assert.deepEqual((await read('slate', 'layout.json')).flowPositions.pipe.repeat, { x: 20, y: 30 });
+        await act({ kind: 'removeRegion', flow: 'pipe', regionId: 'repeat' });
+        assert.deepEqual(await read(...flows, 'pipe.json'), parent);
+        const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(path('pipe.json')));
+        await vscode.commands.executeCommand('undo');
+        await eventually(async () => JSON.parse(editor.document.getText()).regions.length === 2, 'region restored by Undo');
+        await act({ kind: 'saveWorkspace' });
+        assert.deepEqual(await read(...flows, 'pipe.json'), withRepeat);
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await open();
+        assert.deepEqual((await snapshot()).flows?.find(item => item.id === 'pipe')?.flow?.regions, withRepeat.regions);
+    });
+
     test('flow deletion respects confirmation and removes saved layout only after confirmation', async () => {
         await act({ kind: 'createFlow', name: 'pipe', x: 10, y: 20 });
         const before = await read('slate', 'layout.json');

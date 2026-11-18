@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 
+import { compileProse, PROSE_GENERATED_MD_HEADER, PROSE_GENERATED_TEX_HEADER } from './compile/prose';
 import { compilePython, GENERATED_HEADER, type CompileDiagnostic } from './compile/python';
 import { MAIN_FLOW, migrateRootOccurrences } from './flow';
 import { formatPortReport, portPythonProject } from './port/python_importer';
@@ -108,7 +109,9 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
         [...flows.keys()].filter(id => id !== MAIN_FLOW),
     );
     if (migrated.main) flows.set(MAIN_FLOW, migrated.main);
-    const result = compilePython(nodes, config, flows, SlateFolderHost.librarySignatures(await host.readLibrary(config)));
+    const result = config.language === 'prose'
+        ? compileProse(nodes, config, flows)
+        : compilePython(nodes, config, flows, SlateFolderHost.librarySignatures(await host.readLibrary(config)));
     const diagnostics: CompileDiagnostic[] = [
         ...errors.map(message => ({ severity: 'error' as const, message })),
         ...flowFiles.filter(item => item.problem).map(item => ({ severity: 'error' as const, message: `flows/${item.id}: ${item.problem}` })),
@@ -147,6 +150,12 @@ async function readGenerated(root: vscode.Uri, prefix = ''): Promise<string[]> {
         else if (name.endsWith('.py')) {
             const text = decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, ...relative.split('/'))));
             if (text.startsWith(GENERATED_HEADER)) found.push(relative);
+        } else if (name.endsWith('.md')) {
+            const text = decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, ...relative.split('/'))));
+            if (text.startsWith(PROSE_GENERATED_MD_HEADER)) found.push(relative);
+        } else if (name.endsWith('.tex')) {
+            const text = decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, ...relative.split('/'))));
+            if (text.startsWith(PROSE_GENERATED_TEX_HEADER)) found.push(relative);
         }
     }
     return found;

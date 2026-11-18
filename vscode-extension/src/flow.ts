@@ -1,4 +1,18 @@
-import type { CanvasRef, FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow, TestCase, UnitParam } from './harness_protocol';
+import type {
+    CanvasRef,
+    FlowBranchRegion,
+    FlowForeachRegion,
+    FlowInstance,
+    FlowPort,
+    FlowRegion,
+    FlowRegionKind,
+    FlowRepeatRegion,
+    FlowWire,
+    ParsedUnit,
+    SlateFlow,
+    TestCase,
+    UnitParam,
+} from './harness_protocol';
 
 // Flows (slate/flows/<id>.json): instances of nodes, flows, library units, or
 // literal values, connected by data wires, with named inputs and outputs.
@@ -7,7 +21,7 @@ import type { CanvasRef, FlowInstance, FlowPort, FlowWire, ParsedUnit, SlateFlow
 export const FLOWS_DIR = 'slate/flows';
 /** The root canvas's data wires live in this flow. */
 export const MAIN_FLOW = 'main';
-const FLOW_KEYS = ['slate', 'name', 'inputs', 'outputs', 'instances', 'wires', 'cases'];
+const FLOW_KEYS = ['slate', 'name', 'inputs', 'outputs', 'instances', 'wires', 'cases', 'regions'];
 
 export class FlowFormatError extends Error {}
 
@@ -64,6 +78,101 @@ export function parseFlow(text: string): SlateFlow {
     }
     const extra: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) if (!FLOW_KEYS.includes(key)) extra[key] = item;
+    const rawRegions = value.regions;
+    let parsedRegions: FlowRegion[] | undefined;
+    if (rawRegions !== undefined) {
+        if (!Array.isArray(rawRegions)) throw new FlowFormatError('regions must be a list');
+        parsedRegions = rawRegions.map((item): FlowRegion => {
+            if (!isRecord(item) || typeof item.id !== 'string' || !item.id || item.id.includes('.')) {
+                throw new FlowFormatError('regions need an id without dots');
+            }
+            if (item.kind !== 'branch' && item.kind !== 'foreach' && item.kind !== 'repeat') {
+                throw new FlowFormatError(`region ${item.id} kind must be branch, foreach, or repeat`);
+            }
+            if (item.label !== undefined && typeof item.label !== 'string') {
+                throw new FlowFormatError(`region ${item.id} label must be a string`);
+            }
+            if (item.kind === 'branch') {
+                if (typeof item.thenFlow !== 'string' || !item.thenFlow) {
+                    throw new FlowFormatError(`branch region ${item.id} needs a thenFlow`);
+                }
+                if (item.elseFlow !== undefined && (typeof item.elseFlow !== 'string' || !item.elseFlow)) {
+                    throw new FlowFormatError(`branch region ${item.id} elseFlow must be a non-empty string`);
+                }
+                if (item.conditionPort !== undefined && (typeof item.conditionPort !== 'string' || !IDENTIFIER.test(item.conditionPort))) {
+                    throw new FlowFormatError(`branch region ${item.id} conditionPort must be an identifier`);
+                }
+                return {
+                    id: item.id,
+                    kind: 'branch',
+                    thenFlow: item.thenFlow,
+                    ...(item.elseFlow ? { elseFlow: item.elseFlow } : {}),
+                    ...(item.conditionPort ? { conditionPort: item.conditionPort } : {}),
+                    ...(item.label ? { label: item.label } : {}),
+                };
+            }
+            if (item.kind === 'foreach') {
+                if (typeof item.bodyFlow !== 'string' || !item.bodyFlow) {
+                    throw new FlowFormatError(`foreach region ${item.id} needs a bodyFlow`);
+                }
+                if (item.collectionPort !== undefined && (typeof item.collectionPort !== 'string' || !IDENTIFIER.test(item.collectionPort))) {
+                    throw new FlowFormatError(`foreach region ${item.id} collectionPort must be an identifier`);
+                }
+                if (item.itemPort !== undefined && (typeof item.itemPort !== 'string' || !IDENTIFIER.test(item.itemPort))) {
+                    throw new FlowFormatError(`foreach region ${item.id} itemPort must be an identifier`);
+                }
+                if (item.indexPort !== undefined && (typeof item.indexPort !== 'string' || !IDENTIFIER.test(item.indexPort))) {
+                    throw new FlowFormatError(`foreach region ${item.id} indexPort must be an identifier`);
+                }
+                if (item.maxIterations !== undefined && (typeof item.maxIterations !== 'number' || !Number.isInteger(item.maxIterations) || item.maxIterations <= 0)) {
+                    throw new FlowFormatError(`foreach region ${item.id} maxIterations must be a positive integer`);
+                }
+                return {
+                    id: item.id,
+                    kind: 'foreach',
+                    bodyFlow: item.bodyFlow,
+                    ...(item.collectionPort ? { collectionPort: item.collectionPort } : {}),
+                    ...(item.itemPort ? { itemPort: item.itemPort } : {}),
+                    ...(item.indexPort ? { indexPort: item.indexPort } : {}),
+                    ...(item.maxIterations ? { maxIterations: item.maxIterations } : {}),
+                    ...(item.label ? { label: item.label } : {}),
+                };
+            }
+            // repeat
+            if (typeof item.bodyFlow !== 'string' || !item.bodyFlow) {
+                throw new FlowFormatError(`repeat region ${item.id} needs a bodyFlow`);
+            }
+            if (typeof item.maxIterations !== 'number' || !Number.isInteger(item.maxIterations) || item.maxIterations <= 0) {
+                throw new FlowFormatError(`repeat region ${item.id} needs a positive integer maxIterations`);
+            }
+            if (item.statePorts !== undefined) {
+                if (!Array.isArray(item.statePorts) || !item.statePorts.every(p => typeof p === 'string' && IDENTIFIER.test(p))) {
+                    throw new FlowFormatError(`repeat region ${item.id} statePorts must be a list of identifiers`);
+                }
+            }
+            if (item.conditionPort !== undefined && (typeof item.conditionPort !== 'string' || !IDENTIFIER.test(item.conditionPort))) {
+                throw new FlowFormatError(`repeat region ${item.id} conditionPort must be an identifier`);
+            }
+            return {
+                id: item.id,
+                kind: 'repeat',
+                bodyFlow: item.bodyFlow,
+                maxIterations: item.maxIterations,
+                ...(item.statePorts ? { statePorts: item.statePorts as string[] } : {}),
+                ...(item.conditionPort ? { conditionPort: item.conditionPort } : {}),
+                ...(item.label ? { label: item.label } : {}),
+            };
+        });
+        const regionIds = parsedRegions.map(r => r.id);
+        if (new Set(regionIds).size !== regionIds.length) {
+            throw new FlowFormatError('region ids must be unique');
+        }
+        for (const rId of regionIds) {
+            if (ids.includes(rId)) {
+                throw new FlowFormatError(`region id ${rId} collides with an instance id`);
+            }
+        }
+    }
     const rawCases = value.cases ?? (isRecord(value.extra) ? value.extra.cases : undefined);
     const parsedCases: TestCase[] | undefined = Array.isArray(rawCases) ? rawCases.map((c, i) => {
         if (!isRecord(c)) return { id: `case_${i + 1}`, inputs: {} };
@@ -81,6 +190,7 @@ export function parseFlow(text: string): SlateFlow {
         outputs: ports(value.outputs, 'outputs'),
         instances: parsedInstances,
         wires: (wires as FlowWire[]).map(wire => ({ from: wire.from, to: wire.to })),
+        ...(parsedRegions ? { regions: parsedRegions } : {}),
         cases: parsedCases,
         extra,
     };
@@ -95,6 +205,9 @@ export function serializeFlow(flow: SlateFlow): string {
         instances: flow.instances,
         wires: flow.wires,
     };
+    if (flow.regions && flow.regions.length > 0) {
+        obj.regions = flow.regions;
+    }
     if (flow.cases && flow.cases.length > 0) {
         obj.cases = flow.cases;
     }
@@ -616,5 +729,339 @@ export function migrateRootOccurrences(
         main: { ...base, instances, wires },
         positions: nextPositions,
         changed,
+    };
+}
+
+export interface RegionPorts {
+    inputs: Port[];
+    outputs: Port[];
+}
+
+/**
+ * Extract boundary ports for explicit control flow regions (branch, foreach, repeat).
+ * Reuses child flows as bodies where their inputs/outputs define the region contract.
+ */
+/** Branches may declare their outputs in different orders. */
+export function branchOutputsMatch(thenFlow: SlateFlow, elseFlow: SlateFlow): boolean {
+    return thenFlow.outputs.length === elseFlow.outputs.length && thenFlow.outputs.every(output =>
+        elseFlow.outputs.some(other => other.name === output.name &&
+            (!output.annotation || !other.annotation || output.annotation === other.annotation)));
+}
+
+export function repeatStatePortNames(region: FlowRepeatRegion, body: SlateFlow): string[] {
+    return region.statePorts?.length ? region.statePorts : body.outputs
+        .filter(port => port.name !== region.conditionPort && body.inputs.some(input => input.name === port.name))
+        .map(port => port.name);
+}
+
+export function regionPorts(
+    region: FlowRegion,
+    flowLookup: (flowId: string) => SlateFlow | undefined,
+): RegionPorts {
+    if (region.kind === 'branch') {
+        const thenFlow = flowLookup(region.thenFlow);
+        if (!thenFlow) throw new FlowFormatError(`referenced thenFlow '${region.thenFlow}' not found`);
+        const elseFlow = region.elseFlow ? flowLookup(region.elseFlow) : undefined;
+        if (region.elseFlow && !elseFlow) throw new FlowFormatError(`referenced elseFlow '${region.elseFlow}' not found`);
+
+        const condName = region.conditionPort ?? 'condition';
+        const inputs: Port[] = [{ id: `in:${condName}`, name: condName, annotation: 'bool', optional: false }];
+
+        const seenInputs = new Set<string>([condName]);
+        for (const port of thenFlow.inputs) {
+            if (!seenInputs.has(port.name)) {
+                inputs.push({ id: `in:${port.name}`, name: port.name, annotation: port.annotation, optional: false });
+                seenInputs.add(port.name);
+            }
+        }
+        if (elseFlow) {
+            for (const port of elseFlow.inputs) {
+                if (!seenInputs.has(port.name)) {
+                    inputs.push({ id: `in:${port.name}`, name: port.name, annotation: port.annotation, optional: true });
+                    seenInputs.add(port.name);
+                }
+            }
+        }
+
+        const outputs: Port[] = [];
+        if (thenFlow.outputs.length === 1) {
+            outputs.push({
+                id: 'out',
+                name: thenFlow.outputs[0].name,
+                annotation: thenFlow.outputs[0].annotation,
+            });
+        } else {
+            for (const port of thenFlow.outputs) {
+                outputs.push({
+                    id: `out:${port.name}`,
+                    name: port.name,
+                    annotation: port.annotation,
+                });
+            }
+        }
+        return { inputs, outputs };
+    }
+
+    if (region.kind === 'foreach') {
+        const bodyFlow = flowLookup(region.bodyFlow);
+        if (!bodyFlow) throw new FlowFormatError(`referenced bodyFlow '${region.bodyFlow}' not found`);
+
+        const collName = region.collectionPort ?? 'items';
+        const itemPort = region.itemPort ?? 'item';
+        const indexPort = region.indexPort ?? 'index';
+
+        const itemParam = bodyFlow.inputs.find(p => p.name === itemPort);
+        const collAnnotation = itemParam?.annotation ? `List[${itemParam.annotation}]` : 'list';
+
+        const inputs: Port[] = [{ id: `in:${collName}`, name: collName, annotation: collAnnotation, optional: false }];
+
+        for (const port of bodyFlow.inputs) {
+            if (port.name !== itemPort && port.name !== indexPort) {
+                inputs.push({ id: `in:${port.name}`, name: port.name, annotation: port.annotation, optional: false });
+            }
+        }
+
+        const outputs: Port[] = [];
+        if (bodyFlow.outputs.length === 1) {
+            const out = bodyFlow.outputs[0];
+            const listAnn = out.annotation ? `List[${out.annotation}]` : 'list';
+            outputs.push({ id: 'out', name: out.name, annotation: listAnn });
+        } else {
+            for (const port of bodyFlow.outputs) {
+                const listAnn = port.annotation ? `List[${port.annotation}]` : 'list';
+                outputs.push({ id: `out:${port.name}`, name: port.name, annotation: listAnn });
+            }
+        }
+        return { inputs, outputs };
+    }
+
+    if (region.kind === 'repeat') {
+        const bodyFlow = flowLookup(region.bodyFlow);
+        if (!bodyFlow) throw new FlowFormatError(`referenced bodyFlow '${region.bodyFlow}' not found`);
+
+        const stateNames = new Set(repeatStatePortNames(region, bodyFlow));
+
+        const inputs: Port[] = [];
+        // State inputs first
+        for (const port of bodyFlow.inputs) {
+            if (stateNames.has(port.name)) {
+                inputs.push({ id: `in:${port.name}`, name: port.name, annotation: port.annotation, optional: false });
+            }
+        }
+        // Broadcast / captured inputs next
+        for (const port of bodyFlow.inputs) {
+            if (!stateNames.has(port.name)) {
+                inputs.push({ id: `in:${port.name}`, name: port.name, annotation: port.annotation, optional: false });
+            }
+        }
+
+        const outputs: Port[] = [];
+        const stateOutputs = bodyFlow.outputs.filter(p => stateNames.has(p.name));
+        if (stateOutputs.length === 1) {
+            outputs.push({ id: 'out', name: stateOutputs[0].name, annotation: stateOutputs[0].annotation });
+        } else {
+            for (const port of stateOutputs) {
+                outputs.push({ id: `out:${port.name}`, name: port.name, annotation: port.annotation });
+            }
+        }
+        return { inputs, outputs };
+    }
+
+    throw new FlowFormatError(`unknown region kind: ${(region as FlowRegion).kind}`);
+}
+
+/** Reconcile region settings and wires against the child's old and new boundaries. */
+export function repairRegionCallerPorts(
+    caller: SlateFlow,
+    childId: string,
+    before: SlateFlow,
+    after: SlateFlow,
+    lookup: (id: string) => SlateFlow | undefined,
+    direction: 'input' | 'output',
+    oldName: string,
+    newName?: string,
+): SlateFlow {
+    let wires = caller.wires;
+    let changed = false;
+    const regions = caller.regions?.map(region => {
+        const usesChild = region.kind === 'branch'
+            ? region.thenFlow === childId || region.elseFlow === childId
+            : region.bodyFlow === childId;
+        if (!usesChild) return region;
+
+        let next = region;
+        if (region.kind === 'foreach' && direction === 'input') {
+            next = { ...region };
+            if ((region.itemPort ?? 'item') === oldName) next.itemPort = newName ?? oldName;
+            if ((region.indexPort ?? 'index') === oldName) next.indexPort = newName ?? oldName;
+        }
+        if (region.kind === 'repeat') {
+            next = { ...region };
+            if (direction === 'output' && region.conditionPort === oldName) next.conditionPort = newName;
+            if (region.statePorts?.includes(oldName)) {
+                const surviving = region.statePorts.flatMap(name => name !== oldName ? [name] : newName ? [newName] : []);
+                if (!surviving.length && after.inputs.some(input => after.outputs.some(output => output.name === input.name))) {
+                    throw new FlowFormatError('Update the repeat state ports before deleting its last explicit state port.');
+                }
+                next.statePorts = surviving.length ? surviving : undefined;
+            }
+            if (newName && repeatStatePortNames(region, before).includes(oldName) &&
+                (!after.inputs.some(port => port.name === newName) || !after.outputs.some(port => port.name === newName))) {
+                throw new FlowFormatError('Rename a repeat state input and output together.');
+            }
+        }
+
+        let previous: RegionPorts;
+        let updated: RegionPorts;
+        try {
+            previous = regionPorts(region, id => id === childId ? before : lookup(id));
+            updated = regionPorts(next, id => id === childId ? after : lookup(id));
+        } catch {
+            return region; // A missing sibling prevents boundary resolution.
+        }
+        const remap = (endpoint: string, ports: Port[], candidates: Port[], prefix: string) => {
+            const { instance, port } = parseEndpoint(endpoint);
+            if (instance !== region.id) return endpoint;
+            const old = ports.find(item => item.id === port || port === prefix + item.name);
+            if (!old) return endpoint;
+            const target = candidates.find(item => item.name === old.name)
+                ?? (old.name === oldName && newName ? candidates.find(item => item.name === newName) : undefined);
+            return target ? region.id + '.' + target.id : null;
+        };
+        wires = wires.flatMap(wire => {
+            const from = remap(wire.from, previous.outputs, updated.outputs, 'out:');
+            const to = remap(wire.to, previous.inputs, updated.inputs, 'in:');
+            if (from === wire.from && to === wire.to) return [wire];
+            changed = true;
+            return from !== null && to !== null ? [{ from, to }] : [];
+        });
+        if (JSON.stringify(next) !== JSON.stringify(region)) changed = true;
+        return next;
+    });
+    return changed ? { ...caller, wires, regions } : caller;
+}
+
+export function addRegion(flow: SlateFlow, region: FlowRegion): SlateFlow {
+    if (flow.instances.some(inst => inst.id === region.id)) {
+        throw new FlowFormatError(`region id ${region.id} collides with an instance id`);
+    }
+    if (flow.regions?.some(r => r.id === region.id)) {
+        throw new FlowFormatError(`region id ${region.id} already exists`);
+    }
+    return {
+        ...flow,
+        regions: [...(flow.regions ?? []), region],
+    };
+}
+
+export function removeRegion(flow: SlateFlow, regionId: string): SlateFlow {
+    const touches = (endpoint: string) => {
+        const instance = parseEndpoint(endpoint).instance;
+        return instance === regionId;
+    };
+    return {
+        ...flow,
+        regions: (flow.regions ?? []).filter(r => r.id !== regionId),
+        wires: flow.wires.filter(wire => !touches(wire.from) && !touches(wire.to)),
+    };
+}
+
+export type GroupRegionSpec =
+    | { kind: 'branch'; conditionPort?: string; thenFlowId: string; elseFlowId?: string }
+    | { kind: 'foreach'; collectionPort?: string; itemPort?: string; indexPort?: string; maxIterations?: number }
+    | { kind: 'repeat'; maxIterations: number; statePorts?: string[]; conditionPort?: string };
+
+export function groupIntoRegion(
+    parent: SlateFlow,
+    ids: string[],
+    spec: {
+        regionId: string;
+        childId: string;
+        childName: string;
+        region: GroupRegionSpec;
+    },
+    portsOf: (instance: FlowInstance) => { inputs: Port[]; outputs: Port[] },
+): { parent: SlateFlow; child: SlateFlow } {
+    if (parent.instances.some(item => item.id === spec.regionId) || parent.regions?.some(item => item.id === spec.regionId)) {
+        throw new FlowFormatError('A step with that region id already exists.');
+    }
+    if (spec.region.kind === 'branch' && spec.region.thenFlowId !== spec.childId) {
+        throw new FlowFormatError('The then branch must reference the extracted flow.');
+    }
+    const extracted = extractFlow(parent, ids, { id: spec.childId, name: spec.childName, instanceId: spec.regionId }, portsOf);
+
+    let region: FlowRegion;
+    if (spec.region.kind === 'branch') {
+        region = {
+            id: spec.regionId,
+            kind: 'branch',
+            thenFlow: spec.region.thenFlowId,
+            elseFlow: spec.region.elseFlowId,
+            conditionPort: spec.region.conditionPort,
+        };
+    } else if (spec.region.kind === 'foreach') {
+        region = {
+            id: spec.regionId,
+            kind: 'foreach',
+            bodyFlow: spec.childId,
+            collectionPort: spec.region.collectionPort,
+            itemPort: spec.region.itemPort,
+            indexPort: spec.region.indexPort,
+            maxIterations: spec.region.maxIterations,
+        };
+    } else {
+        region = {
+            id: spec.regionId,
+            kind: 'repeat',
+            bodyFlow: spec.childId,
+            maxIterations: spec.region.maxIterations,
+            statePorts: spec.region.statePorts,
+            conditionPort: spec.region.conditionPort,
+        };
+    }
+
+    let child = extracted.child;
+    let wires = extracted.parent.wires;
+    if (region.kind === 'foreach') {
+        const indexPort = region.indexPort ?? 'index';
+        const inputs = child.inputs.filter(port => port.name !== indexPort);
+        const itemPort = region.itemPort ?? inputs.find(port => port.name === 'item')?.name
+            ?? (inputs.length === 1 ? inputs[0].name : undefined);
+        if (inputs.length && !inputs.some(port => port.name === itemPort)) {
+            throw new FlowFormatError('Choose a foreach item input from the extracted inputs before grouping.');
+        }
+        if (itemPort) region = { ...region, itemPort };
+        const collectionPort = region.collectionPort ?? 'items';
+        if (inputs.some(port => port.name === collectionPort && port.name !== itemPort)) {
+            throw new FlowFormatError('The foreach collection port collides with a broadcast input.');
+        }
+        if (child.inputs.some(port => port.name === indexPort)) {
+            throw new FlowFormatError('Disconnect the supplied index before grouping. Foreach supplies its own index.');
+        }
+        wires = wires.map(wire => wire.to === region.id + '.in:' + itemPort
+            ? { ...wire, to: region.id + '.in:' + collectionPort } : wire);
+    }
+    if (region.kind === 'repeat') {
+        const output = child.outputs[0]?.name;
+        const input = child.inputs[0]?.name;
+        if (!region.statePorts?.length && child.inputs.length === 1 && child.outputs.length === 1 &&
+            output !== input && output !== region.conditionPort) {
+            child = renameFlowPort(child, 'output', output, input);
+        }
+        const statePorts = repeatStatePortNames(region, child);
+        if (child.outputs.some(port => !statePorts.includes(port.name))) {
+            throw new FlowFormatError('Repeat grouping requires an input with the same name as each wired output.');
+        }
+    }
+    const parentWithoutChildInstance: SlateFlow = {
+        ...extracted.parent,
+        wires,
+        instances: extracted.parent.instances.filter(inst => inst.id !== spec.regionId),
+        regions: [...(extracted.parent.regions ?? []), region],
+    };
+
+    return {
+        parent: parentWithoutChildInstance,
+        child,
     };
 }
