@@ -1,5 +1,6 @@
 import { expect, test, type Page, type Locator } from './coverage-fixture';
 import { demoSnapshot } from '../../src/harness/demo';
+import { indexNode } from '../../vscode-extension/src/slate_folder';
 
 async function send(page: Page, message: unknown) {
     await page.evaluate(message => window.postMessage(message, '*'), message);
@@ -85,6 +86,36 @@ test('region commands preserve scope and the inspector switches observed iterati
     await page.getByRole('button', { name: 'Remove region', exact: true }).click();
     expect(await messages(page)).toContainEqual(expect.objectContaining({
         action: { kind: 'removeRegion', regionId: 'loop', flow: 'report' },
+    }));
+});
+
+test('prose citation ports can be wired and the project can request document compilation', async ({ page }) => {
+    const brief = await snapshot(page, value => {
+        value.projectName = 'Grant brief';
+        value.documents = [
+            ['source', 'citation source() -> citation:', '    {"key":"study2026"}'],
+            ['aims', 'operator aims(ref: citation) -> section:', '    ## Specific Aims', '    Evidence: {ref}.'],
+        ].map(([name, ...code]) => indexNode('slate/nodes/' + name + '.json',
+            JSON.stringify({ slate: 3, name, code }), 'prose', null).document);
+        value.flows = [{ id: 'brief', flow: {
+            name: 'brief', inputs: [], outputs: [], extra: {},
+            instances: [{ id: 'cite', node: 'source' }, { id: 'aim', node: 'aims' }], wires: [],
+        } }];
+        value.flowPositions = { brief: { cite: { x: 30, y: 100 }, aim: { x: 450, y: 100 } } };
+    });
+    await command(page, 'Flow: brief');
+    await wire(page, node(page, 'cite').locator('[data-handleid="out"]'), node(page, 'aim').locator('[data-handleid="in:ref"]'));
+    const citation = { from: 'cite.out', to: 'aim.in:ref' };
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        action: { kind: 'connectData', flow: 'brief', ...citation },
+    }));
+    brief.revision += 1;
+    brief.flows![0].flow!.wires.push(citation);
+    await send(page, { type: 'snapshot', snapshot: brief });
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1);
+    await command(page, 'Compile project');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        action: expect.objectContaining({ kind: 'compile' }),
     }));
 });
 
