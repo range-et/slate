@@ -515,88 +515,77 @@ export function parseProseNode(node: SlateNode, nodeId = node.name): ParsedProse
     let signature: CallableSignature;
     let templateLines: string[];
 
-    if (firstNonEmptyIdx >= 0) {
-        const firstLine = rawLines[firstNonEmptyIdx];
-        const parsedSig = parseProseSignatureLine(firstLine, node.name);
-        if (parsedSig.matched) {
-            kind = parsedSig.kind;
-            if (parsedSig.name !== node.name) {
-                diagnostics.push({
-                    code: 'prose-syntax',
-                    severity: 'error',
-                    message: `Prose node "${nodeId}" declares signature name "${parsedSig.name}" which does not match node name "${node.name}".`,
-                    nodeId,
-                });
-            }
-            for (const p of parsedSig.rawParamAnnotations) {
-                if (p.raw !== null && !isProsePortType(p.raw) && !['str', 'string', 'text'].includes(p.raw.toLowerCase())) {
-                    diagnostics.push({
-                        code: 'prose-port-type',
-                        severity: 'warning',
-                        message: `Parameter "${p.name}" on prose node "${node.name}" uses non-standard prose port type "${p.raw}" (expected passage, citation, section, or rubric).`,
-                        nodeId,
-                    });
-                }
-            }
-            if (
-                parsedSig.rawReturn !== null &&
-                !isProsePortType(parsedSig.rawReturn) &&
-                !['str', 'string', 'text'].includes(parsedSig.rawReturn.toLowerCase())
-            ) {
+    const parsedSig = parseProseSignatureLine(rawLines[firstNonEmptyIdx] ?? '', node.name);
+    if (parsedSig.matched) {
+        kind = parsedSig.kind;
+        if (parsedSig.name !== node.name) {
+            diagnostics.push({
+                code: 'prose-syntax',
+                severity: 'error',
+                message: `Prose node "${nodeId}" declares signature name "${parsedSig.name}" which does not match node name "${node.name}".`,
+                nodeId,
+            });
+        }
+        for (const p of parsedSig.rawParamAnnotations) {
+            if (p.raw !== null && !isProsePortType(p.raw) && !['str', 'string', 'text'].includes(p.raw.toLowerCase())) {
                 diagnostics.push({
                     code: 'prose-port-type',
                     severity: 'warning',
-                    message: `Return type on prose node "${node.name}" uses non-standard prose port type "${parsedSig.rawReturn}" (expected passage, citation, section, or rubric).`,
+                    message: `Parameter "${p.name}" on prose node "${node.name}" uses non-standard prose port type "${p.raw}" (expected passage, citation, section, or rubric).`,
                     nodeId,
                 });
             }
-            signature = {
-                name: parsedSig.name,
-                params: parsedSig.params,
-                returns: parsedSig.returns,
-            };
-            const rest = unindentLines(rawLines.slice(firstNonEmptyIdx + 1));
-            const stripped = stripReturnOrTripleQuotes(rest.join('\n'));
-            templateLines = stripped ? stripped.split(/\r?\n/) : [];
-        } else {
-            // Plain passage/text node without explicit operator header: infer `{param}` placeholders as `passage` inputs
-            kind = (typeof node.extra?.proseKind === 'string' && isProsePortType(node.extra.proseKind))
-                ? node.extra.proseKind
-                : 'passage';
-            const fullText = rawLines.join('\n');
-            const placeholderMatches = [...fullText.matchAll(/\{\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?\}/g)];
-            const seenParams = new Set<string>();
-            const params: UnitParam[] = [];
-            for (const m of placeholderMatches) {
-                const pName = m[1];
-                if (!seenParams.has(pName)) {
-                    seenParams.add(pName);
-                    params.push({
-                        name: pName,
-                        annotation: 'passage',
-                        default: null,
-                        kind: 'keyword',
-                    });
-                }
-            }
-            const returnType = (typeof node.extra?.returnType === 'string' && isProsePortType(node.extra.returnType))
-                ? node.extra.returnType
-                : kind;
-            signature = {
-                name: node.name,
-                params,
-                returns: returnType,
-            };
-            templateLines = [...rawLines];
         }
+        if (
+            parsedSig.rawReturn !== null &&
+            !isProsePortType(parsedSig.rawReturn) &&
+            !['str', 'string', 'text'].includes(parsedSig.rawReturn.toLowerCase())
+        ) {
+            diagnostics.push({
+                code: 'prose-port-type',
+                severity: 'warning',
+                message: `Return type on prose node "${node.name}" uses non-standard prose port type "${parsedSig.rawReturn}" (expected passage, citation, section, or rubric).`,
+                nodeId,
+            });
+        }
+        signature = {
+            name: parsedSig.name,
+            params: parsedSig.params,
+            returns: parsedSig.returns,
+        };
+        const rest = unindentLines(rawLines.slice(firstNonEmptyIdx + 1));
+        const stripped = stripReturnOrTripleQuotes(rest.join('\n'));
+        templateLines = stripped ? stripped.split(/\r?\n/) : [];
     } else {
-        kind = 'passage';
+        // Plain passage/text node without explicit operator header: infer `{param}` placeholders as `passage` inputs
+        kind = (typeof node.extra?.proseKind === 'string' && isProsePortType(node.extra.proseKind))
+            ? node.extra.proseKind
+            : 'passage';
+        const fullText = rawLines.join('\n');
+        const placeholderMatches = [...fullText.matchAll(/\{\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?\}/g)];
+        const seenParams = new Set<string>();
+        const params: UnitParam[] = [];
+        for (const m of placeholderMatches) {
+            const pName = m[1];
+            if (!seenParams.has(pName)) {
+                seenParams.add(pName);
+                params.push({
+                    name: pName,
+                    annotation: 'passage',
+                    default: null,
+                    kind: 'keyword',
+                });
+            }
+        }
+        const returnType = (typeof node.extra?.returnType === 'string' && isProsePortType(node.extra.returnType))
+            ? node.extra.returnType
+            : kind;
         signature = {
             name: node.name,
-            params: [],
-            returns: 'passage',
+            params,
+            returns: returnType,
         };
-        templateLines = [];
+        templateLines = [...rawLines];
     }
 
     const contractSpec = parseProseContract(node.contract, node.extra);
@@ -615,10 +604,23 @@ export function parseProseNode(node: SlateNode, nodeId = node.name): ParsedProse
     };
 }
 
+export function proseStub(signature: string, expectedName: string, intent: string): SlateNode {
+    const header = signature.trim();
+    const parsed = parseProseSignatureLine(header, expectedName);
+    if (!parsed.matched || parsed.name !== expectedName || /[\r\n]/.test(header)) {
+        throw new Error('Use one prose operator signature with the requested name.');
+    }
+    return {
+        name: expectedName, language: 'prose', intent, contract: '', context: [],
+        examples: [], locked: false, imports: [], uses: [],
+        code: [header.endsWith(':') ? header : header + ':'], extra: {},
+    };
+}
+
 /**
  * Parse a prose source module into a `ParseModuleResult` compatible with `HarnessDocument` and `slate_folder.ts`.
  */
-export function parseProseModule(source: string, documentPath = '<prose>', nodeId?: string): ParseModuleResult {
+export function parseProseModule(source: string, documentPath = '<prose>', nodeId?: string, node?: SlateNode): ParseModuleResult {
     const lines = source.replace(/\r\n?/g, '\n').split('\n');
     const fallbackName = nodeId ? (nodeId.split('/').pop() ?? nodeId) : 'prose_node';
     const firstNonEmptyIdx = lines.findIndex(l => l.trim().length > 0 && !l.trim().startsWith('#'));
@@ -632,9 +634,10 @@ export function parseProseModule(source: string, documentPath = '<prose>', nodeI
         end: { line: endLine, character: endChar },
     };
 
-    const name = parsedSig.matched ? parsedSig.name : fallbackName;
-    const params = parsedSig.matched ? parsedSig.params : [];
-    const returnAnnotation = parsedSig.matched ? parsedSig.returns : 'passage';
+    const parsedNode = node ? parseProseNode(node, nodeId ?? node.name) : undefined;
+    const name = parsedNode?.signature.name ?? (parsedSig.matched ? parsedSig.name : fallbackName);
+    const params = parsedNode?.signature.params ?? (parsedSig.matched ? parsedSig.params : []);
+    const returnAnnotation = parsedNode?.signature.returns ?? (parsedSig.matched ? parsedSig.returns : 'passage');
     const paramStr = params.map(p => `${p.name}: ${p.annotation ?? 'passage'}`).join(', ');
 
     const unit: ParsedUnit = {
@@ -659,9 +662,9 @@ export function parseProseModule(source: string, documentPath = '<prose>', nodeI
     return {
         path: documentPath,
         sourceHash: hashProseSource(source),
-        valid: true,
+        valid: !parsedNode?.diagnostics.some(item => item.severity === 'error'),
         units: [unit],
-        diagnostics: [],
+        diagnostics: parsedNode?.diagnostics.map(item => ({ code: item.code, message: item.message, range: ZERO_RANGE })) ?? [],
     };
 }
 

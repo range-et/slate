@@ -4,6 +4,7 @@ import { activate, deactivate } from '../../extension';
 import { PROSE_GENERATED_MD_HEADER, PROSE_GENERATED_TEX_HEADER } from '../../compile/prose';
 import { GENERATED_HEADER } from '../../compile/python';
 import type { HarnessSnapshot } from '../../harness_protocol';
+import { SlateMcpServer } from '../../mcp/slate_mcp_server';
 import { SlateFolderHost } from '../../slate_folder_host';
 
 suite('Slate native project commands', () => {
@@ -369,10 +370,28 @@ suite('Slate native project commands', () => {
                     { id: 'a1', node: 'aim_passage' },
                 ],
                 wires: [
-                    { from: 'c1.out', to: 'a1.in:ref' },
                     { from: 'a1.out', to: 'output:proposal' },
                 ],
             }, null, 2) + '\n'));
+
+            await vscode.commands.executeCommand('slate.openHarness');
+            await indexed('grant_demo');
+            const snapshot = await vscode.commands.executeCommand<HarnessSnapshot>('slate.test.getSnapshot');
+            assert.equal(snapshot?.documents.find(item => item.units[0]?.id === 'aim_passage')?.units[0].params?.[0]?.annotation, 'citation');
+            await vscode.commands.executeCommand('slate.test.postMessage', {
+                type: 'action', action: { kind: 'connectData', from: 'c1.out', to: 'a1.in:ref' },
+            });
+            assert.ok(JSON.parse(await read('flows', 'main.json')).wires.some((wire: { from: string; to: string }) =>
+                wire.from === 'c1.out' && wire.to === 'a1.in:ref'));
+
+            const mcp = new SlateMcpServer(root.fsPath);
+            const stub = { name: 'abstract', signature: 'operator abstract(topic: passage) -> section', intent: 'Summarize the topic' };
+            assert.equal((await mcp.callTool('slate_define_stub', { ...stub, body: 'Arbitrary text' })).isError, true);
+            assert.equal((await mcp.callTool('slate_define_stub', stub)).isError, false);
+            assert.deepEqual(JSON.parse(await read('nodes', 'abstract.json')).code, ['operator abstract(topic: passage) -> section:']);
+            await vscode.commands.executeCommand('slate.test.postMessage', { type: 'verifyNode', nodeId: 'aim_passage' });
+            assert.equal(JSON.parse(await read('nodes', 'aim_passage.json')).verification.state, 'failed',
+                'Unbound citation fails node verification until it is supplied by the flow');
 
             await vscode.workspace.fs.createDirectory(outDir);
             await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(outDir, 'stale.md'), enc(`${PROSE_GENERATED_MD_HEADER}\nstale\n`));

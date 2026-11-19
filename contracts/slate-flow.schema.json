@@ -138,6 +138,11 @@
       "items": {
         "type": "object",
         "required": ["id", "kind"],
+        "oneOf": [
+          { "properties": { "kind": { "const": "branch" } }, "required": ["thenFlow"] },
+          { "properties": { "kind": { "const": "foreach" } }, "required": ["bodyFlow"] },
+          { "properties": { "kind": { "const": "repeat" } }, "required": ["bodyFlow", "maxIterations"] }
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -155,13 +160,16 @@
             "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
           },
           "thenFlow": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "elseFlow": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "bodyFlow": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "collectionPort": {
             "type": "string",

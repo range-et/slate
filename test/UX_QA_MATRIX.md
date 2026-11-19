@@ -276,3 +276,5 @@ readiness.
   and `slate.compile` prose dispatch; `test/harness_palette.test.ts` and
   `test/coverage_hardening.test.ts` achieve 100% Stryker mutation score (`90/90`)
   on `src/harness/palette.ts` and expand pure-module branch coverage (Issue #20).
+- `interaction_chains.playwright.ts` covers scoped add/group/remove commands and switching between traced loop iterations. The native `persistence.test.ts` covers cancelling and confirming item selection during grouping, boundary rewiring, child-port changes, cancellation, layout persistence, and native Undo/Save/reopen.
+- Native `project.test.ts` opens an indexed Prose project, wires a typed citation through the canvas action handler, then compiles Markdown/LaTeX and checks the persisted bibliography output. Real workbench QA continues to exercise the shared editor. Full Prose authoring through the editor UI and iteration selection inside nested invocations remain gaps.

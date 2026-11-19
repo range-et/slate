@@ -10,12 +10,13 @@ import { checkLlamaHealth, streamLlamaCompletion } from './llama_transport';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { PythonAdapter, sourceHash } from './python_adapter';
+import { parseProseModule, proseStub, verifyProseNode } from './prose_adapter';
 import { searchUnits } from './search';
 import {
-    addRegion, connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, groupIntoRegion, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, parseValueLiteral, pathForFlowId,
-    regionPorts, removeInstances, removeNodeReferences, removeRegion, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, serializeFlow, uniqueName, unitSignature, type CallableSignature, type GroupRegionSpec, type Port,
+    addRegion, connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, groupIntoRegion, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, parseFlow, parseValueLiteral, pathForFlowId,
+    regionPorts, removeInstances, removeNodeReferences, removeRegion, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, repairRegionCallerPorts, repeatStatePortNames, serializeFlow, uniqueName, unitSignature, type CallableSignature, type GroupRegionSpec, type Port,
 } from './flow';
-import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
+import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, parseConfig, pathForNodeId, serializeNode, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
 import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
 import { buildUsageIndex } from './usage_index';
@@ -855,7 +856,12 @@ export class HarnessPanel implements vscode.Disposable {
             }
 
             const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
-            const result = await runNodeVerification({
+            const language = node.language ?? parseConfig(await this.folder.readConfigText()).language;
+            const proseCheck = language === 'prose' ? verifyProseNode(node, { nodeId }) : undefined;
+            const result: NodeVerificationResult = proseCheck ? {
+                nodeId, state: proseCheck.valid ? 'passed' : 'failed', timestamp: Date.now(),
+                sourceHash: runningResult.sourceHash, diagnostics: proseCheck.diagnostics.map(item => item.message),
+            } : await runNodeVerification({
                 workspaceRoot: this.folder.root.fsPath,
                 node,
                 nodeId,
@@ -1083,6 +1089,7 @@ export class HarnessPanel implements vscode.Disposable {
         try {
             const index = await this.folder.index();
             const { config, nodes } = await this.folder.readNodes();
+            if (config.language === 'prose') throw new Error('Use Compile Project to verify and assemble prose flows.');
             const flowMap = new Map<string, SlateFlow>();
             for (const hf of index.flows) {
                 if (hf.flow) flowMap.set(hf.id, hf.flow);
@@ -1353,8 +1360,8 @@ export class HarnessPanel implements vscode.Disposable {
         if (flowId !== MAIN_FLOW && (!this.snapshot?.flows?.some(item => item.id === flowId))) {
             await this.refresh();
         }
-        const finish = async (message: string, select?: string) => {
-            await folder.writeLayout();
+        const finish = async (message: string, select?: string, saveLayout = true) => {
+            if (saveLayout) await folder.writeLayout();
             await this.refresh();
             if (select) await this.postMessage({ type: 'selectUnit', unitId: select });
             this.postCommandResult(true, message);
@@ -1417,13 +1424,14 @@ export class HarnessPanel implements vscode.Disposable {
             }
             case 'createStub': {
                 const name = typeof action.name === 'string' && action.name.trim() ? action.name.trim() : 'stub';
+                const language = parseConfig(await folder.readConfigText()).language;
                 const signature = typeof action.signature === 'string' && action.signature.trim()
                     ? action.signature.trim()
-                    : `def ${name}() -> None`;
+                    : language === 'prose' ? `operator ${name}() -> passage` : `def ${name}() -> None`;
                 const intent = typeof action.intent === 'string' && action.intent.trim()
                     ? action.intent.trim()
                     : `Atomic stub ${name}`;
-                const node = nodeFromSignature(signature, intent);
+                const node = language === 'prose' ? proseStub(signature, name, intent) : nodeFromSignature(signature, intent);
                 node.contract = typeof action.contract === 'string' && action.contract.trim()
                     ? action.contract.trim()
                     : `Contract for ${name}`;
@@ -1446,7 +1454,8 @@ export class HarnessPanel implements vscode.Disposable {
                 const connectFrom = typeof action.connectFrom === 'string' ? action.connectFrom : null;
                 const connectTo = typeof action.connectTo === 'string' ? action.connectTo : null;
                 if (connectFrom || connectTo) {
-                    const parsed = await this.adapter.parseModule(`${node.code.join('\n')}\n`, nodeId);
+                    const parsed = language === 'prose' ? parseProseModule(codeText(node), nodeId, nodeId, node)
+                        : await this.adapter.parseModule(codeText(node), nodeId);
                     const unit = parsed.units[0];
                     const sig = unit ? unitSignature(unit, parsed.units) : null;
                     const ports = sig ? { inputs: inputPorts(sig), outputs: outputPorts(sig) } : { inputs: [], outputs: [] };
@@ -1780,10 +1789,16 @@ export class HarnessPanel implements vscode.Disposable {
                 }
 
                 let next = removeInstances(currentFlow, ids);
+                const removesRegion = currentFlow.regions?.some(region => ids.has(region.id));
                 for (const id of ids) {
                     if ((next.regions ?? []).some(r => r.id === id)) {
                         next = removeRegion(next, id);
                     }
+                }
+                if (removesRegion) {
+                    await folder.writeRegionEdit(new Map([[flowId, next]]), true);
+                    await finish(`Removed ${ids.size} item(s).`, undefined, false);
+                    return true;
                 }
                 if (scope !== null || this.snapshot?.flows?.some(item => item.id === MAIN_FLOW) || currentFlow.instances.length > 0 || (currentFlow.regions?.length ?? 0) > 0 || currentFlow.wires.length > 0) {
                     await saveFlow(flowId, next);
@@ -1937,7 +1952,7 @@ export class HarnessPanel implements vscode.Disposable {
                 if (!newName || newName === oldName) return true;
 
                 const targetFlow = this.flow(targetFlowId);
-                const updatedTargetFlow = renameFlowPort(targetFlow, direction, oldName, newName);
+                let updatedTargetFlow = renameFlowPort(targetFlow, direction, oldName, newName);
 
                 const allFlows = await folder.readFlows();
                 const flowsMap = new Map<string, SlateFlow>();
@@ -1945,19 +1960,24 @@ export class HarnessPanel implements vscode.Disposable {
                     if (f.flow) flowsMap.set(f.id, f.flow);
                 }
                 flowsMap.set(MAIN_FLOW, this.flow(MAIN_FLOW));
-                flowsMap.set(targetFlowId, updatedTargetFlow);
+                const pairedDirection = direction === 'input' ? 'output' : 'input';
+                const paired = [...flowsMap.values()].some(flow => flow.regions?.some(region =>
+                    region.kind === 'repeat' && region.bodyFlow === targetFlowId && repeatStatePortNames(region, targetFlow).includes(oldName)));
+                if (paired) updatedTargetFlow = renameFlowPort(updatedTargetFlow, pairedDirection, oldName, newName);
+                const changed = new Map([[targetFlowId, updatedTargetFlow]]);
 
                 for (const [fId, flowObj] of flowsMap.entries()) {
                     if (fId === targetFlowId) continue;
-                    const repaired = repairCallerWiresOnPortRename(flowObj, targetFlowId, direction, oldName, newName, targetFlow.outputs.length);
+                    let ordinary = repairCallerWiresOnPortRename(flowObj, targetFlowId, direction, oldName, newName, targetFlow.outputs.length);
+                    if (paired) ordinary = repairCallerWiresOnPortRename(ordinary, targetFlowId, pairedDirection, oldName, newName, targetFlow.outputs.length);
+                    const repaired = repairRegionCallerPorts(ordinary, targetFlowId, targetFlow, updatedTargetFlow,
+                        id => flowsMap.get(id), direction, oldName, newName);
                     if (repaired !== flowObj) {
-                        flowsMap.set(fId, repaired);
+                        changed.set(fId, repaired);
                     }
                 }
 
-                for (const [fId, flowObj] of flowsMap.entries()) {
-                    await folder.writeFlow(fId, flowObj);
-                }
+                await folder.writeRegionEdit(changed, false);
 
                 await finish(`Renamed port ${oldName} → ${newName}.`);
                 return true;
@@ -1984,12 +2004,12 @@ export class HarnessPanel implements vscode.Disposable {
                     if (f.flow) flowsMap.set(f.id, f.flow);
                 }
                 flowsMap.set(MAIN_FLOW, this.flow(MAIN_FLOW));
-                flowsMap.set(targetFlowId, updatedTargetFlow);
+                const changed = new Map([[targetFlowId, updatedTargetFlow]]);
 
                 const survivingOutput = updatedTargetFlow.outputs.length === 1 ? updatedTargetFlow.outputs[0].name : undefined;
                 for (const [fId, flowObj] of flowsMap.entries()) {
                     if (fId === targetFlowId) continue;
-                    const repaired = repairCallerWiresOnPortDelete(
+                    const ordinary = repairCallerWiresOnPortDelete(
                         flowObj,
                         targetFlowId,
                         direction,
@@ -1997,14 +2017,14 @@ export class HarnessPanel implements vscode.Disposable {
                         updatedTargetFlow.outputs.length,
                         survivingOutput,
                     );
+                    const repaired = repairRegionCallerPorts(ordinary, targetFlowId, targetFlow, updatedTargetFlow,
+                        id => flowsMap.get(id), direction, name);
                     if (repaired !== flowObj) {
-                        flowsMap.set(fId, repaired);
+                        changed.set(fId, repaired);
                     }
                 }
 
-                for (const [fId, flowObj] of flowsMap.entries()) {
-                    await folder.writeFlow(fId, flowObj);
-                }
+                await folder.writeRegionEdit(changed, false);
 
                 await finish(`Deleted port ${name}.`);
                 return true;
@@ -2059,6 +2079,10 @@ export class HarnessPanel implements vscode.Disposable {
             }
             case 'deleteFlow': {
                 const id = String(action.id);
+                if ((this.snapshot?.flows ?? []).some(item => item.flow?.regions?.some(region => region.kind === 'branch'
+                    ? region.thenFlow === id || region.elseFlow === id : region.bodyFlow === id))) {
+                    throw new Error('Remove the regions that reference this flow before deleting it.');
+                }
                 const choice = await vscode.window.showWarningMessage(`Delete slate/flows/${id}.json?`, { modal: true }, 'Delete');
                 if (choice !== 'Delete') return true;
                 await vscode.workspace.fs.delete(folder.uri(pathForFlowId(id)));
@@ -2068,7 +2092,15 @@ export class HarnessPanel implements vscode.Disposable {
                 return true;
             }
             case 'addRegion': {
-                let flow = this.flow(flowId);
+                const flow = this.flow(flowId);
+                const changes = new Map<string, SlateFlow>();
+                const ensureChild = (id: string) => {
+                    if (id === flowId || id === MAIN_FLOW) throw new Error('Choose a child flow other than its parent or main.');
+                    const existing = this.snapshot?.flows?.find(item => item.id === id);
+                    if (existing?.flow) return;
+                    if (existing || flowName(id)) throw new Error('Cannot create region child flow ' + id + '.');
+                    changes.set(id, emptyFlow(id));
+                };
                 const takenIds = [
                     ...flow.instances.map(i => i.id),
                     ...(flow.regions ?? []).map(r => r.id),
@@ -2088,9 +2120,7 @@ export class HarnessPanel implements vscode.Disposable {
                         const thenFlow = typeof action.thenFlow === 'string' && action.thenFlow.trim()
                             ? action.thenFlow.trim()
                             : uniqueName(`${id}_then`, (this.snapshot?.flows ?? []).map(f => f.id));
-                        if (!this.snapshot?.flows?.some(f => f.id === thenFlow)) {
-                            await folder.writeFlow(thenFlow, emptyFlow(thenFlow));
-                        }
+
                         region = {
                             id,
                             kind: 'branch',
@@ -2103,9 +2133,7 @@ export class HarnessPanel implements vscode.Disposable {
                         const bodyFlow = typeof action.bodyFlow === 'string' && action.bodyFlow.trim()
                             ? action.bodyFlow.trim()
                             : uniqueName(`${id}_body`, (this.snapshot?.flows ?? []).map(f => f.id));
-                        if (!this.snapshot?.flows?.some(f => f.id === bodyFlow)) {
-                            await folder.writeFlow(bodyFlow, emptyFlow(bodyFlow));
-                        }
+
                         const maxIterations = typeof action.maxIterations === 'number' && action.maxIterations > 0
                             ? Math.floor(action.maxIterations)
                             : 10;
@@ -2122,9 +2150,7 @@ export class HarnessPanel implements vscode.Disposable {
                         const bodyFlow = typeof action.bodyFlow === 'string' && action.bodyFlow.trim()
                             ? action.bodyFlow.trim()
                             : uniqueName(`${id}_body`, (this.snapshot?.flows ?? []).map(f => f.id));
-                        if (!this.snapshot?.flows?.some(f => f.id === bodyFlow)) {
-                            await folder.writeFlow(bodyFlow, emptyFlow(bodyFlow));
-                        }
+
                         region = {
                             id,
                             kind: 'foreach',
@@ -2137,10 +2163,15 @@ export class HarnessPanel implements vscode.Disposable {
                         };
                     }
                 }
-                flow = addRegion(flow, region);
+                const next = parseFlow(serializeFlow(addRegion(flow, region)));
+                if (region.kind === 'branch') {
+                    ensureChild(region.thenFlow);
+                    if (region.elseFlow) ensureChild(region.elseFlow);
+                } else ensureChild(region.bodyFlow);
+                changes.set(flowId, next);
                 this.placeAt(scope, region.id, action.x, action.y);
-                await saveFlow(flowId, flow);
-                await finish(`Added ${region.kind} region ${region.id}.`, region.id);
+                await folder.writeRegionEdit(changes, true);
+                await finish(`Added ${region.kind} region ${region.id}.`, region.id, false);
                 return true;
             }
             case 'removeRegion': {
@@ -2149,8 +2180,8 @@ export class HarnessPanel implements vscode.Disposable {
                 const flow = removeRegion(this.flow(flowId), regionId);
                 if (scope === null) delete layout.positions[regionId];
                 else delete layout.flowPositions[scope]?.[regionId];
-                await saveFlow(flowId, flow);
-                await finish(`Removed region ${regionId}.`);
+                await folder.writeRegionEdit(new Map([[flowId, flow]]), true);
+                await finish(`Removed region ${regionId}.`, undefined, false);
                 return true;
             }
             case 'groupIntoRegion': {
@@ -2182,6 +2213,7 @@ export class HarnessPanel implements vscode.Disposable {
                     : null;
                 const existingFlows = (this.snapshot?.flows ?? []).map(f => f.id);
                 const childId = givenName ?? uniqueName(`${regionKind}_body`, existingFlows);
+                if (childId === MAIN_FLOW || childId === flowId || flowName(childId)) throw new Error('Invalid or existing region child flow: ' + childId);
                 const takenIds = [
                     ...parent.instances.map(i => i.id),
                     ...(parent.regions ?? []).map(r => r.id),
@@ -2215,11 +2247,24 @@ export class HarnessPanel implements vscode.Disposable {
                     };
                 }
 
+                const portsOf = (instance: FlowInstance) => this.portsOf(instance);
+                if (regionSpec.kind === 'foreach' && !regionSpec.itemPort) {
+                    const extracted = extractFlow(parent, selected, { id: childId, name: childId, instanceId: regionId }, portsOf);
+                    const indexPort = regionSpec.indexPort ?? 'index';
+                    const candidates = extracted.child.inputs.filter(port => port.name !== indexPort);
+                    if (candidates.length > 1 && !candidates.some(port => port.name === 'item')) {
+                        const item = await vscode.window.showQuickPick(candidates.map(port => ({
+                            label: port.name, description: port.annotation ?? undefined,
+                        })), { placeHolder: 'Choose which input receives one item from the collection' });
+                        if (!item) return true;
+                        regionSpec = { ...regionSpec, itemPort: item.label };
+                    }
+                }
                 const result = groupIntoRegion(
                     parent,
                     selected,
                     { regionId, childId, childName: childId, region: regionSpec },
-                    instance => this.portsOf(instance),
+                    portsOf,
                 );
                 const positions = scope === null ? layout.positions : layout.flowPositions[scope] ?? {};
                 const points = selected.map(id => positions[id]).filter(Boolean);
@@ -2231,9 +2276,8 @@ export class HarnessPanel implements vscode.Disposable {
                     if (scope === null) this.placeAt(null, `flow:${childId}`, avgX + 320, avgY);
                 }
                 for (const id of selected) delete positions[id];
-                await folder.writeFlow(childId, result.child);
-                await saveFlow(flowId, result.parent);
-                await finish(`Grouped ${selected.length} item(s) into ${regionKind} region ${regionId}.`, regionId);
+                await folder.writeRegionEdit(new Map([[childId, result.child], [flowId, result.parent]]), true);
+                await finish(`Grouped ${selected.length} item(s) into ${regionKind} region ${regionId}.`, regionId, false);
                 return true;
             }
             case 'addLibrary': {

@@ -55,6 +55,39 @@ test.beforeEach(async ({ page }) => {
     await expect(node(page, 'clamp')).toBeVisible();
 });
 
+test('region commands preserve scope and the inspector switches observed iterations', async ({ page }) => {
+    await command(page, 'Flow: report');
+    await command(page, 'Add foreach region');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        action: expect.objectContaining({ kind: 'addRegion', regionKind: 'foreach', flow: 'report' }),
+    }));
+    await node(page, 'hundred').locator('strong').first().click();
+    await command(page, 'Group selection into foreach region');
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        action: { kind: 'groupIntoRegion', regionKind: 'foreach', flow: 'report', ids: ['hundred'] },
+    }));
+    await snapshot(page, value => {
+        value.flows!.find(item => item.id === 'report')!.flow!.regions = [{ id: 'loop', kind: 'foreach', bodyFlow: 'body' }];
+        value.flows!.push({ id: 'body', flow: { name: 'body', inputs: [], outputs: [], instances: [], wires: [], extra: {} } });
+        value.execution = { runId: 'region-run', flowId: 'report', status: 'completed', valuesByUse: {},
+            observations: ['first', 'second'].map((text, index) => ({
+                path: ['loop', 'iter:' + index], instanceId: 'step', inputs: {}, status: 'executed',
+                outputs: { out: { type: 'str', repr: text, json: text } },
+            })),
+        };
+    });
+    await node(page, 'loop').locator('strong').first().click();
+    const iteration = page.getByTestId('region-iteration-inspector');
+    await expect(iteration).toContainText('first');
+    await iteration.getByLabel('Iteration').selectOption('iter:1');
+    await expect(iteration).toContainText('second');
+    await expect(iteration).not.toContainText('first');
+    await page.getByRole('button', { name: 'Remove region', exact: true }).click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        action: { kind: 'removeRegion', regionId: 'loop', flow: 'report' },
+    }));
+});
+
 for (const entry of ['double-click', 'Enter', 'context menu', 'palette']) {
     test(`chain source reveal via ${entry}`, async ({ page }) => {
         await node(page, 'clamp').locator('strong').first().click();

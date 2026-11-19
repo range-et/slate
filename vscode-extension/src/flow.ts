@@ -741,6 +741,19 @@ export interface RegionPorts {
  * Extract boundary ports for explicit control flow regions (branch, foreach, repeat).
  * Reuses child flows as bodies where their inputs/outputs define the region contract.
  */
+/** Branches may declare their outputs in different orders. */
+export function branchOutputsMatch(thenFlow: SlateFlow, elseFlow: SlateFlow): boolean {
+    return thenFlow.outputs.length === elseFlow.outputs.length && thenFlow.outputs.every(output =>
+        elseFlow.outputs.some(other => other.name === output.name &&
+            (!output.annotation || !other.annotation || output.annotation === other.annotation)));
+}
+
+export function repeatStatePortNames(region: FlowRepeatRegion, body: SlateFlow): string[] {
+    return region.statePorts?.length ? region.statePorts : body.outputs
+        .filter(port => port.name !== region.conditionPort && body.inputs.some(input => input.name === port.name))
+        .map(port => port.name);
+}
+
 export function regionPorts(
     region: FlowRegion,
     flowLookup: (flowId: string) => SlateFlow | undefined,
@@ -826,10 +839,7 @@ export function regionPorts(
         const bodyFlow = flowLookup(region.bodyFlow);
         if (!bodyFlow) throw new FlowFormatError(`referenced bodyFlow '${region.bodyFlow}' not found`);
 
-        const inputNames = new Set(bodyFlow.inputs.map(p => p.name));
-        const stateNames = region.statePorts && region.statePorts.length > 0
-            ? new Set(region.statePorts)
-            : new Set(bodyFlow.outputs.map(p => p.name).filter(n => inputNames.has(n)));
+        const stateNames = new Set(repeatStatePortNames(region, bodyFlow));
 
         const inputs: Port[] = [];
         // State inputs first
@@ -858,6 +868,77 @@ export function regionPorts(
     }
 
     throw new FlowFormatError(`unknown region kind: ${(region as FlowRegion).kind}`);
+}
+
+/** Reconcile region settings and wires against the child's old and new boundaries. */
+export function repairRegionCallerPorts(
+    caller: SlateFlow,
+    childId: string,
+    before: SlateFlow,
+    after: SlateFlow,
+    lookup: (id: string) => SlateFlow | undefined,
+    direction: 'input' | 'output',
+    oldName: string,
+    newName?: string,
+): SlateFlow {
+    let wires = caller.wires;
+    let changed = false;
+    const regions = caller.regions?.map(region => {
+        const usesChild = region.kind === 'branch'
+            ? region.thenFlow === childId || region.elseFlow === childId
+            : region.bodyFlow === childId;
+        if (!usesChild) return region;
+
+        let next = region;
+        if (region.kind === 'foreach' && direction === 'input') {
+            next = { ...region };
+            if ((region.itemPort ?? 'item') === oldName) next.itemPort = newName ?? oldName;
+            if ((region.indexPort ?? 'index') === oldName) next.indexPort = newName ?? oldName;
+        }
+        if (region.kind === 'repeat') {
+            next = { ...region };
+            if (direction === 'output' && region.conditionPort === oldName) next.conditionPort = newName;
+            if (region.statePorts?.includes(oldName)) {
+                const surviving = region.statePorts.flatMap(name => name !== oldName ? [name] : newName ? [newName] : []);
+                if (!surviving.length && after.inputs.some(input => after.outputs.some(output => output.name === input.name))) {
+                    throw new FlowFormatError('Update the repeat state ports before deleting its last explicit state port.');
+                }
+                next.statePorts = surviving.length ? surviving : undefined;
+            }
+            if (newName && repeatStatePortNames(region, before).includes(oldName) &&
+                (!after.inputs.some(port => port.name === newName) || !after.outputs.some(port => port.name === newName))) {
+                throw new FlowFormatError('Rename a repeat state input and output together.');
+            }
+        }
+
+        let previous: RegionPorts;
+        let updated: RegionPorts;
+        try {
+            previous = regionPorts(region, id => id === childId ? before : lookup(id));
+            updated = regionPorts(next, id => id === childId ? after : lookup(id));
+        } catch {
+            return region; // A missing sibling prevents boundary resolution.
+        }
+        const remap = (endpoint: string, ports: Port[], candidates: Port[], prefix: string) => {
+            const { instance, port } = parseEndpoint(endpoint);
+            if (instance !== region.id) return endpoint;
+            const old = ports.find(item => item.id === port || port === prefix + item.name);
+            if (!old) return endpoint;
+            const target = candidates.find(item => item.name === old.name)
+                ?? (old.name === oldName && newName ? candidates.find(item => item.name === newName) : undefined);
+            return target ? region.id + '.' + target.id : null;
+        };
+        wires = wires.flatMap(wire => {
+            const from = remap(wire.from, previous.outputs, updated.outputs, 'out:');
+            const to = remap(wire.to, previous.inputs, updated.inputs, 'in:');
+            if (from === wire.from && to === wire.to) return [wire];
+            changed = true;
+            return from !== null && to !== null ? [{ from, to }] : [];
+        });
+        if (JSON.stringify(next) !== JSON.stringify(region)) changed = true;
+        return next;
+    });
+    return changed ? { ...caller, wires, regions } : caller;
 }
 
 export function addRegion(flow: SlateFlow, region: FlowRegion): SlateFlow {
@@ -901,6 +982,12 @@ export function groupIntoRegion(
     },
     portsOf: (instance: FlowInstance) => { inputs: Port[]; outputs: Port[] },
 ): { parent: SlateFlow; child: SlateFlow } {
+    if (parent.instances.some(item => item.id === spec.regionId) || parent.regions?.some(item => item.id === spec.regionId)) {
+        throw new FlowFormatError('A step with that region id already exists.');
+    }
+    if (spec.region.kind === 'branch' && spec.region.thenFlowId !== spec.childId) {
+        throw new FlowFormatError('The then branch must reference the extracted flow.');
+    }
     const extracted = extractFlow(parent, ids, { id: spec.childId, name: spec.childName, instanceId: spec.regionId }, portsOf);
 
     let region: FlowRegion;
@@ -933,14 +1020,48 @@ export function groupIntoRegion(
         };
     }
 
+    let child = extracted.child;
+    let wires = extracted.parent.wires;
+    if (region.kind === 'foreach') {
+        const indexPort = region.indexPort ?? 'index';
+        const inputs = child.inputs.filter(port => port.name !== indexPort);
+        const itemPort = region.itemPort ?? inputs.find(port => port.name === 'item')?.name
+            ?? (inputs.length === 1 ? inputs[0].name : undefined);
+        if (inputs.length && !inputs.some(port => port.name === itemPort)) {
+            throw new FlowFormatError('Choose a foreach item input from the extracted inputs before grouping.');
+        }
+        if (itemPort) region = { ...region, itemPort };
+        const collectionPort = region.collectionPort ?? 'items';
+        if (inputs.some(port => port.name === collectionPort && port.name !== itemPort)) {
+            throw new FlowFormatError('The foreach collection port collides with a broadcast input.');
+        }
+        if (child.inputs.some(port => port.name === indexPort)) {
+            throw new FlowFormatError('Disconnect the supplied index before grouping. Foreach supplies its own index.');
+        }
+        wires = wires.map(wire => wire.to === region.id + '.in:' + itemPort
+            ? { ...wire, to: region.id + '.in:' + collectionPort } : wire);
+    }
+    if (region.kind === 'repeat') {
+        const output = child.outputs[0]?.name;
+        const input = child.inputs[0]?.name;
+        if (!region.statePorts?.length && child.inputs.length === 1 && child.outputs.length === 1 &&
+            output !== input && output !== region.conditionPort) {
+            child = renameFlowPort(child, 'output', output, input);
+        }
+        const statePorts = repeatStatePortNames(region, child);
+        if (child.outputs.some(port => !statePorts.includes(port.name))) {
+            throw new FlowFormatError('Repeat grouping requires an input with the same name as each wired output.');
+        }
+    }
     const parentWithoutChildInstance: SlateFlow = {
         ...extracted.parent,
+        wires,
         instances: extracted.parent.instances.filter(inst => inst.id !== spec.regionId),
         regions: [...(extracted.parent.regions ?? []), region],
     };
 
     return {
         parent: parentWithoutChildInstance,
-        child: extracted.child,
+        child,
     };
 }

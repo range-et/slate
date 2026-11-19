@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import Ajv from 'ajv';
+import flowSchema from '../contracts/slate-flow.schema.json';
 import { describe, expect, it } from 'vitest';
 import {
     FlowFormatError,
@@ -11,6 +13,9 @@ import {
     parseFlow,
     regionPorts,
     removeRegion,
+    repairRegionCallerPorts,
+    renameFlowPort,
+    deleteFlowPort,
     serializeFlow,
     type Port,
 } from '../vscode-extension/src/flow';
@@ -28,6 +33,42 @@ import type {
 import type { SlateConfig, SlateNode } from '../vscode-extension/src/slate_folder';
 
 describe('flow regions schema and validation (S-800 Slice 1)', () => {
+    it('enforces the same required region fields as the flow loader', () => {
+        const validate = new Ajv().compile(flowSchema);
+        for (const region of [
+            { id: 'r', kind: 'branch' },
+            { id: 'r', kind: 'branch', thenFlow: '' },
+            { id: 'r', kind: 'foreach' },
+            { id: 'r', kind: 'repeat', bodyFlow: 'child' },
+            { id: 'r', kind: 'repeat', bodyFlow: 'child', maxIterations: 0 },
+        ]) {
+            const flow = { slate: 3, name: 'sample', regions: [region] };
+            expect(validate(flow), JSON.stringify(region)).toBe(false);
+            expect(() => parseFlow(JSON.stringify(flow))).toThrow(FlowFormatError);
+        }
+        const valid = { slate: 3, name: 'sample', regions: [
+            { id: 'b', kind: 'branch', thenFlow: 'child' },
+            { id: 'f', kind: 'foreach', bodyFlow: 'child' },
+            { id: 'r', kind: 'repeat', bodyFlow: 'child', maxIterations: 1 },
+        ] };
+        expect(validate(valid)).toBe(true);
+        expect(parseFlow(JSON.stringify(valid)).regions).toHaveLength(3);
+    });
+
+    it('repairs region role names and removes only wires to the deleted child port', () => {
+        const child = { ...emptyFlow('body'), inputs: [{ name: 'item', annotation: 'int' }, { name: 'offset', annotation: 'int' }],
+            outputs: [{ name: 'result', annotation: 'int' }, { name: 'debug', annotation: 'int' }] };
+        const caller: SlateFlow = { ...emptyFlow('parent'), regions: [{ id: 'loop', kind: 'foreach', bodyFlow: 'body' }],
+            wires: [{ from: 'input:values', to: 'loop.in:items' }, { from: 'input:bias', to: 'loop.in:offset' },
+                { from: 'loop.out:result', to: 'output:result' }, { from: 'loop.out:debug', to: 'output:debug' }] };
+        const renamed = renameFlowPort(child, 'input', 'item', 'value');
+        const fixed = repairRegionCallerPorts(caller, 'body', child, renamed, () => undefined, 'input', 'item', 'value');
+        expect(fixed.regions?.[0]).toMatchObject({ itemPort: 'value' });
+        expect(fixed.wires).toEqual(caller.wires);
+        const deleted = deleteFlowPort(renamed, 'output', 'debug');
+        const final = repairRegionCallerPorts(fixed, 'body', renamed, deleted, () => undefined, 'output', 'debug');
+        expect(final.wires).toEqual([...caller.wires.slice(0, 2), { from: 'loop.out', to: 'output:result' }]);
+    });
     it('parses and round-trips branch, foreach, and repeat regions', () => {
         const flowData: SlateFlow = {
             name: 'pipeline',
@@ -416,7 +457,7 @@ describe('region flow manipulation (add, remove, groupIntoRegion)', () => {
 
         // Wires routed to the new region
         expect(updatedParent.wires).toEqual(expect.arrayContaining([
-            { from: 'input:xs', to: 'loop_region.in:x' },
+            { from: 'input:xs', to: 'loop_region.in:items' },
             { from: 'loop_region.out', to: 'post.in:val' },
             { from: 'pre.out', to: 'post.in:trigger' },
         ]));
@@ -448,6 +489,36 @@ const DEFAULT_CONFIG: SlateConfig = {
 };
 
 describe('deterministic Python compilation and execution of regions (S-800)', () => {
+    it('returns named branch results even when else declares them in reverse order', async () => {
+        const outputs = [{ name: 'first', annotation: 'int' }, { name: 'second', annotation: 'int' }];
+        const makeBranch = (name: string, reverse: boolean): SlateFlow => ({
+            ...emptyFlow(name), outputs: reverse ? [...outputs].reverse() : outputs,
+            instances: [{ id: 'one', kind: 'value', value: 1 }, { id: 'two', kind: 'value', value: 2 }],
+            wires: [{ from: 'one.out', to: 'output:first' }, { from: 'two.out', to: 'output:second' }],
+        });
+        const main: SlateFlow = {
+            ...emptyFlow('main'), outputs, inputs: [{ name: 'flag', annotation: 'bool' }],
+            regions: [{ id: 'pick', kind: 'branch', thenFlow: 'left', elseFlow: 'right' }],
+            wires: [{ from: 'input:flag', to: 'pick.in:condition' },
+                ...outputs.map(port => ({ from: 'pick.out:' + port.name, to: 'output:' + port.name }))],
+        };
+        const flows = new Map([['main', main], ['left', makeBranch('left', false)], ['right', makeBranch('right', true)]]);
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-branch-output-'));
+        try {
+            const result = await runFlow({ workspaceRoot: tmp, flowId: 'main', documents: new Map(), flows,
+                config: DEFAULT_CONFIG, inputs: { flag: false }, isTrusted: true });
+            expect(result.status, result.error).toBe('completed');
+            expect(result.flowOutputs?.first.json).toBe(1);
+            expect(result.flowOutputs?.second.json).toBe(2);
+        } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+        }
+        const right = flows.get('right')!;
+        flows.set('right', { ...right, outputs: [outputs[0]], wires: [right.wires[0]] });
+        expect(compilePython(new Map(), DEFAULT_CONFIG, flows).diagnostics).toContainEqual({
+            severity: 'error', message: 'flows/main: pick branches must expose compatible outputs by name.',
+        });
+    });
     it('compiles branch region to if/else and only executes the selected branch', async () => {
         const nodes = new Map<string, SlateNode>([
             ['safe_double', makeNode('safe_double', ['def safe_double(x: int) -> int:', '    return x * 2'])],
@@ -639,7 +710,7 @@ describe('deterministic Python compilation and execution of regions (S-800)', ()
             name: 'main',
             inputs: [
                 { name: 'nums', annotation: 'list[int]' },
-                { name: 'offset', annotation: 'int' },
+                { name: '_item', annotation: 'int' },
             ],
             outputs: [{ name: 'results', annotation: 'list[int]' }],
             instances: [],
@@ -656,7 +727,7 @@ describe('deterministic Python compilation and execution of regions (S-800)', ()
             ],
             wires: [
                 { from: 'input:nums', to: 'fe_loop.in:records' },
-                { from: 'input:offset', to: 'fe_loop.in:bias' },
+                { from: 'input:_item', to: 'fe_loop.in:bias' },
                 { from: 'fe_loop.out', to: 'output:results' },
             ],
             extra: {},
@@ -670,9 +741,9 @@ describe('deterministic Python compilation and execution of regions (S-800)', ()
         const compiled = compilePython(nodes, DEFAULT_CONFIG, flows);
         expect(compiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
         const pyCode = compiled.files.get('region_test_proj.py')!;
-        expect(pyCode).toContain('for _idx, _item in enumerate(nums):');
+        expect(pyCode).toContain('for _idx, _item_2 in enumerate(nums):');
         expect(pyCode).toContain('if _idx >= 3:');
-        expect(pyCode).toContain('item_body(elem=_item, idx=_idx, bias=offset)');
+        expect(pyCode).toContain('item_body(elem=_item_2, idx=_idx, bias=_item)');
 
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-foreach-test-'));
         try {
@@ -682,7 +753,7 @@ describe('deterministic Python compilation and execution of regions (S-800)', ()
                 documents: nodes,
                 flows,
                 config: DEFAULT_CONFIG,
-                inputs: { nums: [10, 20, 30, 40, 50], offset: 5 },
+                inputs: { nums: [10, 20, 30, 40, 50], _item: 5 },
                 isTrusted: true,
             });
 

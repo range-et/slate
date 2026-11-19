@@ -1,4 +1,4 @@
-import { MAIN_FLOW, parseEndpoint } from '../flow';
+import { branchOutputsMatch, MAIN_FLOW, parseEndpoint, regionPorts, type Port, type RegionPorts } from '../flow';
 import type { FlowBranchRegion, FlowForeachRegion, FlowRepeatRegion, SlateFlow } from '../harness_protocol';
 import {
     extractCitations,
@@ -321,7 +321,68 @@ export function evaluateProseFlow(
         ...flow.instances.map(i => i.id),
         ...regions.map(r => r.id),
     ];
-    const stepSet = new Set(allStepIds);
+    const instanceMap = new Map(flow.instances.map(i => [i.id, i]));
+    const regionMap = new Map(regions.map(r => [r.id, r]));
+    const boundaries = new Map<string, RegionPorts>();
+    const targets = new Map<string, { node?: SlateNode; flow?: SlateFlow; id: string }>();
+    const error = (message: string) => proseDiagnostics.push({
+        code: 'prose-wire-error', severity: 'error', message: `flows/${flowId}: ${message}.`, flowId,
+    });
+    for (const input of flow.inputs) {
+        if (!Object.prototype.hasOwnProperty.call(flowInputs, input.name) || flowInputs[input.name] === undefined) {
+            error(`required input ${input.name} has no value`);
+        }
+    }
+    const singleOutput = [{ id: 'out', name: 'out', annotation: null }];
+    for (const step of flow.instances) {
+        if (step.kind === 'value' || step.kind === 'viewer') {
+            boundaries.set(step.id, {
+                inputs: step.kind === 'viewer' ? [{ id: 'in:in', name: 'in', annotation: null }] : [],
+                outputs: step.kind === 'viewer' ? [] : singleOutput,
+            });
+            continue;
+        }
+        const id = step.node ?? '';
+        const node = nodes.get(id);
+        const childId = id.startsWith('flow:') ? id.slice('flow:'.length) : id;
+        const child = node ? undefined : flows.get(childId);
+        targets.set(step.id, { node, flow: child, id: node ? id : childId });
+        if (node) {
+            const parsed = parseProseNode(node, id);
+            boundaries.set(step.id, parsed);
+        } else if (child) {
+            boundaries.set(step.id, {
+                inputs: child.inputs.map(port => ({ ...port, id: 'in:' + port.name })),
+                outputs: child.outputs.map(port => ({ ...port, id: child.outputs.length === 1 ? 'out' : 'out:' + port.name })),
+            });
+        } else {
+            error(`instance ${step.id} calls ${id}, which does not exist`);
+        }
+    }
+    for (const region of regions) {
+        try {
+            const ports = regionPorts(region, id => flows.get(id));
+            if (region.kind === 'branch' && region.elseFlow &&
+                !branchOutputsMatch(flows.get(region.thenFlow)!, flows.get(region.elseFlow)!)) {
+                error(`region ${region.id} branches must expose compatible outputs by name`);
+            }
+            if (region.kind === 'repeat') {
+                const body = flows.get(region.bodyFlow)!;
+                if (region.statePorts?.some(name => !body.inputs.some(port => port.name === name) ||
+                    !body.outputs.some(port => port.name === name))) {
+                    error(`region ${region.id} state ports must be both inputs and outputs`);
+                }
+                if (region.conditionPort && !body.outputs.some(port => port.name === region.conditionPort)) {
+                    error(`region ${region.id} condition port must be a body output`);
+                }
+            }
+            boundaries.set(region.id, ports);
+        } catch (problem) {
+            error(`region ${region.id}: ${(problem as Error).message}`);
+        }
+    }
+    const findOutput = (ports: Port[], id: string) => ports.find(port => port.id === id ||
+        (ports.length === 1 && id === 'out:' + port.name));
 
     // Build incoming wire map (`toEndpoint -> fromEndpoint`) and validate endpoints
     const incoming = new Map<string, string>();
@@ -331,10 +392,11 @@ export function evaluateProseFlow(
 
         const fromValid = from.instance === null
             ? from.port.startsWith('input:') && flow.inputs.some(inp => `input:${inp.name}` === from.port)
-            : stepSet.has(from.instance);
+            : findOutput(boundaries.get(from.instance)?.outputs ?? [], from.port);
         const toValid = to.instance === null
             ? to.port.startsWith('output:') && flow.outputs.some(out => `output:${out.name}` === to.port)
-            : stepSet.has(to.instance);
+            : boundaries.get(to.instance)?.inputs.find(port => port.id === to.port ||
+                (instanceMap.get(to.instance!)?.kind === 'viewer' && to.port === 'in'));
 
         if (!fromValid || !toValid) {
             proseDiagnostics.push({
@@ -345,7 +407,8 @@ export function evaluateProseFlow(
             });
             continue;
         }
-        if (incoming.has(wire.to)) {
+        const sink = typeof toValid === 'object' ? to.instance + '.' + toValid.id : wire.to;
+        if (incoming.has(sink)) {
             proseDiagnostics.push({
                 code: 'prose-wire-error',
                 severity: 'error',
@@ -354,7 +417,7 @@ export function evaluateProseFlow(
             });
             continue;
         }
-        incoming.set(wire.to, wire.from);
+        incoming.set(sink, wire.from);
     }
 
     // Topological sort via Kahn's algorithm
@@ -382,6 +445,7 @@ export function evaluateProseFlow(
     }
 
     const stepOutputs = new Map<string, Record<string, unknown>>();
+    const terminalText = new Map<string, string>();
     const resolveEndpointValue = (endpoint: string): unknown => {
         const { instance, port } = parseEndpoint(endpoint);
         if (instance === null) {
@@ -390,13 +454,15 @@ export function evaluateProseFlow(
         }
         const outRec = stepOutputs.get(instance);
         if (!outRec) return undefined;
-        if (port === 'out') return outRec.out;
-        const portName = port.startsWith('out:') ? port.slice('out:'.length) : port;
-        return outRec[portName] ?? outRec.out;
+        const output = findOutput(boundaries.get(instance)?.outputs ?? [], port);
+        return output && Object.prototype.hasOwnProperty.call(outRec, output.name) ? outRec[output.name] : undefined;
     };
-
-    const instanceMap = new Map(flow.instances.map(i => [i.id, i]));
-    const regionMap = new Map(regions.map(r => [r.id, r]));
+    const required = (step: string, port: string) => {
+        const source = incoming.get(step + '.in:' + port);
+        const value = source ? resolveEndpointValue(source) : undefined;
+        if (value === undefined) error(step + '.in:' + port + ' has no value');
+        return value;
+    };
 
     for (const stepId of order) {
         const instance = instanceMap.get(stepId);
@@ -404,6 +470,7 @@ export function evaluateProseFlow(
             if (instance.kind === 'value') {
                 const val = coerceProseValue(instance.value);
                 stepOutputs.set(stepId, { out: val });
+                terminalText.set(stepId, val);
                 continue;
             }
             if (instance.kind === 'viewer') {
@@ -412,21 +479,8 @@ export function evaluateProseFlow(
                 stepOutputs.set(stepId, { out: val });
                 continue;
             }
-            const target = instance.node ?? '';
-            const targetNode = nodes.get(target);
-            const targetFlow = targetNode ? undefined : flows.get(target);
-
-            if (!targetNode && !targetFlow) {
-                proseDiagnostics.push({
-                    code: 'prose-wire-error',
-                    severity: 'error',
-                    message: `flows/${flowId}: instance ${stepId} calls ${target}, which does not exist.`,
-                    flowId,
-                    nodeId: target,
-                });
-                stepOutputs.set(stepId, { out: '' });
-                continue;
-            }
+            const { id: target, node: targetNode, flow: targetFlow } = targets.get(stepId)!;
+            if (!targetNode && !targetFlow) continue;
 
             if (targetFlow) {
                 const childArgs: Record<string, unknown> = {};
@@ -453,18 +507,8 @@ export function evaluateProseFlow(
                     proseDiagnostics,
                     nextStack,
                 );
-                if (targetFlow.outputs.length === 1) {
-                    const onlyName = targetFlow.outputs[0].name;
-                    stepOutputs.set(stepId, {
-                        out: childRes.outputs[onlyName] ?? childRes.assembledText,
-                        [onlyName]: childRes.outputs[onlyName] ?? childRes.assembledText,
-                    });
-                } else {
-                    stepOutputs.set(stepId, {
-                        out: childRes.assembledText,
-                        ...childRes.outputs,
-                    });
-                }
+                stepOutputs.set(stepId, childRes.outputs);
+                terminalText.set(stepId, childRes.assembledText);
                 continue;
             }
 
@@ -486,11 +530,15 @@ export function evaluateProseFlow(
                         args[param.name] = coerceProseValue(param.default);
                     }
                 } else {
-                    args[param.name] = resolveEndpointValue(src);
+                    args[param.name] = required(stepId, param.name);
                 }
             }
 
             const rendered = evaluateProseNode(targetNode!, args, citations);
+            for (const key of extractCitations(rendered).filter(key => !citations.has(key))) {
+                proseDiagnostics.push({ code: 'prose-missing-citation', severity: 'warning', flowId, nodeId: target,
+                    message: `flows/${flowId}: citation "[@${key}]" has no matching bibliography entry.` });
+            }
             // Verify node output against node's own contract
             const nodeVerification = verifyProseNode(targetNode!, {
                 nodeId: target,
@@ -501,19 +549,20 @@ export function evaluateProseFlow(
             }
 
             stepOutputs.set(stepId, { out: rendered });
+            terminalText.set(stepId, rendered);
             continue;
         }
 
         const region = regionMap.get(stepId);
-        if (region) {
+        if (region && boundaries.has(stepId)) {
             if (region.kind === 'branch') {
                 const branchReg = region as FlowBranchRegion;
                 const condPort = branchReg.conditionPort ?? 'condition';
-                const condSrc = incoming.get(`${stepId}.in:${condPort}`);
-                const condVal = condSrc ? resolveEndpointValue(condSrc) : false;
+                const condVal = required(stepId, condPort);
+                if (condVal === undefined) continue;
                 const chosenFlowId = isTruthyCondition(condVal) ? branchReg.thenFlow : branchReg.elseFlow;
                 if (!chosenFlowId) {
-                    stepOutputs.set(stepId, { out: '' });
+                    stepOutputs.set(stepId, Object.fromEntries(boundaries.get(stepId)!.outputs.map(port => [port.name, ''])));
                     continue;
                 }
                 const chosenFlow = flows.get(chosenFlowId);
@@ -542,15 +591,8 @@ export function evaluateProseFlow(
                     proseDiagnostics,
                     nextStack,
                 );
-                if (chosenFlow.outputs.length === 1) {
-                    const oName = chosenFlow.outputs[0].name;
-                    stepOutputs.set(stepId, {
-                        out: branchRes.outputs[oName] ?? branchRes.assembledText,
-                        [oName]: branchRes.outputs[oName] ?? branchRes.assembledText,
-                    });
-                } else {
-                    stepOutputs.set(stepId, { out: branchRes.assembledText, ...branchRes.outputs });
-                }
+                stepOutputs.set(stepId, branchRes.outputs);
+                terminalText.set(stepId, branchRes.assembledText);
                 continue;
             }
 
@@ -570,8 +612,11 @@ export function evaluateProseFlow(
                 const collPort = foreachReg.collectionPort ?? 'items';
                 const itemPort = foreachReg.itemPort ?? 'item';
                 const indexPort = foreachReg.indexPort ?? 'index';
-                const collSrc = incoming.get(`${stepId}.in:${collPort}`);
-                const items = parseCollectionItems(collSrc ? resolveEndpointValue(collSrc) : []);
+                const collection = required(stepId, collPort);
+                if (collection === undefined) continue;
+                const items = parseCollectionItems(collection);
+                const broadcasts = Object.fromEntries(bodyFlow.inputs.filter(input => ![itemPort, indexPort].includes(input.name))
+                    .map(input => [input.name, required(stepId, input.name)]));
                 const limit = foreachReg.maxIterations ? Math.min(items.length, foreachReg.maxIterations) : items.length;
 
                 const collectedByOutput = new Map<string, string[]>();
@@ -581,16 +626,7 @@ export function evaluateProseFlow(
                 const assembledItems: string[] = [];
 
                 for (let idx = 0; idx < limit; idx++) {
-                    const iterArgs: Record<string, unknown> = {
-                        [itemPort]: items[idx],
-                        [indexPort]: idx,
-                    };
-                    for (const inp of bodyFlow.inputs) {
-                        if (inp.name !== itemPort && inp.name !== indexPort) {
-                            const src = incoming.get(`${stepId}.in:${inp.name}`);
-                            if (src) iterArgs[inp.name] = resolveEndpointValue(src);
-                        }
-                    }
+                    const iterArgs = { ...broadcasts, [itemPort]: items[idx], [indexPort]: idx };
                     const iterRes = evaluateProseFlow(
                         foreachReg.bodyFlow,
                         bodyFlow,
@@ -603,23 +639,14 @@ export function evaluateProseFlow(
                     );
                     assembledItems.push(iterRes.assembledText);
                     for (const outPort of bodyFlow.outputs) {
-                        const v = coerceProseValue(iterRes.outputs[outPort.name] ?? iterRes.assembledText);
+                        const v = coerceProseValue(iterRes.outputs[outPort.name]);
                         collectedByOutput.get(outPort.name)!.push(v);
                     }
                 }
 
-                const joinedAll = assembledItems.filter(Boolean).join('\n\n');
-                if (bodyFlow.outputs.length === 1) {
-                    const oName = bodyFlow.outputs[0].name;
-                    const joinedOut = (collectedByOutput.get(oName) ?? []).filter(Boolean).join('\n\n');
-                    stepOutputs.set(stepId, { out: joinedOut || joinedAll, [oName]: joinedOut || joinedAll });
-                } else {
-                    const rec: Record<string, unknown> = { out: joinedAll };
-                    for (const [k, list] of collectedByOutput) {
-                        rec[k] = list.filter(Boolean).join('\n\n');
-                    }
-                    stepOutputs.set(stepId, rec);
-                }
+                stepOutputs.set(stepId, Object.fromEntries([...collectedByOutput]
+                    .map(([name, values]) => [name, values.filter(Boolean).join('\n\n')])));
+                terminalText.set(stepId, assembledItems.filter(Boolean).join('\n\n'));
                 continue;
             }
 
@@ -636,15 +663,8 @@ export function evaluateProseFlow(
                     stepOutputs.set(stepId, { out: '' });
                     continue;
                 }
-                const stateSet = repeatReg.statePorts && repeatReg.statePorts.length > 0
-                    ? new Set(repeatReg.statePorts)
-                    : new Set(bodyFlow.outputs.map(o => o.name));
-                const state: Record<string, unknown> = {};
-                for (const inp of bodyFlow.inputs) {
-                    const src = incoming.get(`${stepId}.in:${inp.name}`);
-                    if (src) state[inp.name] = resolveEndpointValue(src);
-                }
-                let lastAssembled = '';
+                const statePorts = boundaries.get(stepId)!.outputs;
+                const state = Object.fromEntries(bodyFlow.inputs.map(input => [input.name, required(stepId, input.name)]));
                 for (let iter = 0; iter < repeatReg.maxIterations; iter++) {
                     const iterRes = evaluateProseFlow(
                         repeatReg.bodyFlow,
@@ -656,17 +676,13 @@ export function evaluateProseFlow(
                         proseDiagnostics,
                         nextStack,
                     );
-                    lastAssembled = iterRes.assembledText;
-                    for (const sName of stateSet) {
-                        if (sName in iterRes.outputs) {
-                            state[sName] = iterRes.outputs[sName];
-                        }
-                    }
+                    for (const port of statePorts) state[port.name] = iterRes.outputs[port.name];
                     if (repeatReg.conditionPort && repeatReg.conditionPort in iterRes.outputs) {
                         if (!isTruthyCondition(iterRes.outputs[repeatReg.conditionPort])) break;
                     }
                 }
-                stepOutputs.set(stepId, { out: lastAssembled, ...state });
+                stepOutputs.set(stepId, Object.fromEntries(statePorts.map(port => [port.name, state[port.name]])));
+                terminalText.set(stepId, statePorts.map(port => coerceProseValue(state[port.name])).filter(Boolean).join('\n\n'));
             }
         }
     }
@@ -697,8 +713,7 @@ export function evaluateProseFlow(
                 }
             }
             if (!consumedSteps.has(stepId)) {
-                const rec = stepOutputs.get(stepId);
-                const textVal = coerceProseValue(rec?.out).trim();
+                const textVal = terminalText.get(stepId)?.trim();
                 if (textVal) outputTexts.push(textVal);
             }
         }
@@ -717,13 +732,11 @@ export function evaluateProseFlow(
                 outputs[outPort.name] = '';
             } else {
                 const val = resolveEndpointValue(src);
+                if (val === undefined) error('output ' + outPort.name + ' has no value');
                 const textVal = coerceProseValue(val).trim();
                 outputs[outPort.name] = textVal;
                 if (textVal) outputTexts.push(textVal);
             }
-        }
-        if (outputTexts.length === 0) {
-            collectTerminalOutputs();
         }
     } else {
         // For a root flow (e.g. `main`) with no explicit output ports, collect terminal sink steps in topological order
@@ -816,41 +829,57 @@ export function renderProseMarkdown(
     return `${lines.join('\n').trimEnd()}\n`;
 }
 
+const LATEX_ESCAPES: Record<string, string> = {
+    '\\': '\\textbackslash{}', '{': '\\{', '}': '\\}', '$': '\\$', '&': '\\&',
+    '#': '\\#', '%': '\\%', '_': '\\_', '^': '\\textasciicircum{}', '~': '\\textasciitilde{}',
+};
+
+function escapeLatex(text: string): string {
+    return text.replace(/[\\{}$&#%_^~]/g, char => LATEX_ESCAPES[char]);
+}
+
 function markdownBodyToLatex(text: string): string {
-    // Convert [@key1; @key2] to \cite{key1,key2}
-    let tex = text.replace(/\[([^\[\]]*@[A-Za-z0-9_:-]+[^\[\]]*)\]/g, (full, inner: string) => {
-        const keys = [...inner.matchAll(/@([A-Za-z0-9_:-]+)/g)].map(m => m[1]);
-        if (keys.length === 0) return full;
-        return `\\cite{${keys.join(',')}}`;
-    });
+    const inline = (value: string) => {
+        const tokens = /\[[^\[\]]*@[A-Za-z0-9_:-]+[^\[\]]*\]|\\cite\{[A-Za-z0-9_:-]+(?:\s*,\s*[A-Za-z0-9_:-]+)*\}|\*\*[^*]+\*\*|\*[^*]+\*/g;
+        let result = '';
+        let start = 0;
+        for (const match of value.matchAll(tokens)) {
+            const token = match[0];
+            result += escapeLatex(value.slice(start, match.index));
+            if (token.startsWith('\\cite{')) result += token;
+            else if (token.startsWith('[')) {
+                const keys = [...token.matchAll(/@([A-Za-z0-9_:-]+)/g)].map(key => key[1]);
+                result += '\\cite{' + keys.join(',') + '}';
+            } else if (token.startsWith('**')) result += '\\textbf{' + inline(token.slice(2, -2)) + '}';
+            else result += '\\textit{' + inline(token.slice(1, -1)) + '}';
+            start = match.index + token.length;
+        }
+        return result + escapeLatex(value.slice(start));
+    };
 
     const outLines: string[] = [];
-    for (const line of tex.split(/\r?\n/)) {
+    for (const line of text.split(/\r?\n/)) {
         const h1 = line.match(/^\s*#\s+(.+?)\s*$/);
         if (h1) {
-            outLines.push(`\\section{${h1[1].trim()}}`);
+            outLines.push(`\\section{${inline(h1[1].trim())}}`);
             continue;
         }
         const h2 = line.match(/^\s*##\s+(.+?)\s*$/);
         if (h2) {
-            outLines.push(`\\section{${h2[1].trim()}}`);
+            outLines.push(`\\section{${inline(h2[1].trim())}}`);
             continue;
         }
         const h3 = line.match(/^\s*###\s+(.+?)\s*$/);
         if (h3) {
-            outLines.push(`\\subsection{${h3[1].trim()}}`);
+            outLines.push(`\\subsection{${inline(h3[1].trim())}}`);
             continue;
         }
         const h4 = line.match(/^\s*#{4,6}\s+(.+?)\s*$/);
         if (h4) {
-            outLines.push(`\\subsubsection{${h4[1].trim()}}`);
+            outLines.push(`\\subsubsection{${inline(h4[1].trim())}}`);
             continue;
         }
-        // Convert **bold** and *italic*
-        const formattedLine = line
-            .replace(/\*\*([^*]+)\*\*/g, '\\textbf{$1}')
-            .replace(/\*([^*]+)\*/g, '\\textit{$1}');
-        outLines.push(formattedLine);
+        outLines.push(inline(line));
     }
     return outLines.join('\n').trim();
 }
@@ -870,7 +899,7 @@ export function renderProseLatex(
         '\\documentclass[11pt]{article}',
         '\\usepackage[utf8]{inputenc}',
         '\\usepackage{hyperref}',
-        `\\title{${title}}`,
+        `\\title{${escapeLatex(title)}}`,
         '\\date{}',
         '\\begin{document}',
         '\\maketitle',
@@ -886,9 +915,9 @@ export function renderProseLatex(
         for (const key of referencedKeys) {
             const entry = citations.get(key);
             if (entry) {
-                const venuePart = entry.venue ? ` \\textit{${entry.venue}}.` : '';
-                const doiPart = entry.doi ? ` DOI: ${entry.doi}.` : '';
-                lines.push(`\\bibitem{${entry.key}} ${entry.author} (${entry.year}). ${entry.title}.${venuePart}${doiPart}`);
+                const venuePart = entry.venue ? ` \\textit{${escapeLatex(entry.venue)}}.` : '';
+                const doiPart = entry.doi ? ` DOI: ${escapeLatex(entry.doi)}.` : '';
+                lines.push(`\\bibitem{${entry.key}} ${escapeLatex(entry.author)} (${escapeLatex(entry.year)}). ${escapeLatex(entry.title)}.${venuePart}${doiPart}`);
             } else {
                 lines.push(`\\bibitem{${key}} Unresolved citation ${key}.`);
             }
@@ -957,32 +986,46 @@ export function compileProse(
     const assembledFlows = new Map<string, string>();
     const allReferencedCitations = new Set<string>();
 
-    // Determine which flows are subflows (called by other flows or regions) so we emit top-level flows
-    const calledSubflows = new Set<string>();
-    for (const flow of flows.values()) {
-        for (const inst of flow.instances) {
-            if (inst.node && flows.has(inst.node)) {
-                calledSubflows.add(inst.node);
-            }
+    // Inspect every component before selecting roots, including cycles with no root.
+    const calls = new Map([...flows].map(([id, flow]) => [id, [
+        ...flow.instances.flatMap(instance => {
+            if (!instance.node || proseNodes.has(instance.node)) return [];
+            return [instance.node.replace(/^flow:/, '')];
+        }),
+        ...(flow.regions ?? []).flatMap(region => region.kind === 'branch'
+            ? [region.thenFlow, ...(region.elseFlow ? [region.elseFlow] : [])] : [region.bodyFlow]),
+    ].filter(target => flows.has(target))]));
+    const calledSubflows = new Set([...calls.values()].flat());
+    const active = new Set<string>();
+    const visited = new Set<string>();
+    const visit = (id: string) => {
+        if (active.has(id)) {
+            proseDiagnostics.push({
+                code: 'prose-flow-cycle', severity: 'error', flowId: id,
+                message: `Recursive prose flow cycle: ${[...active, id].join(' → ')}.`,
+            });
+            return;
         }
-        for (const reg of flow.regions ?? []) {
-            if (reg.kind === 'branch') {
-                calledSubflows.add(reg.thenFlow);
-                if (reg.elseFlow) calledSubflows.add(reg.elseFlow);
-            } else {
-                calledSubflows.add(reg.bodyFlow);
-            }
-        }
-    }
+        if (visited.has(id)) return;
+        active.add(id);
+        for (const target of calls.get(id) ?? []) visit(target);
+        active.delete(id);
+        visited.add(id);
+    };
+    for (const id of flows.keys()) visit(id);
 
     const sortedFlows = [...flows.entries()].sort(([a], [b]) => a.localeCompare(b));
     const executableTopFlows = sortedFlows.filter(([flowId, flow]) => {
-        if (flowId === MAIN_FLOW && flow.instances.length === 0 && (flow.regions?.length ?? 0) === 0) {
+        if (flowId === MAIN_FLOW && !flow.inputs.length && !flow.outputs.length &&
+            !flow.instances.length && !flow.regions?.length) {
             return false;
         }
         return !calledSubflows.has(flowId);
     });
 
+    if (proseDiagnostics.some(item => item.code === 'prose-flow-cycle')) {
+        return { files, proseDiagnostics, diagnostics: proseDiagnostics, assembledFlows, referencedCitations: [] };
+    }
     if (executableTopFlows.length > 0) {
         for (const [flowId, flow] of executableTopFlows) {
             if (proseNodes.has(flowId)) {
@@ -1078,10 +1121,8 @@ export function compileProse(
         files.set(`${slug}.tex`, renderProseLatex(config.name, combined, citations, cited));
     }
 
-    const diagnostics: CompileDiagnostic[] = proseDiagnostics.map(d => ({
-        severity: d.severity,
-        message: d. message,
-    }));
+    const diagnostics: CompileDiagnostic[] = proseDiagnostics.map(d => ({ severity: d.severity, message: d.message }));
+    if (proseDiagnostics.some(item => item.code === 'prose-wire-error' && item.severity === 'error')) files.clear();
 
     return {
         files: new Map([...files.entries()].sort(([a], [b]) => a.localeCompare(b))),

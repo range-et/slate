@@ -545,7 +545,8 @@ function regionNode(
         : region.kind === 'foreach'
         ? `body: ${region.bodyFlow}${region.maxIterations ? ` (≤${region.maxIterations})` : ''}`
         : `body: ${region.bodyFlow} (≤${region.maxIterations})`;
-    const groupColor = region.kind === 'branch' ? '#f59e72' : region.kind === 'foreach' ? '#3ecff5' : '#a78bfa';
+    const groupColor = region.kind === 'branch' ? 'var(--strata-warning)'
+        : region.kind === 'foreach' ? 'var(--strata-accent-cyan)' : 'var(--strata-accent)';
     const execution = snapshot.execution?.observations.find(obs => obs.instanceId === region.id);
 
     return {

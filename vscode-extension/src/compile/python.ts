@@ -1,4 +1,4 @@
-import { compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, unitSignature, type CallableSignature, type RegionPorts } from '../flow';
+import { branchOutputsMatch, compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, repeatStatePortNames, unitSignature, type CallableSignature, type RegionPorts } from '../flow';
 import type { FlowRegion, SlateFlow } from '../harness_protocol';
 import { identifierNames, parseModule, splitImport, topLevelBindings } from '../python_adapter';
 import { checkJpl60, type SlateConfig, type SlateNode } from '../slate_folder';
@@ -168,6 +168,26 @@ export function flowToNode(
         return signature ? outputPorts(signature) : [{ id: 'out', name: 'out', annotation: null }];
     };
 
+    const usedNames = new Set([
+        ...flow.inputs.map(input => input.name),
+        ...[...signatures.values()].flatMap(signature => signature ? [signature.name] : []),
+        ...flow.instances.flatMap(instance => [variable(instance.id), ...outputsOf(instance.id)
+            .map(port => variable(instance.id) + '_' + port.name)]),
+        ...(flow.regions ?? []).flatMap(region => {
+            const targets = region.kind === 'branch' ? [region.thenFlow, region.elseFlow] : [region.bodyFlow];
+            return targets.flatMap(target => target ? [resolveAny(target)?.signature.name ?? target] : []);
+        }),
+    ]);
+    const allocate = (preferred: string) => {
+        let name = preferred;
+        for (let n = 2; usedNames.has(name); n++) name = preferred + '_' + n;
+        usedNames.add(name);
+        return name;
+    };
+    const regionVariables = new Map([...regionPortMap].map(([id, ports]) =>
+        [id, new Map(ports.outputs.map(port =>
+            [port.name, allocate(ports.outputs.length === 1 ? variable(id) : variable(id) + '_' + port.name)]))]));
+
     const incoming = new Map<string, string>();
     for (const wire of flow.wires) {
         const from = parseEndpoint(wire.from);
@@ -197,8 +217,9 @@ export function flowToNode(
         const { instance, port } = parseEndpoint(endpoint);
         if (instance === null) return port.slice('input:'.length);
         const rPorts = regionPortMap.get(instance);
-        if (rPorts && rPorts.outputs.length === 1) {
-            return variable(instance);
+        if (rPorts) {
+            const name = rPorts.outputs.length === 1 ? rPorts.outputs[0].name : port.slice('out:'.length);
+            return regionVariables.get(instance)?.get(name) ?? 'None';
         }
         return port === 'out' ? variable(instance) : `${variable(instance)}_${port.slice('out:'.length)}`;
     };
@@ -224,11 +245,17 @@ export function flowToNode(
             const rPorts = regionPortMap.get(id);
             if (!rPorts) continue;
             const slug = id.replace(/[^A-Za-z0-9_]/g, '_');
+            const output = (name: string) => regionVariables.get(id)!.get(name)!;
+            const traceError = options?.trace ? allocate('_slate_err') : '';
 
             if (region.kind === 'branch') {
                 const thenSig = resolveAny(region.thenFlow)?.signature;
                 const elseSig = region.elseFlow ? resolveAny(region.elseFlow)?.signature : undefined;
                 if (!thenSig || (region.elseFlow && !elseSig)) continue;
+                if (elseSig && !branchOutputsMatch(signatureToFlow(thenSig), signatureToFlow(elseSig))) {
+                    errors.push(`${id} branches must expose compatible outputs by name`);
+                    continue;
+                }
 
                 const condPort = region.conditionPort ?? 'condition';
                 const condSource = incoming.get(`${id}.in:${condPort}`);
@@ -264,10 +291,9 @@ export function flowToNode(
 
                 const thenCall = buildBranchCall(thenSig);
                 const elseCall = elseSig ? buildBranchCall(elseSig) : null;
-                const outVars = rPorts.outputs.length === 1
-                    ? [variable(id)]
-                    : rPorts.outputs.map(p => `${variable(id)}_${p.name}`);
+                const outVars = rPorts.outputs.map(port => output(port.name));
                 const lhs = outVars.join(', ');
+                const elseLhs = elseSig ? signatureToFlow(elseSig).outputs.map(port => output(port.name)).join(', ') : '';
                 const defaultRhs = outVars.length <= 1 ? 'None' : outVars.map(() => 'None').join(', ');
 
                 if (options?.trace) {
@@ -282,22 +308,22 @@ export function flowToNode(
                     body.push(`            else:`);
                     if (elseCall) {
                         body.push(`                with _slate_trace.scope("else"):`);
-                        body.push(`                    ${lhs ? `${lhs} = ${elseCall}` : elseCall}`);
+                        body.push(`                    ${elseLhs ? `${elseLhs} = ${elseCall}` : elseCall}`);
                     } else {
                         body.push(`                ${lhs ? `${lhs} = ${defaultRhs}` : 'pass'}`);
                     }
                     for (let i = 0; i < rPorts.outputs.length; i++) {
                         body.push(`            _slate_trace.trace_output("${id}", "${rPorts.outputs[i].id}", ${outVars[i]})`);
                     }
-                    body.push(`        except Exception as _slate_err:`);
-                    body.push(`            _slate_trace.trace_error("${id}", f"{type(_slate_err).__name__}: {_slate_err}")`);
+                    body.push(`        except Exception as ${traceError}:`);
+                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
                     body.push(`            raise`);
                 } else {
                     body.push(`    if ${condExpr}:`);
                     body.push(`        ${lhs ? `${lhs} = ${thenCall}` : thenCall}`);
                     body.push(`    else:`);
                     if (elseCall) {
-                        body.push(`        ${lhs ? `${lhs} = ${elseCall}` : elseCall}`);
+                        body.push(`        ${elseLhs ? `${elseLhs} = ${elseCall}` : elseCall}`);
                     } else {
                         body.push(`        ${lhs ? `${lhs} = ${defaultRhs}` : 'pass'}`);
                     }
@@ -309,6 +335,8 @@ export function flowToNode(
                 const bodySig = resolveAny(region.bodyFlow)?.signature;
                 if (!bodySig) continue;
 
+                const itemVar = allocate('_item');
+                const indexVar = allocate('_idx');
                 const collPort = region.collectionPort ?? 'items';
                 const itemPort = region.itemPort ?? 'item';
                 const indexPort = region.indexPort ?? 'index';
@@ -324,9 +352,9 @@ export function flowToNode(
                     if (param.kind === 'var' || param.kind === 'kwvar') continue;
                     let argExpr: string | null = null;
                     if (param.name === itemPort) {
-                        argExpr = '_item';
+                        argExpr = itemVar;
                     } else if (param.name === indexPort) {
-                        argExpr = '_idx';
+                        argExpr = indexVar;
                     } else {
                         const src = incoming.get(`${id}.in:${param.name}`);
                         if (!src) {
@@ -345,10 +373,9 @@ export function flowToNode(
                     }
                 }
                 const bodyCall = `${bodySig.name}(${bodyArgs.join(', ')})`;
-                const outVars = rPorts.outputs.length === 1
-                    ? [variable(id)]
-                    : rPorts.outputs.map(p => `${variable(id)}_${p.name}`);
+                const outVars = rPorts.outputs.map(port => output(port.name));
 
+                const itemVars = rPorts.outputs.map(port => allocate(outVars.length === 1 ? `_item_${slug}` : `_item_${slug}_${port.name}`));
                 if (options?.trace) {
                     body.push(`    with _slate_trace.scope("${id}"):`);
                     body.push(`        try:`);
@@ -358,19 +385,19 @@ export function flowToNode(
                     for (const ov of outVars) {
                         body.push(`            ${ov} = []`);
                     }
-                    body.push(`            for _idx, _item in enumerate(${collExpr}):`);
+                    body.push(`            for ${indexVar}, ${itemVar} in enumerate(${collExpr}):`);
                     if (region.maxIterations !== undefined) {
-                        body.push(`                if _idx >= ${region.maxIterations}:`);
+                        body.push(`                if ${indexVar} >= ${region.maxIterations}:`);
                         body.push(`                    break`);
                     }
-                    body.push(`                with _slate_trace.scope(f"iter:{_idx}"):`);
+                    body.push(`                with _slate_trace.scope(f"iter:{${indexVar}}"):`);
+                    body.push(`                    _slate_trace.trace_input("${id}", "in:${itemPort}", ${itemVar})`);
                     if (outVars.length === 0) {
                         body.push(`                    ${bodyCall}`);
                     } else if (outVars.length === 1) {
-                        body.push(`                    _item_${slug} = ${bodyCall}`);
-                        body.push(`                    ${outVars[0]}.append(_item_${slug})`);
+                        body.push(`                    ${itemVars[0]} = ${bodyCall}`);
+                        body.push(`                    ${outVars[0]}.append(${itemVars[0]})`);
                     } else {
-                        const itemVars = rPorts.outputs.map(p => `_item_${slug}_${p.name}`);
                         body.push(`                    ${itemVars.join(', ')} = ${bodyCall}`);
                         for (let i = 0; i < outVars.length; i++) {
                             body.push(`                    ${outVars[i]}.append(${itemVars[i]})`);
@@ -379,25 +406,24 @@ export function flowToNode(
                     for (let i = 0; i < rPorts.outputs.length; i++) {
                         body.push(`            _slate_trace.trace_output("${id}", "${rPorts.outputs[i].id}", ${outVars[i]})`);
                     }
-                    body.push(`        except Exception as _slate_err:`);
-                    body.push(`            _slate_trace.trace_error("${id}", f"{type(_slate_err).__name__}: {_slate_err}")`);
+                    body.push(`        except Exception as ${traceError}:`);
+                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
                     body.push(`            raise`);
                 } else {
                     for (const ov of outVars) {
                         body.push(`    ${ov} = []`);
                     }
-                    body.push(`    for _idx, _item in enumerate(${collExpr}):`);
+                    body.push(`    for ${indexVar}, ${itemVar} in enumerate(${collExpr}):`);
                     if (region.maxIterations !== undefined) {
-                        body.push(`        if _idx >= ${region.maxIterations}:`);
+                        body.push(`        if ${indexVar} >= ${region.maxIterations}:`);
                         body.push(`            break`);
                     }
                     if (outVars.length === 0) {
                         body.push(`        ${bodyCall}`);
                     } else if (outVars.length === 1) {
-                        body.push(`        _item_${slug} = ${bodyCall}`);
-                        body.push(`        ${outVars[0]}.append(_item_${slug})`);
+                        body.push(`        ${itemVars[0]} = ${bodyCall}`);
+                        body.push(`        ${outVars[0]}.append(${itemVars[0]})`);
                     } else {
-                        const itemVars = rPorts.outputs.map(p => `_item_${slug}_${p.name}`);
                         body.push(`        ${itemVars.join(', ')} = ${bodyCall}`);
                         for (let i = 0; i < outVars.length; i++) {
                             body.push(`        ${outVars[i]}.append(${itemVars[i]})`);
@@ -413,15 +439,20 @@ export function flowToNode(
                 if (!bodySig || !bodyFlow) continue;
 
                 const inputNames = new Set(bodyFlow.inputs.map(p => p.name));
-                const stateNames = region.statePorts && region.statePorts.length > 0
-                    ? new Set(region.statePorts)
-                    : new Set(bodyFlow.outputs.map(p => p.name).filter(n => inputNames.has(n)));
+                const stateNames = new Set(repeatStatePortNames(region, bodyFlow));
                 const stateOutputs = bodyFlow.outputs.filter(p => stateNames.has(p.name));
 
-                const stateVarFor = (sName: string) =>
-                    stateOutputs.length === 1 && stateOutputs[0].name === sName
-                        ? variable(id)
-                        : `${variable(id)}_${sName}`;
+                if ([...stateNames].some(name => !inputNames.has(name) || !stateOutputs.some(port => port.name === name))) {
+                    errors.push(`${id} state ports must be declared as both inputs and outputs`);
+                    continue;
+                }
+                if (region.conditionPort && !bodyFlow.outputs.some(port => port.name === region.conditionPort)) {
+                    errors.push(`${id} condition port must be a body output`);
+                    continue;
+                }
+                const iterationVar = allocate('_iter');
+                const conditionVar = allocate(`_cond_${slug}`);
+                const stateVarFor = output;
 
                 const wiredInputs: Array<{ portName: string; expr: string }> = [];
                 const initLines: string[] = [];
@@ -465,19 +496,19 @@ export function flowToNode(
                     callLine = bodyCall;
                 } else if (bodyOutputs.length === 1) {
                     const outName = bodyOutputs[0].name;
-                    const targetVar = stateNames.has(outName) ? stateVarFor(outName) : `_cond_${slug}`;
+                    const targetVar = stateNames.has(outName) ? stateVarFor(outName) : conditionVar;
                     callLine = `${targetVar} = ${bodyCall}`;
                 } else {
                     const unpackVars = bodyOutputs.map(p => {
                         if (stateNames.has(p.name)) return stateVarFor(p.name);
-                        if (region.conditionPort === p.name) return `_cond_${slug}`;
-                        return `_unused_${slug}_${p.name}`;
+                        if (region.conditionPort === p.name) return conditionVar;
+                        return allocate(`_unused_${slug}_${p.name}`);
                     });
                     callLine = `${unpackVars.join(', ')} = ${bodyCall}`;
                 }
 
                 const condCheckVar = region.conditionPort
-                    ? (stateNames.has(region.conditionPort) ? stateVarFor(region.conditionPort) : `_cond_${slug}`)
+                    ? (stateNames.has(region.conditionPort) ? stateVarFor(region.conditionPort) : conditionVar)
                     : null;
 
                 if (options?.trace) {
@@ -489,9 +520,12 @@ export function flowToNode(
                     for (const line of initLines) {
                         body.push(`            ${line}`);
                     }
-                    body.push(`            for _iter in range(${region.maxIterations}):`);
-                    body.push(`                with _slate_trace.scope(f"iter:{_iter}"):`);
+                    body.push(`            for ${iterationVar} in range(${region.maxIterations}):`);
+                    body.push(`                with _slate_trace.scope(f"iter:{${iterationVar}}"):`);
                     body.push(`                    ${callLine}`);
+                    for (const port of rPorts.outputs) {
+                        body.push(`                    _slate_trace.trace_output("${id}", "${port.id}", ${stateVarFor(port.name)})`);
+                    }
                     if (condCheckVar) {
                         body.push(`                if not ${condCheckVar}:`);
                         body.push(`                    break`);
@@ -500,14 +534,14 @@ export function flowToNode(
                         const outVar = stateVarFor(port.name);
                         body.push(`            _slate_trace.trace_output("${id}", "${port.id}", ${outVar})`);
                     }
-                    body.push(`        except Exception as _slate_err:`);
-                    body.push(`            _slate_trace.trace_error("${id}", f"{type(_slate_err).__name__}: {_slate_err}")`);
+                    body.push(`        except Exception as ${traceError}:`);
+                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
                     body.push(`            raise`);
                 } else {
                     for (const line of initLines) {
                         body.push(`    ${line}`);
                     }
-                    body.push(`    for _iter in range(${region.maxIterations}):`);
+                    body.push(`    for ${iterationVar} in range(${region.maxIterations}):`);
                     body.push(`        ${callLine}`);
                     if (condCheckVar) {
                         body.push(`        if not ${condCheckVar}:`);

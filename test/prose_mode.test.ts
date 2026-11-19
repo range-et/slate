@@ -29,7 +29,7 @@ import {
     verifyProseNode,
     verifyProseText,
 } from '../vscode-extension/src/prose_adapter';
-import { parseConfig, parseNode, type SlateNode } from '../vscode-extension/src/slate_folder';
+import { indexNode, parseConfig, parseNode, serializeNode, type SlateNode } from '../vscode-extension/src/slate_folder';
 
 function makeProseNode(overrides: Partial<SlateNode> & { name: string; code: string[] }): SlateNode {
     return {
@@ -603,6 +603,73 @@ describe('Phase 8.5 (S-850): Prose / Grant & Research Mode (`language: "prose"`)
             expect(assembled).not.toContain('Concise summary');
             expect(assembled).toContain('- Evidence item: Trial A');
             expect(assembled).toContain('- Evidence item: Trial B');
+        });
+    });
+
+    describe('Prose project regressions', () => {
+        const config = parseConfig('{"slate":3,"name":"Grant","language":"prose"}');
+
+        it('indexes the same prose signature and contract used by the compiler', () => {
+            const node = makeProseNode({ name: 'draft', contract: 'maxWords: 10', code: ['Summary of {topic}.'] });
+            const indexed = indexNode('slate/nodes/draft.json', serializeNode(node), 'prose', 3, { checkJpl60: true }).document;
+            expect(indexed.valid).toBe(true);
+            expect(indexed.diagnostics).toEqual([]);
+            expect(indexed.units[0]).toMatchObject({ id: 'draft', params: [{ name: 'topic', annotation: 'passage' }],
+                returnAnnotation: 'passage', annotation: { contract: 'maxWords: 10' } });
+            const heading = makeProseNode({ name: 'aims', code: ['## Specific Aims'] });
+            expect(compileProse(new Map([['aims', heading]]), config).assembledFlows.get('main')).toBe('## Specific Aims');
+        });
+
+        it('rejects stale output names, absent required values, and unused recursive components', () => {
+            const node = makeProseNode({ name: 'section', code: ['Summary.'] });
+            const nodes = new Map([['section', node]]);
+            const bad: SlateFlow = {
+                ...emptyFlow('main'), inputs: [{ name: 'topic', annotation: 'passage' }],
+                outputs: [{ name: 'section', annotation: 'passage' }],
+                instances: [{ id: 'entry', node: 'section' }],
+                wires: [{ from: 'entry.out:removed', to: 'output:section' }],
+                regions: [{ id: 'branch', kind: 'branch', thenFlow: 'child' }],
+            };
+            const child = emptyFlow('child');
+            const result = compileProse(nodes, config, new Map([['main', bad], ['child', child]]));
+            expect(result.files.size).toBe(0);
+            expect(result.diagnostics.map(item => item.message)).toEqual(expect.arrayContaining([
+                expect.stringContaining('entry.out:removed'), expect.stringContaining('required input topic'),
+                expect.stringContaining('branch.in:condition'),
+            ]));
+            const a: SlateFlow = { ...emptyFlow('a'), instances: [{ id: 'b_call', node: 'flow:b' }] };
+            const b: SlateFlow = { ...emptyFlow('b'), regions: [{ id: 'loop', kind: 'foreach', bodyFlow: 'a' }] };
+            for (const flows of [new Map([['a', a], ['b', b]]), new Map([['a', { ...a, instances: [{ id: 'self', node: 'a' }] }]])]) {
+                const cyclic = compileProse(nodes, config, flows);
+                expect(cyclic.files.size).toBe(0);
+                expect(cyclic.proseDiagnostics.some(item => item.code === 'prose-flow-cycle')).toBe(true);
+            }
+        });
+
+        it('passes only repeat state through the single-output alias and escapes LaTeX text fields', () => {
+            const body: SlateFlow = {
+                ...emptyFlow('body'), inputs: [{ name: 'draft', annotation: 'passage' }],
+                outputs: [{ name: 'draft', annotation: 'passage' }, { name: 'again', annotation: 'passage' }],
+                instances: [{ id: 'stop', kind: 'value', value: 'false' }],
+                wires: [{ from: 'input:draft', to: 'output:draft' }, { from: 'stop.out', to: 'output:again' }],
+            };
+            const main: SlateFlow = {
+                ...emptyFlow('main'), outputs: [{ name: 'result', annotation: 'passage' }],
+                instances: [{ id: 'draft', kind: 'value', value: '50% improvement' }],
+                regions: [{ id: 'repeat', kind: 'repeat', bodyFlow: 'body', conditionPort: 'again', maxIterations: 2 }],
+                wires: [{ from: 'draft.out', to: 'repeat.in:draft' }, { from: 'repeat.out', to: 'output:result' }],
+            };
+            const result = compileProse(new Map(), config, new Map([['main', main], ['body', body]]));
+            expect(result.diagnostics).toEqual([]);
+            expect(result.assembledFlows.get('main')).toBe('50% improvement');
+            expect(result.files.get('grant.tex')).toContain(String.raw`50\% improvement`);
+            const citation = { key: 'a_2026', author: 'Research & Development', year: '2026', title: 'Rates_50%' };
+            const tex = renderProseLatex('R&D $50', String.raw`## 50% **A&B** [@a_2026]
+**[@a_2026]** \cite{a_2026} #_{}`, new Map([[citation.key, citation]]), [citation.key]);
+            expect(tex).toContain(String.raw`\title{R\&D \$50}`);
+            expect(tex).toContain(String.raw`\section{50\% \textbf{A\&B} \cite{a_2026}}`);
+            expect(tex).toContain(String.raw`\textbf{\cite{a_2026}} \cite{a_2026} \#\_\{\}`);
+            expect(tex).toContain(String.raw`\bibitem{a_2026} Research \& Development (2026). Rates\_50\%.`);
         });
     });
 

@@ -420,9 +420,10 @@ const clampInspectorWidth = (value: number, viewportWidth = window.innerWidth, l
 
 function Inspector({
     node, document, snapshot, packet, packetError, generation, proposal, accepted, onEnterFlow, onGoTo, onNavigateToInstance, visible, width, maxWidth, onResize,
-    candidateVerification, onDiscardProposal,
+    candidateVerification, onDiscardProposal, flowId,
 }: {
     visible: boolean;
+    flowId: string | null;
     width: number;
     maxWidth: number;
     onResize(width: number): void;
@@ -456,6 +457,19 @@ function Inspector({
     const [codeDraft, setCodeDraft] = useState(nodeCode ?? '');
     const [candidateCode, setCandidateCode] = useState(proposal?.candidate ?? '');
     const [revisionFeedback, setRevisionFeedback] = useState('');
+    const [iteration, setIteration] = useState('');
+    const iterations = new Map<string, NonNullable<HarnessSnapshot['execution']>['observations']>();
+    if (node.data.region && snapshot.execution?.flowId === (flowId ?? 'main')) {
+        for (const observation of snapshot.execution.observations) {
+            const [region, step] = observation.path;
+            if (region !== node.id || !step?.startsWith('iter:')) continue;
+            const list = iterations.get(step) ?? [];
+            list.push(observation);
+            iterations.set(step, list);
+        }
+    }
+    const iterationKey = iterations.has(iteration) ? iteration : iterations.keys().next().value ?? '';
+    useEffect(() => setIteration(''), [snapshot.execution?.runId]);
     const usage = node.data.usage ?? document?.usage ?? (node.data.path ? snapshot.usages?.[node.data.path] : undefined);
     useEffect(() => { setCodeDraft(nodeCode ?? ''); }, [unit?.id, document?.sourceHash]);
     useEffect(() => { setCandidateCode(proposal?.candidate ?? ''); }, [proposal?.id, proposal?.candidate]);
@@ -617,11 +631,22 @@ function Inspector({
                             </>
                         )}
                     </dl>
+                    {iterations.size > 0 && <div data-testid="region-iteration-inspector">
+                        <label>Iteration <select value={iterationKey} onChange={event => setIteration(event.target.value)}>
+                            {[...iterations.keys()].map(key => <option key={key} value={key}>{Number(key.slice(5)) + 1}</option>)}
+                        </select></label>
+                        <ul>{iterations.get(iterationKey)?.map(observation => <li key={JSON.stringify([observation.path, observation.instanceId])}>
+                            <strong>{observation.path.slice(2).join(' / ') || observation.instanceId}</strong> {observation.status}
+                            {observation.error && <div>{observation.error}</div>}
+                            {Object.entries({ Input: observation.inputs, Output: observation.outputs }).map(([label, ports]) =>
+                                Object.entries(ports).map(([port, value]) => <div key={label + port}>{label} {port}: <code>{value.repr}</code></div>))}
+                        </li>)}</ul>
+                    </div>}
                     <div className="harness-inspector__actions">
                         {(node.data.childFlows ?? []).map(cf => (
                             <button key={cf} className="secondary" onClick={() => onEnterFlow(cf)}>Open {cf}</button>
                         ))}
-                        <button className="danger" onClick={() => action({ kind: 'removeRegion', regionId: node.id })}>Remove region</button>
+                        <button className="danger" onClick={() => action({ kind: 'removeRegion', regionId: node.id, flow: flowId })}>Remove region</button>
                     </div>
                 </section>
             )}
@@ -2709,6 +2734,7 @@ function HarnessApp() {
                     <Inspector
                         key={selected.id}
                         visible={inspectorVisible}
+                        flowId={scope.flow}
                         width={effectiveInspectorWidth}
                         maxWidth={maxInspectorWidth}
                         onResize={next => setInspectorWidth(clampInspectorWidth(next, viewportWidth, libraryOpen))}
