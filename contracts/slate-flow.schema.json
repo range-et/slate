@@ -131,6 +131,72 @@
         },
         "additionalProperties": true
       }
+    },
+    "regions": {
+      "type": "array",
+      "description": "Explicit control flow regions (branch, foreach, repeat)",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind"],
+        "oneOf": [
+          { "properties": { "kind": { "const": "branch" } }, "required": ["thenFlow"] },
+          { "properties": { "kind": { "const": "foreach" } }, "required": ["bodyFlow"] },
+          { "properties": { "kind": { "const": "repeat" } }, "required": ["bodyFlow", "maxIterations"] }
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[^.]+$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["branch", "foreach", "repeat"]
+          },
+          "label": {
+            "type": "string"
+          },
+          "conditionPort": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "thenFlow": {
+            "type": "string",
+            "minLength": 1
+          },
+          "elseFlow": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bodyFlow": {
+            "type": "string",
+            "minLength": 1
+          },
+          "collectionPort": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "itemPort": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "indexPort": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "maxIterations": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "statePorts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": true

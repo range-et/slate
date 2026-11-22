@@ -339,9 +339,7 @@ Completed in [PR #1](https://github.com/range-et/slate/pull/1):
 - **Validation.** The local launch gate passed with 480 unit tests, 89 browser
   cases, 41 Extension Host cases and workbench QA. Regressions reproduced the
   defects before the fixes. See [verification evidence](test/VERIFICATION.md).
-- **Remaining testing target.** Whole-app strict 100% branch/mutation completion
-  across every host/UI path remains tracked in [issue #20](https://github.com/range-et/slate/issues/20);
-  equivalent and parser-guaranteed survivors are audited in [test/VERIFICATION.md](test/VERIFICATION.md).
+- **Remaining testing target.** `src/harness/palette.ts` achieves a **100.00% Stryker mutation score** (`90/90` killed, `0` survived) in `test/harness_palette.test.ts`, and `test/coverage_hardening.test.ts` adds 13 high-value branch and boundary suites across `search.ts`, `slate_folder.ts`, `python_adapter.ts`, `llama_transport.ts`, and `explainer.ts` (2026-11-17, [issue #20](https://github.com/range-et/slate/issues/20)). Equivalent and parser-guaranteed survivors are audited in [test/VERIFICATION.md](test/VERIFICATION.md).
 
 ## Shipped — one occurrence model (Phase 5, S-500, 2026-11-11)
 
@@ -559,14 +557,37 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 - **Unbundled Local LLM Architecture.** Prominently documents the bring-your-own model/server philosophy (llama.cpp, Ollama, LM Studio, vLLM) with zero server bloat.
 - **Live Showcase & Dual Artifacts.** Deploys both `dist/index.html` (product landing page with interactive micro-studio) and `dist/harness.html` (interactive web demo with `?demo` parameter) to GitHub Pages.
 
+## Shipped — Branch, Foreach, and Repeat Control-Flow Regions (S-800, 2026-11-18)
+
+[Issue #14](https://github.com/range-et/slate/issues/14) · [PR #49](https://github.com/range-et/slate/pull/49)
+
+- **Structured Region Schema & Flow Operations (`vscode-extension/src/flow.ts`, `contracts/slate-flow.schema.json`).** Formalizes `flow.regions` with three bounded control-flow region kinds (`branch`, `foreach`, `repeat`), boundary port derivation (`regionPorts`), and flow manipulation helpers (`addRegion`, `removeRegion`, `groupIntoRegion`).
+- **Deterministic Python Compilation (`vscode-extension/src/compile/python.ts`).** Compiles flows containing `branch`, `foreach`, and `repeat` regions to plain Python `if`/`else` and `for` statements (no list comprehensions):
+  - `branch`: Evaluates `in:<conditionPort>` (default `condition`) and executes *only* the chosen branch (`thenFlow` or `elseFlow`), defaulting to `None` when `elseFlow` is omitted and condition is falsy.
+  - `foreach`: Iterates `for _idx, _item in enumerate(...)` bounded by `maxIterations`, passing `item`, optional `index`, and broadcast inputs to `bodyFlow` and collecting per-iteration outputs into lists.
+  - `repeat`: Initializes loop-carried state ports from initial inputs, iterates `for _iter in range(maxIterations):`, updates state ports, and breaks early when `conditionPort` output is falsy.
+- **Traced Execution & Path Identity (`vscode-extension/src/flow_runner.ts`).** Records region trace scopes (`[regionId, 'then' | 'else']`, `[regionId, 'iter:<n>']`) and marks unselected branch child instances `not_executed`.
+- **Canvas Region Nodes & Inspector Actions (`src/harness/graph.ts`, `src/harness/main.tsx`, `vscode-extension/src/harness_panel.ts`).** Renders region cards with `BRANCH`/`FOREACH`/`REPEAT` badges, child flow labels, and boundary ports, plus canvas/palette/inspector actions to add, remove, or group selected instances into a region.
+- Grouping preserves collection, broadcast, and state boundaries. Child port changes repair caller wires and update region roles. Branches bind outputs by name, and the inspector can select an observed loop iteration.
+- Verification includes schema and compiler regressions, Playwright region controls, real VS Code flow and layout persistence with Undo and Save, and `npm run verify:launch`.
+
+## Shipped — Prose / Grant & Research Mode (`language: "prose"`, S-850, 2026-11-18)
+
+[Issue #27](https://github.com/range-et/slate/issues/27) · [PR #49](https://github.com/range-et/slate/pull/49)
+
+- **Prose Language Adapter (`vscode-extension/src/prose_adapter.ts`).** Supports `language: "prose"` on the existing `slate/` JSON spine (`SlateNode` and `SlateFlow`), defining structured prose port/wire types (`passage`, `citation`, `section`, `rubric`) and parsing `operator <name>(...) -> ...`, Python-style `def <name>(...) -> ...` prose operators, and `{param}` templates.
+- **Deterministic Prose Contract Verification (`verifyProseNode`, `verifyProseFlow`, `verifyProseText`).** Enforces strict word budgets (`minWords`, `maxWords`), character budgets (`minChars`, `maxChars`), required citation keys (`requiredCitations` in `[@key]` and `\cite{key}` syntax), case-insensitive forbidden terms (`forbiddenTerms`), and grant/research rubric completeness (`requiredSections`, `rubricCriteria`).
+- **Deterministic Prose Compiler (`vscode-extension/src/compile/prose.ts`, `vscode-extension/src/port_compile_host.ts`).** Evaluates wired prose flows (including `branch`, `foreach`, and `repeat` regions) and emits compiled Markdown (`<name>.md`) and LaTeX (`<name>.tex`) artifacts with resolved inline citations (`[@key]` -> `(Author, Year)` in Markdown and `\cite{key}` in LaTeX), automatically assembled References / `\begin{thebibliography}` sections, and structured diagnostics. Wired into `slate.compile` (`compileSlateFolder`) when `config.language === 'prose'`.
+- The project index exposes Prose ports and contracts on the canvas. The Architect can define Prose signatures, and Compile Project verifies wired inputs and contracts before writing Markdown and LaTeX. Previewing flow execution with the Run control remains Python-only.
+- Verification includes Prose compiler regressions, real Extension Host indexing, wiring and document compilation, and `npm run verify:launch`.
+
 ## Not started
 
-- Repeat / for-each / branch zones.
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
 - Dependency-ordered queue / generate-all for the harness.
 - Clean-profile VSIX install/update/restart test.
-- Any language other than Python (Slate cannot map its own TypeScript code).
+- Additional code languages beyond Python and Prose (Slate cannot map its own TypeScript code).
 
 ## Removed
 

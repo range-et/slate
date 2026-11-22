@@ -1,8 +1,10 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { activate, deactivate } from '../../extension';
+import { PROSE_GENERATED_MD_HEADER, PROSE_GENERATED_TEX_HEADER } from '../../compile/prose';
 import { GENERATED_HEADER } from '../../compile/python';
 import type { HarnessSnapshot } from '../../harness_protocol';
+import { SlateMcpServer } from '../../mcp/slate_mcp_server';
 import { SlateFolderHost } from '../../slate_folder_host';
 
 suite('Slate native project commands', () => {
@@ -333,6 +335,81 @@ suite('Slate native project commands', () => {
             await vscode.commands.executeCommand('slate.compile');
         } finally {
             await vscode.workspace.fs.delete(vendor, { recursive: true, useTrash: false });
+        }
+    });
+
+    test('compile dispatches prose projects to compileProse (.md and .tex) and removes stale prose artifacts', async () => {
+        const enc = (text: string) => new TextEncoder().encode(text);
+        const outDir = vscode.Uri.joinPath(root, 'out_prose_test');
+        try {
+            await vscode.workspace.fs.createDirectory(uri('nodes'));
+            await vscode.workspace.fs.createDirectory(uri('flows'));
+            await vscode.workspace.fs.writeFile(uri('slate.json'), enc(JSON.stringify({
+                slate: 3, name: 'grant_demo', language: 'prose', compile: { outDir: 'out_prose_test' },
+            }, null, 2) + '\n'));
+            await vscode.workspace.fs.writeFile(uri('layout.json'), enc('{\n  "positions": {},\n  "notes": []\n}\n'));
+            await vscode.workspace.fs.writeFile(uri('nodes', 'cite_smith.json'), enc(JSON.stringify({
+                slate: 3, name: 'cite_smith', language: 'prose',
+                intent: 'Foundational Slate paper', contract: '', context: [], locked: false, describedBy: 'human',
+                code: [
+                    'citation cite_smith() -> citation:',
+                    '    {"key": "smith2024", "author": "Smith et al.", "year": "2024", "title": "Deterministic Visual Flows"}',
+                ],
+            }, null, 2) + '\n'));
+            await vscode.workspace.fs.writeFile(uri('nodes', 'aim_passage.json'), enc(JSON.stringify({
+                slate: 3, name: 'aim_passage', language: 'prose',
+                intent: 'Specific aim', contract: 'minWords: 3, maxWords: 50, requiredCitations: [@smith2024]', context: [], locked: false, describedBy: 'human',
+                code: ['operator aim_passage(ref: citation) -> section:', '    ## Specific Aims', '    We build deterministic flows {ref}.'],
+            }, null, 2) + '\n'));
+            await vscode.workspace.fs.writeFile(uri('flows', 'main.json'), enc(JSON.stringify({
+                slate: 3, name: 'main',
+                inputs: [],
+                outputs: [{ name: 'proposal', annotation: 'section' }],
+                instances: [
+                    { id: 'c1', node: 'cite_smith' },
+                    { id: 'a1', node: 'aim_passage' },
+                ],
+                wires: [
+                    { from: 'a1.out', to: 'output:proposal' },
+                ],
+            }, null, 2) + '\n'));
+
+            await vscode.commands.executeCommand('slate.openHarness');
+            await indexed('grant_demo');
+            const snapshot = await vscode.commands.executeCommand<HarnessSnapshot>('slate.test.getSnapshot');
+            assert.equal(snapshot?.documents.find(item => item.units[0]?.id === 'aim_passage')?.units[0].params?.[0]?.annotation, 'citation');
+            await vscode.commands.executeCommand('slate.test.postMessage', {
+                type: 'action', action: { kind: 'connectData', from: 'c1.out', to: 'a1.in:ref' },
+            });
+            assert.ok(JSON.parse(await read('flows', 'main.json')).wires.some((wire: { from: string; to: string }) =>
+                wire.from === 'c1.out' && wire.to === 'a1.in:ref'));
+
+            const mcp = new SlateMcpServer(root.fsPath);
+            const stub = { name: 'abstract', signature: 'operator abstract(topic: passage) -> section', intent: 'Summarize the topic' };
+            assert.equal((await mcp.callTool('slate_define_stub', { ...stub, body: 'Arbitrary text' })).isError, true);
+            assert.equal((await mcp.callTool('slate_define_stub', stub)).isError, false);
+            assert.deepEqual(JSON.parse(await read('nodes', 'abstract.json')).code, ['operator abstract(topic: passage) -> section:']);
+            await vscode.commands.executeCommand('slate.test.postMessage', { type: 'verifyNode', nodeId: 'aim_passage' });
+            assert.equal(JSON.parse(await read('nodes', 'aim_passage.json')).verification.state, 'failed',
+                'Unbound citation fails node verification until it is supplied by the flow');
+
+            await vscode.workspace.fs.createDirectory(outDir);
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(outDir, 'stale.md'), enc(`${PROSE_GENERATED_MD_HEADER}\nstale\n`));
+            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(outDir, 'stale.tex'), enc(`${PROSE_GENERATED_TEX_HEADER}\nstale\n`));
+
+            replace(vscode.window, 'showInformationMessage', async () => undefined);
+            const result = await vscode.commands.executeCommand<{ files: string[]; diagnostics: Array<{ severity: string }> }>('slate.compile');
+            assert.ok(result);
+            assert.ok(result.files.includes('grant_demo.md'));
+            assert.ok(result.files.includes('grant_demo.tex'));
+            const mdText = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(outDir, 'grant_demo.md')));
+            const texText = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(outDir, 'grant_demo.tex')));
+            assert.ok(mdText.includes('Smith et al.'));
+            assert.ok(texText.includes('\\cite{smith2024}'));
+            await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(vscode.Uri.joinPath(outDir, 'stale.md'))));
+            await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(vscode.Uri.joinPath(outDir, 'stale.tex'))));
+        } finally {
+            try { await vscode.workspace.fs.delete(outDir, { recursive: true, useTrash: false }); } catch { /* ignore */ }
         }
     });
 

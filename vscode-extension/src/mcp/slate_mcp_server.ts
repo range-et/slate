@@ -12,12 +12,13 @@ import {
 } from '../flow';
 import {
     codeLines, CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR,
-    nodeFromSignature, nodeIdForPath, parseLayout, parseNode,
+    nodeFromSignature, nodeIdForPath, parseConfig, parseLayout, parseNode,
     pathForNodeId, serializeLayout, serializeNode,
     type SlateLayout, type SlateNode
 } from '../slate_folder';
 import type { BoardNote, FlowInstance, FlowWire, SlateFlow } from '../harness_protocol';
 import { checkLlamaHealth } from '../llama_transport';
+import { parseProseNode, proseStub } from '../prose_adapter';
 
 export interface SlateMcpBridge {
     focusCamera?(options: {
@@ -919,6 +920,8 @@ export class SlateMcpServer {
         }
 
         const layout = await this.readLayout();
+        const configText = await this.readTextIfExists(CONFIG_PATH);
+        const language = configText ? parseConfig(configText).language : 'python';
         const createdIds: string[] = [];
 
         for (const item of stubList) {
@@ -936,7 +939,9 @@ export class SlateMcpServer {
                 }
                 const existingBody = existingNode.code.slice(1).join('\n');
                 const existingSig = existingNode.code[0] ?? '';
-                const existingValidation = validateStubBody(existingSig, existingBody);
+                const existingValidation = (existingNode.language ?? language) === 'prose'
+                    ? { valid: !parseProseNode(existingNode, nodeId).bodyText, reason: 'Prose template already has a body.' }
+                    : validateStubBody(existingSig, existingBody);
                 if (!existingValidation.valid) {
                     throw new Error(
                         `Node "${nodeId}" already has an active implementation and cannot be overwritten with a stub. ` +
@@ -953,13 +958,16 @@ export class SlateMcpServer {
             const stubBody = (item.body ?? 'raise NotImplementedError').trim();
 
             // Validate that the signature creates a valid node header
-            const initialNode = nodeFromSignature(signature, intent);
+            const initialNode = language === 'prose' ? proseStub(signature, name.split('/').pop()!, intent)
+                : nodeFromSignature(signature, intent);
             if (initialNode.name !== name && name.split('/').pop() !== initialNode.name) {
                 throw new Error(`Signature function name "${initialNode.name}" does not match provided name "${name}".`);
             }
 
             // Strictly validate that body is an allowed stub (zero arbitrary function bodies allowed)
-            const validation = validateStubBody(signature, stubBody);
+            const validation = language === 'prose'
+                ? { valid: !item.body?.trim(), reason: 'Architect prose stubs accept a signature without body text.' }
+                : validateStubBody(signature, stubBody);
             if (!validation.valid) {
                 throw new Error(validation.reason);
             }
@@ -967,10 +975,11 @@ export class SlateMcpServer {
             // Build node code
             const header = signature.replace(/:$/, '');
             const bodyLines = stubBody.split('\n').map(l => l.startsWith('    ') ? l : `    ${l}`);
-            const code = [`${header}:`, ...bodyLines];
+            const code = language === 'prose' ? initialNode.code : [`${header}:`, ...bodyLines];
 
             const node: SlateNode = {
                 name: initialNode.name,
+                ...(language === 'prose' ? { language } : {}),
                 intent,
                 contract,
                 context,

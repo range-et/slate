@@ -100,6 +100,50 @@ export class SlateFolderHost {
         }
     }
 
+    /** Apply a region edit as one undoable change across its flows and layout. */
+    async writeRegionEdit(flows: ReadonlyMap<string, SlateFlow>, includeLayout: boolean): Promise<void> {
+        const replacements = new Map<string, string>();
+        for (const [id, flow] of flows) {
+            const migrated = id === MAIN_FLOW && this.pendingUnindexedRefs && this.deferredRefs.length > 0
+                ? migrateRootOccurrences(flow, this.deferredRefs, this.layout.positions, [], []) : undefined;
+            if (migrated) this.layout.positions = migrated.positions;
+            const text = serializeFlow(migrated?.main ?? flow);
+            parseFlow(text);
+            replacements.set(pathForFlowId(id), text);
+        }
+        if (flows.has(MAIN_FLOW) && (this.deferredRefs.length || this.layout.refs.length)) {
+            this.pendingUnindexedRefs = false;
+            this.deferredRefs = [];
+            this.layout.refs = [];
+            includeLayout = true;
+        }
+        if (includeLayout) replacements.set(LAYOUT_PATH, this.layoutText());
+
+        const edit = new vscode.WorkspaceEdit();
+        const touched: vscode.Uri[] = [];
+        for (const [relative, text] of replacements) {
+            const uri = this.uri(relative);
+            const existing = await this.read(relative);
+            if (existing?.text === text) continue;
+            if (existing) {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                if (doc.getText() !== existing.text) throw new Error(relative + ' changed during the region edit.');
+                edit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), text);
+            } else {
+                edit.createFile(uri, { ignoreIfExists: false });
+                edit.insert(uri, new vscode.Position(0, 0), text);
+            }
+            touched.push(uri);
+        }
+        if (!touched.length) return;
+        if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code rejected the region edit.');
+        for (const uri of touched) {
+            if (!await (await vscode.workspace.openTextDocument(uri)).save()) {
+                throw new Error('Could not save ' + this.relative(uri) + '. The edits remain in the editor.');
+            }
+        }
+    }
+
     /** Library files from slate.json `library` (files or folders of .py), with top-level ids `lib:<path>:<name>`. */
     async readLibrary(config: SlateConfig): Promise<LibraryDocument[]> {
         const documents: LibraryDocument[] = [];
