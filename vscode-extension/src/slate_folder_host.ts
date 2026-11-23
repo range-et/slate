@@ -353,14 +353,23 @@ export class SlateFolderHost {
     }
 
     private async writeText(uri: vscode.Uri, text: string): Promise<void> {
-        const open = vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
-        if (open?.isDirty) {
+        const open = vscode.workspace.textDocuments.find(document => !document.isClosed && document.uri.toString() === uri.toString());
+        if (open) {
+            if (!open.isDirty && text === open.getText()) {
+                try {
+                    if (new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)) === text) return;
+                } catch {
+                    // Missing or unreadable on disk (e.g. replaced by a directory); fall through to fs.writeFile so disk is restored or the error surfaces.
+                }
+                await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
+                return;
+            }
             if (text !== open.getText()) {
                 const edit = new vscode.WorkspaceEdit();
                 edit.replace(open.uri, new vscode.Range(open.positionAt(0), open.positionAt(open.getText().length)), text);
                 if (!await vscode.workspace.applyEdit(edit)) throw new Error(`VS Code rejected the edit to ${this.relative(uri)}.`);
             }
-            if (!await open.save()) throw new Error(`VS Code could not save ${this.relative(uri)}.`);
+            if (open.isDirty && !await open.save()) throw new Error(`VS Code could not save ${this.relative(uri)}.`);
             return;
         }
         await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));

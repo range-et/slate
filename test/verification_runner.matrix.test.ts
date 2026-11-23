@@ -961,6 +961,52 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(mutualRes.state, mutualRes.traceback).toBe('passed');
             expect(mutualRes.pydanticValid).toBe(true);
+
+            // Top-level declarations inside node.check shadow exported _prelude symbols without duplicate import injection
+            const shadowPreludeNode = makeNode({
+                name: 'helper_prelude',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude constant exported to helpers',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: ['export const LIMIT = 10;'],
+            });
+            const usePreludeLimitNode = makeNode({
+                name: 'scaleWithLimit',
+                language: 'typescript',
+                intent: 'Multiply value by prelude LIMIT',
+                contract: '',
+                context: ['helper_prelude'],
+                imports: [],
+                uses: ['helper_prelude'],
+                cases: undefined,
+                code: [
+                    'export function scaleWithLimit(n: number): number {',
+                    '    return n * LIMIT;',
+                    '}',
+                ],
+                check: [
+                    'const LIMIT = 99;',
+                    "test('shadows prelude LIMIT in check body without duplicate import', () => {",
+                    '    expect(LIMIT).toBe(99);',
+                    '    expect(scaleWithLimit(2)).toBe(20);',
+                    '});',
+                ],
+            });
+            const shadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: usePreludeLimitNode,
+                nodeId: 'scaleWithLimit',
+                dependencies: new Map([['helper_prelude', shadowPreludeNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(shadowRes.state, shadowRes.traceback).toBe('passed');
+            expect(shadowRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });

@@ -640,15 +640,17 @@ suite('Slate native persistence and proposal QA', () => {
     test('root migration preserves refs on main.json write failure, defers disk writes for dirty buffers, and compiles dirty or missing layout', async () => {
         const layoutUri = uri('slate', 'layout.json');
         const mainUri = uri('slate', 'flows', 'main.json');
+        // Create blocking main.json directory BEFORE writing legacy refs so an async webview `ready` refresh cannot migrate first.
+        await vscode.workspace.fs.createDirectory(mainUri);
         await vscode.workspace.fs.writeFile(layoutUri, encode({
             positions: { 'ref-legacy': { x: 40, y: 50 }, normalize: { x: 100, y: 120 } },
             notes: [],
             refs: [{ id: 'ref-legacy', target: 'clamp' }],
         }));
         // If writing main.json fails during migration, layout.json keeps its legacy refs so they are not lost.
-        await vscode.workspace.fs.createDirectory(mainUri);
         await act({ kind: 'refreshIndex' });
         assert.deepEqual((await read('slate', 'layout.json')).refs, [{ id: 'ref-legacy', target: 'clamp' }]);
+        await vscode.workspace.fs.writeFile(layoutUri, encode({ positions: {}, notes: [] }));
         await vscode.workspace.fs.delete(mainUri, { recursive: true, useTrash: false });
 
         // While main.json has unsaved changes, refresh migrates in-memory without overwriting disk or minting duplicate ref_* IDs.
@@ -668,6 +670,11 @@ suite('Slate native persistence and proposal QA', () => {
         );
         assert.ok(await vscode.workspace.applyEdit(dirtyMainEdit));
         assert.equal(mainDoc.isDirty, true);
+        await vscode.workspace.fs.writeFile(layoutUri, encode({
+            positions: { 'ref-legacy': { x: 40, y: 50 }, normalize: { x: 100, y: 120 } },
+            notes: [],
+            refs: [{ id: 'ref-legacy', target: 'clamp' }],
+        }));
         await act({ kind: 'refreshIndex' });
         await act({ kind: 'refreshIndex' });
         assert.equal(mainDoc.isDirty, true);
@@ -755,6 +762,28 @@ suite('Slate native persistence and proposal QA', () => {
         await act({ kind: 'createRef', target: 'normalize', x: 60, y: 70 });
         assert.equal((await read('slate', 'layout.json')).refs, undefined);
         assert.ok((await read('slate', 'flows', 'main.json')).instances.some((item: any) => item.id === 'ref-after-drag' && item.node === 'clamp'));
+
+        // Writing layout onto an open clean editor buffer updates through the editor model without mtime desync on subsequent edits.
+        await post({ type: 'layout', positions: { normalize: { x: 145, y: 165 } } });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        assert.deepEqual(JSON.parse(layoutEditorDoc.getText()).positions.normalize, { x: 145, y: 165 });
+        const postCleanWriteEdit = new vscode.WorkspaceEdit();
+        postCleanWriteEdit.replace(
+            layoutEditorDoc.uri,
+            new vscode.Range(layoutEditorDoc.positionAt(0), layoutEditorDoc.positionAt(layoutEditorDoc.getText().length)),
+            new TextDecoder().decode(encode({
+                ...JSON.parse(layoutEditorDoc.getText()),
+                notes: [{ id: 'note-after-clean-write', title: 'After clean write', body: 'No mtime desync', attachedTo: null }],
+            })),
+        );
+        assert.ok(await vscode.workspace.applyEdit(postCleanWriteEdit));
+        assert.equal(layoutEditorDoc.isDirty, true);
+        await post({ type: 'layout', positions: { normalize: { x: 155, y: 175 } } });
+        assert.equal(layoutEditorDoc.isDirty, false);
+        assert.deepEqual((await read('slate', 'layout.json')).positions.normalize, { x: 155, y: 175 });
+        assert.deepEqual((await read('slate', 'layout.json')).notes, [
+            { id: 'note-after-clean-write', title: 'After clean write', body: 'No mtime desync', attachedTo: null },
+        ]);
 
         // Compile respects unsaved layout.json ref targets and repairs missing root instances even when layout.json is absent.
         await vscode.commands.executeCommand('workbench.action.closeAllEditors');

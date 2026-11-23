@@ -1226,6 +1226,9 @@ async function runTsNodeVerification(
         const testBodyText = testBodyLines.join('\n');
         const testIdents = tsIdentifierNames(testBodyText, `test_${safeBase}${ext}`);
         const boundInTest = new Set<string>([node.name]);
+        for (const sym of inspectTsModuleDeclarations(testBodyText, `test_${safeBase}${ext}`).allSymbols) {
+            boundInTest.add(sym);
+        }
         for (const line of testBodyLines) {
             if (/^\s*import\b/.test(line)) {
                 for (const item of splitTsImport(line)) {
