@@ -30,6 +30,7 @@
     "!vscode-extension/scripts/**/*",
     "!vitest.config.js",
     "!package.json",
+    "!benchmarks/**/*",
     "!scripts/**/*",
     "!eslint.config.mjs",
     "!tsconfig.json"

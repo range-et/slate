@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { randomUUID } from 'crypto';
 
-import { batchForgeWorkspace } from '../batch_forge';
+import { batchForgeWorkspace, compactBatchForgeResult } from '../batch_forge';
 import {
     connect, disconnect, emptyFlow, FLOWS_DIR, flowIdForPath, MAIN_FLOW,
     parseEndpoint, pathForFlowId, removeInstances, serializeFlow, parseFlow
@@ -17,12 +17,12 @@ import {
     type SlateConfig, type SlateLayout, type SlateLlmConfig, type SlateLlmProvider,
     type SlateNode, type StubValidationResult
 } from '../slate_folder';
-import type { BoardNote, FlowInstance, FlowWire, HarnessDocument, HarnessFlow, SlateFlow } from '../harness_protocol';
+import type { BoardNote, FlowInstance, FlowPort, FlowWire, HarnessDocument, HarnessFlow, SlateFlow } from '../harness_protocol';
 import { compileProjectForLanguage } from '../language_adapter';
 import { isSlateGeneratedContent, normalizeCompileOutputPath, tryNormalizeLanguage } from '../language_types';
 import { checkLlamaHealth, resolveLlmConfig, type LlmConfigInput } from '../llama_transport';
 import { parseProseNode, proseStub } from '../prose_adapter';
-import { identifierNames } from '../python_adapter';
+import { identifierNames, isForbiddenSlateModule, splitImport } from '../python_adapter';
 import { tsIdentifierNames } from '../ts_adapter';
 import { buildUsageIndex } from '../usage_index';
 
@@ -220,17 +220,33 @@ export const MCP_TOOLS = [
                     items: { type: 'string' },
                     description: 'Optional list of node dependency IDs.',
                 },
+                imports: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional external import statements required by this node (e.g. ["import math"]). Internal slate.* imports are rejected.',
+                },
                 cases: {
                     type: 'array',
                     description: 'Optional structured test cases.',
                     items: {
-                        type: 'object',
-                        properties: {
-                            name: { type: 'string' },
-                            input: { type: 'object' },
-                            expected: {},
-                        },
-                        required: ['name', 'input'],
+                        oneOf: [
+                            { type: 'string' },
+                            {
+                                type: 'object',
+                                properties: {
+                                    id: { type: 'string' },
+                                    name: { type: 'string' },
+                                    description: { type: 'string' },
+                                    input: { type: ['object', 'array'] },
+                                    inputs: { type: ['object', 'array'] },
+                                    expected: {},
+                                    error: { type: 'string', description: 'Expected exception class name (e.g. "ValueError").' },
+                                    expectedError: { type: 'string', description: 'Alias for "error".' },
+                                    approx: { type: ['boolean', 'number'], description: 'Use approximate float matching (boolean or numeric abs tolerance).' },
+                                    code: { type: 'string', description: 'Explicit assertion expression/line.' },
+                                },
+                            },
+                        ],
                     },
                 },
                 body: {
@@ -261,7 +277,30 @@ export const MCP_TOOLS = [
                             modulePath: { type: 'string' },
                             contract: { type: 'string' },
                             context: { type: 'array', items: { type: 'string' } },
-                            cases: { type: 'array' },
+                            imports: { type: 'array', items: { type: 'string' } },
+                            cases: {
+                                type: 'array',
+                                items: {
+                                    oneOf: [
+                                        { type: 'string' },
+                                        {
+                                            type: 'object',
+                                            properties: {
+                                                id: { type: 'string' },
+                                                name: { type: 'string' },
+                                                description: { type: 'string' },
+                                                input: { type: ['object', 'array'] },
+                                                inputs: { type: ['object', 'array'] },
+                                                expected: {},
+                                                error: { type: 'string' },
+                                                expectedError: { type: 'string' },
+                                                approx: { type: ['boolean', 'number'] },
+                                                code: { type: 'string' },
+                                            },
+                                        },
+                                    ],
+                                },
+                            },
                             body: { type: 'string' },
                             position: {
                                 type: 'object',
@@ -276,13 +315,39 @@ export const MCP_TOOLS = [
     },
     {
         name: 'slate_wire_flow',
-        description: 'Connect typed dataflow wires deterministically via flow.ts and layout.json.',
+        description: 'Connect typed dataflow wires and declare flow input/output ports deterministically via flow.ts and layout.json.',
         inputSchema: {
             type: 'object',
             properties: {
                 flow: {
                     type: 'string',
                     description: 'Flow ID to wire (defaults to "main").',
+                },
+                inputs: {
+                    type: 'array',
+                    description: 'Optional flow input ports (replaces existing inputs when provided; preserved when omitted).',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            name: { type: 'string', description: 'Valid identifier port name.' },
+                            annotation: { type: ['string', 'null'], description: 'Optional type annotation.' },
+                        },
+                        required: ['name'],
+                        additionalProperties: false,
+                    },
+                },
+                outputs: {
+                    type: 'array',
+                    description: 'Optional flow output ports (replaces existing outputs when provided; preserved when omitted).',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            name: { type: 'string', description: 'Valid identifier port name.' },
+                            annotation: { type: ['string', 'null'], description: 'Optional type annotation.' },
+                        },
+                        required: ['name'],
+                        additionalProperties: false,
+                    },
                 },
                 instances: {
                     type: 'array',
@@ -399,18 +464,18 @@ export const MCP_TOOLS = [
     },
     {
         name: 'slate_forge_batch',
-        description: 'Statelessly batch-forge atomic stub nodes with bounded <=600-token micro-packets, JPL-60 validation, optional Pydantic+pytest verification, and bounded revision retries.',
+        description: 'Statelessly batch-forge atomic stub nodes in topological dependency waves using bounded <=600-token micro-packets, JPL-60 validation, language-appropriate verification (Pydantic+pytest or strict tsc+node), and bounded revision retries.',
         inputSchema: {
             type: 'object',
             properties: {
                 nodeIds: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: 'Optional list of node IDs to forge. If omitted, forges all unlocked unimplemented Python stubs.',
+                    description: 'Optional list of node IDs to forge. If omitted, forges all unlocked unimplemented atomic stubs (Python, TypeScript, JavaScript).',
                 },
                 allStubs: {
                     type: 'boolean',
-                    description: 'When true (or when nodeIds is omitted), select all unlocked unimplemented Python stubs.',
+                    description: 'When true (or when nodeIds is omitted), select all unlocked unimplemented atomic stubs (Python, TypeScript, JavaScript).',
                 },
                 concurrency: {
                     type: 'number',
@@ -422,7 +487,7 @@ export const MCP_TOOLS = [
                 },
                 verify: {
                     type: 'boolean',
-                    description: 'Run Pydantic + pytest verification on forged candidates before writing (default true).',
+                    description: 'Run verification (Pydantic+pytest for Python, strict tsc+node for TS/JS) on forged candidates before writing (default true).',
                 },
                 write: {
                     type: 'boolean',
@@ -431,6 +496,10 @@ export const MCP_TOOLS = [
                 overwrite: {
                     type: 'boolean',
                     description: 'Allow regenerating nodes that already have non-stub implementations (default false).',
+                },
+                verbose: {
+                    type: 'boolean',
+                    description: 'Return full raw verification tracebacks and payloads instead of compact Frontier digests (default false).',
                 },
                 provider: {
                     type: 'string',
@@ -639,6 +708,8 @@ export class SlateMcpServer {
 
         const nodes: Array<Record<string, unknown>> = [];
         if (matchNodes) {
+            const configText = await this.readTextIfExists(CONFIG_PATH);
+            const defaultLanguage = configText ? parseConfig(configText).language : 'python';
             const files = await this.findNodeFiles();
             for (const file of files) {
                 const id = nodeIdForPath(file);
@@ -646,9 +717,15 @@ export class SlateMcpServer {
                 if (scope !== 'all' && scope !== 'nodes' && !id.startsWith(scope)) continue;
                 try {
                     const text = await fs.readFile(this.absPath(file), 'utf8');
-                    const node = parseNode(text);
+                    const indexed = indexNode(file, text, defaultLanguage, null);
+                    const node = indexed.node ?? parseNode(text);
                     const code = node.code.join('\n');
-                    const sig = node.code[0] ?? '';
+                    const parsedUnit = indexed.document.units.find(u => u.id === id) ?? indexed.document.units[0];
+                    const fallbackSig = node.code.find(line => {
+                        const trimmed = line.trim();
+                        return trimmed.length > 0 && !trimmed.startsWith('#') && !trimmed.startsWith('//');
+                    }) ?? node.code[0] ?? '';
+                    const sig = (parsedUnit?.signature || fallbackSig).trim().replace(/:\s*$/, '');
 
                     let matched = !q;
                     if (q) {
@@ -668,7 +745,7 @@ export class SlateMcpServer {
                             id,
                             name: node.name,
                             path: file,
-                            signature: sig.replace(/:$/, ''),
+                            signature: sig,
                             intent: node.intent,
                             contract: node.contract,
                             locked: node.locked,
@@ -868,6 +945,67 @@ export class SlateMcpServer {
         };
     }
 
+    private normalizeStubImports(rawImports: unknown, language: string, nodeId: string): string[] {
+        if (!Array.isArray(rawImports)) {
+            throw new Error(`Stub "${nodeId}" imports must be an array of strings.`);
+        }
+        const result: string[] = [];
+        const pushUnique = (line: string) => {
+            if (!result.includes(line)) result.push(line);
+        };
+        for (const entry of rawImports) {
+            if (typeof entry !== 'string') {
+                throw new Error(`Stub "${nodeId}" imports entries must be strings.`);
+            }
+            const trimmed = entry.trim();
+            if (!trimmed) continue;
+            if (language === 'python') {
+                const parsed = splitImport(trimmed);
+                if (parsed.length === 0) {
+                    throw new Error(`Invalid Python import "${trimmed}" in stub "${nodeId}".`);
+                }
+                for (const item of parsed) {
+                    if (isForbiddenSlateModule(item.module)) {
+                        throw new Error(`Forbidden internal import "${trimmed}" in stub "${nodeId}": dependencies are imported automatically from context/uses.`);
+                    }
+                    pushUnique(item.line);
+                }
+            } else {
+                pushUnique(trimmed);
+            }
+        }
+        return result;
+    }
+
+    private normalizeFlowPortsArg(rawPorts: unknown, label: 'inputs' | 'outputs'): FlowPort[] {
+        if (!Array.isArray(rawPorts)) {
+            throw new Error(`Flow "${label}" must be an array of { name, annotation? } objects.`);
+        }
+        const identRe = /^[A-Za-z_][A-Za-z0-9_]*$/;
+        const seen = new Set<string>();
+        const ports: FlowPort[] = [];
+        for (const entry of rawPorts) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                throw new Error(`Each entry in flow "${label}" must be an object with a "name" identifier.`);
+            }
+            const rec = entry as Record<string, unknown>;
+            const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+            if (!identRe.test(name)) {
+                throw new Error(`Invalid port name "${String(rec.name ?? '')}" in flow "${label}": must match identifier pattern.`);
+            }
+            if (seen.has(name)) {
+                throw new Error(`Duplicate port name "${name}" in flow "${label}".`);
+            }
+            seen.add(name);
+            if (rec.annotation !== undefined && rec.annotation !== null && typeof rec.annotation !== 'string') {
+                throw new Error(`Annotation for port "${name}" in flow "${label}" must be a string or null.`);
+            }
+            const ann = typeof rec.annotation === 'string' ? (rec.annotation.trim() || null) : null;
+            ports.push({ name, annotation: ann });
+        }
+        return ports;
+    }
+
     /** Tool: slate_define_stub */
     async toolDefineStub(args: {
         name?: string;
@@ -878,7 +1016,8 @@ export class SlateMcpServer {
         modulePath?: string;
         contract?: string;
         context?: string[];
-        cases?: Array<{ name: string; input: Record<string, unknown>; expected?: unknown }>;
+        imports?: string[];
+        cases?: unknown[];
         body?: string;
         position?: { x: number; y: number };
         splitFrom?: string;
@@ -891,7 +1030,8 @@ export class SlateMcpServer {
             modulePath?: string;
             contract?: string;
             context?: string[];
-            cases?: Array<{ name: string; input: Record<string, unknown>; expected?: unknown }>;
+            imports?: string[];
+            cases?: unknown[];
             body?: string;
             position?: { x: number; y: number };
         }>;
@@ -907,6 +1047,7 @@ export class SlateMcpServer {
                 modulePath: args.modulePath,
                 contract: args.contract,
                 context: args.context,
+                imports: args.imports,
                 cases: args.cases,
                 body: args.body,
                 position: args.position,
@@ -957,6 +1098,10 @@ export class SlateMcpServer {
             const intent = item.intent.trim();
             const contract = (item.contract ?? '').trim();
             const context = item.context ?? [];
+            const rawImports = item.imports !== undefined ? item.imports : (args.stubs?.length ? undefined : args.imports);
+            const imports = rawImports !== undefined
+                ? this.normalizeStubImports(rawImports, itemLanguage, nodeId)
+                : (existingNode?.imports ?? []);
             const cases = item.cases ?? [];
 
             let initialNode: SlateNode;
@@ -1031,7 +1176,7 @@ export class SlateMcpServer {
                 examples: existingNode?.examples ?? [],
                 describedBy: existingNode?.describedBy ?? 'human',
                 locked: false,
-                imports: existingNode?.imports ?? [],
+                imports,
                 uses: existingNode?.uses ?? [],
                 code,
                 extra,
@@ -1073,6 +1218,8 @@ export class SlateMcpServer {
     /** Tool: slate_wire_flow */
     async toolWireFlow(args: {
         flow?: string;
+        inputs?: Array<{ name: string; annotation?: string | null }>;
+        outputs?: Array<{ name: string; annotation?: string | null }>;
         instances?: Array<{ id: string; node?: string; kind?: 'value'; value?: string; position?: { x: number; y: number } }>;
         wires?: Array<{ from: string; to: string }>;
         disconnect?: Array<{ from: string; to: string }>;
@@ -1085,13 +1232,24 @@ export class SlateMcpServer {
 
         const rawFlow = await this.readTextIfExists(flowRelPath);
         if (rawFlow === null) {
-            flow = emptyFlow(flowId);
+            const flowName = flowId.includes('/') ? flowId.slice(flowId.lastIndexOf('/') + 1) : flowId;
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(flowName)) {
+                throw new Error(`Invalid flow identifier "${flowName}" derived from flow ID "${flowId}".`);
+            }
+            flow = emptyFlow(flowName);
         } else {
             try {
                 flow = parseFlow(rawFlow);
             } catch (error) {
                 throw new Error(`Existing flow file "${flowRelPath}" is invalid and was not modified: ${(error as Error).message}`);
             }
+        }
+
+        if (args.inputs !== undefined) {
+            flow = { ...flow, inputs: this.normalizeFlowPortsArg(args.inputs, 'inputs') };
+        }
+        if (args.outputs !== undefined) {
+            flow = { ...flow, outputs: this.normalizeFlowPortsArg(args.outputs, 'outputs') };
         }
 
         const layout = await this.readLayout();
@@ -1163,10 +1321,26 @@ export class SlateMcpServer {
                 if (fromEp.instance !== null && fromEp.instance === toEp.instance) {
                     throw new Error(`Self-loop rejected: node instance "${fromEp.instance}" cannot wire into itself.`);
                 }
-                if (fromEp.instance !== null && !flow.instances.some(i => i.id === fromEp.instance)) {
+                if (fromEp.instance === null) {
+                    if (!fromEp.port.startsWith('input:')) {
+                        throw new Error(`Wire source "${from}" must originate from an instance port or "input:<port>".`);
+                    }
+                    const portName = fromEp.port.slice('input:'.length);
+                    if (!flow.inputs.some(p => p.name === portName)) {
+                        throw new Error(`Flow input port "${portName}" does not exist in flow "${flowId}". Declare it in "inputs" before wiring.`);
+                    }
+                } else if (!flow.instances.some(i => i.id === fromEp.instance)) {
                     throw new Error(`Instance "${fromEp.instance}" does not exist in flow "${flowId}". Define or add the instance before connecting wires.`);
                 }
-                if (toEp.instance !== null && !flow.instances.some(i => i.id === toEp.instance)) {
+                if (toEp.instance === null) {
+                    if (!toEp.port.startsWith('output:')) {
+                        throw new Error(`Wire destination "${to}" must target an instance port or "output:<port>".`);
+                    }
+                    const portName = toEp.port.slice('output:'.length);
+                    if (!flow.outputs.some(p => p.name === portName)) {
+                        throw new Error(`Flow output port "${portName}" does not exist in flow "${flowId}". Declare it in "outputs" before wiring.`);
+                    }
+                } else if (!flow.instances.some(i => i.id === toEp.instance)) {
                     throw new Error(`Instance "${toEp.instance}" does not exist in flow "${flowId}". Define or add the instance before connecting wires.`);
                 }
                 flow = connect(flow, from, to);
@@ -1183,6 +1357,8 @@ export class SlateMcpServer {
         return {
             ok: true,
             flow: flow.name,
+            inputs: flow.inputs,
+            outputs: flow.outputs,
             instances: flow.instances,
             wires: flow.wires,
         };
@@ -1381,6 +1557,7 @@ export class SlateMcpServer {
         apiKeyEnv?: string;
         timeoutSeconds?: number;
         outputTokens?: number;
+        verbose?: boolean;
     }): Promise<Record<string, unknown>> {
         this.assertNoSecretArgs(args, 'slate_forge_batch');
         const provider = this.parseProviderArg(args.provider);
@@ -1426,7 +1603,10 @@ export class SlateMcpServer {
                 : undefined,
         });
 
-        return result as unknown as Record<string, unknown>;
+        if (args.verbose === true) {
+            return result as unknown as Record<string, unknown>;
+        }
+        return compactBatchForgeResult(result);
     }
 
     /** Tool: slate_references */
@@ -1931,16 +2111,158 @@ export class SlateMcpServer {
     }
 }
 
-// Standalone CLI execution
-if (require.main === module) {
-    let workspaceDir = process.cwd();
-    const args = process.argv.slice(2);
-    for (let i = 0; i < args.length; i++) {
-        if (args[i] === '--workspace' && args[i + 1]) {
-            workspaceDir = path.resolve(args[i + 1]);
-            i++;
+export interface SlateMcpCliIo {
+    stdout: (text: string) => void;
+    stderr: (text: string) => void;
+    cwd?: string;
+}
+
+const SLATE_MCP_CLI_HELP = [
+    'Usage: slate_mcp_server [--workspace <dir>] [--list-tools | --call <tool> [--args <json> | --args-file <path>]]',
+    '',
+    'Options:',
+    '  --workspace <dir>   Workspace root directory (defaults to current working directory)',
+    '  --list-tools        Print available MCP tools as JSON and exit',
+    '  --call <tool>       Invoke a single MCP tool one-shot and print JSON result',
+    '  --args <json>       Inline JSON object of arguments for --call',
+    '  --args-file <path>  Path to JSON file containing arguments for --call',
+    '  -h, --help          Show this help message and exit',
+    '',
+    'With no action flag, starts the stdio JSON-RPC 2.0 MCP server.',
+].join('\n');
+
+/** Executes the standalone CLI or stdio MCP server entrypoint and returns a process exit code. */
+export async function runSlateMcpCli(
+    argv: readonly string[],
+    io: SlateMcpCliIo = {
+        stdout: text => { process.stdout.write(text); },
+        stderr: text => { process.stderr.write(text); },
+        cwd: process.cwd(),
+    },
+): Promise<number> {
+    const baseCwd = io.cwd ?? process.cwd();
+    let workspaceDir = path.resolve(baseCwd);
+    let showHelp = false;
+    let listTools = false;
+    let callToolName: string | undefined;
+    let inlineArgsJson: string | undefined;
+    let argsFilePath: string | undefined;
+
+    for (let i = 0; i < argv.length; i++) {
+        const flag = argv[i];
+        if (flag === '--help' || flag === '-h') {
+            showHelp = true;
+        } else if (flag === '--list-tools') {
+            listTools = true;
+        } else if (flag === '--workspace') {
+            if (!argv[i + 1]) {
+                io.stderr('Error: --workspace requires a directory path.\n');
+                return 1;
+            }
+            workspaceDir = path.resolve(baseCwd, argv[++i]);
+        } else if (flag === '--call') {
+            if (!argv[i + 1]) {
+                io.stderr('Error: --call requires a tool name.\n');
+                return 1;
+            }
+            callToolName = argv[++i];
+        } else if (flag === '--args') {
+            if (argv[i + 1] === undefined) {
+                io.stderr('Error: --args requires a JSON string.\n');
+                return 1;
+            }
+            inlineArgsJson = argv[++i];
+        } else if (flag === '--args-file') {
+            if (!argv[i + 1]) {
+                io.stderr('Error: --args-file requires a file path.\n');
+                return 1;
+            }
+            argsFilePath = argv[++i];
+        } else {
+            io.stderr(`Unknown argument: "${flag}". Run with --help for usage.\n`);
+            return 1;
         }
     }
+
+    if (showHelp) {
+        io.stdout(`${SLATE_MCP_CLI_HELP}\n`);
+        return 0;
+    }
+
+    if (listTools) {
+        io.stdout(`${JSON.stringify(MCP_TOOLS.map(t => ({ name: t.name, description: t.description })), null, 2)}\n`);
+        return 0;
+    }
+
+    if (callToolName !== undefined) {
+        if (inlineArgsJson !== undefined && argsFilePath !== undefined) {
+            io.stderr('Error: pass either --args or --args-file, not both.\n');
+            return 1;
+        }
+        let rawJson: string | undefined = inlineArgsJson;
+        if (argsFilePath) {
+            try {
+                rawJson = await fs.readFile(path.resolve(baseCwd, argsFilePath), 'utf8');
+            } catch (err) {
+                io.stderr(`Error reading --args-file "${argsFilePath}": ${(err as Error).message}\n`);
+                return 1;
+            }
+        }
+        let parsedArgs: Record<string, unknown> = {};
+        if (rawJson !== undefined) {
+            try {
+                const candidate = JSON.parse(rawJson);
+                if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+                    io.stderr('Error: tool arguments JSON must be an object.\n');
+                    return 1;
+                }
+                parsedArgs = candidate as Record<string, unknown>;
+            } catch (err) {
+                io.stderr(`Error parsing tool arguments JSON: ${(err as Error).message}\n`);
+                return 1;
+            }
+        }
+
+        const server = new SlateMcpServer(workspaceDir);
+        try {
+            const response = await server.handleRequest({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'tools/call',
+                params: { name: callToolName, arguments: parsedArgs },
+            });
+            if (!response) {
+                io.stderr('Error: empty response from MCP server.\n');
+                return 1;
+            }
+            if ('error' in response) {
+                io.stderr(`${JSON.stringify(response.error, null, 2)}\n`);
+                return 1;
+            }
+            const toolResult = response.result as McpToolCallResult;
+            const text = toolResult?.content?.[0]?.text ?? JSON.stringify(toolResult);
+            if (toolResult?.isError) {
+                io.stderr(`${text}\n`);
+                return 1;
+            }
+            io.stdout(`${text}\n`);
+            return 0;
+        } finally {
+            server.close();
+        }
+    }
+
     const server = new SlateMcpServer(workspaceDir);
     server.startStdio();
+    return 0;
+}
+
+// Standalone CLI execution
+if (require.main === module) {
+    runSlateMcpCli(process.argv.slice(2)).then(code => {
+        if (code !== 0) process.exitCode = code;
+    }).catch(err => {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+        process.exitCode = 1;
+    });
 }

@@ -288,6 +288,104 @@ export function splitImport(statement: string): PythonImport[] {
     return imports;
 }
 
+/** Whether a parsed Python module path refers to internal `slate` / `slate.*` pseudo-modules. */
+export function isForbiddenSlateModule(moduleName: string): boolean {
+    const clean = moduleName.replace(/^\.+/, '');
+    return clean === 'slate' || clean.startsWith('slate.');
+}
+
+function subtreeHasSyntaxError(node: SyntaxNode): boolean {
+    let bad = node.type.isError;
+    if (bad) return true;
+    const cursor = node.cursor();
+    const visit = (): boolean => {
+        if (cursor.type.isError) return true;
+        if (cursor.firstChild()) {
+            do {
+                if (visit()) return true;
+            } while (cursor.nextSibling());
+            cursor.parent();
+        }
+        return false;
+    };
+    return visit();
+}
+
+/** Find any `slate` / `slate.*` import statements anywhere inside a Python source string. */
+export function findForbiddenSlateImports(source: string): string[] {
+    const normalized = source.replace(/\r\n?/g, '\n');
+    const found: string[] = [];
+    const pushUnique = (line: string) => {
+        if (!found.includes(line)) found.push(line);
+    };
+    const cursor = parser.parse(normalized).cursor();
+    do {
+        if (cursor.name !== 'ImportStatement') continue;
+        const stmt = normalized.slice(cursor.from, cursor.to).trim();
+        const items = splitImport(stmt);
+        if (items.length > 0) {
+            for (const item of items) {
+                if (isForbiddenSlateModule(item.module)) pushUnique(item.line);
+            }
+        } else if (/^\s*(?:from|import)\s+slate(?:\.|\s|,|$)/.test(stmt)) {
+            pushUnique(stmt);
+        }
+    } while (cursor.next());
+    return found;
+}
+
+/** Hoist valid leading top-level Python imports out of a candidate implementation and flag any `slate.*` imports. */
+export function hoistLeadingPythonImports(source: string): {
+    implementation: string;
+    imports: string[];
+    forbiddenImports: string[];
+} {
+    const normalized = source.replace(/\r\n?/g, '\n');
+    const tree = parser.parse(normalized);
+    const imports: string[] = [];
+    const forbiddenSet = new Set<string>(findForbiddenSlateImports(normalized));
+    const stripSpans: Array<{ from: number; to: number }> = [];
+
+    for (const child of directChildren(tree.topNode)) {
+        if (child.name === 'Comment') continue;
+        if (child.name !== 'ImportStatement') break;
+        if (subtreeHasSyntaxError(child)) break;
+        const stmt = normalized.slice(child.from, child.to).trim();
+        const items = splitImport(stmt);
+        if (items.length === 0) break;
+        for (const item of items) {
+            if (isForbiddenSlateModule(item.module)) {
+                forbiddenSet.add(item.line);
+            } else if (!imports.includes(item.line)) {
+                imports.push(item.line);
+            }
+        }
+        stripSpans.push({ from: child.from, to: child.to });
+    }
+
+    let stripped = normalized;
+    if (stripSpans.length > 0) {
+        let out = '';
+        let pos = 0;
+        for (const span of stripSpans) {
+            out += normalized.slice(pos, span.from);
+            pos = span.to;
+        }
+        out += normalized.slice(pos);
+        stripped = out;
+    }
+
+    const lines = stripped.split('\n');
+    while (lines.length > 0 && lines[0].trim() === '') lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+
+    return {
+        implementation: lines.join('\n'),
+        imports,
+        forbiddenImports: Array.from(forbiddenSet),
+    };
+}
+
 /** Every `VariableName` in the source: references, parameters, and assignment targets. */
 export function identifierNames(source: string): Set<string> {
     const names = new Set<string>();

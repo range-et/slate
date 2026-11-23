@@ -7,7 +7,7 @@ import type { NodeVerificationResult, VerificationState } from './harness_protoc
 import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
-import { sourceHash } from './python_adapter';
+import { parseModule, sourceHash } from './python_adapter';
 import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
@@ -71,16 +71,24 @@ function toPythonLiteral(value: unknown): string {
     return JSON.stringify(value);
 }
 
-const CASE_METADATA_KEYS = new Set(['name', 'id', 'description', 'error', 'expected', 'return', 'output']);
+const CASE_METADATA_KEYS = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx']);
+
+const FLOAT_RETURN_RE = /^\s*(?:float|Optional\[float\]|float\s*\|\s*None|None\s*\|\s*float)\s*$/;
 
 /** Formats structured cases into executable pytest test assertions. */
-export function formatCasesAsPython(nodeName: string, cases: unknown[]): string[] {
+export function formatCasesAsPython(
+    nodeName: string,
+    cases: unknown[],
+    options?: { returnAnnotation?: string | null },
+): string[] {
     const lines: string[] = [];
     lines.push(`def test_structured_cases_${nodeName}():`);
     if (cases.length === 0) {
         lines.push('    pass');
         return lines;
     }
+
+    const isFloatReturn = Boolean(options?.returnAnnotation && FLOAT_RETURN_RE.test(options.returnAnnotation));
 
     cases.forEach((item, index) => {
         if (!item || typeof item !== 'object') {
@@ -103,7 +111,9 @@ export function formatCasesAsPython(nodeName: string, cases: unknown[]): string[
         }
 
         const expected = obj.expected ?? obj.return ?? obj.output;
-        const expectedError = typeof obj.error === 'string' && obj.error.trim() ? obj.error.trim() : undefined;
+        const expectedError = typeof obj.error === 'string' && obj.error.trim()
+            ? obj.error.trim()
+            : (typeof obj.expectedError === 'string' && obj.expectedError.trim() ? obj.expectedError.trim() : undefined);
         const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
 
         let callExpr: string | null = null;
@@ -130,7 +140,26 @@ export function formatCasesAsPython(nodeName: string, cases: unknown[]): string[
             lines.push(`    with pytest.raises(${excClass}):`);
             lines.push(`        ${callExpr}`);
         } else if (expected !== undefined) {
-            lines.push(`    assert ${callExpr} == ${toPythonLiteral(expected)}`);
+            const approxFlag = obj.approx;
+            if (
+                typeof expected === 'number'
+                && Number.isFinite(expected)
+                && approxFlag !== false
+                && (
+                    typeof approxFlag === 'number'
+                    || approxFlag === true
+                    || isFloatReturn
+                    || !Number.isInteger(expected)
+                )
+            ) {
+                if (typeof approxFlag === 'number' && Number.isFinite(approxFlag) && approxFlag > 0) {
+                    lines.push(`    assert ${callExpr} == pytest.approx(${toPythonLiteral(expected)}, abs=${approxFlag})`);
+                } else {
+                    lines.push(`    assert ${callExpr} == pytest.approx(${toPythonLiteral(expected)}, rel=1e-9, abs=1e-12)`);
+                }
+            } else {
+                lines.push(`    assert ${callExpr} == ${toPythonLiteral(expected)}`);
+            }
         } else {
             lines.push(`    ${callExpr}`);
         }
@@ -194,7 +223,9 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
             : Object.prototype.hasOwnProperty.call(obj, 'return')
                 ? obj.return
                 : obj.output;
-        const expectedError = typeof obj.error === 'string' && obj.error.trim() ? obj.error.trim() : undefined;
+        const expectedError = typeof obj.error === 'string' && obj.error.trim()
+            ? obj.error.trim()
+            : (typeof obj.expectedError === 'string' && obj.expectedError.trim() ? obj.expectedError.trim() : undefined);
         const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
 
         let callExpr: string | null = null;
@@ -243,7 +274,18 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
             }
         } else if (hasExpected) {
             const awaitedExpr = isAsync ? `await ${callExpr}` : callExpr;
-            lines.push(`    expect(${awaitedExpr}).toEqual(${JSON.stringify(expected)});`);
+            const approxFlag = obj.approx;
+            if (typeof expected === 'number' && Number.isFinite(expected) && approxFlag !== false) {
+                if (typeof approxFlag === 'number' && Number.isFinite(approxFlag) && approxFlag > 0) {
+                    lines.push(`    expect(Math.abs((${awaitedExpr}) - (${JSON.stringify(expected)}))).toBeLessThanOrEqual(${approxFlag});`);
+                } else if (approxFlag === true) {
+                    lines.push(`    expect(${awaitedExpr}).toBeCloseTo(${JSON.stringify(expected)}, 6);`);
+                } else {
+                    lines.push(`    expect(${awaitedExpr}).toEqual(${JSON.stringify(expected)});`);
+                }
+            } else {
+                lines.push(`    expect(${awaitedExpr}).toEqual(${JSON.stringify(expected)});`);
+            }
         } else {
             lines.push(`    ${isAsync ? 'await ' : ''}${callExpr};`);
         }
@@ -257,6 +299,7 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
 export function generateVerificationFiles(
     node: SlateNode,
     dependencies?: Map<string, SlateNode>,
+    nodeId?: string,
 ): GeneratedVerification {
     const hasCases = Array.isArray(node.cases) && node.cases.length > 0;
     const hasCheck = Array.isArray(node.check) && node.check.length > 0;
@@ -266,37 +309,58 @@ export function generateVerificationFiles(
         return { moduleContent: '', testContent: '', hasChecks: false };
     }
 
-    const moduleParts: string[] = [
-        '# Auto-generated verification module for Slate atomic node',
-        'from __future__ import annotations',
-        'import sys',
-        'import typing',
-    ];
+    const futureImports: string[] = ['from __future__ import annotations'];
+    const regularImports: string[] = ['import sys', 'import typing'];
+    const seenImports = new Set<string>([...futureImports, ...regularImports]);
+    const pushImport = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || seenImports.has(trimmed)) return;
+        seenImports.add(trimmed);
+        if (trimmed.startsWith('from __future__ ')) {
+            futureImports.push(trimmed);
+        } else {
+            regularImports.push(trimmed);
+        }
+    };
 
-    if (node.imports.length > 0) {
-        moduleParts.push(...node.imports);
-    }
-
-    // Include dependency node code so target can reference helpers
+    const depCodeBlocks: string[] = [];
     if (dependencies && dependencies.size > 0) {
-        moduleParts.push('# Dependent context nodes');
         for (const [depId, depNode] of dependencies.entries()) {
-            if (depId !== node.name && depNode.code.length > 0) {
-                moduleParts.push(`\n# Context: ${depNode.name}`);
-                moduleParts.push(...depNode.code);
+            if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
+            for (const imp of depNode.imports ?? []) {
+                pushImport(imp);
+            }
+            if (depNode.code.length > 0) {
+                depCodeBlocks.push(`\n# Context: ${depNode.name}`);
+                depCodeBlocks.push(...depNode.code);
             }
         }
+    }
+
+    for (const imp of node.imports ?? []) {
+        pushImport(imp);
+    }
+
+    const moduleParts: string[] = [
+        '# Auto-generated verification module for Slate atomic node',
+        ...futureImports,
+        ...regularImports,
+    ];
+
+    if (depCodeBlocks.length > 0) {
+        moduleParts.push('# Dependent context nodes');
+        moduleParts.push(...depCodeBlocks);
     }
 
     moduleParts.push(`\n# Target implementation: ${node.name}`);
     moduleParts.push(...node.code);
 
-    // Pydantic parameter & return contract validation wrapper
+    // Pydantic strict parameter & return contract validation wrapper
     moduleParts.push(`
 # Pydantic contract validation (S-513)
 try:
-    from pydantic import validate_call
-    ${node.name} = validate_call(validate_return=True)(${node.name})
+    from pydantic import ConfigDict, validate_call
+    ${node.name} = validate_call(config=ConfigDict(strict=True), validate_return=True)(${node.name})
 except Exception:
     pass
 `);
@@ -313,8 +377,10 @@ except Exception:
     }
 
     if (hasCases && node.cases) {
+        const parsedTarget = parseModule(`${codeText(node)}\n`, '<verify>', node.name);
+        const targetUnit = parsedTarget.units.find(u => u.parentId === null && u.name === node.name);
         testParts.push('\n# Structured cases');
-        testParts.push(...formatCasesAsPython(node.name, node.cases));
+        testParts.push(...formatCasesAsPython(node.name, node.cases, { returnAnnotation: targetUnit?.returnAnnotation }));
     }
 
     return {
@@ -467,7 +533,7 @@ export async function runNodeVerification(options: VerificationOptions): Promise
         };
     }
 
-    const { moduleContent, testContent, hasChecks } = generateVerificationFiles(node, dependencies);
+    const { moduleContent, testContent, hasChecks } = generateVerificationFiles(node, dependencies, nodeId);
 
     if (!hasChecks) {
         return {

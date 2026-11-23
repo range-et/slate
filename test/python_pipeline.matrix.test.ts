@@ -128,4 +128,30 @@ describe('port and compile matrix', () => {
         expect(result.files.size).toBe(0);
         expect(result.diagnostics).toEqual([{ severity: 'error', message: 'run: no compiler for language "ruby".' }]);
     });
+    it('deduplicates shared external imports across multiple nodes in the same module folder', () => {
+        const sqrtNode = parseNode(JSON.stringify({
+            slate: 3,
+            name: 'square_root',
+            intent: 'Compute sqrt',
+            contract: 'x >= 0',
+            imports: ['import math'],
+            code: ['def square_root(x: float) -> float:', '    return math.sqrt(x)'],
+        }));
+        const cosNode = parseNode(JSON.stringify({
+            slate: 3,
+            name: 'cos_deg',
+            intent: 'Compute cos',
+            contract: 'Returns float',
+            imports: ['import math'],
+            code: ['def cos_deg(degrees: float) -> float:', '    return math.cos(math.radians(degrees))'],
+        }));
+        const result = compilePython(
+            new Map([['scientific/square_root', sqrtNode], ['scientific/cos_deg', cosNode]]),
+            { slate: 3, name: 'sci', language: 'python' },
+        );
+        expect(result.diagnostics).toEqual([]);
+        const py = result.files.get('scientific.py')!;
+        expect(py.match(/^import math$/gm)).toHaveLength(1);
+        expect(py.indexOf('import math')).toBeLessThan(py.indexOf('def cos_deg'));
+    });
 });

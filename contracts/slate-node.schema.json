@@ -53,10 +53,14 @@
             "type": "object",
             "properties": {
               "id": { "type": "string" },
+              "name": { "type": "string" },
               "description": { "type": "string" },
+              "input": { "type": ["object", "array"] },
               "inputs": { "type": ["object", "array"] },
               "expected": { "type": ["string", "number", "boolean", "null", "array", "object"] },
               "error": { "type": "string" },
+              "expectedError": { "type": "string" },
+              "approx": { "type": ["boolean", "number"] },
               "code": { "type": "string" }
             },
             "additionalProperties": true
