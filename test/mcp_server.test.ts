@@ -581,6 +581,54 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(compileParsed.diagnostics).toEqual([]);
             const compiledFlowPy = await fs.readFile(path.join(tmpDir, 'compiled_out', 'sci_calc.py'), 'utf8');
             expect(compiledFlowPy).toContain('def twice(val: float) -> float:');
+
+            // Updating inputs/outputs removes wires attached to deleted boundary ports without breaking compile
+            await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [
+                    { name: 'val', annotation: 'float' },
+                    { name: 'extra_in', annotation: 'float' },
+                ],
+                outputs: [
+                    { name: 'result', annotation: 'float' },
+                    { name: 'extra_out', annotation: 'float' },
+                ],
+                wires: [
+                    { from: 'd1.out', to: 'output:extra_out' },
+                ],
+            });
+            const pruneExtras = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [{ name: 'val', annotation: 'float' }],
+                outputs: [{ name: 'result', annotation: 'float' }],
+            });
+            expect(pruneExtras.isError).toBe(false);
+            const prunedExtrasData = JSON.parse(pruneExtras.content[0].text);
+            expect(prunedExtrasData.wires).toEqual([
+                { from: 'input:val', to: 'd1.in:x' },
+                { from: 'd1.out', to: 'output:result' },
+            ]);
+            const postExtraCompile = await server.callTool('slate_compile', { outDir: 'compiled_out' });
+            expect(JSON.parse(postExtraCompile.content[0].text)).toMatchObject({ ok: true, diagnostics: [] });
+
+            // Clearing all inputs/outputs also removes remaining boundary wires
+            const clearAll = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [],
+                outputs: [],
+                removeInstances: ['d1'],
+            });
+            expect(clearAll.isError).toBe(false);
+            const clearedData = JSON.parse(clearAll.content[0].text);
+            expect(clearedData.inputs).toEqual([]);
+            expect(clearedData.outputs).toEqual([]);
+            expect(clearedData.wires).toEqual([]);
+
+            const postPruneCompile = await server.callTool('slate_compile', { outDir: 'compiled_out' });
+            expect(postPruneCompile.isError).toBe(false);
+            const postPruneParsed = JSON.parse(postPruneCompile.content[0].text);
+            expect(postPruneParsed.ok).toBe(true);
+            expect(postPruneParsed.diagnostics).toEqual([]);
         });
     });
 

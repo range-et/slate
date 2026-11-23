@@ -28,15 +28,73 @@ const require = createRequire(import.meta.url);
 const ROOT = path.resolve(__dirname, '..');
 const EXTENSION_OUT = path.join(ROOT, 'vscode-extension', 'out');
 
+const REQUIRED_EXTENSION_OUTPUTS = [
+    path.join('mcp', 'slate_mcp_server.js'),
+    path.join('port', 'python_importer.js'),
+    'verification_runner.js',
+    'slate_folder.js',
+];
+
+function newestMtimeUnder(dir, includeFile) {
+    let newest = 0;
+    let entries;
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return newest;
+    }
+    for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            if (entry.name === 'test' || entry.name === 'node_modules') continue;
+            newest = Math.max(newest, newestMtimeUnder(full, includeFile));
+        } else if (entry.isFile() && includeFile(entry.name)) {
+            newest = Math.max(newest, fs.statSync(full).mtimeMs);
+        }
+    }
+    return newest;
+}
+
+/**
+ * Checks whether compiled extension outputs are missing or older than extension source/config files.
+ */
+export function isExtensionBuildStale(root = ROOT) {
+    const outRoot = path.join(root, 'vscode-extension', 'out');
+    let oldestOut = Infinity;
+    for (const rel of REQUIRED_EXTENSION_OUTPUTS) {
+        const full = path.join(outRoot, rel);
+        try {
+            const stat = fs.statSync(full);
+            if (!stat.isFile()) return true;
+            oldestOut = Math.min(oldestOut, stat.mtimeMs);
+        } catch {
+            return true;
+        }
+    }
+    let newestSrc = newestMtimeUnder(
+        path.join(root, 'vscode-extension', 'src'),
+        name => name.endsWith('.ts'),
+    );
+    for (const metaRel of ['package.json', 'tsconfig.json', path.join('scripts', 'build-extension.js')]) {
+        const metaFull = path.join(root, 'vscode-extension', metaRel);
+        try {
+            newestSrc = Math.max(newestSrc, fs.statSync(metaFull).mtimeMs);
+        } catch {
+            // Optional metadata file
+        }
+    }
+    return newestSrc > oldestOut;
+}
+
 function ensureExtensionBuilt() {
-    const required = [
-        path.join(EXTENSION_OUT, 'mcp', 'slate_mcp_server.js'),
-        path.join(EXTENSION_OUT, 'port', 'python_importer.js'),
-        path.join(EXTENSION_OUT, 'verification_runner.js'),
-        path.join(EXTENSION_OUT, 'slate_folder.js'),
-    ];
-    if (required.some(p => !fs.existsSync(p))) {
+    if (isExtensionBuildStale(ROOT)) {
         execSync('npm --prefix vscode-extension run compile', { cwd: ROOT, stdio: 'inherit' });
+        const outPrefix = `${EXTENSION_OUT}${path.sep}`;
+        for (const key of Object.keys(require.cache)) {
+            if (key === EXTENSION_OUT || key.startsWith(outPrefix)) {
+                delete require.cache[key];
+            }
+        }
     }
 }
 
@@ -173,11 +231,18 @@ function countLines(text) {
  * Execute a full declarative spec-to-forge benchmark using real Slate MCP tools.
  */
 export async function runBenchmarkOffload(options = {}) {
-    ensureExtensionBuilt();
-    const { SlateMcpServer } = require(path.join(EXTENSION_OUT, 'mcp', 'slate_mcp_server.js'));
-    const { portPythonProject } = require(path.join(EXTENSION_OUT, 'port', 'python_importer.js'));
-    const { parseNode, serializeConfig, serializeNode } = require(path.join(EXTENSION_OUT, 'slate_folder.js'));
-    const verificationRunner = require(path.join(EXTENSION_OUT, 'verification_runner.js'));
+    let loaded;
+    if (options.slateModules) {
+        loaded = options.slateModules;
+    } else {
+        ensureExtensionBuilt();
+        const { SlateMcpServer } = require(path.join(EXTENSION_OUT, 'mcp', 'slate_mcp_server.js'));
+        const { portPythonProject } = require(path.join(EXTENSION_OUT, 'port', 'python_importer.js'));
+        const { parseNode, serializeConfig, serializeNode } = require(path.join(EXTENSION_OUT, 'slate_folder.js'));
+        const { resolvePythonPath } = require(path.join(EXTENSION_OUT, 'verification_runner.js'));
+        loaded = { SlateMcpServer, portPythonProject, parseNode, serializeConfig, serializeNode, resolvePythonPath };
+    }
+    const { SlateMcpServer, portPythonProject, parseNode, serializeConfig, serializeNode, resolvePythonPath } = loaded;
 
     const specPath = path.resolve(ROOT, options.specPath ?? 'benchmarks/specs/sci_calc.json');
     const spec = JSON.parse(await fsp.readFile(specPath, 'utf8'));
@@ -185,7 +250,7 @@ export async function runBenchmarkOffload(options = {}) {
     const concurrency = options.concurrency ?? 3;
     const maxRevisions = options.maxRevisions ?? 3;
     const verboseForge = options.verboseForge === true;
-    const pythonPath = options.pythonPath ?? resolveExecutablePython(verificationRunner);
+    const pythonPath = options.pythonPath ?? resolveExecutablePython({ resolvePythonPath });
 
     const workspaceDir = await fsp.mkdtemp(path.join(os.tmpdir(), `slate-bench-${spec.name}-`));
     let fakeServer;

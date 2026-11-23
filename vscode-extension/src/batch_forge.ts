@@ -145,22 +145,27 @@ function collectTransitiveDependencies(
 }
 
 /**
- * Partitions targets into topological execution waves from `context` + `uses` dependencies.
+ * Partitions targets into topological execution waves across transitive `context` + `uses` dependencies
+ * (including chains passing through already-implemented non-target nodes when `allNodesById` is supplied).
  * Cycles are broken deterministically into a final wave sorted by `nodeId`.
  */
 export function partitionTargetsIntoWaves<T extends { target: { nodeId: string; node: SlateNode } }>(
     items: readonly T[],
+    allNodesById?: ReadonlyMap<string, SlateNode>,
 ): T[][] {
     if (items.length === 0) return [];
     const byId = new Map<string, T>();
+    const lookupNodes = new Map<string, SlateNode>(allNodesById ?? []);
     for (const item of items) {
         byId.set(item.target.nodeId, item);
+        lookupNodes.set(item.target.nodeId, item.target.node);
     }
     const remaining = new Set<string>(byId.keys());
     const depsById = new Map<string, Set<string>>();
     for (const item of items) {
+        const transitive = collectTransitiveDependencies(item.target.nodeId, item.target.node, lookupNodes);
         const internalDeps = new Set<string>();
-        for (const depId of [...item.target.node.context, ...item.target.node.uses]) {
+        for (const depId of transitive.dependencies.keys()) {
             if (depId !== item.target.nodeId && byId.has(depId)) {
                 internalDeps.add(depId);
             }
@@ -846,7 +851,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
     }
 
     const batchStartMs = Date.now();
-    const waves = partitionTargetsIntoWaves(activeTargets);
+    const waves = partitionTargetsIntoWaves(activeTargets, nodesById);
     const activeTargetIds = new Set(activeTargets.map(a => a.target.nodeId));
     const resultById = new Map<string, BatchForgeNodeResult>();
 

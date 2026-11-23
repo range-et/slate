@@ -455,7 +455,80 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             ['leaf'],
             ['x', 'y'],
         ]);
+
+        // Transitive dependency through an already-implemented non-target helper:
+        // stub_a -> impl_b -> stub_c  ==>  Wave 0: [stub_c], Wave 1: [stub_a]
+        const implB = makeStubNode('impl_b', 'def impl_b(x: int) -> int', 'Uses c', undefined, {
+            context: ['stub_c'],
+            code: ['def impl_b(x: int) -> int:', '    return stub_c(x) * 2'],
+        });
+        const allNodes = new Map<string, SlateNode>([
+            ['impl_b', implB],
+            ['stub_a', makeStubNode('stub_a', 'def stub_a(x: int) -> int', 'Uses impl_b', undefined, { context: ['impl_b'] })],
+            ['stub_c', makeStubNode('stub_c', 'def stub_c(x: int) -> int', 'Leaf stub')],
+        ]);
+        const transitiveWaves = partitionTargetsIntoWaves([
+            mk('stub_a', ['impl_b']),
+            mk('stub_c'),
+        ], allNodes);
+        expect(transitiveWaves.map(w => w.map(i => i.target.nodeId))).toEqual([
+            ['stub_c'],
+            ['stub_a'],
+        ]);
     });
+
+    it('orders stubs reached transitively through implemented helpers into separate waves', async () => {
+        await writeProject(
+            tmpDir,
+            { provider: 'llama.cpp', model: 'qwen/qwen3-coder-30b-a3b-instruct' },
+            {
+                stub_c: makeStubNode(
+                    'stub_c',
+                    'def stub_c(x: int) -> int',
+                    'Add 1',
+                    [{ name: 'c1', input: { x: 2 }, expected: 3 }],
+                ),
+                impl_b: makeStubNode(
+                    'impl_b',
+                    'def impl_b(x: int) -> int',
+                    'Double stub_c(x)',
+                    undefined,
+                    {
+                        context: ['stub_c'],
+                        code: ['def impl_b(x: int) -> int:', '    return stub_c(x) * 2'],
+                    },
+                ),
+                stub_a: makeStubNode(
+                    'stub_a',
+                    'def stub_a(x: int) -> int',
+                    'Return impl_b(x) + 10',
+                    [{ name: 'a1', input: { x: 2 }, expected: 16 }],
+                    { context: ['impl_b'] },
+                ),
+            },
+        );
+
+        const order: string[] = [];
+        activeServer = await startCustomSseServer(body => {
+            const prompt = String(body.messages?.[1]?.content ?? '');
+            if (prompt.includes('### Target stub: stub_c')) {
+                order.push('stub_c');
+                return '### Implementation\n```python\ndef stub_c(x: int) -> int:\n    return x + 1\n```\n### Unit Check\n```python\ndef test_stub_c():\n    assert stub_c(2) == 3\n```';
+            }
+            order.push('stub_a');
+            return '### Implementation\n```python\ndef stub_a(x: int) -> int:\n    return impl_b(x) + 10\n```\n### Unit Check\n```python\ndef test_stub_a():\n    assert stub_a(2) == 16\n```';
+        });
+
+        const res = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            concurrency: 2,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(res.ok, JSON.stringify(res.results)).toBe(true);
+        expect(res.waves).toBe(2);
+        expect(res.forgedCount).toBe(2);
+        expect(order).toEqual(['stub_c', 'stub_a']);
+    }, 20_000);
 
     it('forges multi-wave dependencies in one batch (both write and dry-run) and hoists leading imports', async () => {
         await writeProject(

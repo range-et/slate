@@ -1246,10 +1246,30 @@ export class SlateMcpServer {
         }
 
         if (args.inputs !== undefined) {
-            flow = { ...flow, inputs: this.normalizeFlowPortsArg(args.inputs, 'inputs') };
+            const nextInputs = this.normalizeFlowPortsArg(args.inputs, 'inputs');
+            const validInputNames = new Set(nextInputs.map(p => p.name));
+            flow = {
+                ...flow,
+                inputs: nextInputs,
+                wires: flow.wires.filter(w => {
+                    const fromEp = parseEndpoint(w.from);
+                    if (fromEp.instance !== null || !fromEp.port.startsWith('input:')) return true;
+                    return validInputNames.has(fromEp.port.slice('input:'.length));
+                }),
+            };
         }
         if (args.outputs !== undefined) {
-            flow = { ...flow, outputs: this.normalizeFlowPortsArg(args.outputs, 'outputs') };
+            const nextOutputs = this.normalizeFlowPortsArg(args.outputs, 'outputs');
+            const validOutputNames = new Set(nextOutputs.map(p => p.name));
+            flow = {
+                ...flow,
+                outputs: nextOutputs,
+                wires: flow.wires.filter(w => {
+                    const toEp = parseEndpoint(w.to);
+                    if (toEp.instance !== null || !toEp.port.startsWith('output:')) return true;
+                    return validOutputNames.has(toEp.port.slice('output:'.length));
+                }),
+            };
         }
 
         const layout = await this.readLayout();
