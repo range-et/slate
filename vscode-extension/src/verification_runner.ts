@@ -959,6 +959,34 @@ function collectTsReferencedNamespaces(
     fileName: string,
 ): { valueRefs: Set<string>; typeRefs: Set<string> } {
     const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindForPath(fileName, source));
+    const host: ts.CompilerHost = {
+        getSourceFile: (requested) => (requested === fileName ? sf : undefined),
+        writeFile: () => {},
+        getCurrentDirectory: () => '',
+        getDirectories: () => [],
+        fileExists: (requested) => requested === fileName,
+        readFile: () => undefined,
+        getCanonicalFileName: (name) => name,
+        useCaseSensitiveFileNames: () => true,
+        getNewLine: () => '\n',
+        getDefaultLibFileName: () => '__slate_no_lib.d.ts',
+    };
+    const program = ts.createProgram(
+        [fileName],
+        {
+            allowJs: true,
+            noLib: true,
+            noResolve: true,
+            jsx: ts.JsxEmit.Preserve,
+            target: ts.ScriptTarget.Latest,
+            module: ts.ModuleKind.ESNext,
+        },
+        host,
+    );
+    const checker = program.getTypeChecker();
+    const isLocallyResolved = (sym: ts.Symbol | undefined): boolean =>
+        Boolean(sym?.declarations && sym.declarations.some(decl => decl.getSourceFile() === sf));
+
     const valueRefs = new Set<string>();
     const typeRefs = new Set<string>();
 
@@ -967,7 +995,7 @@ function collectTsReferencedNamespaces(
         while (ts.isQualifiedName(cur)) {
             cur = cur.left;
         }
-        if (ts.isIdentifier(cur)) {
+        if (ts.isIdentifier(cur) && !isLocallyResolved(checker.getSymbolAtLocation(cur))) {
             target.add(cur.text);
         }
     };
@@ -1011,6 +1039,10 @@ function collectTsReferencedNamespaces(
             || ts.isGetAccessorDeclaration(node)
             || ts.isSetAccessorDeclaration(node)
             || ts.isConstructorDeclaration(node)
+            || ts.isCallSignatureDeclaration(node)
+            || ts.isConstructSignatureDeclaration(node)
+            || ts.isFunctionTypeNode(node)
+            || ts.isConstructorTypeNode(node)
         ) {
             if ('name' in node && node.name && ts.isComputedPropertyName(node.name)) {
                 visit(node.name.expression, false);
@@ -1052,6 +1084,9 @@ function collectTsReferencedNamespaces(
 
         if (ts.isEnumDeclaration(node)) {
             for (const member of node.members) {
+                if (ts.isComputedPropertyName(member.name)) {
+                    visit(member.name.expression, false);
+                }
                 if (member.initializer) visit(member.initializer, false);
             }
             return;
@@ -1070,6 +1105,16 @@ function collectTsReferencedNamespaces(
 
         if (ts.isInferTypeNode(node)) {
             visit(node.typeParameter, true);
+            return;
+        }
+
+        if (ts.isNamedTupleMember(node)) {
+            visit(node.type, true);
+            return;
+        }
+
+        if (ts.isImportTypeNode(node)) {
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
             return;
         }
 
@@ -1103,6 +1148,16 @@ function collectTsReferencedNamespaces(
             return;
         }
 
+        if (ts.isShorthandPropertyAssignment(node)) {
+            if (!isLocallyResolved(checker.getShorthandAssignmentValueSymbol(node))) {
+                valueRefs.add(node.name.text);
+            }
+            if (node.objectAssignmentInitializer) {
+                visit(node.objectAssignmentInitializer, false);
+            }
+            return;
+        }
+
         if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
             if (ts.isComputedPropertyName(node.name)) {
                 visit(node.name.expression, false);
@@ -1116,21 +1171,28 @@ function collectTsReferencedNamespaces(
             if (node.moduleSpecifier) return;
             if (node.exportClause && ts.isNamedExports(node.exportClause)) {
                 for (const spec of node.exportClause.elements) {
+                    if (isLocallyResolved(checker.getExportSpecifierLocalTargetSymbol(spec))) continue;
                     const ref = spec.propertyName ?? spec.name;
                     if (node.isTypeOnly || spec.isTypeOnly) {
-                        visit(ref, true);
+                        typeRefs.add(ref.text);
                     } else {
-                        visit(ref, false);
-                        visit(ref, true);
+                        valueRefs.add(ref.text);
+                        typeRefs.add(ref.text);
                     }
                 }
             }
             return;
         }
 
-        if (ts.isExportAssignment(node) && ts.isIdentifier(node.expression)) {
-            valueRefs.add(node.expression.text);
-            typeRefs.add(node.expression.text);
+        if (ts.isExportAssignment(node)) {
+            if (ts.isIdentifier(node.expression)) {
+                if (!isLocallyResolved(checker.getSymbolAtLocation(node.expression))) {
+                    valueRefs.add(node.expression.text);
+                    typeRefs.add(node.expression.text);
+                }
+            } else {
+                visit(node.expression, false);
+            }
             return;
         }
 
@@ -1146,9 +1208,10 @@ function collectTsReferencedNamespaces(
         if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
             if (ts.isPropertyAccessExpression(node.tagName)) {
                 visit(node.tagName, false);
-            } else {
-                const tag = node.tagName.getText(sf).split('.')[0];
-                if (tag && !/^[a-z]/.test(tag)) valueRefs.add(tag);
+            } else if (ts.isIdentifier(node.tagName)) {
+                if (!/^[a-z]/.test(node.tagName.text) && !isLocallyResolved(checker.getSymbolAtLocation(node.tagName))) {
+                    valueRefs.add(node.tagName.text);
+                }
             }
             for (const ta of node.typeArguments ?? []) visit(ta, true);
             visit(node.attributes, false);
@@ -1161,7 +1224,9 @@ function collectTsReferencedNamespaces(
         }
 
         if (ts.isIdentifier(node)) {
-            (inType ? typeRefs : valueRefs).add(node.text);
+            if (!isLocallyResolved(checker.getSymbolAtLocation(node))) {
+                (inType ? typeRefs : valueRefs).add(node.text);
+            }
             return;
         }
 

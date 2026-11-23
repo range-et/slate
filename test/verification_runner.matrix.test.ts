@@ -1668,5 +1668,205 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(dualBoxRes.state, dualBoxRes.traceback).toBe('passed');
             expect(dualBoxRes.pydanticValid).toBe(true);
         }, 40_000);
+
+        it('excludes locally shadowed parameters, variables, shorthand bindings, and type parameters from dep import selection', async () => {
+            const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-scope-'));
+            tempDirs.push(workspaceRoot);
+
+            const depClassBox = makeNode({
+                name: 'depClassBox',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting dual value+type class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export class Box { v = 5; }'],
+            });
+
+            // Test A (PR #51 P1 #discussion_r4663796585): Parameter `Box: number` satisfies local value reference
+            // in `return { a: Box }`, so earlier `interface Box` is selected over later `class Box`.
+            const depInterfaceBox = makeNode({
+                name: 'depInterfaceBox',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Box { a: number }',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Box { a: number; }'],
+            });
+            const paramShadowTarget = makeNode({
+                name: 'wrapParamBox',
+                language: 'typescript',
+                intent: 'Uses Box parameter in value position and outer interface Box as return type',
+                contract: '',
+                context: ['depInterfaceBox', 'depClassBox'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: [
+                    'export function wrapParamBox(Box: number): Box {',
+                    '    return { a: Box };',
+                    '}',
+                ],
+                check: [
+                    "test('local parameter Box selects interface Box rather than later class Box', () => {",
+                    '    expect(wrapParamBox(9)).toEqual({ a: 9 });',
+                    '});',
+                ],
+            });
+            const paramShadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: paramShadowTarget,
+                nodeId: 'wrapParamBox',
+                dependencies: new Map([
+                    ['depInterfaceBox', depInterfaceBox],
+                    ['depClassBox', depClassBox],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(paramShadowRes.state, paramShadowRes.traceback).toBe('passed');
+            expect(paramShadowRes.pydanticValid).toBe(true);
+
+            // Test B: Local `const Box` + shorthand property `{ Box }` must not register an outer value ref.
+            const depInterfaceBoxShorthand = makeNode({
+                name: 'depInterfaceBoxShorthand',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Box { Box: number }',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Box { Box: number; }'],
+            });
+            const shorthandLocalTarget = makeNode({
+                name: 'shorthandLocalBox',
+                language: 'typescript',
+                intent: 'Uses local const Box in shorthand object literal with outer interface Box return type',
+                contract: '',
+                context: ['depInterfaceBoxShorthand', 'depClassBox'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: [
+                    'export function shorthandLocalBox(n: number): Box {',
+                    '    const Box = n + 1;',
+                    '    return { Box };',
+                    '}',
+                ],
+                check: [
+                    "test('local shorthand binding selects interface Box rather than later class Box', () => {",
+                    '    expect(shorthandLocalBox(4)).toEqual({ Box: 5 });',
+                    '});',
+                ],
+            });
+            const shorthandLocalRes = await runNodeVerification({
+                workspaceRoot,
+                node: shorthandLocalTarget,
+                nodeId: 'shorthandLocalBox',
+                dependencies: new Map([
+                    ['depInterfaceBoxShorthand', depInterfaceBoxShorthand],
+                    ['depClassBox', depClassBox],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(shorthandLocalRes.state, shorthandLocalRes.traceback).toBe('passed');
+            expect(shorthandLocalRes.pydanticValid).toBe(true);
+
+            // Test C: Symmetric type-parameter `<Box>` shadowing leaves only outer value ref `Box` (`const Box = 7`),
+            // selecting value-only `depBoxVal` rather than later dual `depClassBox`.
+            const depBoxVal = makeNode({
+                name: 'depBoxVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value Box = 7',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const Box = 7;'],
+            });
+            const genericTypeShadowTarget = makeNode({
+                name: 'genericBoxValue',
+                language: 'typescript',
+                intent: 'Type parameter Box shadows outer type while body reads outer value Box',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export function genericBoxValue<Box>(x: Box): [Box, number] {',
+                    '    return [x, Box];',
+                    '}',
+                ],
+                check: [
+                    "test('type parameter Box shadows outer type so outer const Box is selected', () => {",
+                    "    expect(genericBoxValue('ok')).toEqual(['ok', 7]);",
+                    '});',
+                ],
+            });
+            const genericTypeShadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: genericTypeShadowTarget,
+                nodeId: 'genericBoxValue',
+                dependencies: new Map([
+                    ['depBoxVal', depBoxVal],
+                    ['depClassBox', depClassBox],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(genericTypeShadowRes.state, genericTypeShadowRes.traceback).toBe('passed');
+            expect(genericTypeShadowRes.pydanticValid).toBe(true);
+
+            // Test D: Parameter default initializer `x: number = Box` is NOT shadowed by body `const Box = 1`,
+            // so `depBoxVal` (`const Box = 7`) must still be imported.
+            const defaultParamOuterTarget = makeNode({
+                name: 'defaultParamOuterBox',
+                language: 'typescript',
+                intent: 'Reads outer Box in parameter default while shadowing Box in function body',
+                contract: '',
+                context: ['depBoxVal'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export function defaultParamOuterBox(x: number = Box): number {',
+                    '    const Box = 1;',
+                    '    return x + Box;',
+                    '}',
+                ],
+                check: [
+                    "test('parameter default reads outer Box before body shadow', () => {",
+                    '    expect(defaultParamOuterBox()).toBe(8);',
+                    '});',
+                ],
+            });
+            const defaultParamOuterRes = await runNodeVerification({
+                workspaceRoot,
+                node: defaultParamOuterTarget,
+                nodeId: 'defaultParamOuterBox',
+                dependencies: new Map([['depBoxVal', depBoxVal]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(defaultParamOuterRes.state, defaultParamOuterRes.traceback).toBe('passed');
+            expect(defaultParamOuterRes.pydanticValid).toBe(true);
+        }, 40_000);
     });
 });
