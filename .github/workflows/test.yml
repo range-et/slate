@@ -10,6 +10,7 @@ on:
 jobs:
   vitest:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,6 +30,7 @@ jobs:
 
   harness-ui:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
@@ -58,6 +60,7 @@ jobs:
   launch-gate:
     name: Launch gate
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [vitest, harness-ui]
     if: always()
     steps:
