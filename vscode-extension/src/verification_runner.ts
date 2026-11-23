@@ -1112,8 +1112,34 @@ function collectTsReferencedNamespaces(
             return;
         }
 
-        if (ts.isExportSpecifier(node)) {
-            visit(node.propertyName ?? node.name, inType);
+        if (ts.isExportDeclaration(node)) {
+            if (node.moduleSpecifier) return;
+            if (node.exportClause && ts.isNamedExports(node.exportClause)) {
+                for (const spec of node.exportClause.elements) {
+                    const ref = spec.propertyName ?? spec.name;
+                    if (node.isTypeOnly || spec.isTypeOnly) {
+                        visit(ref, true);
+                    } else {
+                        visit(ref, false);
+                        visit(ref, true);
+                    }
+                }
+            }
+            return;
+        }
+
+        if (ts.isExportAssignment(node) && ts.isIdentifier(node.expression)) {
+            valueRefs.add(node.expression.text);
+            typeRefs.add(node.expression.text);
+            return;
+        }
+
+        if (ts.isLabeledStatement(node)) {
+            visit(node.statement, false);
+            return;
+        }
+
+        if (ts.isBreakOrContinueStatement(node)) {
             return;
         }
 

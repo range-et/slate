@@ -1361,6 +1361,131 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(helperConflictRes.state, helperConflictRes.traceback).toBe('passed');
             expect(helperConflictRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4663480771): `export type { Config }` and `export { type Config }` and `export { Config }`
+            // collect type references accurately, while re-exports with `moduleSpecifier` (`from '...'`) never inject local imports.
+            const depConfigIface = makeNode({
+                name: 'depConfigIface',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Config',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Config { ok: boolean; }'],
+            });
+            const exportTypeReexportNode = makeNode({
+                name: 'fnExportType',
+                language: 'typescript',
+                intent: 'Check body contains standalone export type { Config }',
+                contract: '',
+                context: ['depConfigIface'],
+                imports: [],
+                uses: ['depConfigIface'],
+                cases: undefined,
+                code: ['export function fnExportType(): number {', '    return 1;', '}'],
+                check: [
+                    'export type { Config };',
+                    "test('export type Config re-exports prelude interface cleanly', () => {",
+                    '    expect(fnExportType()).toBe(1);',
+                    '});',
+                ],
+            });
+            const exportTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: exportTypeReexportNode,
+                nodeId: 'fnExportType',
+                dependencies: new Map([['depConfigIface', depConfigIface]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(exportTypeRes.state, exportTypeRes.traceback).toBe('passed');
+            expect(exportTypeRes.pydanticValid).toBe(true);
+
+            const exportInlineTypeNode = makeNode({
+                name: 'fnExportInlineType',
+                language: 'typescript',
+                intent: 'Check body contains inline export { type Config }',
+                contract: '',
+                context: ['depConfigIface'],
+                imports: [],
+                uses: ['depConfigIface'],
+                cases: undefined,
+                code: ['export function fnExportInlineType(): number {', '    return 2;', '}'],
+                check: [
+                    'export { type Config };',
+                    "test('export { type Config } re-exports prelude interface cleanly', () => {",
+                    '    expect(fnExportInlineType()).toBe(2);',
+                    '});',
+                ],
+            });
+            const exportInlineTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: exportInlineTypeNode,
+                nodeId: 'fnExportInlineType',
+                dependencies: new Map([['depConfigIface', depConfigIface]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(exportInlineTypeRes.state, exportInlineTypeRes.traceback).toBe('passed');
+            expect(exportInlineTypeRes.pydanticValid).toBe(true);
+
+            const helperReexportNamed = makeNode({
+                name: 'helperReexportCfg',
+                language: 'typescript',
+                intent: 'Helper module re-exporting interface Config via export { Config }',
+                contract: '',
+                context: ['depConfigIface'],
+                imports: [],
+                uses: ['depConfigIface'],
+                check: undefined,
+                cases: undefined,
+                code: [
+                    'export { Config };',
+                    'export function helperReexportCfg(): number {',
+                    '    return 3;',
+                    '}',
+                ],
+            });
+            const externalModuleReexportTarget = makeNode({
+                name: 'callReexportHelper',
+                language: 'typescript',
+                intent: 'Calls helper re-exporting Config while target itself re-exports external config_types LIMIT without colliding with depNamespacesNode const LIMIT',
+                contract: '',
+                context: ['depConfigIface', 'helperReexportCfg', 'ns_prelude'],
+                imports: [],
+                uses: ['helperReexportCfg'],
+                cases: undefined,
+                code: [
+                    "export type { LIMIT } from 'config_types';",
+                    'export function callReexportHelper(): number {',
+                    '    return helperReexportCfg();',
+                    '}',
+                ],
+                check: [
+                    'export { Config };',
+                    "test('helper and check re-exports compile cleanly without external from-reexport collision', () => {",
+                    '    expect(callReexportHelper()).toBe(3);',
+                    '});',
+                ],
+            });
+            const reexportCombinedRes = await runNodeVerification({
+                workspaceRoot,
+                node: externalModuleReexportTarget,
+                nodeId: 'callReexportHelper',
+                dependencies: new Map([
+                    ['depConfigIface', depConfigIface],
+                    ['helperReexportCfg', helperReexportNamed],
+                    ['ns_prelude', depNamespacesNode],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(reexportCombinedRes.state, reexportCombinedRes.traceback).toBe('passed');
+            expect(reexportCombinedRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });
