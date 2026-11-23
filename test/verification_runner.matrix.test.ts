@@ -779,6 +779,93 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 isTrusted: true,
                 language: 'typescript',
             })).state).toBe('passed');
+
+            // Follow-up (#1 on df3ab41): Helper and caller with conflicting local import names (`format`) + quote-variant dupes compile & run in isolation
+            const pkgAlphaDir = path.join(workspaceRoot, 'node_modules', 'pkg_alpha');
+            const pkgBetaDir = path.join(workspaceRoot, 'node_modules', 'pkg_beta');
+            fs.mkdirSync(pkgAlphaDir, { recursive: true });
+            fs.mkdirSync(pkgBetaDir, { recursive: true });
+            fs.writeFileSync(path.join(pkgAlphaDir, 'package.json'), JSON.stringify({ name: 'pkg_alpha', main: 'index.js', types: 'index.d.ts' }), 'utf8');
+            fs.writeFileSync(path.join(pkgAlphaDir, 'index.js'), 'exports.format = (s) => `A:${s}`;\n', 'utf8');
+            fs.writeFileSync(path.join(pkgAlphaDir, 'index.d.ts'), 'export declare function format(s: string): string;\n', 'utf8');
+            fs.writeFileSync(path.join(pkgBetaDir, 'package.json'), JSON.stringify({ name: 'pkg_beta', main: 'index.js', types: 'index.d.ts' }), 'utf8');
+            fs.writeFileSync(path.join(pkgBetaDir, 'index.js'), 'exports.format = (s) => `B:${s}`;\n', 'utf8');
+            fs.writeFileSync(path.join(pkgBetaDir, 'index.d.ts'), 'export declare function format(s: string): string;\n', 'utf8');
+
+            const helperFmt: SlateNode = {
+                name: 'helperFmt',
+                language: 'typescript',
+                intent: 'Format via pkg_alpha',
+                contract: '',
+                context: [],
+                imports: ["import { format } from 'pkg_alpha';"],
+                uses: [],
+                code: ['export function helperFmt(v: string): string {', '    return format(v);', '}'],
+                extra: {},
+            };
+            const callerFmt: SlateNode = {
+                name: 'callerFmt',
+                language: 'typescript',
+                intent: 'Combine helperFmt and pkg_beta format without identifier collision',
+                contract: '',
+                context: ['helperFmt'],
+                imports: ["import { format } from 'pkg_beta';", 'import { format } from "pkg_beta";'],
+                uses: [],
+                code: ['export function callerFmt(v: string): string {', "    return `${helperFmt(v)}|${format(v)}`;", '}'],
+                cases: [{ name: 'isolated', input: { v: 'ok' }, expected: 'A:ok|B:ok' }],
+                extra: {},
+            };
+            const isolatedFmtRes = await runNodeVerification({
+                workspaceRoot,
+                node: callerFmt,
+                nodeId: 'callerFmt',
+                dependencies: new Map([['helperFmt', helperFmt]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(isolatedFmtRes.state, isolatedFmtRes.traceback).toBe('passed');
+            expect(isolatedFmtRes.pydanticValid).toBe(true);
+
+            // CI regression: rapid consecutive same-byte-length Python retries + concurrent colliding slugs do not hit stale .pyc or collide
+            const pyWrong: SlateNode = makeNode({
+                name: 'triple',
+                language: 'python',
+                code: ['def triple(x: int) -> int:', '    return x * 2'],
+                cases: [{ name: 'c1', input: { x: 4 }, expected: 12 }],
+                check: ['def test_triple():', '    assert triple(4) == 8'],
+            });
+            const pyRight: SlateNode = makeNode({
+                name: 'triple',
+                language: 'python',
+                code: ['def triple(x: int) -> int:', '    return x * 3'],
+                cases: [{ name: 'c1', input: { x: 4 }, expected: 12 }],
+                check: ['def test_triple():', '    assert triple(4) == 12'],
+            });
+            const r1 = await runNodeVerification({ workspaceRoot, node: pyWrong, nodeId: 'py_retry', isTrusted: true, language: 'python' });
+            const r2 = await runNodeVerification({ workspaceRoot, node: pyRight, nodeId: 'py_retry', isTrusted: true, language: 'python' });
+            expect(r1.state).toBe('failed');
+            expect(r2.state, r2.traceback || r2.diagnostics?.join('; ')).toBe('passed');
+
+            const pyLeft = makeNode({
+                name: 'p',
+                language: 'python',
+                code: ['def p(x: int) -> int:', '    return x + 1'],
+                cases: [{ name: 'c1', input: { x: 1 }, expected: 2 }],
+                check: ['def test_p():', '    assert p(1) == 2'],
+            });
+            const pyRightConc = makeNode({
+                name: 'p',
+                language: 'python',
+                code: ['def p(x: int) -> int:', '    return x + 2'],
+                cases: [{ name: 'c1', input: { x: 1 }, expected: 3 }],
+                check: ['def test_p():', '    assert p(1) == 3'],
+            });
+            const [pyConcA, pyConcB] = await Promise.all([
+                runNodeVerification({ workspaceRoot, node: pyLeft, nodeId: 'a/b/p', isTrusted: true, language: 'python' }),
+                runNodeVerification({ workspaceRoot, node: pyRightConc, nodeId: 'a_b/p', isTrusted: true, language: 'python' }),
+            ]);
+            expect(pyConcA.state, pyConcA.traceback).toBe('passed');
+            expect(pyConcB.state, pyConcB.traceback).toBe('passed');
         }, 40_000);
     });
 });

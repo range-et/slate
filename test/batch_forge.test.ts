@@ -171,7 +171,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             onNodeForged: id => { forgedIds.push(id); },
         });
 
-        expect(result.ok).toBe(true);
+        expect(result.ok, JSON.stringify(result)).toBe(true);
         expect(result.forgedCount).toBe(3);
         expect(result.failedCount).toBe(0);
         expect(result.skippedCount).toBe(0);
@@ -223,7 +223,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             maxRevisions: 3,
         });
 
-        expect(result.ok).toBe(true);
+        expect(result.ok, JSON.stringify(result)).toBe(true);
         expect(result.forgedCount).toBe(1);
         expect(result.results[0].attempts).toBe(3);
         expect(result.results[0].verification?.state).toBe('passed');

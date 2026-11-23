@@ -655,9 +655,11 @@ function parseMarkdownDocument(path: string, source: string): ParsedDocument {
         }
 
         const { contract: secContract, cleanedLines } = extractCommentDirectives(chunk.lines);
-        if (chunk.heading === null && cleanedLines.length === 0) {
+        if (chunk.heading === null) {
             docDirectiveContract = mergeContracts(docDirectiveContract, secContract);
-            continue;
+            if (cleanedLines.length === 0) {
+                continue;
+            }
         }
 
         sections.push({

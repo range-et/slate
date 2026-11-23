@@ -4,11 +4,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
 import type { NodeVerificationResult, VerificationState } from './harness_protocol';
-import { tryNormalizeLanguage } from './language_types';
+import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
 import { sourceHash } from './python_adapter';
-import { containsJsxSyntax, parseTsModule } from './ts_adapter';
+import { containsJsxSyntax, parseTsModule, splitTsImport, tsIdentifierNames } from './ts_adapter';
 
 export interface GeneratedVerification {
     moduleContent: string;
@@ -354,14 +354,16 @@ function defaultExecute(
             return;
         }
 
-        const env = process.versions.electron && cmd === process.execPath
-            ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
-            : undefined;
+        const env: NodeJS.ProcessEnv = {
+            ...process.env,
+            PYTHONDONTWRITEBYTECODE: '1',
+            ...(process.versions.electron && cmd === process.execPath ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+        };
         const useShell = process.platform === 'win32' && cmd !== process.execPath && !cmd.toLowerCase().endsWith('.exe');
         const proc = child_process.spawn(cmd, args, {
             cwd,
             shell: useShell,
-            ...(env ? { env } : {}),
+            env,
         });
 
         const timer = setTimeout(() => {
@@ -478,8 +480,15 @@ export async function runNodeVerification(options: VerificationOptions): Promise
     }
 
     const pythonPath = resolvePythonPath(rawPythonPath);
-    const buildDir = path.join(workspaceRoot, '.slate', 'build', 'verify', nodeId);
+    const normNodeRel = normalizeCompileOutputPath(nodeId);
+    const pyRelSegments = normNodeRel
+        ? normNodeRel.split('/')
+        : [`${nodeId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${createHash('sha256').update(nodeId).digest('hex').slice(0, 12)}`];
+    const buildDir = path.join(workspaceRoot, '.slate', 'build', 'verify', ...pyRelSegments);
     await fs.promises.mkdir(buildDir, { recursive: true });
+    for (const staleDir of ['__pycache__', '.pytest_cache', '.mutmut-cache', 'mutants']) {
+        await fs.promises.rm(path.join(buildDir, staleDir), { recursive: true, force: true });
+    }
 
     const moduleFile = path.join(buildDir, `${node.name}_impl.py`);
     const testFile = path.join(buildDir, `test_${node.name}.py`);
@@ -865,6 +874,30 @@ function stripInjectedImports(lines: readonly string[], symbolNames: ReadonlySet
     return out;
 }
 
+function dedupeNormalizedImports(lines: readonly string[]): { lines: string[]; bindings: Set<string> } {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const bindings = new Set<string>();
+    for (const raw of lines) {
+        const trimmed = raw.trim();
+        if (!trimmed) continue;
+        const parsed = splitTsImport(trimmed);
+        if (parsed.length > 0) {
+            for (const item of parsed) {
+                if (item.binding) bindings.add(item.binding);
+                if (!seen.has(item.line)) {
+                    seen.add(item.line);
+                    out.push(item.line);
+                }
+            }
+        } else if (!seen.has(trimmed)) {
+            seen.add(trimmed);
+            out.push(trimmed);
+        }
+    }
+    return { lines: out, bindings };
+}
+
 function runStrictTsTypecheck(
     workspaceRoot: string,
     virtualFiles: ReadonlyMap<string, string>,
@@ -998,122 +1031,195 @@ async function runTsNodeVerification(
         const ext = language === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
         const safeBase = node.name.replace(/[^a-zA-Z0-9_$]/g, '_') || 'node';
 
-        const implParts: string[] = [];
-        const mergedImports = Array.from(new Set([
-            ...depNodes.flatMap(dep => dep.imports ?? []),
-            ...(node.imports ?? []),
-        ]));
-        if (mergedImports.length > 0) {
-            implParts.push(...stripInjectedImports(mergedImports, availableSymbols, false));
+        // Prepare each dependency in its own isolated module so per-module imports never clash
+        interface DepModuleSpec {
+            dep: SlateNode;
+            moduleBase: string;
+            ext: string;
+            tsPath: string;
+            cjsPath: string;
+            needsJsx: boolean;
+            source: string;
         }
-    const reExports = new Set<string>();
-    const exportedNames = new Set<string>([node.name]);
-    for (const dep of depNodes) {
-        const depLines = stripInjectedImports(dep.code, availableSymbols, false);
-        implParts.push(...depLines);
-        const parsedDep = parseTsModule(depLines.join('\n') + '\n', `dep_${dep.name}${ext}`, dep.name);
-        const depUnit = parsedDep.units.find(u => u.parentId === null && u.name === dep.name);
-        if (depUnit) {
-            exportedNames.add(dep.name);
-            const depNamed = Boolean(depUnit.signature?.startsWith('export ') && !depUnit.signature.startsWith('export default '));
-            if (!depNamed) {
-                reExports.add(dep.name);
+
+        const depSpecsRaw = depNodes.map((dep, idx) => {
+            const depExtHint = typeof dep.extra?.extension === 'string' ? dep.extra.extension : undefined;
+            const depBodyText = dep.code.join('\n');
+            const depNeedsJsx = containsJsxSyntax(depBodyText, depExtHint);
+            const depExt = language === 'javascript' ? (depNeedsJsx ? '.jsx' : '.js') : (depNeedsJsx ? '.tsx' : '.ts');
+            const moduleBase = `__slate_dep_${idx}`;
+            return {
+                dep,
+                moduleBase,
+                ext: depExt,
+                tsPath: path.join(buildDir, `${moduleBase}${depExt}`),
+                cjsPath: path.join(buildDir, `${moduleBase}.cjs`),
+                needsJsx: depNeedsJsx,
+            };
+        });
+
+        const depModules: DepModuleSpec[] = depSpecsRaw.map((spec) => {
+            const { dep, moduleBase, ext: depExt, tsPath, cjsPath, needsJsx: depNeedsJsx } = spec;
+            const depImports = dedupeNormalizedImports(stripInjectedImports(dep.imports ?? [], availableSymbols, false));
+            const depLines = stripInjectedImports(dep.code, availableSymbols, false);
+            const depText = depLines.join('\n');
+            const depIdents = tsIdentifierNames(depText, `dep_${dep.name}${depExt}`);
+            const depParts: string[] = [...depImports.lines];
+            for (const other of depSpecsRaw) {
+                if (other.dep === dep) continue;
+                if (depIdents.has(other.dep.name) && !depImports.bindings.has(other.dep.name)) {
+                    depParts.push(`import { ${other.dep.name} } from './${other.moduleBase}';`);
+                }
+            }
+            depParts.push(...depLines);
+            const parsedDep = parseTsModule(depText + '\n', `dep_${dep.name}${depExt}`, dep.name);
+            const depUnit = parsedDep.units.find(u => u.parentId === null && u.name === dep.name);
+            const depNamedExported = Boolean(
+                depUnit?.signature?.startsWith('export ')
+                && !depUnit.signature.startsWith('export default '),
+            );
+            if (!depNamedExported) {
+                depParts.push(`export { ${dep.name} };`);
+            }
+            return {
+                dep,
+                moduleBase,
+                ext: depExt,
+                tsPath,
+                cjsPath,
+                needsJsx: depNeedsJsx,
+                source: depParts.join('\n') + '\n',
+            };
+        });
+
+        // Build target module with ONLY target's own imports + explicit imports from isolated dep modules
+        const targetImports = dedupeNormalizedImports(stripInjectedImports(node.imports ?? [], availableSymbols, false));
+        const targetLines = stripInjectedImports(node.code, availableSymbols, false);
+        const targetText = targetLines.join('\n');
+        const implParts: string[] = [...targetImports.lines];
+        for (const depSpec of depModules) {
+            if (!targetImports.bindings.has(depSpec.dep.name)) {
+                implParts.push(`import { ${depSpec.dep.name} } from './${depSpec.moduleBase}';`);
             }
         }
-    }
-    const targetLines = stripInjectedImports(node.code, availableSymbols, false);
-    implParts.push(...targetLines);
+        implParts.push(...targetLines);
 
-    const parsedTarget = parseTsModule(targetLines.join('\n') + '\n', `target${ext}`, node.name);
-    const targetUnit = parsedTarget.units.find(u => u.parentId === null && u.name === node.name);
-    const isNamedExported = Boolean(targetUnit?.signature?.startsWith('export ') && !targetUnit.signature.startsWith('export default '));
-    if (!isNamedExported) {
-        reExports.add(node.name);
-    }
-    if (reExports.size > 0) {
-        implParts.push(`export { ${Array.from(reExports).join(', ')} };`);
-    }
-    const implSource = implParts.join('\n') + '\n';
+        const parsedTarget = parseTsModule(targetText + '\n', `target${ext}`, node.name);
+        const targetUnit = parsedTarget.units.find(u => u.parentId === null && u.name === node.name);
+        const isNamedExported = Boolean(targetUnit?.signature?.startsWith('export ') && !targetUnit.signature.startsWith('export default '));
+        if (!isNamedExported) {
+            implParts.push(`export { ${node.name} };`);
+        }
+        const implSource = implParts.join('\n') + '\n';
 
-    const testParts: string[] = [`import { ${Array.from(exportedNames).join(', ')} } from './${safeBase}_impl';`];
-    if (hasCheck && node.check) {
-        testParts.push(...stripInjectedImports(node.check, availableSymbols, true));
-    }
-    if (hasCases && node.cases) {
-        testParts.push(...formatCasesAsTs(node, node.cases, language));
-    }
-    const testSource = testParts.join('\n') + '\n';
+        // Build test module importing target symbol (plus any dep directly referenced in testBody)
+        const testBodyLines: string[] = [];
+        if (hasCheck && node.check) {
+            testBodyLines.push(...stripInjectedImports(node.check, availableSymbols, true));
+        }
+        if (hasCases && node.cases) {
+            testBodyLines.push(...formatCasesAsTs(node, node.cases, language));
+        }
+        const testBodyText = testBodyLines.join('\n');
+        const testIdents = tsIdentifierNames(testBodyText, `test_${safeBase}${ext}`);
+        const testHeader: string[] = [`import { ${node.name} } from './${safeBase}_impl';`];
+        for (const depSpec of depModules) {
+            if (depSpec.dep.name !== node.name && testIdents.has(depSpec.dep.name)) {
+                testHeader.push(`import { ${depSpec.dep.name} } from './${depSpec.moduleBase}';`);
+            }
+        }
+        const testSource = [...testHeader, ...testBodyLines].join('\n') + '\n';
 
-    const implTsPath = path.join(buildDir, `${safeBase}_impl${ext}`);
-    const testTsPath = path.join(buildDir, `${safeBase}_test${ext}`);
-    const preludePath = path.join(buildDir, '__slate_prelude.d.ts');
+        const implTsPath = path.join(buildDir, `${safeBase}_impl${ext}`);
+        const testTsPath = path.join(buildDir, `${safeBase}_test${ext}`);
+        const preludePath = path.join(buildDir, '__slate_prelude.d.ts');
 
-    const useStandaloneJsx = needsJsx && !hasWorkspaceReactTypes(workspaceRoot);
-    const jsxFallback = useStandaloneJsx
-        ? '\ndeclare namespace JSX { interface IntrinsicElements { [elem: string]: unknown; } interface Element { type: unknown; props: Record<string, unknown>; children?: unknown[]; } }\ndeclare function __slateJsx(tag: unknown, props: unknown, ...children: unknown[]): JSX.Element;\ndeclare const __slateFragment: unique symbol;\n'
-        : '';
-    const preludeContent = (resolveTypeScriptLibDir() ? '' : TS_FALLBACK_NO_LIB_DECLARATIONS) + TS_PRELUDE_DECLARATIONS + jsxFallback;
+        const anyNeedsJsx = needsJsx || depModules.some(d => d.needsJsx);
+        const useStandaloneJsx = anyNeedsJsx && !hasWorkspaceReactTypes(workspaceRoot);
+        const jsxFallback = useStandaloneJsx
+            ? '\ndeclare namespace JSX { interface IntrinsicElements { [elem: string]: unknown; } interface Element { type: unknown; props: Record<string, unknown>; children?: unknown[]; } }\ndeclare function __slateJsx(tag: unknown, props: unknown, ...children: unknown[]): JSX.Element;\ndeclare const __slateFragment: unique symbol;\n'
+            : '';
+        const preludeContent = (resolveTypeScriptLibDir() ? '' : TS_FALLBACK_NO_LIB_DECLARATIONS) + TS_PRELUDE_DECLARATIONS + jsxFallback;
 
-    if (language === 'typescript') {
-        const virtualFiles = new Map<string, string>([
-            [preludePath, preludeContent],
-            [implTsPath, implSource],
-            [testTsPath, testSource],
-        ]);
-        const typeErrors = runStrictTsTypecheck(workspaceRoot, virtualFiles, [implTsPath, testTsPath], useStandaloneJsx);
-        if (typeErrors.length > 0) {
+        if (language === 'typescript') {
+            const virtualFiles = new Map<string, string>([[preludePath, preludeContent]]);
+            const checkedFiles: string[] = [];
+            for (const depSpec of depModules) {
+                virtualFiles.set(depSpec.tsPath, depSpec.source);
+                checkedFiles.push(depSpec.tsPath);
+            }
+            virtualFiles.set(implTsPath, implSource);
+            virtualFiles.set(testTsPath, testSource);
+            checkedFiles.push(implTsPath, testTsPath);
+
+            const typeErrors = runStrictTsTypecheck(workspaceRoot, virtualFiles, checkedFiles, useStandaloneJsx);
+            if (typeErrors.length > 0) {
+                return {
+                    nodeId,
+                    state: 'failed',
+                    timestamp: Date.now(),
+                    sourceHash: currentHash,
+                    pydanticValid: false,
+                    traceback: typeErrors.join('\n'),
+                    diagnostics: typeErrors,
+                };
+            }
+        }
+
+        const transpileOpts: ts.TranspileOptions = {
+            compilerOptions: {
+                target: ts.ScriptTarget.ES2022,
+                module: ts.ModuleKind.CommonJS,
+                ...(useStandaloneJsx
+                    ? { jsx: ts.JsxEmit.React, jsxFactory: '__slateJsx', jsxFragmentFactory: '__slateFragment' }
+                    : { jsx: ts.JsxEmit.ReactJSX }),
+                esModuleInterop: true,
+            },
+            reportDiagnostics: true,
+        };
+        const depTranspiled = depModules.map(depSpec => ({
+            spec: depSpec,
+            result: ts.transpileModule(depSpec.source, { ...transpileOpts, fileName: depSpec.tsPath }),
+        }));
+        const implTranspiled = ts.transpileModule(implSource, { ...transpileOpts, fileName: implTsPath });
+        const testTranspiled = ts.transpileModule(testSource, { ...transpileOpts, fileName: testTsPath });
+        const syntaxErrors = [
+            ...depTranspiled.flatMap(d => d.result.diagnostics ?? []),
+            ...(implTranspiled.diagnostics ?? []),
+            ...(testTranspiled.diagnostics ?? []),
+        ]
+            .filter(d => d.category === ts.DiagnosticCategory.Error)
+            .map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+        if (syntaxErrors.length > 0) {
             return {
                 nodeId,
                 state: 'failed',
                 timestamp: Date.now(),
                 sourceHash: currentHash,
                 pydanticValid: false,
-                traceback: typeErrors.join('\n'),
-                diagnostics: typeErrors,
+                traceback: syntaxErrors.join('\n'),
+                diagnostics: syntaxErrors,
             };
         }
-    }
 
-    const transpileOpts: ts.TranspileOptions = {
-        compilerOptions: {
-            target: ts.ScriptTarget.ES2022,
-            module: ts.ModuleKind.CommonJS,
-            ...(useStandaloneJsx
-                ? { jsx: ts.JsxEmit.React, jsxFactory: '__slateJsx', jsxFragmentFactory: '__slateFragment' }
-                : { jsx: ts.JsxEmit.ReactJSX }),
-            esModuleInterop: true,
-        },
-        reportDiagnostics: true,
-    };
-    const implTranspiled = ts.transpileModule(implSource, { ...transpileOpts, fileName: implTsPath });
-    const testTranspiled = ts.transpileModule(testSource, { ...transpileOpts, fileName: testTsPath });
-    const syntaxErrors = [...(implTranspiled.diagnostics ?? []), ...(testTranspiled.diagnostics ?? [])]
-        .filter(d => d.category === ts.DiagnosticCategory.Error)
-        .map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
-    if (syntaxErrors.length > 0) {
-        return {
-            nodeId,
-            state: 'failed',
-            timestamp: Date.now(),
-            sourceHash: currentHash,
-            pydanticValid: false,
-            traceback: syntaxErrors.join('\n'),
-            diagnostics: syntaxErrors,
-        };
-    }
+        const testBase = `${safeBase}_test`;
+        const implCjsPath = path.join(buildDir, `${safeBase}_impl.cjs`);
+        const testCjsPath = path.join(buildDir, `${testBase}.cjs`);
+        const harnessPath = path.join(buildDir, '__slate_harness.cjs');
 
-    const testBase = `${safeBase}_test`;
-    const implCjsPath = path.join(buildDir, `${safeBase}_impl.cjs`);
-    const testCjsPath = path.join(buildDir, `${testBase}.cjs`);
-    const harnessPath = path.join(buildDir, '__slate_harness.cjs');
+        const escapedSafeBase = safeBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rewriteLocalRequires = (jsCode: string): string =>
+            jsCode.replace(
+                new RegExp(`require\\((['"])(\\.\\/(?:__slate_dep_\\d+|${escapedSafeBase}_impl))\\1\\)`, 'g'),
+                "require('$2.cjs')",
+            );
 
-    const rewrittenTestJs = testTranspiled.outputText.replace(
-        new RegExp(`require\\((['"])\\.\\/${safeBase}_impl\\1\\)`, 'g'),
-        `require('./${safeBase}_impl.cjs')`,
-    );
-    fs.writeFileSync(implCjsPath, implTranspiled.outputText, 'utf8');
-    fs.writeFileSync(testCjsPath, rewrittenTestJs, 'utf8');
-    fs.writeFileSync(harnessPath, TS_HARNESS_SOURCE, 'utf8');
+        for (const item of depTranspiled) {
+            fs.writeFileSync(item.spec.cjsPath, rewriteLocalRequires(item.result.outputText), 'utf8');
+        }
+        fs.writeFileSync(implCjsPath, rewriteLocalRequires(implTranspiled.outputText), 'utf8');
+        fs.writeFileSync(testCjsPath, rewriteLocalRequires(testTranspiled.outputText), 'utf8');
+        fs.writeFileSync(harnessPath, TS_HARNESS_SOURCE, 'utf8');
 
     const runRes = await executeCommand(process.execPath, [harnessPath, testCjsPath], buildDir, timeoutMs, signal);
     if (signal?.aborted) {

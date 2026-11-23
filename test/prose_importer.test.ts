@@ -364,5 +364,25 @@ Literate programming [@knuth1984; @lamport1994] unifies source code and human-re
         expect(methodsCode).toContain('# Not a document title');
         expect(methodsCode).toContain('## Not a section split');
         expect(methodsCode).toContain('After fence text stays in Methods.');
+
+        // Follow-up (#2 on df3ab41): pre-heading directive followed by intro text reaches docContract and later sections without duplicating intro
+        const introWithDirective = portProseProject({
+            'intro_doc.md': [
+                '<!-- forbiddenTerms: [magic] -->',
+                '',
+                'Introductory context setting the stage.',
+                '',
+                '## Methods',
+                'Rigorous methodology section.',
+            ].join('\n'),
+        });
+        expect(introWithDirective.nodes.has('intro_doc_passage_1')).toBe(true);
+        expect(introWithDirective.nodes.has('intro_doc_passage_2')).toBe(false);
+        expect(parseProseNode(introWithDirective.nodes.get('methods')!).contractSpec.forbiddenTerms).toEqual(['magic']);
+        const flowExtraContract = introWithDirective.flows.get('main')?.extra?.proseContract as { forbiddenTerms?: string[] } | undefined;
+        expect(flowExtraContract?.forbiddenTerms).toEqual(['magic']);
+        const compiledIntroDoc = compileProse(introWithDirective.nodes, introWithDirective.config, introWithDirective.flows);
+        const compiledIntroMd = compiledIntroDoc.files.get('intro_doc.md')!;
+        expect(compiledIntroMd.split('Introductory context setting the stage.').length - 1).toBe(1);
     });
 });
