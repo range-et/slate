@@ -155,6 +155,49 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(moduleContent).toContain('from decimal import Decimal');
         });
 
+        it('imports non-prelude dependency symbols into test file unless already bound in node.check (#55)', () => {
+            const depValidate = makeNode({
+                name: 'validate_grid',
+                code: ['def validate_grid(g: list[list[int]]) -> bool:', '    return True'],
+            });
+            const depCopy = makeNode({
+                name: 'copy_grid',
+                code: ['def copy_grid(g: list[list[int]]) -> list[list[int]]:', '    return [list(r) for r in g]'],
+            });
+            const depAlreadyInCheck = makeNode({
+                name: 'local_helper',
+                code: ['def local_helper() -> int:', '    return 1'],
+            });
+            const preludeNode = makeNode({
+                name: 'GRID_CONST',
+                kind: 'prelude',
+                code: ['GRID_CONST = 9'],
+            });
+            const deps = new Map([
+                ['sudoku/validate_grid', depValidate],
+                ['sudoku/copy_grid', depCopy],
+                ['sudoku/local_helper', depAlreadyInCheck],
+                ['sudoku/GRID_CONST', preludeNode],
+            ]);
+            const target = makeNode({
+                name: 'solve_sudoku',
+                code: ['def solve_sudoku(grid: list[list[int]]) -> int:', '    return 0'],
+                check: [
+                    'def local_helper() -> int:',
+                    '    return 2',
+                    'def test_solve_sudoku():',
+                    '    assert solve_sudoku([[0]]) == 0',
+                    '    assert validate_grid([[0]]) is True',
+                ],
+                cases: undefined,
+            });
+            const { testContent } = generateVerificationFiles(target, deps, 'sudoku/solve_sudoku');
+            expect(testContent).toContain('from solve_sudoku_impl import solve_sudoku');
+            expect(testContent).toContain('from solve_sudoku_impl import copy_grid, validate_grid');
+            expect(testContent).not.toContain('from solve_sudoku_impl import copy_grid, local_helper');
+            expect(testContent).not.toContain('GRID_CONST');
+        });
+
         it('enforces strict Pydantic bool-vs-int rejection while preserving int-to-float promotion in real pytest', async () => {
             const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-strict-pydantic-'));
             try {
@@ -210,6 +253,127 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 });
                 expect(hypotRes.state, hypotRes.traceback).toBe('passed');
                 expect(hypotRes.pydanticValid).toBe(true);
+            } finally {
+                fs.rmSync(tmpWorkspace, { recursive: true, force: true });
+            }
+        }, 20_000);
+
+        it('imports test_* and Test* dependency helpers without exposing them to pytest collection or blocking subclasses (#55 PR #56)', async () => {
+            const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-test-helper-dep-'));
+            try {
+                const helperFn = makeNode({
+                    name: 'test_bit',
+                    code: ['def test_bit(value: int) -> bool:', '    return (value & 1) == 1'],
+                });
+                const helperClass = makeNode({
+                    name: 'TestMask',
+                    kind: 'class',
+                    code: [
+                        'class TestMask:',
+                        '    def __init__(self, mask: int) -> None:',
+                        '        self.mask = mask',
+                    ],
+                });
+                const baseClass = makeNode({
+                    name: 'TestBase',
+                    kind: 'class',
+                    code: [
+                        'class TestBase:',
+                        '    def expected_mask(self) -> int:',
+                        '        return 5',
+                    ],
+                });
+                const target = makeNode({
+                    name: 'has_bit',
+                    context: ['bits/test_bit', 'bits/TestMask', 'bits/TestBase'],
+                    check: [
+                        'class TestSolver(TestBase):',
+                        '    def test_inherited_case(self):',
+                        '        assert self.expected_mask() == 5',
+                        '        assert has_bit(3) is True',
+                        'def test_has_bit():',
+                        '    assert has_bit(3) is True',
+                        '    assert test_bit(2) is False',
+                        '    assert TestMask(5).mask == 5',
+                    ],
+                    cases: undefined,
+                    code: [
+                        'def has_bit(value: int) -> bool:',
+                        '    return test_bit(value)',
+                    ],
+                });
+                const res = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: target,
+                    nodeId: 'bits/has_bit',
+                    dependencies: new Map([
+                        ['bits/test_bit', helperFn],
+                        ['bits/TestMask', helperClass],
+                        ['bits/TestBase', baseClass],
+                    ]),
+                    isTrusted: true,
+                });
+                expect(res.state, res.traceback).toBe('passed');
+                expect(res.testsPassed).toBe(2);
+                expect(res.testsTotal).toBe(2);
+
+                const failingInherited = makeNode({
+                    ...target,
+                    check: [
+                        'class TestFailing(TestBase):',
+                        '    def test_fails(self):',
+                        '        assert False',
+                    ],
+                });
+                const failRes = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: failingInherited,
+                    nodeId: 'bits/has_bit_fail',
+                    dependencies: new Map([
+                        ['bits/test_bit', helperFn],
+                        ['bits/TestBase', baseClass],
+                    ]),
+                    isTrusted: true,
+                });
+                expect(failRes.state).toBe('failed');
+
+                // User symbols literally named _slate_mark_helper or _SlateNonTestClass must not be overwritten (#55 PR #56)
+                const clashHelperClass = makeNode({
+                    name: '_SlateNonTestClass',
+                    kind: 'class',
+                    code: [
+                        'class _SlateNonTestClass:',
+                        '    value = 99',
+                    ],
+                });
+                const clashTarget = makeNode({
+                    name: '_slate_mark_helper',
+                    context: ['bits/test_bit', 'bits/_SlateNonTestClass'],
+                    check: [
+                        'def test_clash_safe():',
+                        '    assert _slate_mark_helper(3) == 102',
+                        '    assert _SlateNonTestClass.value == 99',
+                        '    assert test_bit(2) is False',
+                    ],
+                    cases: undefined,
+                    code: [
+                        'def _slate_mark_helper(value: int) -> int:',
+                        '    return _SlateNonTestClass.value + (3 if test_bit(value) else 0)',
+                    ],
+                });
+                const clashRes = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: clashTarget,
+                    nodeId: 'bits/_slate_mark_helper',
+                    dependencies: new Map([
+                        ['bits/test_bit', helperFn],
+                        ['bits/_SlateNonTestClass', clashHelperClass],
+                    ]),
+                    isTrusted: true,
+                });
+                expect(clashRes.state, clashRes.traceback).toBe('passed');
+                expect(clashRes.testsPassed).toBe(1);
+                expect(clashRes.testsTotal).toBe(1);
             } finally {
                 fs.rmSync(tmpWorkspace, { recursive: true, force: true });
             }

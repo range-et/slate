@@ -95,7 +95,7 @@
         },
         "slate.llama.outputTokens": {
           "type": "integer",
-          "default": 768,
+          "default": 1536,
           "minimum": 64
         },
         "slate.llama.timeoutSeconds": {

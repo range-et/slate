@@ -7,7 +7,7 @@ import type { NodeVerificationResult, VerificationState } from './harness_protoc
 import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
-import { parseModule, sourceHash } from './python_adapter';
+import { parseModule, sourceHash, topLevelBindings } from './python_adapter';
 import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
@@ -324,6 +324,7 @@ export function generateVerificationFiles(
     };
 
     const depCodeBlocks: string[] = [];
+    const depExportNames = new Set<string>();
     if (dependencies && dependencies.size > 0) {
         for (const [depId, depNode] of dependencies.entries()) {
             if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
@@ -333,6 +334,13 @@ export function generateVerificationFiles(
             if (depNode.code.length > 0) {
                 depCodeBlocks.push(`\n# Context: ${depNode.name}`);
                 depCodeBlocks.push(...depNode.code);
+                if (
+                    depNode.kind !== 'prelude'
+                    && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
+                    && topLevelBindings(codeText(depNode)).has(depNode.name)
+                ) {
+                    depExportNames.add(depNode.name);
+                }
             }
         }
     }
@@ -365,10 +373,79 @@ except Exception:
     pass
 `);
 
+    const checkTopBindings = hasCheck && node.check
+        ? topLevelBindings(node.check.join('\n'))
+        : new Set<string>();
+    const extraTestImports = Array.from(depExportNames)
+        .filter(name => name !== node.name && name !== 'pytest' && !checkTopBindings.has(name))
+        .sort();
+    const isPytestTestName = (name: string) => name.startsWith('test') || name.startsWith('Test');
+    const safeTestImports = extraTestImports.filter(name => !isPytestTestName(name));
+    const pytestCollidingImports = extraTestImports.filter(isPytestTestName);
+    const nextSafePyIdentifier = (base: string, reserved: Set<string>): string => {
+        if (!reserved.has(base)) {
+            reserved.add(base);
+            return base;
+        }
+        let suffix = 1;
+        while (reserved.has(`${base}_${suffix}`)) {
+            suffix += 1;
+        }
+        const chosen = `${base}_${suffix}`;
+        reserved.add(chosen);
+        return chosen;
+    };
+
+    let nonCollectedHelperLines: string[] = [];
+    if (pytestCollidingImports.length > 0) {
+        const reservedNames = new Set<string>([
+            'pytest',
+            node.name,
+            ...depExportNames,
+            ...checkTopBindings,
+        ]);
+        const userText = `${(node.check ?? []).join('\n')}\n${hasCases && node.cases ? JSON.stringify(node.cases) : ''}`;
+        for (const match of userText.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+            reservedNames.add(match[0]);
+        }
+        const helperClsName = nextSafePyIdentifier('_SlateNonTestClass', reservedNames);
+        const helperFnName = nextSafePyIdentifier('_slate_mark_helper', reservedNames);
+        nonCollectedHelperLines = [
+            `class ${helperClsName}:`,
+            `    def __init__(self, target_cls, inherited=True):`,
+            `        self._target_cls = target_cls`,
+            `        self._inherited = inherited`,
+            `    def __get__(self, obj, owner=None):`,
+            `        return False if owner is self._target_cls else self._inherited`,
+            `def ${helperFnName}(obj):`,
+            `    if isinstance(obj, type):`,
+            `        try:`,
+            `            obj.__test__ = ${helperClsName}(obj, getattr(obj, '__test__', True))`,
+            `        except Exception:`,
+            `            pass`,
+            `        return obj`,
+            `    try:`,
+            `        obj.__test__ = False`,
+            `        return obj`,
+            `    except Exception:`,
+            `        if callable(obj):`,
+            `            def _wrapped(*_args, **_kwargs):`,
+            `                return obj(*_args, **_kwargs)`,
+            `            _wrapped.__test__ = False`,
+            `            return _wrapped`,
+            `        return obj`,
+            `from ${node.name}_impl import ${pytestCollidingImports.join(', ')}`,
+            ...pytestCollidingImports.map(name => `${name} = ${helperFnName}(${name})`),
+            `del ${helperClsName}, ${helperFnName}`,
+        ];
+    }
+
     const testParts: string[] = [
         '# Auto-generated pytest check file for Slate atomic node',
         'import pytest',
         `from ${node.name}_impl import ${node.name}`,
+        ...(safeTestImports.length > 0 ? [`from ${node.name}_impl import ${safeTestImports.join(', ')}`] : []),
+        ...nonCollectedHelperLines,
     ];
 
     if (hasCheck && node.check) {

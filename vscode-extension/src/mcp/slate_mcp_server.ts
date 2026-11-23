@@ -445,7 +445,7 @@ export const MCP_TOOLS = [
                 },
                 outputTokens: {
                     type: 'number',
-                    description: 'Optional max completion output tokens (>= 64, default 768).',
+                    description: 'Optional max completion output tokens (>= 64, default 1536).',
                 },
                 contextWindow: {
                     type: 'number',

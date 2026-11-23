@@ -1,5 +1,7 @@
 import type { SlateLlmConfig, SlateLlmProvider } from './slate_folder';
 
+export const DEFAULT_OUTPUT_TOKENS = 1536;
+
 export interface LlamaOptions {
     endpoint: string;
     model: string;
@@ -11,6 +13,8 @@ export interface LlamaOptions {
     apiKey?: string;
     /** Optional additional HTTP headers. */
     headers?: Record<string, string>;
+    /** Optional callback notified when SSE emits a non-empty finish_reason. */
+    onFinishReason?: (finishReason: string) => void;
 }
 
 export interface LlamaHealthOptions {
@@ -218,9 +222,6 @@ export function resolveLlmConfig(
     const rawTimeout = override?.timeoutSeconds ?? projectLlm?.timeoutSeconds ?? fallback?.timeoutSeconds ?? 120;
     const timeoutSeconds = Math.max(5, Math.trunc(Number.isFinite(rawTimeout) ? rawTimeout : 120));
 
-    const rawOutputTokens = override?.outputTokens ?? projectLlm?.outputTokens ?? fallback?.outputTokens ?? 768;
-    const outputTokens = Math.max(64, Math.trunc(Number.isFinite(rawOutputTokens) ? rawOutputTokens : 768));
-
     const rawContextWindow = override?.contextWindow
         ?? override?.contextWindowTokens
         ?? projectLlm?.contextWindow
@@ -228,6 +229,10 @@ export function resolveLlmConfig(
         ?? fallback?.contextWindowTokens
         ?? 4096;
     const contextWindowTokens = Math.max(1024, Math.trunc(Number.isFinite(rawContextWindow) ? rawContextWindow : 4096));
+
+    const defaultOutputTokens = Math.max(64, Math.min(DEFAULT_OUTPUT_TOKENS, Math.floor(contextWindowTokens / 2)));
+    const rawOutputTokens = override?.outputTokens ?? projectLlm?.outputTokens ?? fallback?.outputTokens ?? defaultOutputTokens;
+    const outputTokens = Math.max(64, Math.trunc(Number.isFinite(rawOutputTokens) ? rawOutputTokens : defaultOutputTokens));
 
     const apiKey = cleanString(override?.apiKey)
         ?? cleanString(fallback?.apiKey)
@@ -448,11 +453,15 @@ export async function streamLlamaCompletion(
                                 : JSON.stringify(streamError);
                         throw new LlamaTransportError(`llama.cpp stream error: ${message}`);
                     }
-                    const content = (payload as { choices?: Array<{ delta?: { content?: unknown } }> })
-                        .choices?.[0]?.delta?.content;
+                    const choice = (payload as { choices?: Array<{ delta?: { content?: unknown }; finish_reason?: unknown }> })
+                        .choices?.[0];
+                    const content = choice?.delta?.content;
                     if (typeof content === 'string') {
                         result += content;
                         onToken(content);
+                    }
+                    if (typeof choice?.finish_reason === 'string' && choice.finish_reason.length > 0) {
+                        options.onFinishReason?.(choice.finish_reason);
                     }
                 }
             }

@@ -15,6 +15,7 @@ export type FakeLlamaBehavior = {
     delayMs?: number;
     requiredAuth?: string;
     streamError?: string;
+    finishReason?: string | ((request: FakeLlamaRequest, index: number) => string | undefined);
 };
 
 /** Fixed chunks for every request, or chunks computed per request (0-based index). */
@@ -74,8 +75,16 @@ export async function startFakeLlamaServer(
                     if (behavior.malformed) response.write('data: {not-json}\n\n');
                     else if (behavior.streamError) {
                         response.write(`data: ${JSON.stringify({ error: { message: behavior.streamError } })}\n\n`);
-                    } else for (const content of chunks) {
-                        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`);
+                    } else {
+                        for (const content of chunks) {
+                            response.write(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`);
+                        }
+                        const fr = typeof behavior.finishReason === 'function'
+                            ? behavior.finishReason(parsed, requests.length - 1)
+                            : behavior.finishReason;
+                        if (fr) {
+                            response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: fr }] })}\n\n`);
+                        }
                     }
                     response.end(behavior.omitDone ? '' : 'data: [DONE]\n\n');
                 }, behavior.delayMs ?? 0);
