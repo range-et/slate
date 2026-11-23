@@ -1225,6 +1225,142 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(sharedDepsRes.state, sharedDepsRes.traceback).toBe('passed');
             expect(sharedDepsRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4663312534): Exported functions do not spuriously import same-named prelude interfaces;
+            // default-exported functions + legitimate same-name parameter types emit `import type` without clobbering CJS exports;
+            // helper modules with same-named interface prelude also avoid conflicting imports.
+            const depInterfaceFoo = makeNode({
+                name: 'depInterfaceFoo',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Foo',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Foo { a: number; }'],
+            });
+            const exportFnFooNode = makeNode({
+                name: 'Foo',
+                language: 'typescript',
+                intent: 'Exported function Foo ignoring same-named prelude interface Foo',
+                contract: '',
+                context: ['depInterfaceFoo'],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: [{ name: 'inc', input: { x: 2 }, expected: 3 }],
+                code: ['export function Foo(x: number): number {', '    return x + 1;', '}'],
+            });
+            const exportFnFooRes = await runNodeVerification({
+                workspaceRoot,
+                node: exportFnFooNode,
+                nodeId: 'Foo',
+                dependencies: new Map([['depInterfaceFoo', depInterfaceFoo]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(exportFnFooRes.state, exportFnFooRes.traceback).toBe('passed');
+            expect(exportFnFooRes.pydanticValid).toBe(true);
+
+            const defaultFnFooNode = makeNode({
+                name: 'Foo',
+                language: 'typescript',
+                intent: 'Default-exported function Foo executed via CJS import { Foo } alongside prelude interface Foo',
+                contract: '',
+                context: ['depInterfaceFoo'],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: [{ name: 'inc_default', input: { x: 2 }, expected: 3 }],
+                code: ['export default function Foo(x: number): number {', '    return x + 1;', '}'],
+            });
+            const defaultFnFooRes = await runNodeVerification({
+                workspaceRoot,
+                node: defaultFnFooNode,
+                nodeId: 'FooDefault',
+                dependencies: new Map([['depInterfaceFoo', depInterfaceFoo]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(defaultFnFooRes.state, defaultFnFooRes.traceback).toBe('passed');
+            expect(defaultFnFooRes.pydanticValid).toBe(true);
+
+            const fnUsingSameNameIfaceNode = makeNode({
+                name: 'Foo',
+                language: 'typescript',
+                intent: 'Exported function Foo accepting prelude interface Foo parameter emits import type cleanly',
+                contract: '',
+                context: ['depInterfaceFoo'],
+                imports: [],
+                uses: ['depInterfaceFoo'],
+                check: undefined,
+                cases: [{ name: 'use_iface', input: { x: { a: 4 } }, expected: 5 }],
+                code: ['export function Foo(x: Foo): number {', '    return x.a + 1;', '}'],
+            });
+            const fnUsingSameNameIfaceRes = await runNodeVerification({
+                workspaceRoot,
+                node: fnUsingSameNameIfaceNode,
+                nodeId: 'FooUsesSameIface',
+                dependencies: new Map([['depInterfaceFoo', depInterfaceFoo]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(fnUsingSameNameIfaceRes.state, fnUsingSameNameIfaceRes.traceback).toBe('passed');
+            expect(fnUsingSameNameIfaceRes.pydanticValid).toBe(true);
+
+            const depIfaceHelper = makeNode({
+                name: 'depIfaceHelper',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports interface Helper',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Helper { a: number; }'],
+            });
+            const depFnHelper = makeNode({
+                name: 'Helper',
+                language: 'typescript',
+                intent: 'Helper function named Helper alongside interface Helper prelude',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export function Helper(x: number): number {', '    return x + 1;', '}'],
+            });
+            const callHelperTarget = makeNode({
+                name: 'callHelper',
+                language: 'typescript',
+                intent: 'Calls Helper function without helper-to-helper import conflict',
+                contract: '',
+                context: ['depIfaceHelper', 'Helper'],
+                imports: [],
+                uses: ['Helper'],
+                check: undefined,
+                cases: [{ name: 'call', input: { x: 9 }, expected: 10 }],
+                code: ['export function callHelper(x: number): number {', '    return Helper(x);', '}'],
+            });
+            const helperConflictRes = await runNodeVerification({
+                workspaceRoot,
+                node: callHelperTarget,
+                nodeId: 'callHelper',
+                dependencies: new Map([
+                    ['depIfaceHelper', depIfaceHelper],
+                    ['Helper', depFnHelper],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(helperConflictRes.state, helperConflictRes.traceback).toBe('passed');
+            expect(helperConflictRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });

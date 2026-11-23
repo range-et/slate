@@ -8,7 +8,7 @@ import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_typ
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
 import { sourceHash } from './python_adapter';
-import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport, tsIdentifierNames } from './ts_adapter';
+import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
     moduleContent: string;
@@ -954,6 +954,198 @@ function inspectTsModuleDeclarations(
     return { allSymbols, valueSymbols, typeSymbols, exportedVariables, unexportedValues, unexportedTypes };
 }
 
+function collectTsReferencedNamespaces(
+    source: string,
+    fileName: string,
+): { valueRefs: Set<string>; typeRefs: Set<string> } {
+    const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindForPath(fileName, source));
+    const valueRefs = new Set<string>();
+    const typeRefs = new Set<string>();
+
+    const recordEntityNameRoot = (name: ts.EntityName, target: Set<string>): void => {
+        let cur: ts.EntityName = name;
+        while (ts.isQualifiedName(cur)) {
+            cur = cur.left;
+        }
+        if (ts.isIdentifier(cur)) {
+            target.add(cur.text);
+        }
+    };
+
+    const visitDecorators = (node: ts.Node): void => {
+        if (!ts.canHaveDecorators(node)) return;
+        for (const dec of ts.getDecorators(node) ?? []) {
+            visit(dec, false);
+        }
+    };
+
+    const visitBindingPattern = (binding: ts.BindingName): void => {
+        if (ts.isIdentifier(binding)) return;
+        for (const el of binding.elements) {
+            if (!ts.isBindingElement(el)) continue;
+            if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {
+                visit(el.propertyName.expression, false);
+            }
+            visitBindingPattern(el.name);
+            if (el.initializer) visit(el.initializer, false);
+        }
+    };
+
+    const visit = (node: ts.Node, inType: boolean): void => {
+        if (ts.isImportDeclaration(node) || ts.isJsxClosingElement(node)) return;
+        visitDecorators(node);
+
+        if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+            visitBindingPattern(node.name);
+            if (node.type) visit(node.type, true);
+            if (node.initializer) visit(node.initializer, false);
+            return;
+        }
+
+        if (
+            ts.isFunctionDeclaration(node)
+            || ts.isFunctionExpression(node)
+            || ts.isArrowFunction(node)
+            || ts.isMethodDeclaration(node)
+            || ts.isMethodSignature(node)
+            || ts.isGetAccessorDeclaration(node)
+            || ts.isSetAccessorDeclaration(node)
+            || ts.isConstructorDeclaration(node)
+        ) {
+            if ('name' in node && node.name && ts.isComputedPropertyName(node.name)) {
+                visit(node.name.expression, false);
+            }
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            for (const param of node.parameters) visit(param, false);
+            if (node.type) visit(node.type, true);
+            if ('body' in node && node.body) visit(node.body, false);
+            return;
+        }
+
+        if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            for (const hc of node.heritageClauses ?? []) {
+                const isImplements = hc.token === ts.SyntaxKind.ImplementsKeyword;
+                for (const t of hc.types) {
+                    visit(t.expression, isImplements);
+                    for (const ta of t.typeArguments ?? []) visit(ta, true);
+                }
+            }
+            for (const member of node.members) visit(member, false);
+            return;
+        }
+
+        if (ts.isInterfaceDeclaration(node)) {
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            for (const hc of node.heritageClauses ?? []) {
+                for (const t of hc.types) visit(t, true);
+            }
+            for (const member of node.members) visit(member, true);
+            return;
+        }
+
+        if (ts.isTypeAliasDeclaration(node)) {
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            visit(node.type, true);
+            return;
+        }
+
+        if (ts.isEnumDeclaration(node)) {
+            for (const member of node.members) {
+                if (member.initializer) visit(member.initializer, false);
+            }
+            return;
+        }
+
+        if (ts.isTypeParameterDeclaration(node)) {
+            if (node.constraint) visit(node.constraint, true);
+            if (node.default) visit(node.default, true);
+            return;
+        }
+
+        if (ts.isTypePredicateNode(node)) {
+            if (node.type) visit(node.type, true);
+            return;
+        }
+
+        if (ts.isInferTypeNode(node)) {
+            visit(node.typeParameter, true);
+            return;
+        }
+
+        if (ts.isTypeQueryNode(node)) {
+            recordEntityNameRoot(node.exprName, valueRefs);
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            return;
+        }
+
+        if (ts.isTypeReferenceNode(node)) {
+            recordEntityNameRoot(node.typeName, typeRefs);
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            return;
+        }
+
+        if (ts.isTypeNode(node)) {
+            ts.forEachChild(node, child => visit(child, true));
+            return;
+        }
+
+        if (ts.isPropertyAccessExpression(node)) {
+            visit(node.expression, inType);
+            return;
+        }
+
+        if (ts.isPropertyAssignment(node)) {
+            if (ts.isComputedPropertyName(node.name)) {
+                visit(node.name.expression, false);
+            }
+            visit(node.initializer, false);
+            return;
+        }
+
+        if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+            if (ts.isComputedPropertyName(node.name)) {
+                visit(node.name.expression, false);
+            }
+            if (node.type) visit(node.type, true);
+            if ('initializer' in node && node.initializer) visit(node.initializer, false);
+            return;
+        }
+
+        if (ts.isExportSpecifier(node)) {
+            visit(node.propertyName ?? node.name, inType);
+            return;
+        }
+
+        if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+            if (ts.isPropertyAccessExpression(node.tagName)) {
+                visit(node.tagName, false);
+            } else {
+                const tag = node.tagName.getText(sf).split('.')[0];
+                if (tag && !/^[a-z]/.test(tag)) valueRefs.add(tag);
+            }
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            visit(node.attributes, false);
+            return;
+        }
+
+        if (ts.isJsxAttribute(node)) {
+            if (node.initializer) visit(node.initializer, false);
+            return;
+        }
+
+        if (ts.isIdentifier(node)) {
+            (inType ? typeRefs : valueRefs).add(node.text);
+            return;
+        }
+
+        ts.forEachChild(node, child => visit(child, inType));
+    };
+
+    ts.forEachChild(sf, child => visit(child, false));
+    return { valueRefs, typeRefs };
+}
+
 function stripInjectedImports(lines: readonly string[], symbolNames: ReadonlySet<string>, stripTestImports: boolean): string[] {
     const out: string[] = [];
     for (const line of lines) {
@@ -1195,6 +1387,34 @@ async function runTsNodeVerification(
             boundTypes.add(sym);
         };
 
+        const emitDepImports = (
+            depSpec: { moduleBase: string; exportedSymbols: readonly string[]; exportedValues: ReadonlySet<string>; exportedTypes: ReadonlySet<string> },
+            refs: { valueRefs: ReadonlySet<string>; typeRefs: ReadonlySet<string> },
+            boundValues: Set<string>,
+            boundTypes: Set<string>,
+            outLines: string[],
+        ): void => {
+            const valueNeeded: string[] = [];
+            const typeOnlyNeeded: string[] = [];
+            for (const sym of depSpec.exportedSymbols) {
+                const needsValue = depSpec.exportedValues.has(sym) && refs.valueRefs.has(sym);
+                const needsType = depSpec.exportedTypes.has(sym) && refs.typeRefs.has(sym);
+                if ((!needsValue && !needsType) || !canImportDepSymbol(depSpec, sym, boundValues, boundTypes)) continue;
+                if (depSpec.exportedValues.has(sym)) {
+                    valueNeeded.push(sym);
+                } else {
+                    typeOnlyNeeded.push(sym);
+                }
+                recordDepSymbol(sym, boundValues, boundTypes);
+            }
+            if (valueNeeded.length > 0) {
+                outLines.push(`import { ${valueNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+            }
+            if (typeOnlyNeeded.length > 0) {
+                outLines.push(`import type { ${typeOnlyNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+            }
+        };
+
         const availableSymbols = new Set<string>([
             node.name,
             ...depSpecsRaw.flatMap(d => (d.dep.kind ? d.exportedSymbols : [d.dep.name, ...d.exportedSymbols])),
@@ -1205,24 +1425,22 @@ async function runTsNodeVerification(
             const depImports = dedupeNormalizedImports(stripInjectedImports(dep.imports ?? [], availableSymbols, false));
             const depLines = stripInjectedImports(dep.code, availableSymbols, false);
             const depText = depLines.join('\n');
-            const depIdents = tsIdentifierNames(depText, `dep_${dep.name}${depExt}`);
+            const depRefs = collectTsReferencedNamespaces(depText, `dep_${dep.name}${depExt}`);
             const boundValuesInDep = new Set<string>([...depImports.bindings, ...decls.valueSymbols]);
             const boundTypesInDep = new Set<string>([...depImports.bindings, ...decls.typeSymbols, ...decls.exportedVariables]);
             const depParts: string[] = [...depImports.lines];
 
             for (const other of depSpecsRaw) {
                 if (other.dep === dep) continue;
-                const needed = other.exportedSymbols.filter(
-                    sym => depIdents.has(sym) && canImportDepSymbol(other, sym, boundValuesInDep, boundTypesInDep),
-                );
-                if (needed.length > 0) {
-                    depParts.push(`import { ${needed.join(', ')} } from './${other.moduleBase}';`);
-                    for (const sym of needed) recordDepSymbol(sym, boundValuesInDep, boundTypesInDep);
-                }
+                emitDepImports(other, depRefs, boundValuesInDep, boundTypesInDep, depParts);
             }
 
             // Support mutual recursion (helper calling target function)
-            if (depIdents.has(node.name) && !boundValuesInDep.has(node.name) && !boundTypesInDep.has(node.name)) {
+            if (
+                (depRefs.valueRefs.has(node.name) || depRefs.typeRefs.has(node.name))
+                && !boundValuesInDep.has(node.name)
+                && !boundTypesInDep.has(node.name)
+            ) {
                 depParts.push(`import { ${node.name} } from './${safeBase}_impl';`);
                 recordDepSymbol(node.name, boundValuesInDep, boundTypesInDep);
             }
@@ -1255,20 +1473,14 @@ async function runTsNodeVerification(
         const targetImports = dedupeNormalizedImports(stripInjectedImports(node.imports ?? [], availableSymbols, false));
         const targetLines = stripInjectedImports(node.code, availableSymbols, false);
         const targetText = targetLines.join('\n');
-        const targetIdents = tsIdentifierNames(targetText, `target${ext}`);
+        const targetRefs = collectTsReferencedNamespaces(targetText, `target${ext}`);
         const targetDecls = inspectTsModuleDeclarations(targetText, `target${ext}`);
         const boundValuesInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.valueSymbols]);
         const boundTypesInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.typeSymbols, ...targetDecls.exportedVariables]);
 
         const implParts: string[] = [...targetImports.lines];
         for (const depSpec of depModules) {
-            const needed = depSpec.exportedSymbols.filter(
-                sym => targetIdents.has(sym) && canImportDepSymbol(depSpec, sym, boundValuesInTarget, boundTypesInTarget),
-            );
-            if (needed.length > 0) {
-                implParts.push(`import { ${needed.join(', ')} } from './${depSpec.moduleBase}';`);
-                for (const sym of needed) recordDepSymbol(sym, boundValuesInTarget, boundTypesInTarget);
-            }
+            emitDepImports(depSpec, targetRefs, boundValuesInTarget, boundTypesInTarget, implParts);
         }
         implParts.push(...targetLines);
 
@@ -1286,7 +1498,7 @@ async function runTsNodeVerification(
             testBodyLines.push(...formatCasesAsTs(node, node.cases, language));
         }
         const testBodyText = testBodyLines.join('\n');
-        const testIdents = tsIdentifierNames(testBodyText, `test_${safeBase}${ext}`);
+        const testRefs = collectTsReferencedNamespaces(testBodyText, `test_${safeBase}${ext}`);
         const testDecls = inspectTsModuleDeclarations(testBodyText, `test_${safeBase}${ext}`);
         const boundValuesInTest = new Set<string>([node.name, ...testDecls.valueSymbols]);
         const boundTypesInTest = new Set<string>([node.name, ...testDecls.typeSymbols, ...testDecls.exportedVariables]);
@@ -1302,13 +1514,7 @@ async function runTsNodeVerification(
         }
         const testHeader: string[] = [`import { ${node.name} } from './${safeBase}_impl';`];
         for (const depSpec of depModules) {
-            const needed = depSpec.exportedSymbols.filter(
-                sym => testIdents.has(sym) && canImportDepSymbol(depSpec, sym, boundValuesInTest, boundTypesInTest),
-            );
-            if (needed.length > 0) {
-                testHeader.push(`import { ${needed.join(', ')} } from './${depSpec.moduleBase}';`);
-                for (const sym of needed) recordDepSymbol(sym, boundValuesInTest, boundTypesInTest);
-            }
+            emitDepImports(depSpec, testRefs, boundValuesInTest, boundTypesInTest, testHeader);
         }
         const testSource = [...testHeader, ...testBodyLines].join('\n') + '\n';
 
