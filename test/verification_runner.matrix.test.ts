@@ -1114,6 +1114,117 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(localClassShadowRes.state, localClassShadowRes.traceback).toBe('passed');
             expect(localClassShadowRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4662023802): import / import type bindings stay reserved across both value & type sets (no TS2300 duplicate imports)
+            const configTypesDir = path.join(workspaceRoot, 'node_modules', 'config_types');
+            fs.mkdirSync(configTypesDir, { recursive: true });
+            fs.writeFileSync(path.join(configTypesDir, 'package.json'), JSON.stringify({ name: 'config_types', types: 'index.d.ts' }), 'utf8');
+            fs.writeFileSync(path.join(configTypesDir, 'index.d.ts'), 'export type LIMIT = number;\n', 'utf8');
+
+            const importTypeTargetNode = makeNode({
+                name: 'acceptLimit',
+                language: 'typescript',
+                intent: 'Use type-only LIMIT import in target signature even when context prelude exports const LIMIT',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: ["import type { LIMIT } from 'config_types';"],
+                uses: [],
+                check: undefined,
+                cases: [{ name: 'inc', input: { x: 4 }, expected: 5 }],
+                code: ['export function acceptLimit(x: LIMIT): number {', '    return x + 1;', '}'],
+            });
+            const acceptLimitRes = await runNodeVerification({
+                workspaceRoot,
+                node: importTypeTargetNode,
+                nodeId: 'acceptLimit',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(acceptLimitRes.state, acceptLimitRes.traceback).toBe('passed');
+            expect(acceptLimitRes.pydanticValid).toBe(true);
+
+            const importTypeCheckNode = makeNode({
+                name: 'targetUsesDepLimit',
+                language: 'typescript',
+                intent: 'Target uses dep const LIMIT while check uses import type LIMIT from config_types',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function targetUsesDepLimit(n: number): number {', '    return n * LIMIT;', '}'],
+                check: [
+                    "import type { LIMIT } from 'config_types';",
+                    "test('check-body import type LIMIT suppresses duplicate value import', () => {",
+                    '    const v: LIMIT = 7;',
+                    '    expect(v).toBe(7);',
+                    '    expect(targetUsesDepLimit(2)).toBe(20);',
+                    '});',
+                ],
+            });
+            const importTypeCheckRes = await runNodeVerification({
+                workspaceRoot,
+                node: importTypeCheckNode,
+                nodeId: 'targetUsesDepLimit',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(importTypeCheckRes.state, importTypeCheckRes.traceback).toBe('passed');
+            expect(importTypeCheckRes.pydanticValid).toBe(true);
+
+            const depSharedVal = makeNode({
+                name: 'depSharedVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports value SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const SHARED = 7;'],
+            });
+            const depSharedType = makeNode({
+                name: 'depSharedType',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports type SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export type SHARED = string;'],
+            });
+            const consumeSharedVal = makeNode({
+                name: 'getShared',
+                language: 'typescript',
+                intent: 'Consumes SHARED value from first matching dep without duplicate import from second dep',
+                contract: '',
+                context: ['depSharedVal', 'depSharedType'],
+                imports: [],
+                uses: ['depSharedVal'],
+                check: undefined,
+                cases: [{ name: 'shared', inputs: {}, expected: 7 }],
+                code: ['export function getShared(): number {', '    return SHARED;', '}'],
+            });
+            const sharedDepsRes = await runNodeVerification({
+                workspaceRoot,
+                node: consumeSharedVal,
+                nodeId: 'getShared',
+                dependencies: new Map([
+                    ['depSharedVal', depSharedVal],
+                    ['depSharedType', depSharedType],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(sharedDepsRes.state, sharedDepsRes.traceback).toBe('passed');
+            expect(sharedDepsRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });
