@@ -19,6 +19,7 @@
     "onCustomEditor:slate.editor",
     "onCommand:slate.openHarness",
     "onCommand:slate.portProject",
+    "onCommand:slate.portAnyProject",
     "onCommand:slate.compile"
   ],
   "contributes": {
@@ -66,6 +67,10 @@
         "title": "Slate: Port Python Project…"
       },
       {
+        "command": "slate.portAnyProject",
+        "title": "Slate: Port Project (Any Language)…"
+      },
+      {
         "command": "slate.compile",
         "title": "Slate: Compile Project"
       }
@@ -102,6 +107,11 @@
           "type": "boolean",
           "default": false,
           "description": "Bind proposal acceptance strictly to all packet inputs (code hash, imports/uses, intent, contract, lock, cases, neighbor signatures)."
+        },
+        "slate.llama.apiKeyEnv": {
+          "type": "string",
+          "default": "",
+          "description": "Optional environment variable name containing a Bearer API key (e.g. OPENROUTER_API_KEY or SLATE_LLM_API_KEY). Never enter a raw API key here."
         }
       }
     }

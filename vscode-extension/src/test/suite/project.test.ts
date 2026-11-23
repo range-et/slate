@@ -413,4 +413,62 @@ suite('Slate native project commands', () => {
         }
     });
 
+    test('slate.compile refuses traversal modulePath escapes and sub/../ colliding overwrites in Extension Host (#2)', async () => {
+        const enc = (text: string) => new TextEncoder().encode(text);
+        const outDirName = `built-ts-safe-${Date.now()}`;
+        const outDir = vscode.Uri.joinPath(root, outDirName);
+        const escapedFile = vscode.Uri.joinPath(root, 'outside_compile_escape.ts');
+        try {
+            await vscode.workspace.fs.createDirectory(uri('nodes'));
+            await vscode.workspace.fs.createDirectory(uri('flows'));
+            await vscode.workspace.fs.createDirectory(outDir);
+            await vscode.workspace.fs.writeFile(uri('slate.json'), enc(JSON.stringify({
+                slate: 3, name: 'safe_ts_compile', language: 'typescript', compile: { outDir: outDirName },
+            }, null, 2) + '\n'));
+            await vscode.workspace.fs.writeFile(uri('layout.json'), enc('{\n  "positions": {},\n  "notes": []\n}\n'));
+            await vscode.workspace.fs.writeFile(uri('flows', 'main.json'), enc(JSON.stringify({
+                slate: 3, name: 'main', inputs: [], outputs: [], instances: [], wires: [],
+            }, null, 2) + '\n'));
+
+            // Part 1: traversal escaping outDir is refused
+            await vscode.workspace.fs.writeFile(uri('nodes', 'escape_fn.json'), enc(JSON.stringify({
+                slate: 3, name: 'escape_fn', language: 'typescript',
+                intent: 'Attempt escape', contract: '', context: [], locked: false, describedBy: 'human',
+                modulePath: '../outside_compile_escape.ts',
+                extension: '.ts',
+                code: ['export function escape_fn(): number {', '    return 1;', '}'],
+            }, null, 2) + '\n'));
+
+            let errMsg = '';
+            replace(vscode.window, 'showErrorMessage', async (m: string) => { errMsg = m; });
+            const escapeRes = await vscode.commands.executeCommand<{ files: string[]; diagnostics: Array<{ severity: string; message: string }> }>('slate.compile');
+            assert.deepEqual(escapeRes?.files, []);
+            assert.ok(escapeRes?.diagnostics.some(d => d.severity === 'error' && /unsafe/i.test(d.message)), JSON.stringify(escapeRes));
+            assert.ok(errMsg.includes('compile stopped'));
+            await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(escapedFile)));
+
+            // Part 2: sub/../hand.ts collapsing onto hand-written built/hand.ts refuses overwrite
+            const handFile = vscode.Uri.joinPath(outDir, 'hand.ts');
+            await vscode.workspace.fs.writeFile(handFile, enc('// Hand-written TS file\nexport const keep = true;\n'));
+            await vscode.workspace.fs.delete(uri('nodes', 'escape_fn.json'));
+            await vscode.workspace.fs.writeFile(uri('nodes', 'collide_fn.json'), enc(JSON.stringify({
+                slate: 3, name: 'collide_fn', language: 'typescript',
+                intent: 'Collide via sub/../hand.ts', contract: '', context: [], locked: false, describedBy: 'human',
+                modulePath: 'sub/../hand.ts',
+                extension: '.ts',
+                code: ['export function collide_fn(): number {', '    return 2;', '}'],
+            }, null, 2) + '\n'));
+
+            errMsg = '';
+            const collideRes = await vscode.commands.executeCommand<{ files: string[]; diagnostics: Array<{ severity: string; message: string }> }>('slate.compile');
+            assert.deepEqual(collideRes?.files, []);
+            assert.ok(collideRes?.diagnostics.some(d => d.severity === 'error' && d.message.includes('Refusing to overwrite')), JSON.stringify(collideRes));
+            const handText = new TextDecoder().decode(await vscode.workspace.fs.readFile(handFile));
+            assert.ok(handText.includes('// Hand-written TS file'));
+        } finally {
+            try { await vscode.workspace.fs.delete(outDir, { recursive: true, useTrash: false }); } catch { /* ignore */ }
+            try { await vscode.workspace.fs.delete(escapedFile, { recursive: false, useTrash: false }); } catch { /* ignore */ }
+        }
+    });
+
 });

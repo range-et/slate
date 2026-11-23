@@ -61,7 +61,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
 
     afterEach(async () => {
         server.close();
-        await fs.rm(tmpDir, { recursive: true, force: true });
+        await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
 
     describe('MCP JSON-RPC Protocol', () => {
@@ -106,7 +106,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
         });
 
-        it('tools/list enumerates all 7 required frontier architect tools', async () => {
+        it('tools/list enumerates all 10 required frontier architect tools', async () => {
             const resp = await server.handleRequest({
                 jsonrpc: '2.0',
                 id: 3,
@@ -114,7 +114,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
             expect(resp).not.toBeNull();
             const tools = (resp as any).result.tools;
-            expect(tools).toHaveLength(7);
+            expect(tools).toHaveLength(10);
             const toolNames = tools.map((t: any) => t.name);
             expect(toolNames).toEqual([
                 'slate_find',
@@ -124,6 +124,9 @@ describe('Frontier Architect MCP Server (S-510)', () => {
                 'slate_wire_flow',
                 'slate_llm_status',
                 'slate_configure_llm',
+                'slate_forge_batch',
+                'slate_references',
+                'slate_compile',
             ]);
             for (const tool of tools) {
                 expect(tool.description).toBeTruthy();
@@ -706,6 +709,353 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             } finally {
                 await fakeServer.close();
             }
+        });
+
+        it('slate_configure_llm persists non-secret llm config to slate.json and rejects raw secrets', async () => {
+            const rejectKey = await server.callTool('slate_configure_llm', {
+                endpoint: 'https://openrouter.ai/api/v1',
+                apiKey: 'sk-fake-secret',
+            });
+            expect(rejectKey.isError).toBe(true);
+            expect(rejectKey.content[0].text).toContain('Raw API keys are rejected');
+
+            const rejectSkEnv = await server.callTool('slate_configure_llm', {
+                endpoint: 'https://openrouter.ai/api/v1',
+                apiKeyEnv: 'sk-fake-secret',
+            });
+            expect(rejectSkEnv.isError).toBe(true);
+            expect(rejectSkEnv.content[0].text).toContain('not a raw API key');
+
+            const fakeServer = await startFakeLlamaServer(undefined, { requiredAuth: 'Bearer fake-mcp-auth' });
+            const prevEnv = process.env.SLATE_MCP_TEST_KEY;
+            process.env.SLATE_MCP_TEST_KEY = 'fake-mcp-auth';
+            try {
+                const writeRes = await server.callTool('slate_configure_llm', {
+                    provider: 'openai-compatible',
+                    endpoint: fakeServer.url,
+                    model: 'qwen/qwen3-coder-30b-a3b-instruct',
+                    apiKeyEnv: 'SLATE_MCP_TEST_KEY',
+                    concurrency: 3,
+                    writeToProject: true,
+                });
+                expect(writeRes.isError).toBe(false);
+                const parsed = JSON.parse(writeRes.content[0].text);
+                expect(parsed).toMatchObject({
+                    updated: true,
+                    writeToProject: true,
+                    provider: 'openai-compatible',
+                    model: 'qwen/qwen3-coder-30b-a3b-instruct',
+                    apiKeyEnv: 'SLATE_MCP_TEST_KEY',
+                    hasApiKey: true,
+                    reachable: true,
+                });
+
+                const diskConfig = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'slate.json'), 'utf8'));
+                expect(diskConfig.llm).toEqual({
+                    provider: 'openai-compatible',
+                    endpoint: fakeServer.url,
+                    model: 'qwen/qwen3-coder-30b-a3b-instruct',
+                    apiKeyEnv: 'SLATE_MCP_TEST_KEY',
+                    concurrency: 3,
+                });
+
+                const statusRes = await server.callTool('slate_llm_status', {});
+                expect(statusRes.isError).toBe(false);
+                const statusParsed = JSON.parse(statusRes.content[0].text);
+                expect(statusParsed).toMatchObject({
+                    ok: true,
+                    provider: 'openai-compatible',
+                    model: 'qwen/qwen3-coder-30b-a3b-instruct',
+                    hasApiKey: true,
+                });
+            } finally {
+                if (prevEnv === undefined) delete process.env.SLATE_MCP_TEST_KEY;
+                else process.env.SLATE_MCP_TEST_KEY = prevEnv;
+                await fakeServer.close();
+            }
+        });
+
+        it('slate_forge_batch statelessly forges stubs over MCP and notifies canvas bridge', async () => {
+            const notified: string[] = [];
+            server.setBridge({
+                onStubDefined: async id => { notified.push(id); },
+            });
+
+            const stubRes = await server.callTool('slate_define_stub', {
+                stubs: [
+                    {
+                        name: 'inc',
+                        signature: 'def inc(x: int) -> int',
+                        intent: 'Increment integer by one',
+                        contract: 'Returns x + 1',
+                        cases: [{ name: 'c1', input: { x: 4 }, expected: 5 }],
+                    },
+                    {
+                        name: 'dec',
+                        signature: 'def dec(x: int) -> int',
+                        intent: 'Decrement integer by one',
+                        contract: 'Returns x - 1',
+                        cases: [{ name: 'c1', input: { x: 4 }, expected: 3 }],
+                    },
+                ],
+            });
+            expect(stubRes.isError).toBe(false);
+            notified.length = 0;
+
+            const fakeServer = await startFakeLlamaServer(req => {
+                const prompt = String((req as any).messages?.[1]?.content ?? '');
+                if (prompt.includes('def inc(')) {
+                    return ['### Implementation\n```python\ndef inc(x: int) -> int:\n    return x + 1\n```\n\n### Unit Check\n```python\ndef test_inc():\n    assert inc(4) == 5\n```'];
+                }
+                return ['### Implementation\n```python\ndef dec(x: int) -> int:\n    return x - 1\n```\n\n### Unit Check\n```python\ndef test_dec():\n    assert dec(4) == 3\n```'];
+            }, { requiredAuth: 'Bearer fake-batch-mcp' });
+
+            const prevEnv = process.env.SLATE_MCP_BATCH_KEY;
+            process.env.SLATE_MCP_BATCH_KEY = 'fake-batch-mcp';
+            try {
+                const secretReject = await server.callTool('slate_forge_batch', { apiKey: 'sk-nope' });
+                expect(secretReject.isError).toBe(true);
+                expect(secretReject.content[0].text).toContain('Raw API keys are rejected');
+
+                const traversalReject = await server.callTool('slate_forge_batch', { nodeIds: ['../../evil'] });
+                expect(traversalReject.isError).toBe(true);
+                expect(traversalReject.content[0].text).toContain('Path traversal rejected');
+
+                const batchRes = await server.callTool('slate_forge_batch', {
+                    allStubs: true,
+                    concurrency: 2,
+                    endpoint: fakeServer.url,
+                    model: 'qwen/qwen3-coder-30b-a3b-instruct',
+                    apiKeyEnv: 'SLATE_MCP_BATCH_KEY',
+                });
+                expect(batchRes.isError).toBe(false);
+                const parsed = JSON.parse(batchRes.content[0].text);
+                expect(parsed).toMatchObject({
+                    ok: true,
+                    forgedCount: 2,
+                    failedCount: 0,
+                    hasApiKey: true,
+                });
+                expect(notified.sort()).toEqual(['dec', 'inc']);
+
+                const incNode = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'inc.json'), 'utf8'));
+                expect(incNode.code).toEqual(['def inc(x: int) -> int:', '    return x + 1']);
+                expect(incNode.verification.state).toBe('passed');
+            } finally {
+                if (prevEnv === undefined) delete process.env.SLATE_MCP_BATCH_KEY;
+                else process.env.SLATE_MCP_BATCH_KEY = prevEnv;
+                await fakeServer.close();
+            }
+        }, 20_000);
+    });
+
+    describe('TypeScript stubs, AST references, and safe multi-language compile', () => {
+        it('slate_define_stub creates TS stubs, rejects arbitrary TS bodies, and refuses overwriting implemented TS nodes', async () => {
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'slate.json'),
+                JSON.stringify({ slate: 3, name: 'ts_app', language: 'typescript' }, null, 2),
+                'utf8',
+            );
+
+            const bodyReject = await server.callTool('slate_define_stub', {
+                name: 'scaleScore',
+                signature: 'export function scaleScore(v: number): number',
+                intent: 'Multiply by 2',
+                body: 'return v * 2;',
+            });
+            expect(bodyReject.isError).toBe(true);
+            expect(bodyReject.content[0].text).toMatch(/stub|throw/i);
+
+            const okStub = await server.callTool('slate_define_stub', {
+                name: 'scaleScore',
+                signature: 'export function scaleScore(v: number): number',
+                intent: 'Multiply by 2',
+                modulePath: 'src/math/scale.ts',
+                extension: '.ts',
+                cases: [{ name: 'c1', input: { v: 3 }, expected: 6 }],
+            });
+            expect(okStub.isError).toBe(false);
+            const nodeRaw = await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'scaleScore.json'), 'utf8');
+            const nodeDisk = JSON.parse(nodeRaw);
+            expect(nodeDisk.language).toBe('typescript');
+            expect(nodeDisk.modulePath).toBe('src/math/scale.ts');
+            expect(nodeDisk.extension).toBe('.ts');
+
+            // Simulate forged implementation on disk, then ensure slate_define_stub refuses overwrite
+            nodeDisk.code = ['export function scaleScore(v: number): number {', '    return v * 2;', '}'];
+            await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'scaleScore.json'), JSON.stringify(nodeDisk, null, 2), 'utf8');
+
+            const overwriteReject = await server.callTool('slate_define_stub', {
+                name: 'scaleScore',
+                signature: 'export function scaleScore(v: number): number',
+                intent: 'Overwrite check',
+            });
+            expect(overwriteReject.isError).toBe(true);
+            expect(overwriteReject.content[0].text).toContain('already has an active implementation');
+        });
+
+        it('slate_references reports uses, dependencies, and flow/caller references accurately', async () => {
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'slate.json'),
+                JSON.stringify({ slate: 3, name: 'ts_refs', language: 'typescript' }, null, 2),
+                'utf8',
+            );
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'leaf.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'leaf',
+                    language: 'typescript',
+                    intent: 'Leaf helper',
+                    code: ['export function leaf(x: number): number {', '    return x + 1;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'caller.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'caller',
+                    language: 'typescript',
+                    intent: 'Calls leaf',
+                    context: ['leaf'],
+                    code: ['export function caller(x: number): number {', '    return leaf(x) * 2;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+
+            const leafRefs = await server.callTool('slate_references', { nodeId: 'leaf' });
+            expect(leafRefs.isError).toBe(false);
+            const leafParsed = JSON.parse(leafRefs.content[0].text);
+            expect(leafParsed.nodeId).toBe('leaf');
+            expect(leafParsed.dependencyCount).toBeGreaterThanOrEqual(1);
+            expect(leafParsed.usedBy.some((s: any) => s.nodeId === 'caller')).toBe(true);
+            expect(leafParsed.contextUsers).toContain('caller');
+
+            const callerRefs = await server.callTool('slate_references', { nodeId: 'caller' });
+            expect(callerRefs.isError).toBe(false);
+            const callerParsed = JSON.parse(callerRefs.content[0].text);
+            expect(callerParsed.uses).toContain('leaf');
+            expect(callerParsed.dependsOn).toContain('leaf');
+
+            const summary = await server.callTool('slate_references', {});
+            expect(summary.isError).toBe(false);
+            const summaryParsed = JSON.parse(summary.content[0].text);
+            expect(summaryParsed.totalNodes).toBeGreaterThanOrEqual(2);
+        });
+
+        it('slate_compile compiles safely, prunes stale generated files, and refuses overwriting hand-written files or escaping workspace', async () => {
+            await fs.rm(path.join(tmpDir, 'slate', 'nodes', 'calc.json'), { force: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'slate.json'),
+                JSON.stringify({ slate: 3, name: 'compile_demo', language: 'typescript', compile: { outDir: 'built-ts' } }, null, 2),
+                'utf8',
+            );
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'greet.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'greet',
+                    language: 'typescript',
+                    intent: 'Greet user',
+                    contract: 'Returns greeting for non-empty name',
+                    modulePath: 'greet.ts',
+                    extension: '.ts',
+                    code: ['export function greet(name: string): string {', '    return `Hi ${name}`;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+
+            // Unsafe outDir rejections
+            const escapeRes = await server.callTool('slate_compile', { outDir: '../outside' });
+            expect(escapeRes.isError).toBe(true);
+            const slateDirRes = await server.callTool('slate_compile', { outDir: 'slate/nodes' });
+            expect(slateDirRes.isError).toBe(true);
+
+            // Dry run does not write files
+            const dry = await server.callTool('slate_compile', { dryRun: true });
+            expect(dry.isError).toBe(false);
+            const dryParsed = JSON.parse(dry.content[0].text);
+            expect(dryParsed.ok).toBe(true);
+            expect(dryParsed.dryRun).toBe(true);
+            expect(dryParsed.writtenFiles).toEqual([]);
+            expect(dryParsed.files).toContain('greet.ts');
+
+            // Seed a stale Slate-generated file to test pruning
+            await fs.mkdir(path.join(tmpDir, 'built-ts'), { recursive: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'built-ts', 'obsolete.ts'),
+                '// Generated by Slate — do not edit by hand.\nexport const old = 1;\n',
+                'utf8',
+            );
+
+            const compiled = await server.callTool('slate_compile', {});
+            expect(compiled.isError).toBe(false);
+            const compiledParsed = JSON.parse(compiled.content[0].text);
+            expect(compiledParsed.ok).toBe(true);
+            expect(compiledParsed.writtenFiles).toContain('greet.ts');
+            expect(compiledParsed.removedFiles).toContain('obsolete.ts');
+
+            const emitted = await fs.readFile(path.join(tmpDir, 'built-ts', 'greet.ts'), 'utf8');
+            expect(emitted).toContain('// Generated by Slate');
+            expect(emitted).toContain('export function greet(name: string): string');
+
+            // Create a non-generated user file colliding with output path and confirm refusal
+            await fs.writeFile(path.join(tmpDir, 'built-ts', 'greet.ts'), '// Hand-written file\nexport const lock = true;\n', 'utf8');
+            const collision = await server.callTool('slate_compile', {});
+            expect(collision.isError).toBe(false);
+            const collisionParsed = JSON.parse(collision.content[0].text);
+            expect(collisionParsed.ok).toBe(false);
+            expect(collisionParsed.diagnostics.some((d: any) => d.message.includes('Refusing to overwrite'))).toBe(true);
+            const preserved = await fs.readFile(path.join(tmpDir, 'built-ts', 'greet.ts'), 'utf8');
+            expect(preserved).toContain('// Hand-written file');
+
+            // Regression (#2): dot-segment modulePath `sub/../victim.ts` must NOT bypass existing-file overwrite check,
+            // and parent traversal `../../victim.ts` must NOT write outside outDir.
+            await fs.writeFile(path.join(tmpDir, 'built-ts', 'victim.ts'), '// Hand-written victim\nexport const keep = 1;\n', 'utf8');
+            await fs.rm(path.join(tmpDir, 'slate', 'nodes', 'greet.json'), { force: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'dotdot_inside.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'dotdot_inside',
+                    language: 'typescript',
+                    intent: 'Attempt raw-key bypass via sub/../victim.ts',
+                    contract: '',
+                    modulePath: 'sub/../victim.ts',
+                    extension: '.ts',
+                    code: ['export function dotdot_inside(): number {', '    return 1;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+            const rawKeyBypass = await server.callTool('slate_compile', {});
+            expect(rawKeyBypass.isError).toBe(false);
+            const rawBypassParsed = JSON.parse(rawKeyBypass.content[0].text);
+            expect(rawBypassParsed.ok).toBe(false);
+            expect(rawBypassParsed.diagnostics.some((d: any) => d.message.includes('Refusing to overwrite'))).toBe(true);
+            expect(await fs.readFile(path.join(tmpDir, 'built-ts', 'victim.ts'), 'utf8')).toContain('// Hand-written victim');
+
+            await fs.rm(path.join(tmpDir, 'slate', 'nodes', 'dotdot_inside.json'), { force: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'escape_outside.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'escape_outside',
+                    language: 'typescript',
+                    intent: 'Attempt escape via ../../outside.ts',
+                    contract: '',
+                    modulePath: '../../outside.ts',
+                    extension: '.ts',
+                    code: ['export function escape_outside(): number {', '    return 1;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+            const escapeAttempt = await server.callTool('slate_compile', {});
+            expect(escapeAttempt.isError).toBe(false);
+            const escapeParsed = JSON.parse(escapeAttempt.content[0].text);
+            expect(escapeParsed.ok).toBe(false);
+            expect(escapeParsed.diagnostics.some((d: any) => /unsafe/i.test(String(d.message)))).toBe(true);
+            await expect(fs.stat(path.join(tmpDir, 'outside.ts'))).rejects.toThrow();
         });
     });
 });

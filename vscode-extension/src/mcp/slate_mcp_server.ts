@@ -3,22 +3,30 @@ import * as http from 'http';
 import * as path from 'path';
 import * as readline from 'readline';
 import { randomUUID } from 'crypto';
-import { parser } from '@lezer/python';
-import type { SyntaxNode } from '@lezer/common';
 
+import { batchForgeWorkspace } from '../batch_forge';
 import {
-    connect, disconnect, emptyFlow, flowIdForPath, MAIN_FLOW,
+    connect, disconnect, emptyFlow, FLOWS_DIR, flowIdForPath, MAIN_FLOW,
     parseEndpoint, pathForFlowId, removeInstances, serializeFlow, parseFlow
 } from '../flow';
 import {
-    codeLines, CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR,
+    codeLines, CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR,
     nodeFromSignature, nodeIdForPath, parseConfig, parseLayout, parseNode,
-    pathForNodeId, serializeLayout, serializeNode,
-    type SlateLayout, type SlateNode
+    pathForNodeId, serializeConfig, serializeLayout, serializeNode,
+    tsNodeFromSignature, validateNodeStub, validateStubBody, validateTsStubBody,
+    type SlateConfig, type SlateLayout, type SlateLlmConfig, type SlateLlmProvider,
+    type SlateNode, type StubValidationResult
 } from '../slate_folder';
-import type { BoardNote, FlowInstance, FlowWire, SlateFlow } from '../harness_protocol';
-import { checkLlamaHealth } from '../llama_transport';
+import type { BoardNote, FlowInstance, FlowWire, HarnessDocument, HarnessFlow, SlateFlow } from '../harness_protocol';
+import { compileProjectForLanguage } from '../language_adapter';
+import { isSlateGeneratedContent, normalizeCompileOutputPath, tryNormalizeLanguage } from '../language_types';
+import { checkLlamaHealth, resolveLlmConfig, type LlmConfigInput } from '../llama_transport';
 import { parseProseNode, proseStub } from '../prose_adapter';
+import { identifierNames } from '../python_adapter';
+import { tsIdentifierNames } from '../ts_adapter';
+import { buildUsageIndex } from '../usage_index';
+
+export { validateStubBody, type StubValidationResult };
 
 export interface SlateMcpBridge {
     focusCamera?(options: {
@@ -30,153 +38,8 @@ export interface SlateMcpBridge {
     onStubDefined?(nodeId: string): Promise<void>;
     onFlowWired?(flowId: string): Promise<void>;
     onNotesPlaced?(): Promise<void>;
-    getLlamaConfig?(): { endpoint: string; model: string; timeoutSeconds?: number };
-    setLlamaConfig?(config: { endpoint?: string; model?: string; timeoutSeconds?: number }): Promise<void>;
-}
-
-export interface StubValidationResult {
-    valid: boolean;
-    reason?: string;
-}
-
-/**
- * Validates that an atomic stub contains ONLY permitted stub constructs:
- * `pass`, `...`, `raise NotImplementedError`, docstrings, comments, whitespace.
- * Strictly refuses any arbitrary implementation statements (returns, math, loops, assignments).
- */
-export function validateStubBody(signature: string, bodyText: string): StubValidationResult {
-    const cleanSig = signature.trim().replace(/:$/, '');
-    const cleanLines = bodyText.replace(/\r\n/g, '\n').split('\n');
-    const indentedBody = cleanLines.map(l => l.startsWith('    ') ? l : `    ${l}`).join('\n');
-    const fullCode = `${cleanSig}:\n${indentedBody}\n`;
-
-    const tree = parser.parse(fullCode);
-
-    let funcNode: SyntaxNode | null = null;
-    for (let cur = tree.topNode.firstChild; cur; cur = cur.nextSibling) {
-        if (cur.name === 'FunctionDefinition') {
-            funcNode = cur;
-            break;
-        }
-    }
-    if (!funcNode) {
-        return { valid: false, reason: 'No valid function definition found.' };
-    }
-
-    let bodyNode: SyntaxNode | null = null;
-    for (let cur = funcNode.firstChild; cur; cur = cur.nextSibling) {
-        if (cur.name === 'Body') {
-            bodyNode = cur;
-            break;
-        }
-    }
-    if (!bodyNode) {
-        return { valid: false, reason: 'No function body found.' };
-    }
-
-    let hasStubStatement = false;
-    for (let stmt = bodyNode.firstChild; stmt; stmt = stmt.nextSibling) {
-        if (stmt.name === ':' || stmt.name === 'Comment') continue;
-        if (stmt.name === 'PassStatement') {
-            hasStubStatement = true;
-            continue;
-        }
-        if (stmt.name === 'ExpressionStatement') {
-            const inner = stmt.firstChild;
-            if (inner && inner.name === 'String') {
-                // Docstring allowed
-                continue;
-            }
-            if (inner && inner.name === 'Ellipsis') {
-                hasStubStatement = true;
-                continue;
-            }
-            return {
-                valid: false,
-                reason: `Arbitrary expression in function body is refused: "${fullCode.slice(stmt.from, stmt.to).trim()}". Only stubs (pass, ..., raise NotImplementedError) are permitted.`,
-            };
-        }
-        if (stmt.name === 'RaiseStatement') {
-            const raisedText = fullCode.slice(stmt.from, stmt.to).trim();
-            let exprNode: SyntaxNode | null = null;
-            for (let c = stmt.firstChild; c; c = c.nextSibling) {
-                if (c.name === 'raise' || c.name === 'Comment') continue;
-                exprNode = c;
-                break;
-            }
-            if (!exprNode) {
-                return {
-                    valid: false,
-                    reason: 'Bare "raise" statement without exception is not a valid stub.',
-                };
-            }
-
-            // Case 1: raise NotImplementedError
-            if (exprNode.name === 'VariableName') {
-                const nameText = fullCode.slice(exprNode.from, exprNode.to).trim();
-                if (nameText === 'NotImplementedError') {
-                    hasStubStatement = true;
-                    continue;
-                }
-                return {
-                    valid: false,
-                    reason: `Only NotImplementedError may be raised in an atomic stub (found: "${nameText}").`,
-                };
-            }
-
-            // Case 2: raise NotImplementedError(...)
-            if (exprNode.name === 'CallExpression') {
-                const callee = exprNode.firstChild;
-                if (!callee || fullCode.slice(callee.from, callee.to).trim() !== 'NotImplementedError') {
-                    return {
-                        valid: false,
-                        reason: `Only NotImplementedError may be raised in an atomic stub (found: "${raisedText}").`,
-                    };
-                }
-                // Check arguments inside ArgList
-                const argList = callee.nextSibling;
-                if (argList && argList.name === 'ArgList') {
-                    let argCount = 0;
-                    let invalidArg = false;
-                    for (let arg = argList.firstChild; arg; arg = arg.nextSibling) {
-                        if (arg.name === '(' || arg.name === ')' || arg.name === ',' || arg.name === 'Comment') continue;
-                        argCount++;
-                        // Argument MUST be an optional literal String only!
-                        if (arg.name !== 'String') {
-                            invalidArg = true;
-                            break;
-                        }
-                    }
-                    if (invalidArg || argCount > 1) {
-                        return {
-                            valid: false,
-                            reason: `NotImplementedError argument must be an optional literal string message; arbitrary expressions or calls are refused in stubs (found: "${raisedText}").`,
-                        };
-                    }
-                }
-                hasStubStatement = true;
-                continue;
-            }
-
-            return {
-                valid: false,
-                reason: `Only NotImplementedError (or NotImplementedError("message")) may be raised in an atomic stub (found: "${raisedText}").`,
-            };
-        }
-        return {
-            valid: false,
-            reason: `Arbitrary function body implementations are strictly refused. Frontier Architect only authors atomic stubs (pass, ..., or raise NotImplementedError). Statement: ${stmt.name} ("${fullCode.slice(stmt.from, stmt.to).trim()}"). Body implementations must be forged by the Tier 2 local model.`,
-        };
-    }
-
-    if (!hasStubStatement) {
-        return {
-            valid: false,
-            reason: 'Function body must contain an atomic stub statement (pass, ..., or raise NotImplementedError).',
-        };
-    }
-
-    return { valid: true };
+    getLlamaConfig?(): LlmConfigInput & { endpoint: string; model: string; timeoutSeconds?: number };
+    setLlamaConfig?(config: LlmConfigInput): Promise<void>;
 }
 
 export interface JsonRpcRequest {
@@ -319,7 +182,7 @@ export const MCP_TOOLS = [
     },
     {
         name: 'slate_define_stub',
-        description: 'Define typed atomic stubs (name, signature, intent, contract, cases) in slate/nodes/**/*.json. Strictly refuses arbitrary body implementations (only pass, ..., or raise NotImplementedError stubs permitted) and supports splitting oversized (>60-line) nodes into smaller atomic stubs.',
+        description: 'Define typed atomic stubs (name, signature, intent, contract, cases) in slate/nodes/**/*.json for Python or TypeScript/JavaScript/Prose. Strictly refuses arbitrary body implementations and supports splitting oversized (>60-line) nodes into smaller atomic stubs.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -329,11 +192,24 @@ export const MCP_TOOLS = [
                 },
                 signature: {
                     type: 'string',
-                    description: 'Typed Python function signature (e.g. "def clamp(value: int, lower: int, upper: int) -> int").',
+                    description: 'Typed signature (e.g. "def clamp(value: int, lower: int, upper: int) -> int" or "export function clamp(value: number, lower: number, upper: number): number").',
                 },
                 intent: {
                     type: 'string',
                     description: 'High-level intent describing what the atomic node must do.',
+                },
+                language: {
+                    type: 'string',
+                    enum: ['python', 'typescript', 'javascript', 'prose'],
+                    description: 'Optional target language (defaults to slate.json project language).',
+                },
+                extension: {
+                    type: 'string',
+                    description: 'Optional TypeScript/JavaScript source extension (e.g. ".ts", ".tsx", ".js", ".jsx").',
+                },
+                modulePath: {
+                    type: 'string',
+                    description: 'Optional source module path hint used when compiling multi-file TypeScript/JavaScript modules.',
                 },
                 contract: {
                     type: 'string',
@@ -359,7 +235,7 @@ export const MCP_TOOLS = [
                 },
                 body: {
                     type: 'string',
-                    description: 'Optional stub body (MUST only be "pass", "...", or "raise NotImplementedError(...)"). Non-stub implementation code is strictly rejected.',
+                    description: 'Optional stub body (Python: "pass", "...", or "raise NotImplementedError(...)"; TS/JS: empty or "throw new Error(...)"). Non-stub implementation code is strictly rejected.',
                 },
                 position: {
                     type: 'object',
@@ -380,6 +256,9 @@ export const MCP_TOOLS = [
                             name: { type: 'string' },
                             signature: { type: 'string' },
                             intent: { type: 'string' },
+                            language: { type: 'string', enum: ['python', 'typescript', 'javascript', 'prose'] },
+                            extension: { type: 'string' },
+                            modulePath: { type: 'string' },
                             contract: { type: 'string' },
                             context: { type: 'array', items: { type: 'string' } },
                             cases: { type: 'array' },
@@ -457,7 +336,7 @@ export const MCP_TOOLS = [
     },
     {
         name: 'slate_llm_status',
-        description: 'Inspect reachability, endpoint, model, and available models for the local LLM server (llama.cpp, Ollama, LM Studio, etc.).',
+        description: 'Inspect reachability, provider, endpoint, model, API-key presence (non-secret), and available models for the configured LLM server (llama.cpp, Ollama, OpenRouter, LM Studio, vLLM).',
         inputSchema: {
             type: 'object',
             properties: {
@@ -474,24 +353,133 @@ export const MCP_TOOLS = [
     },
     {
         name: 'slate_configure_llm',
-        description: 'Configure the local LLM endpoint and model settings for Slate component forge. Allows the frontier architect model to configure the user\'s local LLM (e.g. llama-server, Ollama, LM Studio, vLLM) without bundling an LLM binary.',
+        description: 'Configure the LLM provider, endpoint, model, and non-secret env-var auth settings for Slate component forge (llama.cpp, Ollama, OpenRouter, or OpenAI-compatible). Never accepts raw API keys.',
         inputSchema: {
             type: 'object',
             properties: {
+                provider: {
+                    type: 'string',
+                    enum: ['llama.cpp', 'ollama', 'openrouter', 'openai-compatible'],
+                    description: 'Optional LLM provider kind.',
+                },
                 endpoint: {
                     type: 'string',
-                    description: 'The HTTP URL of the local OpenAI-compatible LLM server (e.g. "http://127.0.0.1:8080" or "http://127.0.0.1:11434/v1").',
+                    description: 'The HTTP/HTTPS URL of the OpenAI-compatible LLM server (e.g. "http://127.0.0.1:8080", "http://127.0.0.1:11434/v1", or "https://openrouter.ai/api/v1").',
                 },
                 model: {
                     type: 'string',
-                    description: 'Optional model identifier (e.g. "qwen2.5-coder:7b" or "local").',
+                    description: 'Optional model identifier (e.g. "qwen/qwen3-coder-30b-a3b-instruct", "qwen2.5-coder:7b", or "local").',
+                },
+                apiKeyEnv: {
+                    type: 'string',
+                    description: 'Environment variable name holding the Bearer API key (e.g. "OPENROUTER_API_KEY"). Raw secrets are rejected.',
+                },
+                concurrency: {
+                    type: 'number',
+                    description: 'Optional batch forge concurrency (1-16, default 3).',
+                },
+                outputTokens: {
+                    type: 'number',
+                    description: 'Optional max completion output tokens (>= 64, default 768).',
+                },
+                contextWindow: {
+                    type: 'number',
+                    description: 'Optional context window tokens (>= 1024, default 4096).',
                 },
                 timeoutSeconds: {
                     type: 'number',
-                    description: 'Optional request timeout in seconds (e.g. 120).',
+                    description: 'Optional request timeout in seconds (>= 5, default 120).',
+                },
+                writeToProject: {
+                    type: 'boolean',
+                    description: 'When true, persist non-secret llm settings into slate/slate.json.',
                 },
             },
-            required: ['endpoint'],
+        },
+    },
+    {
+        name: 'slate_forge_batch',
+        description: 'Statelessly batch-forge atomic stub nodes with bounded <=600-token micro-packets, JPL-60 validation, optional Pydantic+pytest verification, and bounded revision retries.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                nodeIds: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional list of node IDs to forge. If omitted, forges all unlocked unimplemented Python stubs.',
+                },
+                allStubs: {
+                    type: 'boolean',
+                    description: 'When true (or when nodeIds is omitted), select all unlocked unimplemented Python stubs.',
+                },
+                concurrency: {
+                    type: 'number',
+                    description: 'Optional parallel worker count (1-8, default from config or 3).',
+                },
+                maxRevisions: {
+                    type: 'number',
+                    description: 'Optional max forge/verify attempts per node (1-5, default 3).',
+                },
+                verify: {
+                    type: 'boolean',
+                    description: 'Run Pydantic + pytest verification on forged candidates before writing (default true).',
+                },
+                write: {
+                    type: 'boolean',
+                    description: 'Write verified candidates back to slate/nodes/*.json (default true).',
+                },
+                overwrite: {
+                    type: 'boolean',
+                    description: 'Allow regenerating nodes that already have non-stub implementations (default false).',
+                },
+                provider: {
+                    type: 'string',
+                    enum: ['llama.cpp', 'ollama', 'openrouter', 'openai-compatible'],
+                    description: 'Optional per-batch provider override.',
+                },
+                endpoint: {
+                    type: 'string',
+                    description: 'Optional per-batch endpoint override.',
+                },
+                model: {
+                    type: 'string',
+                    description: 'Optional per-batch model override.',
+                },
+                apiKeyEnv: {
+                    type: 'string',
+                    description: 'Optional env var name override for Bearer auth (never a raw key).',
+                },
+            },
+        },
+    },
+    {
+        name: 'slate_references',
+        description: 'Inspect deterministic AST uses, dependencies, callers, and flow call-sites across Slate nodes using indexNode and buildUsageIndex.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                nodeId: {
+                    type: 'string',
+                    description: 'Target node ID to inspect (e.g. "scoreMatch" or "palette/scoreMatch"). Omit for a project-wide usage summary.',
+                },
+            },
+        },
+    },
+    {
+        name: 'slate_compile',
+        description: 'Deterministically compile slate/ nodes and flows into target source files without overwriting non-Slate user files.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                outDir: {
+                    type: 'string',
+                    description: 'Relative output directory inside the workspace (defaults to slate.json compile.outDir or "out").',
+                },
+                dryRun: {
+                    type: 'boolean',
+                    description: 'If true, compile in memory and return planned files and diagnostics without writing disk files.',
+                },
+            },
         },
     },
 ];
@@ -885,6 +873,9 @@ export class SlateMcpServer {
         name?: string;
         signature?: string;
         intent?: string;
+        language?: string;
+        extension?: string;
+        modulePath?: string;
         contract?: string;
         context?: string[];
         cases?: Array<{ name: string; input: Record<string, unknown>; expected?: unknown }>;
@@ -895,6 +886,9 @@ export class SlateMcpServer {
             name: string;
             signature: string;
             intent: string;
+            language?: string;
+            extension?: string;
+            modulePath?: string;
             contract?: string;
             context?: string[];
             cases?: Array<{ name: string; input: Record<string, unknown>; expected?: unknown }>;
@@ -908,6 +902,9 @@ export class SlateMcpServer {
                 name: args.name,
                 signature: args.signature,
                 intent: args.intent,
+                language: args.language,
+                extension: args.extension,
+                modulePath: args.modulePath,
                 contract: args.contract,
                 context: args.context,
                 cases: args.cases,
@@ -921,7 +918,8 @@ export class SlateMcpServer {
 
         const layout = await this.readLayout();
         const configText = await this.readTextIfExists(CONFIG_PATH);
-        const language = configText ? parseConfig(configText).language : 'python';
+        const rawProjectLang = configText ? parseConfig(configText).language : 'python';
+        const projectLanguage = tryNormalizeLanguage(rawProjectLang) ?? 'python';
         const createdIds: string[] = [];
 
         for (const item of stubList) {
@@ -931,17 +929,22 @@ export class SlateMcpServer {
             const nodeRelPath = pathForNodeId(nodeId);
             this.assertSafePath(nodeRelPath, NODES_DIR);
 
+            const rawItemLang = item.language ?? args.language;
+            const itemLanguage = rawItemLang ? tryNormalizeLanguage(rawItemLang) : projectLanguage;
+            if (!itemLanguage || !['python', 'typescript', 'javascript', 'prose'].includes(itemLanguage)) {
+                throw new Error(`Unsupported stub language "${rawItemLang}"; expected python, typescript, javascript, or prose.`);
+            }
+
             // Check if node already exists
             const existingNode = await this.readExistingNode(nodeRelPath);
             if (existingNode) {
                 if (existingNode.locked) {
                     throw new Error(`Node "${nodeId}" is locked and cannot be modified.`);
                 }
-                const existingBody = existingNode.code.slice(1).join('\n');
-                const existingSig = existingNode.code[0] ?? '';
-                const existingValidation = (existingNode.language ?? language) === 'prose'
+                const existingLang = tryNormalizeLanguage(existingNode.language ?? itemLanguage) ?? projectLanguage;
+                const existingValidation = existingLang === 'prose'
                     ? { valid: !parseProseNode(existingNode, nodeId).bodyText, reason: 'Prose template already has a body.' }
-                    : validateStubBody(existingSig, existingBody);
+                    : validateNodeStub(existingNode, existingLang);
                 if (!existingValidation.valid) {
                     throw new Error(
                         `Node "${nodeId}" already has an active implementation and cannot be overwritten with a stub. ` +
@@ -955,31 +958,72 @@ export class SlateMcpServer {
             const contract = (item.contract ?? '').trim();
             const context = item.context ?? [];
             const cases = item.cases ?? [];
-            const stubBody = (item.body ?? 'raise NotImplementedError').trim();
 
-            // Validate that the signature creates a valid node header
-            const initialNode = language === 'prose' ? proseStub(signature, name.split('/').pop()!, intent)
-                : nodeFromSignature(signature, intent);
-            if (initialNode.name !== name && name.split('/').pop() !== initialNode.name) {
-                throw new Error(`Signature function name "${initialNode.name}" does not match provided name "${name}".`);
+            let initialNode: SlateNode;
+            let code: string[];
+            let extra: Record<string, unknown> = { ...(existingNode?.extra ?? {}) };
+
+            if (itemLanguage === 'prose') {
+                initialNode = proseStub(signature, name.split('/').pop()!, intent);
+                if (initialNode.name !== name && name.split('/').pop() !== initialNode.name) {
+                    throw new Error(`Signature function name "${initialNode.name}" does not match provided name "${name}".`);
+                }
+                if (item.body?.trim()) {
+                    throw new Error('Architect prose stubs accept a signature without body text.');
+                }
+                code = initialNode.code;
+            } else if (itemLanguage === 'typescript' || itemLanguage === 'javascript') {
+                const modPath = (item.modulePath ?? args.modulePath)?.trim();
+                const explicitExt = (item.extension ?? args.extension)?.trim();
+                const ext = explicitExt
+                    || (modPath?.endsWith('.tsx') ? '.tsx'
+                        : modPath?.endsWith('.jsx') ? '.jsx'
+                        : modPath?.endsWith('.js') ? '.js'
+                        : modPath?.endsWith('.ts') ? '.ts'
+                        : itemLanguage === 'javascript' ? '.js'
+                        : signature.includes('JSX') ? '.tsx' : '.ts');
+                initialNode = tsNodeFromSignature(signature, intent, itemLanguage, ext);
+                if (initialNode.name !== name && name.split('/').pop() !== initialNode.name) {
+                    throw new Error(`Signature function name "${initialNode.name}" does not match provided name "${name}".`);
+                }
+                const rawBody = (item.body ?? '').trim();
+                const stubBody = rawBody || 'throw new Error("Not implemented");';
+                const validation = validateTsStubBody(signature, stubBody, ext);
+                if (!validation.valid) {
+                    throw new Error(validation.reason);
+                }
+                if (!rawBody) {
+                    code = initialNode.code;
+                } else {
+                    const cleanSig = signature.replace(/[;{]\s*$/, '').trim();
+                    const block = stubBody.startsWith('{') && stubBody.endsWith('}')
+                        ? stubBody
+                        : `{\n${stubBody.split(/\r?\n/).map(l => `    ${l}`).join('\n')}\n}`;
+                    code = codeLines(`${cleanSig} ${block}`);
+                }
+                extra = {
+                    ...extra,
+                    extension: ext,
+                    ...(modPath ? { modulePath: modPath.replace(/\\/g, '/').replace(/^\.\//, '') } : {}),
+                };
+            } else {
+                const stubBody = (item.body ?? 'raise NotImplementedError').trim();
+                initialNode = nodeFromSignature(signature, intent);
+                if (initialNode.name !== name && name.split('/').pop() !== initialNode.name) {
+                    throw new Error(`Signature function name "${initialNode.name}" does not match provided name "${name}".`);
+                }
+                const validation = validateStubBody(signature, stubBody);
+                if (!validation.valid) {
+                    throw new Error(validation.reason);
+                }
+                const header = signature.replace(/:$/, '');
+                const bodyLines = stubBody.split('\n').map(l => l.startsWith('    ') ? l : `    ${l}`);
+                code = [`${header}:`, ...bodyLines];
             }
-
-            // Strictly validate that body is an allowed stub (zero arbitrary function bodies allowed)
-            const validation = language === 'prose'
-                ? { valid: !item.body?.trim(), reason: 'Architect prose stubs accept a signature without body text.' }
-                : validateStubBody(signature, stubBody);
-            if (!validation.valid) {
-                throw new Error(validation.reason);
-            }
-
-            // Build node code
-            const header = signature.replace(/:$/, '');
-            const bodyLines = stubBody.split('\n').map(l => l.startsWith('    ') ? l : `    ${l}`);
-            const code = language === 'prose' ? initialNode.code : [`${header}:`, ...bodyLines];
 
             const node: SlateNode = {
                 name: initialNode.name,
-                ...(language === 'prose' ? { language } : {}),
+                ...(itemLanguage !== 'python' ? { language: itemLanguage } : {}),
                 intent,
                 contract,
                 context,
@@ -990,7 +1034,7 @@ export class SlateMcpServer {
                 imports: existingNode?.imports ?? [],
                 uses: existingNode?.uses ?? [],
                 code,
-                extra: existingNode?.extra ?? {},
+                extra,
             };
 
             await this.writeJsonFile(nodeRelPath, serializeNode(node));
@@ -1144,43 +1188,552 @@ export class SlateMcpServer {
         };
     }
 
+    private assertNoSecretArgs(args: Record<string, unknown>, toolName: string): void {
+        const forbidden = new Set(['apikey', 'api_key', 'token', 'secret', 'authorization']);
+        for (const key of Object.keys(args)) {
+            if (forbidden.has(key.toLowerCase())) {
+                throw new Error(`Raw API keys are rejected in ${toolName}; pass "apiKeyEnv" with an environment variable name instead.`);
+            }
+        }
+    }
+
+    private parseEnvVarArg(raw: unknown): string | undefined {
+        if (raw === undefined) return undefined;
+        if (typeof raw !== 'string') {
+            throw new Error('apiKeyEnv must be an environment variable name string.');
+        }
+        const trimmed = raw.trim();
+        if (!trimmed) return undefined;
+        if (/^(?:sk-|bearer\s+)/i.test(trimmed) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+            throw new Error('apiKeyEnv must be an environment variable name (e.g. "OPENROUTER_API_KEY"), not a raw API key.');
+        }
+        return trimmed;
+    }
+
+    private parseProviderArg(raw: unknown): SlateLlmProvider | undefined {
+        if (raw === undefined) return undefined;
+        const allowed = new Set<SlateLlmProvider>(['llama.cpp', 'ollama', 'openrouter', 'openai-compatible']);
+        if (typeof raw !== 'string' || !allowed.has(raw as SlateLlmProvider)) {
+            throw new Error('provider must be one of "llama.cpp", "ollama", "openrouter", or "openai-compatible".');
+        }
+        return raw as SlateLlmProvider;
+    }
+
+    private async readProjectLlm(): Promise<SlateLlmConfig | undefined> {
+        const raw = await this.readTextIfExists(CONFIG_PATH);
+        if (raw === null) return undefined;
+        try {
+            return parseConfig(raw).llm;
+        } catch {
+            return undefined;
+        }
+    }
+
     /** Tool: slate_llm_status */
     async toolLlmStatus(args: { endpoint?: string; timeoutMs?: number }): Promise<Record<string, unknown>> {
-        const config = this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : { endpoint: 'http://127.0.0.1:8080', model: 'local' };
-        const targetEndpoint = typeof args.endpoint === 'string' && args.endpoint.trim() ? args.endpoint.trim() : config.endpoint;
-        const targetModel = config.model;
+        const projectLlm = await this.readProjectLlm();
+        const bridgeConfig = this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined;
+        const resolved = resolveLlmConfig(
+            projectLlm,
+            bridgeConfig,
+            process.env,
+            typeof args.endpoint === 'string' && args.endpoint.trim() ? { endpoint: args.endpoint.trim() } : undefined,
+        );
         const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : 3000;
-        const health = await checkLlamaHealth(targetEndpoint, targetModel, timeoutMs);
+        const health = await checkLlamaHealth(
+            resolved.endpoint,
+            resolved.model,
+            timeoutMs,
+            resolved.apiKey ? { apiKey: resolved.apiKey } : undefined,
+        );
         return {
             ok: health.ok,
-            endpoint: targetEndpoint,
-            model: targetModel,
+            provider: resolved.provider,
+            endpoint: resolved.endpoint,
+            model: resolved.model,
+            ...(resolved.apiKeyEnv ? { apiKeyEnv: resolved.apiKeyEnv } : {}),
+            hasApiKey: resolved.hasApiKey,
             statusText: health.statusText,
             models: health.models ?? [],
         };
     }
 
     /** Tool: slate_configure_llm */
-    async toolConfigureLlm(args: { endpoint: string; model?: string; timeoutSeconds?: number }): Promise<Record<string, unknown>> {
-        if (!args.endpoint || typeof args.endpoint !== 'string' || !args.endpoint.trim().startsWith('http')) {
+    async toolConfigureLlm(args: Record<string, unknown> & {
+        provider?: string;
+        endpoint?: string;
+        model?: string;
+        apiKeyEnv?: string;
+        concurrency?: number;
+        outputTokens?: number;
+        contextWindow?: number;
+        timeoutSeconds?: number;
+        writeToProject?: boolean;
+    }): Promise<Record<string, unknown>> {
+        this.assertNoSecretArgs(args, 'slate_configure_llm');
+        const provider = this.parseProviderArg(args.provider);
+        const apiKeyEnv = this.parseEnvVarArg(args.apiKeyEnv);
+
+        let endpoint: string;
+        if (typeof args.endpoint === 'string' && args.endpoint.trim()) {
+            const trimmed = args.endpoint.trim();
+            if (!/^https?:\/\//i.test(trimmed)) {
+                throw new Error('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
+            }
+            endpoint = trimmed;
+        } else if (provider) {
+            endpoint = resolveLlmConfig({ provider }).endpoint;
+        } else {
             throw new Error('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
         }
-        const endpoint = args.endpoint.trim();
+
         const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : 'local';
         const timeoutSeconds = typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 120;
+        const concurrency = typeof args.concurrency === 'number' ? args.concurrency : undefined;
+        const outputTokens = typeof args.outputTokens === 'number' ? args.outputTokens : undefined;
+        const contextWindow = typeof args.contextWindow === 'number' ? args.contextWindow : undefined;
 
-        if (this.bridge?.setLlamaConfig) {
-            await this.bridge.setLlamaConfig({ endpoint, model, timeoutSeconds });
+        let wroteToProject = false;
+        let projectLlm: SlateLlmConfig | undefined;
+        if (args.writeToProject === true) {
+            const rawConfig = await this.readTextIfExists(CONFIG_PATH);
+            if (rawConfig === null) {
+                throw new Error(`Cannot persist llm configuration: "${CONFIG_PATH}" does not exist.`);
+            }
+            const config = parseConfig(rawConfig);
+            const nextLlm: SlateLlmConfig = {
+                ...(config.llm ?? {}),
+                ...(provider ? { provider } : {}),
+                endpoint,
+                model,
+                ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
+                ...(concurrency !== undefined ? { concurrency } : {}),
+                ...(outputTokens !== undefined ? { outputTokens } : {}),
+                ...(contextWindow !== undefined ? { contextWindow } : {}),
+                ...(typeof args.timeoutSeconds === 'number' ? { timeoutSeconds } : {}),
+            };
+            config.llm = nextLlm;
+            const serialized = serializeConfig(config);
+            parseConfig(serialized);
+            await this.writeJsonFile(CONFIG_PATH, serialized);
+            projectLlm = nextLlm;
+            wroteToProject = true;
+        } else {
+            projectLlm = await this.readProjectLlm();
         }
 
-        const health = await checkLlamaHealth(endpoint, model, 3000);
+        if (this.bridge?.setLlamaConfig) {
+            await this.bridge.setLlamaConfig({
+                ...(provider ? { provider } : {}),
+                endpoint,
+                model,
+                timeoutSeconds,
+                ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
+                ...(concurrency !== undefined ? { concurrency } : {}),
+                ...(outputTokens !== undefined ? { outputTokens } : {}),
+            });
+        }
+
+        const resolved = resolveLlmConfig(
+            projectLlm,
+            this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined,
+            process.env,
+            {
+                ...(provider ? { provider } : {}),
+                endpoint,
+                model,
+                timeoutSeconds,
+                ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
+            },
+        );
+        const health = await checkLlamaHealth(
+            resolved.endpoint,
+            resolved.model,
+            3000,
+            resolved.apiKey ? { apiKey: resolved.apiKey } : undefined,
+        );
         return {
             updated: true,
-            endpoint,
-            model,
+            ...(wroteToProject ? { writeToProject: true } : {}),
+            provider: resolved.provider,
+            endpoint: resolved.endpoint,
+            model: resolved.model,
+            ...(resolved.apiKeyEnv ? { apiKeyEnv: resolved.apiKeyEnv } : {}),
+            hasApiKey: resolved.hasApiKey,
             reachable: health.ok,
             statusText: health.statusText,
             models: health.models ?? [],
+        };
+    }
+
+    /** Tool: slate_forge_batch */
+    async toolForgeBatch(args: Record<string, unknown> & {
+        nodeIds?: string[];
+        allStubs?: boolean;
+        concurrency?: number;
+        maxRevisions?: number;
+        verify?: boolean;
+        write?: boolean;
+        overwrite?: boolean;
+        provider?: string;
+        endpoint?: string;
+        model?: string;
+        apiKeyEnv?: string;
+        timeoutSeconds?: number;
+        outputTokens?: number;
+    }): Promise<Record<string, unknown>> {
+        this.assertNoSecretArgs(args, 'slate_forge_batch');
+        const provider = this.parseProviderArg(args.provider);
+        const apiKeyEnv = this.parseEnvVarArg(args.apiKeyEnv);
+
+        let endpoint: string | undefined;
+        if (typeof args.endpoint === 'string' && args.endpoint.trim()) {
+            const trimmed = args.endpoint.trim();
+            if (!/^https?:\/\//i.test(trimmed)) {
+                throw new Error('Batch override endpoint must be a valid HTTP/HTTPS URL.');
+            }
+            endpoint = trimmed;
+        }
+
+        const hasLlmOverride = Boolean(
+            provider || endpoint || args.model || apiKeyEnv
+            || typeof args.timeoutSeconds === 'number' || typeof args.outputTokens === 'number',
+        );
+        const llmOverride: LlmConfigInput | undefined = hasLlmOverride
+            ? {
+                ...(provider ? { provider } : {}),
+                ...(endpoint ? { endpoint } : {}),
+                ...(typeof args.model === 'string' && args.model.trim() ? { model: args.model.trim() } : {}),
+                ...(apiKeyEnv ? { apiKeyEnv } : {}),
+                ...(typeof args.timeoutSeconds === 'number' ? { timeoutSeconds: args.timeoutSeconds } : {}),
+                ...(typeof args.outputTokens === 'number' ? { outputTokens: args.outputTokens } : {}),
+            }
+            : undefined;
+
+        const result = await batchForgeWorkspace({
+            workspaceRoot: this.workspaceRoot,
+            nodeIds: Array.isArray(args.nodeIds) ? args.nodeIds.filter((x): x is string => typeof x === 'string') : undefined,
+            allStubs: typeof args.allStubs === 'boolean' ? args.allStubs : undefined,
+            concurrency: typeof args.concurrency === 'number' ? args.concurrency : undefined,
+            maxRevisions: typeof args.maxRevisions === 'number' ? args.maxRevisions : undefined,
+            verify: typeof args.verify === 'boolean' ? args.verify : undefined,
+            write: typeof args.write === 'boolean' ? args.write : undefined,
+            overwrite: typeof args.overwrite === 'boolean' ? args.overwrite : undefined,
+            fallbackLlm: this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined,
+            llmOverride,
+            onNodeForged: this.bridge?.onStubDefined
+                ? async nodeId => { await this.bridge!.onStubDefined!(nodeId); }
+                : undefined,
+        });
+
+        return result as unknown as Record<string, unknown>;
+    }
+
+    /** Tool: slate_references */
+    async toolReferences(args: { nodeId?: string }): Promise<Record<string, unknown>> {
+        const configText = await this.readTextIfExists(CONFIG_PATH);
+        const defaultLanguage = configText ? parseConfig(configText).language : 'python';
+        const layout = await this.readLayout();
+
+        const nodeFiles = await this.findNodeFiles();
+        const documents: HarnessDocument[] = [];
+        const docById = new Map<string, HarnessDocument>();
+        const nodesById = new Map<string, SlateNode>();
+
+        for (const file of nodeFiles) {
+            const id = nodeIdForPath(file);
+            if (!id) continue;
+            try {
+                const text = await fs.readFile(this.absPath(file), 'utf8');
+                const indexed = indexNode(file, text, defaultLanguage, null);
+                documents.push(indexed.document);
+                docById.set(id, indexed.document);
+                if (indexed.node) {
+                    nodesById.set(id, indexed.node);
+                }
+            } catch {
+                // Skip unreadable nodes while building the reference graph
+            }
+        }
+
+        const flowFiles = await this.findFlowFiles();
+        const flows: HarnessFlow[] = [];
+        for (const file of flowFiles) {
+            const id = flowIdForPath(file);
+            if (!id) continue;
+            try {
+                const text = await fs.readFile(this.absPath(file), 'utf8');
+                flows.push({ id, flow: parseFlow(text) });
+            } catch {
+                // Skip unreadable flow files
+            }
+        }
+
+        const shortNameToIds = new Map<string, string[]>();
+        for (const [id, node] of nodesById.entries()) {
+            const keys = new Set<string>([node.name, id.split('/').pop() ?? id]);
+            for (const key of keys) {
+                const list = shortNameToIds.get(key) ?? [];
+                if (!list.includes(id)) list.push(id);
+                shortNameToIds.set(key, list);
+            }
+        }
+
+        const effectiveUsesById = new Map<string, string[]>();
+        for (const [id, doc] of docById.entries()) {
+            const node = nodesById.get(id);
+            const resolvedUses = new Set<string>(doc.uses ?? node?.uses ?? []);
+            const lang = tryNormalizeLanguage(node?.language ?? defaultLanguage) ?? 'python';
+            if (lang === 'typescript' || lang === 'javascript' || lang === 'python') {
+                const names = lang === 'python'
+                    ? identifierNames(`${doc.source}\n`)
+                    : tsIdentifierNames(`${doc.source}\n`);
+                const contextSet = new Set<string>(node?.context ?? []);
+                for (const ident of names) {
+                    const candidates = shortNameToIds.get(ident);
+                    if (!candidates || candidates.length === 0) continue;
+                    const nonSelf = candidates.filter(c => c !== id);
+                    if (nonSelf.length === 1) {
+                        resolvedUses.add(nonSelf[0]);
+                    } else if (nonSelf.length > 1) {
+                        for (const c of nonSelf) {
+                            if (contextSet.has(c)) resolvedUses.add(c);
+                        }
+                    }
+                }
+            }
+            const sortedUses = Array.from(resolvedUses).sort();
+            doc.uses = sortedUses;
+            effectiveUsesById.set(id, sortedUses);
+        }
+
+        const usageIndex = buildUsageIndex(documents, flows, layout.refs);
+
+        if (args.nodeId !== undefined) {
+            const targetId = args.nodeId.trim();
+            if (!targetId) {
+                throw new Error('nodeId must be a non-empty string when provided.');
+            }
+            const node = nodesById.get(targetId);
+            const doc = docById.get(targetId);
+            const usage = usageIndex[targetId];
+            if (!node && !doc && !usage) {
+                throw new Error(`Node "${targetId}" was not found in "${NODES_DIR}".`);
+            }
+            const directUses = effectiveUsesById.get(targetId) ?? doc?.uses ?? node?.uses ?? [];
+            const dependsOn = Array.from(new Set([
+                ...directUses,
+                ...(node?.uses ?? []),
+                ...(node?.context ?? []),
+            ]));
+            return {
+                nodeId: targetId,
+                language: node?.language ?? defaultLanguage,
+                uses: directUses,
+                dependsOn,
+                usedBy: usage?.callSites ?? [],
+                contextUsers: usage?.contextUsers ?? [],
+                totalUses: usage?.totalUses ?? 0,
+                instanceCount: usage?.instanceCount ?? 0,
+                dependencyCount: usage?.dependencyCount ?? 0,
+                contextCount: usage?.contextCount ?? 0,
+                usage: usage ?? null,
+            };
+        }
+
+        const nodes = Object.values(usageIndex)
+            .sort((a, b) => a.nodeId.localeCompare(b.nodeId))
+            .map(entry => ({
+                nodeId: entry.nodeId,
+                language: nodesById.get(entry.nodeId)?.language ?? defaultLanguage,
+                uses: docById.get(entry.nodeId)?.uses ?? nodesById.get(entry.nodeId)?.uses ?? [],
+                totalUses: entry.totalUses,
+                instanceCount: entry.instanceCount,
+                dependencyCount: entry.dependencyCount,
+                contextCount: entry.contextCount,
+            }));
+
+        return {
+            totalNodes: nodes.length,
+            nodes,
+        };
+    }
+
+    /** Recursively read existing files inside a directory into a map keyed by forward-slash relative path. */
+    private async readExistingDirectoryFiles(dir: string): Promise<Map<string, string>> {
+        const files = new Map<string, string>();
+        const scan = async (current: string) => {
+            let entries: string[];
+            try {
+                entries = await fs.readdir(current);
+            } catch {
+                return;
+            }
+            for (const entry of entries) {
+                const full = path.join(current, entry);
+                try {
+                    const stat = await fs.stat(full);
+                    if (stat.isDirectory()) {
+                        await scan(full);
+                    } else if (stat.isFile()) {
+                        const rel = path.relative(dir, full).replace(/\\/g, '/');
+                        files.set(rel, await fs.readFile(full, 'utf8'));
+                    }
+                } catch {
+                    // Ignore unreadable entries
+                }
+            }
+        };
+        await scan(dir);
+        return files;
+    }
+
+    /** Tool: slate_compile */
+    async toolCompile(args: { outDir?: string; dryRun?: boolean }): Promise<Record<string, unknown>> {
+        const configText = await this.readTextIfExists(CONFIG_PATH);
+        if (!configText) {
+            throw new Error(`Missing "${CONFIG_PATH}"; initialize or configure a Slate project first.`);
+        }
+        const config: SlateConfig = parseConfig(configText);
+
+        const targetRelRaw = (args.outDir ?? config.compile?.outDir ?? 'out').trim() || 'out';
+        const resolvedRoot = path.resolve(this.workspaceRoot);
+        const resolvedOut = path.resolve(resolvedRoot, targetRelRaw);
+        const relToRoot = path.relative(resolvedRoot, resolvedOut).replace(/\\/g, '/');
+        if (
+            !relToRoot
+            || relToRoot === '.'
+            || relToRoot.startsWith('..')
+            || path.isAbsolute(relToRoot)
+            || relToRoot === 'slate'
+            || relToRoot.startsWith('slate/')
+        ) {
+            throw new Error(`Unsafe compile output directory "${targetRelRaw}": must stay inside workspace and outside "slate/".`);
+        }
+
+        const diagnostics: Array<{ severity: 'error' | 'warning'; message: string }> = [];
+        const nodes = new Map<string, SlateNode>();
+        for (const file of await this.findNodeFiles()) {
+            const id = nodeIdForPath(file);
+            if (!id) continue;
+            try {
+                const text = await fs.readFile(this.absPath(file), 'utf8');
+                nodes.set(id, parseNode(text));
+            } catch (error) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Invalid node "${file}": ${error instanceof Error ? error.message : String(error)}`,
+                });
+            }
+        }
+
+        const flows = new Map<string, SlateFlow>();
+        for (const file of await this.findFlowFiles()) {
+            const id = flowIdForPath(file);
+            if (!id) continue;
+            try {
+                const text = await fs.readFile(this.absPath(file), 'utf8');
+                flows.set(id, parseFlow(text));
+            } catch (error) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Invalid flow "${file}": ${error instanceof Error ? error.message : String(error)}`,
+                });
+            }
+        }
+
+        const existingFiles = await this.readExistingDirectoryFiles(resolvedOut);
+        const compiled = compileProjectForLanguage(nodes, config, flows, new Map(), existingFiles);
+        diagnostics.push(...compiled.diagnostics);
+
+        const normalizedFiles = new Map<string, string>();
+        for (const [relFile, content] of compiled.files.entries()) {
+            const normRel = normalizeCompileOutputPath(relFile);
+            if (!normRel) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing unsafe output path "${relFile}" outside "${relToRoot}".`,
+                });
+                continue;
+            }
+            if (normalizedFiles.has(normRel)) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing duplicate output destination "${normRel}" from "${relFile}".`,
+                });
+                continue;
+            }
+            const absOut = path.resolve(resolvedOut, normRel);
+            const relCheck = path.relative(resolvedOut, absOut);
+            if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing to write output path "${relFile}" outside "${relToRoot}".`,
+                });
+                continue;
+            }
+            let existingContent = existingFiles.get(normRel);
+            if (existingContent === undefined) {
+                try {
+                    existingContent = await fs.readFile(absOut, 'utf8');
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                        diagnostics.push({
+                            severity: 'error',
+                            message: `Cannot inspect existing destination "${normRel}": ${(error as Error).message}`,
+                        });
+                        continue;
+                    }
+                }
+            }
+            if (existingContent !== undefined && !isSlateGeneratedContent(existingContent)) {
+                const alreadyFlagged = diagnostics.some(d => d.severity === 'error' && (d.message.includes(normRel) || d.message.includes(relFile)));
+                if (!alreadyFlagged) {
+                    diagnostics.push({
+                        severity: 'error',
+                        message: `Refusing to overwrite existing non-generated file "${normRel}" (missing Slate generated header).`,
+                    });
+                }
+            }
+            normalizedFiles.set(normRel, content);
+        }
+
+        const dryRun = args.dryRun === true;
+        const hasErrors = diagnostics.some(d => d.severity === 'error');
+        const generatedPaths = Array.from(normalizedFiles.keys()).sort();
+        const writtenFiles: string[] = [];
+        const removedFiles: string[] = [];
+
+        if (!dryRun && !hasErrors) {
+            await fs.mkdir(resolvedOut, { recursive: true });
+            for (const [prevRel, prevContent] of existingFiles.entries()) {
+                if (!normalizedFiles.has(prevRel) && isSlateGeneratedContent(prevContent)) {
+                    const prevAbs = path.resolve(resolvedOut, prevRel);
+                    const prevRelCheck = path.relative(resolvedOut, prevAbs);
+                    if (prevRelCheck && !prevRelCheck.startsWith('..') && !path.isAbsolute(prevRelCheck)) {
+                        await fs.unlink(prevAbs);
+                        removedFiles.push(prevRel);
+                    }
+                }
+            }
+            for (const relFile of generatedPaths) {
+                const absOut = path.resolve(resolvedOut, relFile);
+                await fs.mkdir(path.dirname(absOut), { recursive: true });
+                await fs.writeFile(absOut, normalizedFiles.get(relFile)!, 'utf8');
+                writtenFiles.push(relFile);
+            }
+        }
+
+        return {
+            ok: !hasErrors,
+            language: config.language,
+            outDir: relToRoot,
+            dryRun,
+            fileCount: normalizedFiles.size,
+            files: generatedPaths,
+            writtenFiles,
+            removedFiles: removedFiles.sort(),
+            diagnostics,
         };
     }
 
@@ -1209,6 +1762,15 @@ export class SlateMcpServer {
                     break;
                 case 'slate_configure_llm':
                     result = await this.runSerialized(() => this.toolConfigureLlm(args as any));
+                    break;
+                case 'slate_forge_batch':
+                    result = await this.runSerialized(() => this.toolForgeBatch(args as any));
+                    break;
+                case 'slate_references':
+                    result = await this.toolReferences(args as any);
+                    break;
+                case 'slate_compile':
+                    result = await this.runSerialized(() => this.toolCompile(args as any));
                     break;
                 default:
                     return {

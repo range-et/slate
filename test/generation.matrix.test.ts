@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildForgePacket, buildGenerationPacket, FORGE_INPUT_BUDGET_TOKENS, PacketError, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from '../vscode-extension/src/generation';
 import { buildDescribePacket, describeNodes, describeOrder, parseDescribeReply } from '../vscode-extension/src/port/describe';
 import { indexNode, parseNode } from '../vscode-extension/src/slate_folder';
+import { containsJsxSyntax } from '../vscode-extension/src/ts_adapter';
 
 function fixture(patch: Record<string, unknown> = {}) {
     const target = indexNode('slate/nodes/run.json', JSON.stringify({ slate: 3, name: 'run', intent: ' Return x ',
@@ -310,5 +311,160 @@ describe('S-512 local llama.cpp component forge matrix', () => {
         const res2 = validateForgeCandidate(target.document.units[0], candidate2);
         expect(res2.valid).toBe(false);
         expect(res2.diagnostics.some(d => d.includes('must define at least one top-level pytest test function'))).toBe(true);
+    });
+
+    it('builds TypeScript forge packets (including 0-arg functions), strips TS fences, and validates TS candidates', () => {
+        const dep = indexNode(
+            'slate/nodes/clamp.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'clamp',
+                language: 'typescript',
+                intent: 'Clamp number to bounds',
+                contract: 'lower <= upper',
+                code: ['export function clamp(v: number, lo: number, hi: number): number {', '    return Math.min(hi, Math.max(lo, v));', '}'],
+            }),
+            'typescript',
+            1,
+        );
+        const target = indexNode(
+            'slate/nodes/zeroArgVersion.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'zeroArgVersion',
+                language: 'typescript',
+                intent: 'Return semantic version string',
+                contract: 'Always non-empty',
+                context: ['clamp'],
+                cases: [{ name: 'version', input: {}, expected: '1.0.0' }],
+                code: ['export function zeroArgVersion(): string {', '    throw new Error("Not implemented");', '}'],
+            }),
+            'typescript',
+            1,
+        );
+        const snapshot = { revision: 1, projectName: 'ts-demo', documents: [target.document, dep.document] };
+        const sources = new Map([
+            [target.document.path, target.code],
+            [dep.document.path, dep.code],
+        ]);
+
+        const packet = buildForgePacket(snapshot, sources, 'zeroArgVersion', { language: 'typescript' });
+        expect(packet.boundInputs).toBe(true);
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.prompt).toContain('TypeScript');
+        expect(packet.prompt).toContain('```ts');
+        expect(packet.prompt).toContain('clamp');
+
+        expect(stripModelEnvelope('```ts\nexport const x = 1;\n```', 'typescript')).toBe('export const x = 1;');
+        expect(stripModelEnvelope('```javascript\nexport const x = 1;\n```', 'javascript')).toBe('export const x = 1;');
+
+        const rawReply = [
+            '### Implementation',
+            '```typescript',
+            'export function zeroArgVersion(): string {',
+            "    return '1.0.0';",
+            '}',
+            '```',
+            '### Unit Check',
+            '```ts',
+            "test('zeroArgVersion', () => {",
+            "    expect(zeroArgVersion()).toBe('1.0.0');",
+            '});',
+            '```',
+        ].join('\n');
+        const parsed = parseForgeCandidate(rawReply, 'typescript');
+        expect(parsed.implementation).toContain("return '1.0.0'");
+        expect(parsed.check).toContain("test('zeroArgVersion'");
+
+        const validRes = validateForgeCandidate(target.document.units[0], parsed, 'typescript');
+        expect(validRes.valid).toBe(true);
+        expect(validRes.diagnostics).toEqual([]);
+
+        const badReturn = validateForgeCandidate(
+            target.document.units[0],
+            { implementation: 'export function zeroArgVersion(): number {\n    return 1;\n}' },
+            'typescript',
+        );
+        expect(badReturn.valid).toBe(false);
+        expect(badReturn.diagnostics.some(d => d.includes('return type annotation'))).toBe(true);
+
+        const singleBlock = parseForgeCandidate(
+            "```ts\nexport function zeroArgVersion(): string {\n    return '1.0.0';\n}\n\ntest('zeroArgVersion', () => {\n    expect(zeroArgVersion()).toBe('1.0.0');\n});\n```",
+            'typescript',
+        );
+        expect(singleBlock.implementation).toContain('zeroArgVersion()');
+        expect(singleBlock.check).toContain("test('zeroArgVersion'");
+    });
+
+    it('detects JSX self-closing tags and fragments via AST (#11) and enforces TS param defaults/rest/async/export (#15)', () => {
+        // #11: containsJsxSyntax catches self-closing tags and fragments without closing </tag>, ignoring generics
+        expect(containsJsxSyntax('export function Badge() { return <span className="pill" />; }')).toBe(true);
+        expect(containsJsxSyntax('export function Frag() { return <><span>hi</span></>; }')).toBe(true);
+        expect(containsJsxSyntax('export const id = <T>(x: T): T => x;', '.ts')).toBe(false);
+
+        const tsxTarget = indexNode(
+            'slate/nodes/Pill.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'Pill',
+                language: 'typescript',
+                extension: '.tsx',
+                intent: 'Render pill',
+                contract: 'Returns self-closing span',
+                code: ['export function Pill(label: string) {', '    throw new Error("Not implemented");', '}'],
+            }),
+            'typescript',
+            1,
+        );
+        const tsxValid = validateForgeCandidate(
+            tsxTarget.document.units[0],
+            { implementation: 'export function Pill(label: string) {\n    return <span title={label} />;\n}' },
+            'typescript',
+        );
+        expect(tsxValid.valid).toBe(true);
+
+        // #15: TS parameter defaults, rest kinds, async, and export modifiers must match target
+        const richTarget = indexNode(
+            'slate/nodes/richFn.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'richFn',
+                language: 'typescript',
+                intent: 'Compute score',
+                contract: 'Preserves defaults, rest, async, export',
+                code: ['export async function richFn(base: number = 1, ...extra: number[]): Promise<number> {', '    throw new Error("Not implemented");', '}'],
+            }),
+            'typescript',
+            1,
+        );
+        const unit = richTarget.document.units[0];
+
+        expect(validateForgeCandidate(unit, {
+            implementation: 'export async function richFn(base: number = 1, ...extra: number[]): Promise<number> {\n    return base + extra.length;\n}',
+        }, 'typescript').valid).toBe(true);
+
+        const changedDefault = validateForgeCandidate(unit, {
+            implementation: 'export async function richFn(base: number = 99, ...extra: number[]): Promise<number> {\n    return base;\n}',
+        }, 'typescript');
+        expect(changedDefault.valid).toBe(false);
+        expect(changedDefault.diagnostics.some(d => d.includes('default/optional'))).toBe(true);
+
+        const droppedRest = validateForgeCandidate(unit, {
+            implementation: 'export async function richFn(base: number = 1, extra: number[]): Promise<number> {\n    return base + extra.length;\n}',
+        }, 'typescript');
+        expect(droppedRest.valid).toBe(false);
+        expect(droppedRest.diagnostics.some(d => d.includes('kind'))).toBe(true);
+
+        const droppedAsync = validateForgeCandidate(unit, {
+            implementation: 'export function richFn(base: number = 1, ...extra: number[]): Promise<number> {\n    return Promise.resolve(base);\n}',
+        }, 'typescript');
+        expect(droppedAsync.valid).toBe(false);
+        expect(droppedAsync.diagnostics.some(d => d.includes('async'))).toBe(true);
+
+        const droppedExport = validateForgeCandidate(unit, {
+            implementation: 'async function richFn(base: number = 1, ...extra: number[]): Promise<number> {\n    return base;\n}',
+        }, 'typescript');
+        expect(droppedExport.valid).toBe(false);
+        expect(droppedExport.diagnostics.some(d => d.includes('export modifier'))).toBe(true);
     });
 });

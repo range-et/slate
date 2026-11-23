@@ -1759,4 +1759,127 @@ suite('Slate native persistence and proposal QA', () => {
         const revertedClamp = await read(...nodePath('clamp'));
         assert.ok(!revertedClamp.code.some((l: string) => l.includes('raise ValueError')), 'undo successfully reverted edited candidate');
     });
+
+    test('guards project LLM credentials against passive ready disclosure (#1) and forges/verifies/accepts TS nodes via Canvas Forge (#10)', async () => {
+        // #1: Start local capture server checking Authorization headers received
+        const capturedAuth: Array<string | undefined> = [];
+        const guardServer = http.createServer((req, res) => {
+            capturedAuth.push(req.headers.authorization);
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ data: [{ id: 'guard-model' }] }));
+        });
+        await new Promise<void>(resolve => guardServer.listen(0, '127.0.0.1', resolve));
+        const guardPort = (guardServer.address() as { port: number }).port;
+        const guardUrl = `http://127.0.0.1:${guardPort}`;
+        const prevGuardEnv = process.env.SLATE_TEST_GUARD_KEY;
+        process.env.SLATE_TEST_GUARD_KEY = 'guard-secret-token';
+
+        try {
+            const origConfig = await read('slate', 'slate.json');
+            await vscode.workspace.fs.writeFile(
+                uri('slate', 'slate.json'),
+                encode({
+                    ...origConfig,
+                    llm: { endpoint: guardUrl, model: 'guard-model', apiKeyEnv: 'SLATE_TEST_GUARD_KEY' },
+                }),
+            );
+            await act({ kind: 'refreshIndex' });
+            await messages();
+
+            // Passive `ready` check must NOT contact guardServer or send credentials without explicit consent
+            const seenHealth: any[] = [];
+            await post({ type: 'ready' });
+            await eventually(async () => {
+                for (const m of await messages()) {
+                    if (m.type === 'llamaHealth') seenHealth.push((m as any).status);
+                }
+                return seenHealth.length > 0;
+            }, 'passive ready llamaHealth broadcast');
+            assert.equal(seenHealth.at(-1).ok, false);
+            assert.match(seenHealth.at(-1).statusText, /approval/i);
+            assert.equal(capturedAuth.length, 0, 'passive ready check must never send credentials to project endpoint');
+
+            // Interactive checkLlamaHealth declined -> still blocks credentials
+            replaceMethod(vscode.window, 'showWarningMessage', async () => undefined);
+            await post({ type: 'checkLlamaHealth' });
+            const declinedMsg = (await messages()).find(m => m.type === 'llamaHealth') as any;
+            assert.equal(declinedMsg?.status?.ok, false);
+            assert.equal(capturedAuth.length, 0, 'declining modal must not send credentials');
+
+            // Interactive checkLlamaHealth allowed -> sends Bearer header once approved
+            let modalShown = false;
+            replaceMethod(vscode.window, 'showWarningMessage', async (_msg: string, opts: { modal?: boolean }, btn: string) => {
+                modalShown = opts?.modal === true && btn === 'Allow';
+                return 'Allow';
+            });
+            await post({ type: 'checkLlamaHealth' });
+            const allowedMsg = (await messages()).find(m => m.type === 'llamaHealth') as any;
+            assert.ok(modalShown, 'explicit modal confirmation dialog was shown');
+            assert.equal(allowedMsg?.status?.ok, true);
+            assert.equal(capturedAuth[0], 'Bearer guard-secret-token');
+
+            // Restore python-project slate.json without project llm so remaining assertions use suite server
+            await vscode.workspace.fs.writeFile(uri('slate', 'slate.json'), encode(origConfig));
+            await act({ kind: 'refreshIndex' });
+
+            // #10: Canvas Forge TS generation, strict tsc + Node verification, and acceptProposal on TS node
+            const tsStubNode = {
+                slate: 3,
+                name: 'scale_ts',
+                language: 'typescript',
+                intent: 'Double input number',
+                contract: 'Returns x * 2',
+                context: [],
+                locked: false,
+                describedBy: 'human',
+                cases: [{ id: 'c1', inputs: { x: 3 }, expected: 6 }],
+                code: ['export function scale_ts(x: number): number {', '    throw new Error("Not implemented");', '}'],
+            };
+            await vscode.workspace.fs.writeFile(uri(...nodePath('scale_ts')), encode(tsStubNode));
+            await act({ kind: 'refreshIndex' });
+            await messages();
+            requests.length = 0;
+
+            const tsReply = [
+                '### Implementation',
+                '```ts',
+                'export function scale_ts(x: number): number {',
+                '    return x * 2;',
+                '}',
+                '```',
+                '',
+                '### Unit Check',
+                '```ts',
+                "test('scale_ts', () => {",
+                '    expect(scale_ts(3)).toBe(6);',
+                '});',
+                '```',
+            ].join('\n');
+            serverResponseContent = tsReply;
+
+            await post({ type: 'generate', unitId: 'scale_ts' });
+            const genMsgs = await messages();
+            const tsReady = genMsgs.find(m => m.type === 'proposalReady');
+            assert.ok(tsReady?.proposal, JSON.stringify(genMsgs));
+            assert.ok(requests.some(r => r.includes('TypeScript')), 'TS forge prompt mentions TypeScript');
+
+            const propId = tsReady!.proposal!.id;
+            await post({ type: 'verifyCandidate', proposalId: propId, candidate: tsReady!.proposal!.candidate });
+            const verifyMsgs = await messages();
+            const verif = verifyMsgs.find(m => m.type === 'candidateVerification') as any;
+            assert.equal(verif?.passed, true, JSON.stringify(verifyMsgs));
+
+            await post({ type: 'acceptProposal', proposalId: propId });
+            const acceptMsgs = await messages();
+            assert.ok(acceptMsgs.some(m => m.type === 'proposalAccepted' && m.unitId === 'scale_ts'), JSON.stringify(acceptMsgs));
+
+            const savedTs = await read(...nodePath('scale_ts'));
+            assert.ok(savedTs.code.some((l: string) => l.includes('return x * 2;')));
+            assert.ok(Array.isArray(savedTs.check) && savedTs.check.some((l: string) => l.includes("test('scale_ts'")));
+        } finally {
+            if (prevGuardEnv === undefined) delete process.env.SLATE_TEST_GUARD_KEY;
+            else process.env.SLATE_TEST_GUARD_KEY = prevGuardEnv;
+            await new Promise<void>(resolve => guardServer.close(() => resolve()));
+        }
+    });
 });

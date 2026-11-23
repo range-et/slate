@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 import { HarnessPanel } from './harness_panel';
-import { compileSlateFolder, portPythonFolder } from './port_compile_host';
+import { compileSlateFolder, portProjectFolder, portPythonFolder } from './port_compile_host';
 import { PythonAdapter } from './python_adapter';
 import { SlateMcpServer } from './mcp/slate_mcp_server';
 import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, serializeLayout } from './slate_folder';
@@ -17,6 +17,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
         vscode.commands.registerCommand('slate.newProject', () => createNewSlateProject()),
         vscode.commands.registerCommand('slate.portProject', (source?: vscode.Uri) => portProject(source)),
+        vscode.commands.registerCommand('slate.portAnyProject', (source?: vscode.Uri, language?: string) => portAnyProject(source, language)),
         vscode.commands.registerCommand('slate.compile', () => compileProject()),
         vscode.window.registerWebviewViewProvider('slate.launcher', new SlateLauncherView()),
         vscode.window.registerCustomEditorProvider(
@@ -42,10 +43,12 @@ export function activate(context: vscode.ExtensionContext): void {
                     onNotesPlaced: async () => { HarnessPanel.current?.scheduleRefresh(0); },
                     getLlamaConfig: () => {
                         const config = vscode.workspace.getConfiguration('slate.llama');
+                        const apiKeyEnv = config.get<string>('apiKeyEnv', '').trim();
                         return {
                             endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
                             model: config.get('model', 'local'),
                             timeoutSeconds: config.get('timeoutSeconds', 120),
+                            ...(apiKeyEnv ? { apiKeyEnv } : {}),
                         };
                     },
                     setLlamaConfig: async cfg => {
@@ -53,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
                         if (cfg.endpoint) await config.update('endpoint', cfg.endpoint, vscode.ConfigurationTarget.Global);
                         if (cfg.model) await config.update('model', cfg.model, vscode.ConfigurationTarget.Global);
                         if (cfg.timeoutSeconds) await config.update('timeoutSeconds', cfg.timeoutSeconds, vscode.ConfigurationTarget.Global);
+                        if (cfg.apiKeyEnv !== undefined) await config.update('apiKeyEnv', cfg.apiKeyEnv, vscode.ConfigurationTarget.Global);
                     },
                 });
             }),
@@ -95,15 +99,23 @@ async function createNewSlateProject(): Promise<void> {
     await vscode.commands.executeCommand('vscode.openWith', config, 'slate.editor');
 }
 
-async function portProject(source?: vscode.Uri): Promise<number> {
+async function runPort(runner: (root: vscode.Uri) => Promise<number>): Promise<number> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
         vscode.window.showErrorMessage('Open a workspace folder first; Slate writes its slate/ folder there.');
         return 0;
     }
-    const count = await portPythonFolder(folder.uri, source);
+    const count = await runner(folder.uri);
     if (count > 0) await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.joinPath(folder.uri, ...CONFIG_PATH.split('/')), 'slate.editor');
     return count;
+}
+
+async function portProject(source?: vscode.Uri): Promise<number> {
+    return runPort((root) => portPythonFolder(root, source));
+}
+
+async function portAnyProject(source?: vscode.Uri, language?: string): Promise<number> {
+    return runPort((root) => portProjectFolder(root, source, language));
 }
 
 async function compileProject(): Promise<Awaited<ReturnType<typeof compileSlateFolder>> | undefined> {

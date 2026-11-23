@@ -859,6 +859,11 @@ function markdownBodyToLatex(text: string): string {
 
     const outLines: string[] = [];
     for (const line of text.split(/\r?\n/)) {
+        const texSection = line.match(/^\s*(\\(?:sub)*section\*?)\{(.+)\}\s*$/);
+        if (texSection) {
+            outLines.push(`${texSection[1]}{${inline(texSection[2].trim())}}`);
+            continue;
+        }
         const h1 = line.match(/^\s*#\s+(.+?)\s*$/);
         if (h1) {
             outLines.push(`\\section{${inline(h1[1].trim())}}`);
