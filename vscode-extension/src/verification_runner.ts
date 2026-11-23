@@ -1413,31 +1413,76 @@ async function runTsNodeVerification(
             boundTypes.add(sym);
         };
 
-        const emitDepImports = (
-            depSpec: { moduleBase: string; exportedSymbols: readonly string[]; exportedValues: ReadonlySet<string>; exportedTypes: ReadonlySet<string> },
+        type DepImportCandidate = {
+            moduleBase: string;
+            exportedSymbols: readonly string[];
+            exportedValues: ReadonlySet<string>;
+            exportedTypes: ReadonlySet<string>;
+        };
+
+        const emitAllDepImports = (
+            depSpecs: readonly DepImportCandidate[],
             refs: { valueRefs: ReadonlySet<string>; typeRefs: ReadonlySet<string> },
             boundValues: Set<string>,
             boundTypes: Set<string>,
             outLines: string[],
         ): void => {
-            const valueNeeded: string[] = [];
-            const typeOnlyNeeded: string[] = [];
-            for (const sym of depSpec.exportedSymbols) {
-                const needsValue = depSpec.exportedValues.has(sym) && refs.valueRefs.has(sym);
-                const needsType = depSpec.exportedTypes.has(sym) && refs.typeRefs.has(sym);
-                if ((!needsValue && !needsType) || !canImportDepSymbol(depSpec, sym, boundValues, boundTypes)) continue;
+            const perDep = new Map<string, { valueNeeded: string[]; typeOnlyNeeded: string[] }>();
+            const tryAcquire = (depSpec: DepImportCandidate, sym: string): void => {
+                if (!canImportDepSymbol(depSpec, sym, boundValues, boundTypes)) return;
+                let entry = perDep.get(depSpec.moduleBase);
+                if (!entry) {
+                    entry = { valueNeeded: [], typeOnlyNeeded: [] };
+                    perDep.set(depSpec.moduleBase, entry);
+                }
                 if (depSpec.exportedValues.has(sym)) {
-                    valueNeeded.push(sym);
+                    entry.valueNeeded.push(sym);
                 } else {
-                    typeOnlyNeeded.push(sym);
+                    entry.typeOnlyNeeded.push(sym);
                 }
                 recordDepSymbol(sym, boundValues, boundTypes);
+            };
+
+            // Pass 1: dual providers when a symbol needs both value and type namespaces
+            for (const depSpec of depSpecs) {
+                for (const sym of depSpec.exportedSymbols) {
+                    if (
+                        depSpec.exportedValues.has(sym) && depSpec.exportedTypes.has(sym)
+                        && refs.valueRefs.has(sym) && refs.typeRefs.has(sym)
+                    ) {
+                        tryAcquire(depSpec, sym);
+                    }
+                }
             }
-            if (valueNeeded.length > 0) {
-                outLines.push(`import { ${valueNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+            // Pass 2: value providers whenever a value reference exists, so an earlier
+            // type-only dependency does not reserve the name and block required runtime bindings
+            for (const depSpec of depSpecs) {
+                for (const sym of depSpec.exportedSymbols) {
+                    if (depSpec.exportedValues.has(sym) && refs.valueRefs.has(sym)) {
+                        tryAcquire(depSpec, sym);
+                    }
+                }
             }
-            if (typeOnlyNeeded.length > 0) {
-                outLines.push(`import type { ${typeOnlyNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+            // Pass 3: remaining type-only providers for remaining type references
+            for (const depSpec of depSpecs) {
+                for (const sym of depSpec.exportedSymbols) {
+                    if (depSpec.exportedTypes.has(sym) && refs.typeRefs.has(sym)) {
+                        tryAcquire(depSpec, sym);
+                    }
+                }
+            }
+
+            for (const depSpec of depSpecs) {
+                const entry = perDep.get(depSpec.moduleBase);
+                if (!entry) continue;
+                if (entry.valueNeeded.length > 0) {
+                    entry.valueNeeded.sort();
+                    outLines.push(`import { ${entry.valueNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+                }
+                if (entry.typeOnlyNeeded.length > 0) {
+                    entry.typeOnlyNeeded.sort();
+                    outLines.push(`import type { ${entry.typeOnlyNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+                }
             }
         };
 
@@ -1456,10 +1501,13 @@ async function runTsNodeVerification(
             const boundTypesInDep = new Set<string>([...depImports.bindings, ...decls.typeSymbols, ...decls.exportedVariables]);
             const depParts: string[] = [...depImports.lines];
 
-            for (const other of depSpecsRaw) {
-                if (other.dep === dep) continue;
-                emitDepImports(other, depRefs, boundValuesInDep, boundTypesInDep, depParts);
-            }
+            emitAllDepImports(
+                depSpecsRaw.filter(other => other.dep !== dep),
+                depRefs,
+                boundValuesInDep,
+                boundTypesInDep,
+                depParts,
+            );
 
             // Support mutual recursion (helper calling target function)
             if (
@@ -1505,9 +1553,7 @@ async function runTsNodeVerification(
         const boundTypesInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.typeSymbols, ...targetDecls.exportedVariables]);
 
         const implParts: string[] = [...targetImports.lines];
-        for (const depSpec of depModules) {
-            emitDepImports(depSpec, targetRefs, boundValuesInTarget, boundTypesInTarget, implParts);
-        }
+        emitAllDepImports(depModules, targetRefs, boundValuesInTarget, boundTypesInTarget, implParts);
         implParts.push(...targetLines);
 
         if (targetDecls.unexportedValues.includes(node.name) || !targetDecls.allSymbols.includes(node.name)) {
@@ -1539,9 +1585,7 @@ async function runTsNodeVerification(
             }
         }
         const testHeader: string[] = [`import { ${node.name} } from './${safeBase}_impl';`];
-        for (const depSpec of depModules) {
-            emitDepImports(depSpec, testRefs, boundValuesInTest, boundTypesInTest, testHeader);
-        }
+        emitAllDepImports(depModules, testRefs, boundValuesInTest, boundTypesInTest, testHeader);
         const testSource = [...testHeader, ...testBodyLines].join('\n') + '\n';
 
         const implTsPath = path.join(buildDir, `${safeBase}_impl${ext}`);

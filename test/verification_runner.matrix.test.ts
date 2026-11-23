@@ -1487,5 +1487,186 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(reexportCombinedRes.state, reexportCombinedRes.traceback).toBe('passed');
             expect(reexportCombinedRes.pydanticValid).toBe(true);
         }, 40_000);
+
+        it('prioritizes dual and value dep providers before earlier type-only imports across deps, target, and tests', async () => {
+            const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-priority-'));
+            tempDirs.push(workspaceRoot);
+
+            const depSharedType = makeNode({
+                name: 'depSharedType',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports type SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export type SHARED = string;'],
+            });
+            const depSharedVal = makeNode({
+                name: 'depSharedVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports value SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const SHARED = 7;'],
+            });
+
+            // Case 1: `[depSharedType, depSharedVal]` (`type` FIRST, `value` SECOND) with value + `export { SHARED }` re-export
+            const namedReexportTarget = makeNode({
+                name: 'pickSharedNamed',
+                language: 'typescript',
+                intent: 'Checks combined value + named re-export reference resolves SHARED value even when depSharedType comes first',
+                contract: '',
+                context: ['depSharedType', 'depSharedVal'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: ['export function pickSharedNamed(): number {', '    return 1;', '}'],
+                check: [
+                    'export { SHARED };',
+                    "test('picks value over earlier type for combined value+reexport refs', () => {",
+                    '    expect(SHARED).toBe(7);',
+                    '    expect(pickSharedNamed()).toBe(1);',
+                    '});',
+                ],
+            });
+            const namedReexportRes = await runNodeVerification({
+                workspaceRoot,
+                node: namedReexportTarget,
+                nodeId: 'pickSharedNamed',
+                dependencies: new Map([
+                    ['depSharedType', depSharedType],
+                    ['depSharedVal', depSharedVal],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(namedReexportRes.state, namedReexportRes.traceback).toBe('passed');
+            expect(namedReexportRes.pydanticValid).toBe(true);
+
+            // Case 2: `[depSharedType, depSharedVal]` (`type` FIRST, `value` SECOND) with value + `export default SHARED`
+            const defaultReexportTarget = makeNode({
+                name: 'pickSharedDefault',
+                language: 'typescript',
+                intent: 'Checks combined value + export default reference resolves SHARED value even when depSharedType comes first',
+                contract: '',
+                context: ['depSharedType', 'depSharedVal'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: ['export function pickSharedDefault(): number {', '    return 1;', '}'],
+                check: [
+                    'export default SHARED;',
+                    "test('picks value over earlier type for export default refs', () => {",
+                    '    expect(SHARED).toBe(7);',
+                    '    expect(pickSharedDefault()).toBe(1);',
+                    '});',
+                ],
+            });
+            const defaultReexportRes = await runNodeVerification({
+                workspaceRoot,
+                node: defaultReexportTarget,
+                nodeId: 'pickSharedDefault',
+                dependencies: new Map([
+                    ['depSharedType', depSharedType],
+                    ['depSharedVal', depSharedVal],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(defaultReexportRes.state, defaultReexportRes.traceback).toBe('passed');
+            expect(defaultReexportRes.pydanticValid).toBe(true);
+
+            // Case 3: Dual provider (`export class Box`) beats earlier value-only provider (`export const Box = 1`)
+            // across dep helper module, target impl module, and test module when both value & type refs exist.
+            const depBoxVal = makeNode({
+                name: 'depBoxVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value-only Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const Box = 1;'],
+            });
+            const depBoxClass = makeNode({
+                name: 'depBoxClass',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting dual value+type class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export class Box { v = 5; }'],
+            });
+            const helperBoxNode = makeNode({
+                name: 'helperReadBox',
+                language: 'typescript',
+                intent: 'Helper using Box as both type annotation and constructor',
+                contract: '',
+                context: ['depBoxVal', 'depBoxClass'],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: [
+                    'export function helperReadBox(): number {',
+                    '    const b: Box = new Box();',
+                    '    return b.v;',
+                    '}',
+                ],
+            });
+            const dualBoxTarget = makeNode({
+                name: 'useDualBox',
+                language: 'typescript',
+                intent: 'Target using Box as both type annotation and constructor alongside helperReadBox',
+                contract: '',
+                context: ['depBoxVal', 'depBoxClass', 'helperReadBox'],
+                imports: [],
+                uses: ['helperReadBox'],
+                cases: undefined,
+                code: [
+                    'export function useDualBox(): number {',
+                    '    const b: Box = new Box();',
+                    '    return b.v + helperReadBox();',
+                    '}',
+                ],
+                check: [
+                    "test('selects dual class Box over earlier value-only Box across deps, target, and test', () => {",
+                    '    const b: Box = new Box();',
+                    '    expect(b.v).toBe(5);',
+                    '    expect(useDualBox()).toBe(10);',
+                    '});',
+                ],
+            });
+            const dualBoxRes = await runNodeVerification({
+                workspaceRoot,
+                node: dualBoxTarget,
+                nodeId: 'useDualBox',
+                dependencies: new Map([
+                    ['depBoxVal', depBoxVal],
+                    ['depBoxClass', depBoxClass],
+                    ['helperReadBox', helperBoxNode],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(dualBoxRes.state, dualBoxRes.traceback).toBe('passed');
+            expect(dualBoxRes.pydanticValid).toBe(true);
+        }, 40_000);
     });
 });
