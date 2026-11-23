@@ -371,4 +371,149 @@ describe('runBoundedElectronProcess', () => {
         })).rejects.toThrow(`${field} must be a positive finite number`);
         expect(spawnProcess).not.toHaveBeenCalled();
     });
+
+    it('stops gracefully on first SIGINT when the child honors termination', async () => {
+        vi.useFakeTimers();
+        const { child, stdoutChunks, stderrChunks } = createChildFixture();
+        const signals = new EventEmitter();
+        const terminateProcess = vi.fn(() => {
+            child.emitExit(null, 'SIGINT');
+        });
+
+        const pending = runBoundedElectronProcess({
+            executablePath: 'code',
+            args: [],
+            resultFile: '/tmp/result.json',
+            graceMs: 100,
+            pollIntervalMs: 25,
+            overallTimeoutMs: 1000,
+            forceKillWaitMs: 50,
+            signalSource: signals,
+            ...makeFakeOutputs(stdoutChunks, stderrChunks),
+            spawnProcess: () => child,
+            readResultFile: () => undefined,
+            terminateProcess,
+        });
+
+        signals.emit('SIGINT');
+        await expect(pending).rejects.toThrow('VS Code test run interrupted by SIGINT');
+        expect(terminateProcess).toHaveBeenCalledExactlyOnceWith(child, false);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(signals.listenerCount('SIGINT')).toBe(0);
+        expect(signals.listenerCount('SIGTERM')).toBe(0);
+    });
+
+    it('escalates SIGTERM to forced termination after graceMs if the child ignores graceful shutdown', async () => {
+        vi.useFakeTimers();
+        const { child, stdoutChunks, stderrChunks } = createChildFixture();
+        const signals = new EventEmitter();
+        const warn = vi.fn();
+        const terminateProcess = vi.fn((_c: ElectronChildProcess, force: boolean) => {
+            if (force) {
+                child.emitExit(null, 'SIGKILL');
+            }
+        });
+
+        const pending = runBoundedElectronProcess({
+            executablePath: 'code',
+            args: [],
+            resultFile: '/tmp/result.json',
+            graceMs: 80,
+            pollIntervalMs: 20,
+            overallTimeoutMs: 1000,
+            forceKillWaitMs: 50,
+            warn,
+            signalSource: signals,
+            ...makeFakeOutputs(stdoutChunks, stderrChunks),
+            spawnProcess: () => child,
+            readResultFile: () => undefined,
+            terminateProcess,
+        });
+
+        signals.emit('SIGTERM');
+        await vi.advanceTimersByTimeAsync(79);
+        expect(terminateProcess).toHaveBeenCalledExactlyOnceWith(child, false);
+
+        const expectation = expect(pending).rejects.toThrow('VS Code test run interrupted by SIGTERM');
+        await vi.advanceTimersByTimeAsync(1);
+        await expectation;
+        expect(terminateProcess).toHaveBeenCalledTimes(2);
+        expect(terminateProcess).toHaveBeenNthCalledWith(1, child, false);
+        expect(terminateProcess).toHaveBeenNthCalledWith(2, child, true);
+        expect(warn).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(signals.listenerCount('SIGINT')).toBe(0);
+        expect(signals.listenerCount('SIGTERM')).toBe(0);
+    });
+
+    it('immediately escalates repeated SIGINT before graceMs expires', async () => {
+        vi.useFakeTimers();
+        const { child, stdoutChunks, stderrChunks } = createChildFixture();
+        const signals = new EventEmitter();
+        const warn = vi.fn();
+        const terminateProcess = vi.fn((_c: ElectronChildProcess, force: boolean) => {
+            if (force) {
+                child.emitExit(null, 'SIGKILL');
+            }
+        });
+
+        const pending = runBoundedElectronProcess({
+            executablePath: 'code',
+            args: [],
+            resultFile: '/tmp/result.json',
+            graceMs: 500,
+            pollIntervalMs: 50,
+            overallTimeoutMs: 5000,
+            forceKillWaitMs: 50,
+            warn,
+            signalSource: signals,
+            ...makeFakeOutputs(stdoutChunks, stderrChunks),
+            spawnProcess: () => child,
+            readResultFile: () => undefined,
+            terminateProcess,
+        });
+
+        signals.emit('SIGINT');
+        signals.emit('SIGINT');
+        await expect(pending).rejects.toThrow('VS Code test run interrupted by SIGINT');
+        expect(terminateProcess).toHaveBeenCalledTimes(2);
+        expect(terminateProcess).toHaveBeenNthCalledWith(1, child, false);
+        expect(terminateProcess).toHaveBeenNthCalledWith(2, child, true);
+        expect(warn).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(signals.listenerCount('SIGINT')).toBe(0);
+        expect(signals.listenerCount('SIGTERM')).toBe(0);
+    });
+
+    it('rejects if child ignores both graceful and forced termination after interrupt', async () => {
+        vi.useFakeTimers();
+        const { child, stdoutChunks, stderrChunks } = createChildFixture();
+        const signals = new EventEmitter();
+        const terminateProcess = vi.fn();
+
+        const pending = runBoundedElectronProcess({
+            executablePath: 'code',
+            args: [],
+            resultFile: '/tmp/result.json',
+            graceMs: 40,
+            pollIntervalMs: 10,
+            overallTimeoutMs: 1000,
+            forceKillWaitMs: 30,
+            warn: vi.fn(),
+            signalSource: signals,
+            ...makeFakeOutputs(stdoutChunks, stderrChunks),
+            spawnProcess: () => child,
+            readResultFile: () => undefined,
+            terminateProcess,
+        });
+
+        signals.emit('SIGINT');
+        const expectation = expect(pending).rejects.toThrow('did not exit after forced shutdown');
+        await vi.advanceTimersByTimeAsync(75);
+        await expectation;
+        expect(terminateProcess).toHaveBeenCalledTimes(2);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(signals.listenerCount('SIGINT')).toBe(0);
+        expect(signals.listenerCount('SIGTERM')).toBe(0);
+    });
 });

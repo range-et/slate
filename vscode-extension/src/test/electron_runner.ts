@@ -32,6 +32,11 @@ export type ReadElectronResultFile = (filePath: string) => ElectronTestResult | 
 
 export type TerminateElectronProcess = (child: ElectronChildProcess, force: boolean) => Promise<void> | void;
 
+export interface SignalSource {
+    on(event: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
+    removeListener(event: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
+}
+
 export interface BoundedElectronRunOptions {
     executablePath: string;
     args: readonly string[];
@@ -44,6 +49,7 @@ export interface BoundedElectronRunOptions {
     stdout?: { write(chunk: string | Uint8Array): unknown };
     stderr?: { write(chunk: string | Uint8Array): unknown };
     warn?: (message: string) => void;
+    signalSource?: SignalSource;
     spawnProcess?: SpawnElectronProcess;
     readResultFile?: ReadElectronResultFile;
     terminateProcess?: TerminateElectronProcess;
@@ -160,6 +166,7 @@ export async function runBoundedElectronProcess(options: BoundedElectronRunOptio
         stdout = process.stdout,
         stderr = process.stderr,
         warn = console.warn,
+        signalSource = process,
         spawnProcess = defaultSpawnProcess,
         readResultFile = defaultReadResultFile,
         terminateProcess = defaultTerminateProcess,
@@ -252,8 +259,8 @@ export async function runBoundedElectronProcess(options: BoundedElectronRunOptio
             clearGraceTimer();
             clearOverallTimer();
             clearForceTimer();
-            process.removeListener('SIGINT', onSigint);
-            process.removeListener('SIGTERM', onSigterm);
+            signalSource.removeListener('SIGINT', onSigint);
+            signalSource.removeListener('SIGTERM', onSigterm);
             child.removeListener('exit', onProcessClosed);
             child.removeListener('close', onProcessClosed);
             child.removeListener('error', onProcessError);
@@ -337,7 +344,7 @@ export async function runBoundedElectronProcess(options: BoundedElectronRunOptio
             succeedWith(0);
         };
 
-        const triggerForcedShutdown = async (reason: 'result' | 'timeout' | 'readError'): Promise<void> => {
+        const triggerForcedShutdown = async (reason: 'result' | 'timeout' | 'readError' | 'signal'): Promise<void> => {
             if (settled || terminating) return;
             terminating = true;
             stopPolling();
@@ -355,6 +362,8 @@ export async function runBoundedElectronProcess(options: BoundedElectronRunOptio
             } else if (reason === 'readError') {
                 forcedAfterResult = true;
                 warn('VS Code Extension Host result could not be read before shutdown timeout; forcing shutdown.');
+            } else if (reason === 'signal') {
+                warn(`VS Code did not exit after ${interruptedSignal ?? 'signal'}; forcing shutdown.`);
             } else {
                 forcedAfterResult = true;
                 warn(`VS Code shutdown exceeded ${graceMs}ms after Extension Host finished; closing its owned test process.`);
@@ -377,10 +386,27 @@ export async function runBoundedElectronProcess(options: BoundedElectronRunOptio
 
         const handleSignal = (signal: NodeJS.Signals): void => {
             if (settled) return;
+            if (terminating) {
+                interruptedSignal = interruptedSignal ?? signal;
+                return;
+            }
+            if (interruptedSignal) {
+                clearGraceTimer();
+                void triggerForcedShutdown('signal');
+                return;
+            }
             interruptedSignal = signal;
             stopPolling();
             clearGraceTimer();
             clearOverallTimer();
+            if (hasExited()) {
+                finalizeExit(child.exitCode, child.signalCode);
+                return;
+            }
+            graceTimer = setTimeout(() => {
+                graceTimer = undefined;
+                void triggerForcedShutdown('signal');
+            }, graceMs);
             void (async () => {
                 try {
                     await terminateProcess(child, false);
@@ -434,8 +460,8 @@ export async function runBoundedElectronProcess(options: BoundedElectronRunOptio
         child.on('exit', onProcessClosed);
         child.on('close', onProcessClosed);
         child.on('error', onProcessError);
-        process.on('SIGINT', onSigint);
-        process.on('SIGTERM', onSigterm);
+        signalSource.on('SIGINT', onSigint);
+        signalSource.on('SIGTERM', onSigterm);
 
         if (hasExited()) {
             finalizeExit(child.exitCode, child.signalCode);
