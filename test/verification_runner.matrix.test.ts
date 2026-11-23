@@ -155,6 +155,49 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(moduleContent).toContain('from decimal import Decimal');
         });
 
+        it('imports non-prelude dependency symbols into test file unless already bound in node.check (#55)', () => {
+            const depValidate = makeNode({
+                name: 'validate_grid',
+                code: ['def validate_grid(g: list[list[int]]) -> bool:', '    return True'],
+            });
+            const depCopy = makeNode({
+                name: 'copy_grid',
+                code: ['def copy_grid(g: list[list[int]]) -> list[list[int]]:', '    return [list(r) for r in g]'],
+            });
+            const depAlreadyInCheck = makeNode({
+                name: 'local_helper',
+                code: ['def local_helper() -> int:', '    return 1'],
+            });
+            const preludeNode = makeNode({
+                name: 'GRID_CONST',
+                kind: 'prelude',
+                code: ['GRID_CONST = 9'],
+            });
+            const deps = new Map([
+                ['sudoku/validate_grid', depValidate],
+                ['sudoku/copy_grid', depCopy],
+                ['sudoku/local_helper', depAlreadyInCheck],
+                ['sudoku/GRID_CONST', preludeNode],
+            ]);
+            const target = makeNode({
+                name: 'solve_sudoku',
+                code: ['def solve_sudoku(grid: list[list[int]]) -> int:', '    return 0'],
+                check: [
+                    'def local_helper() -> int:',
+                    '    return 2',
+                    'def test_solve_sudoku():',
+                    '    assert solve_sudoku([[0]]) == 0',
+                    '    assert validate_grid([[0]]) is True',
+                ],
+                cases: undefined,
+            });
+            const { testContent } = generateVerificationFiles(target, deps, 'sudoku/solve_sudoku');
+            expect(testContent).toContain('from solve_sudoku_impl import solve_sudoku');
+            expect(testContent).toContain('from solve_sudoku_impl import copy_grid, validate_grid');
+            expect(testContent).not.toContain('from solve_sudoku_impl import copy_grid, local_helper');
+            expect(testContent).not.toContain('GRID_CONST');
+        });
+
         it('enforces strict Pydantic bool-vs-int rejection while preserving int-to-float promotion in real pytest', async () => {
             const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-strict-pydantic-'));
             try {

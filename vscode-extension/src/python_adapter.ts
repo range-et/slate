@@ -421,6 +421,24 @@ export function topLevelBindings(source: string): Set<string> {
     return names;
 }
 
+/** Return names of any nested functions or classes defined inside a function body. */
+export function findNestedPythonDefinitions(source: string): string[] {
+    const names: string[] = [];
+    const visit = (node: SyntaxNode, insideFunction: boolean) => {
+        if (node.name === 'FunctionDefinition' || node.name === 'ClassDefinition') {
+            if (insideFunction) {
+                const name = firstDirect(node, 'VariableName');
+                if (name) names.push(source.slice(name.from, name.to));
+            }
+            for (const child of directChildren(node)) visit(child, true);
+            return;
+        }
+        for (const child of directChildren(node)) visit(child, insideFunction);
+    };
+    visit(parser.parse(source).topNode, false);
+    return names;
+}
+
 function requireFresh(source: string, expectedHash: unknown): void {
     const actual = sourceHash(source);
     if (expectedHash !== actual) throw new AdapterError(`stale source: expected ${String(expectedHash)}, current ${actual}`);

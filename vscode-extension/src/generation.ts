@@ -1,9 +1,10 @@
 import { HarnessDocument, HarnessSnapshot, ParsedUnit, SourcePosition } from './harness_protocol';
 import { tryNormalizeLanguage } from './language_types';
-import { findForbiddenSlateImports, hoistLeadingPythonImports, parseModule } from './python_adapter';
+import { findForbiddenSlateImports, findNestedPythonDefinitions, hoistLeadingPythonImports, parseModule } from './python_adapter';
 import { parseTsModule, containsJsxSyntax } from './ts_adapter';
 
 export const FORGE_INPUT_BUDGET_TOKENS = 600;
+export const DEFAULT_FORGE_OUTPUT_TOKENS = 1536;
 export const JPL60_MAX_LINES = 60;
 
 export interface PacketItem {
@@ -330,11 +331,17 @@ export function buildGenerationPacket(
         const casesFormatted = cases && cases.length > 0 ? formatCases(cases) : '';
         const feedbackFormatted = retryFeedback ? `### Bounded Retry Feedback (revised code must fix these issues):\n${retryFeedback}` : '';
 
-        const formatForgePrompt = (neighborList: NeighborSignatureContext[]): string => {
+        const formatForgePrompt = (
+            neighborList: readonly NeighborSignatureContext[],
+            signatureOnlyList: readonly NeighborSignatureContext[] = [],
+        ): string => {
             const neighborSection = neighborList.length > 0
                 ? `### Reference neighbor signatures:\n${neighborList.map(n =>
                     `### Dependency: ${n.qualifiedName}\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}${n.contract ? `\nContract: ${n.contract}` : ''}`
                 ).join('\n\n')}`
+                : '';
+            const signatureOnlySection = signatureOnlyList.length > 0
+                ? `### Additional dependencies in scope (signatures only):\n${signatureOnlyList.map(n => `- ${n.signature}`).join('\n')}`
                 : '';
 
             const promptParts = langKind === 'python'
@@ -346,24 +353,29 @@ export function buildGenerationPacket(
                     targetImports.length > 0 ? `Pre-declared imports (already at module top): ${targetImports.join('; ')}` : '',
                     casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
                     feedbackFormatted,
-                    `Rules:`,
-                    `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
-                    `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
-                    `- Listed dependencies are already in scope inside your function; ${target.unit.name} is already imported in the test file. NEVER import from slate.* or file paths.`,
-                    `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases (use pytest.approx for float comparisons).`,
+                    [
+                        `Rules:`,
+                        `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
+                        `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
+                        `- Listed dependencies are already in scope inside your function; ${target.unit.name} is already imported in the test file. NEVER import from slate.* or file paths, and NEVER redefine listed dependencies inside your function.`,
+                        `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases (use pytest.approx for float comparisons).`,
+                    ].join('\n'),
                     neighborSection,
+                    signatureOnlySection,
                     `### Target stub: ${target.unit.qualifiedName}\n\`\`\`python\n${items[0].source}\n\`\`\``,
-                    `Output format (use these exact section headers):`,
-                    `### Implementation`,
-                    `\`\`\`python`,
-                    `def ${target.unit.name}(...):`,
-                    `    ...`,
-                    `\`\`\``,
-                    `### Unit Check`,
-                    `\`\`\`python`,
-                    `def test_${target.unit.name}():`,
-                    `    ...`,
-                    `\`\`\``,
+                    [
+                        `Output format (use these exact section headers):`,
+                        `### Implementation`,
+                        `\`\`\`python`,
+                        `def ${target.unit.name}(...):`,
+                        `    ...`,
+                        `\`\`\``,
+                        `### Unit Check`,
+                        `\`\`\`python`,
+                        `def test_${target.unit.name}():`,
+                        `    ...`,
+                        `\`\`\``,
+                    ].join('\n'),
                 ].filter(Boolean)
                 : (() => {
                     const fenceTag = langKind === 'typescript' ? 'ts' : 'js';
@@ -378,26 +390,31 @@ export function buildGenerationPacket(
                         contract ? `Contract: ${contract}` : '',
                         casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
                         feedbackFormatted,
-                        `Rules:`,
-                        `- Preserve export modifiers, function name, signature, and parameter/return${typeRule}.`,
-                        `- The implementation MUST be <=60 lines${strictRule} with bounded control flow (JPL-60).`,
-                        `- Only call dependencies provided in Reference neighbor signatures or standard ${langDisplay} built-ins.`,
-                        `- The unit check MUST use test('${target.unit.name}', () => { ... }) with expect(...) assertions (no imports needed).`,
+                        [
+                            `Rules:`,
+                            `- Preserve export modifiers, function name, signature, and parameter/return${typeRule}.`,
+                            `- The implementation MUST be <=60 lines${strictRule} with bounded control flow (JPL-60).`,
+                            `- Only call dependencies provided in Reference neighbor signatures or standard ${langDisplay} built-ins; NEVER redefine listed dependencies locally.`,
+                            `- The unit check MUST use test('${target.unit.name}', () => { ... }) with expect(...) assertions (no imports needed).`,
+                        ].join('\n'),
                         neighborSection,
+                        signatureOnlySection,
                         `### Target stub: ${target.unit.qualifiedName}\n\`\`\`${fenceTag}\n${items[0].source}\n\`\`\``,
-                        `Output format (use these exact section headers):`,
-                        `### Implementation`,
-                        `\`\`\`${fenceTag}`,
-                        `export function ${target.unit.name}(...)${retExample} {`,
-                        `    ...`,
-                        `}`,
-                        `\`\`\``,
-                        `### Unit Check`,
-                        `\`\`\`${fenceTag}`,
-                        `test('${target.unit.name}', () => {`,
-                        `    ...`,
-                        `});`,
-                        `\`\`\``,
+                        [
+                            `Output format (use these exact section headers):`,
+                            `### Implementation`,
+                            `\`\`\`${fenceTag}`,
+                            `export function ${target.unit.name}(...)${retExample} {`,
+                            `    ...`,
+                            `}`,
+                            `\`\`\``,
+                            `### Unit Check`,
+                            `\`\`\`${fenceTag}`,
+                            `test('${target.unit.name}', () => {`,
+                            `    ...`,
+                            `});`,
+                            `\`\`\``,
+                        ].join('\n'),
                     ].filter(Boolean);
                 })();
 
@@ -410,8 +427,7 @@ export function buildGenerationPacket(
             throw new PacketError(`Target stub, cases, and feedback require about ${coreTokens} tokens, which exceeds the micro-packet budget of ${inputBudgetTokens}. Refusing oversized target.`);
         }
 
-        const neighbors: NeighborSignatureContext[] = [];
-        const omittedNeighbors: string[] = [];
+        const allCandidates: NeighborSignatureContext[] = [];
         const neighborSignatures: Record<string, { signature: string; sourceHash: string }> = {};
 
         for (const dependencyId of dependencies) {
@@ -436,7 +452,7 @@ export function buildGenerationPacket(
             const depContract = textField(depUnit, 'contract');
             neighborSignatures[dependencyId] = { signature: sig, sourceHash: dependency.document.sourceHash };
 
-            const candidateNeighbor: NeighborSignatureContext = {
+            allCandidates.push({
                 id: dependency.unit.id,
                 path: dependency.document.path,
                 qualifiedName: depUnit.qualifiedName,
@@ -444,17 +460,46 @@ export function buildGenerationPacket(
                 intent: depIntent,
                 contract: depContract || undefined,
                 sourceHash: dependency.document.sourceHash as `sha256:${string}`,
-            };
+            });
+        }
 
-            const testPrompt = formatForgePrompt([...neighbors, candidateNeighbor]);
-            if (Math.ceil(testPrompt.length / 4) <= inputBudgetTokens) {
-                neighbors.push(candidateNeighbor);
+        const fitsBudget = (
+            neighborList: readonly NeighborSignatureContext[],
+            sigOnlyList: readonly NeighborSignatureContext[] = [],
+        ): boolean => Math.ceil(formatForgePrompt(neighborList, sigOnlyList).length / 4) <= inputBudgetTokens;
+
+        let neighbors: NeighborSignatureContext[] = [];
+        const signatureOnlyNeighbors: NeighborSignatureContext[] = [];
+        const omittedNeighbors: string[] = [];
+
+        if (allCandidates.length > 0) {
+            if (fitsBudget(allCandidates)) {
+                neighbors = [...allCandidates];
             } else {
-                omittedNeighbors.push(depUnit.qualifiedName);
+                const compactCandidates = allCandidates.map(c => ({ ...c, contract: undefined }));
+                if (fitsBudget(compactCandidates)) {
+                    neighbors = compactCandidates;
+                } else {
+                    const omittedCandidates: NeighborSignatureContext[] = [];
+                    for (let i = 0; i < compactCandidates.length; i++) {
+                        const candidate = compactCandidates[i];
+                        if (fitsBudget([...neighbors, candidate], [...omittedCandidates, ...compactCandidates.slice(i + 1)])) {
+                            neighbors.push(candidate);
+                        } else {
+                            omittedCandidates.push(candidate);
+                            omittedNeighbors.push(candidate.qualifiedName);
+                        }
+                    }
+                    for (const candidate of omittedCandidates) {
+                        if (fitsBudget(neighbors, [...signatureOnlyNeighbors, candidate])) {
+                            signatureOnlyNeighbors.push(candidate);
+                        }
+                    }
+                }
             }
         }
 
-        const prompt = formatForgePrompt(neighbors);
+        const prompt = formatForgePrompt(neighbors, signatureOnlyNeighbors);
         const estimatedInputTokens = Math.ceil(prompt.length / 4);
 
         const fingerprint: TargetFingerprint = {
@@ -559,8 +604,8 @@ export function buildForgePacket(
         snapshot,
         sources,
         targetId,
-        FORGE_INPUT_BUDGET_TOKENS + 768,
-        768,
+        FORGE_INPUT_BUDGET_TOKENS + DEFAULT_FORGE_OUTPUT_TOKENS,
+        DEFAULT_FORGE_OUTPUT_TOKENS,
         { forge: true, inputBudgetTokens: FORGE_INPUT_BUDGET_TOKENS, boundInputs: true, ...options },
     );
 }
@@ -592,14 +637,24 @@ export function parseForgeCandidate(raw: string, language?: string): ForgeCandid
     const implMatch = text.match(implHeaderRegex);
     const checkMatch = text.match(checkHeaderRegex);
 
+    const sectionFenceRegex = langKind === 'python'
+        ? /(?:^|\r?\n)```(?:python)?[ \t]*\r?\n([\s\S]*?)\r?\n```(?=[ \t]*(?:\r?\n|$))/i
+        : /(?:^|\r?\n)```(?:typescript|tsx?|javascript|jsx?)?[ \t]*\r?\n([\s\S]*?)\r?\n```(?=[ \t]*(?:\r?\n|$))/i;
+    const extractSectionCode = (sectionText: string): string => {
+        const direct = stripModelEnvelope(sectionText, language);
+        if (direct !== sectionText.trim()) return direct;
+        const fenced = sectionText.match(sectionFenceRegex);
+        return fenced ? fenced[1].trim() : direct;
+    };
+
     if (implMatch) {
         const rawImpl = implMatch[0].replace(/(?:^|\n)###\s*(?:Implementation|Function|Code)\s*/i, '').trim();
-        const strippedImpl = stripModelEnvelope(rawImpl, language);
+        const strippedImpl = extractSectionCode(rawImpl);
         if (checkMatch) {
             const rawCheck = checkMatch[1].trim();
             return {
                 implementation: strippedImpl,
-                check: stripModelEnvelope(rawCheck, language) || undefined,
+                check: extractSectionCode(rawCheck) || undefined,
             };
         }
         const testSplit = strippedImpl.search(testSplitRegex);
@@ -787,6 +842,29 @@ export function validateForgeCandidate(
     const parsedImpl = parseModule(implText, '<candidate>', targetUnit.name);
     if (!parsedImpl.valid) {
         diagnostics.push('Candidate implementation is not valid Python.');
+    }
+
+    const rawDeps = Array.isArray(targetUnit.annotation?.dependencies)
+        ? targetUnit.annotation.dependencies
+        : [
+            ...(Array.isArray(targetUnit.annotation?.context) ? targetUnit.annotation.context : []),
+            ...(Array.isArray(targetUnit.annotation?.uses) ? targetUnit.annotation.uses : []),
+        ];
+    const declaredDepNames = new Set(
+        rawDeps
+            .filter((dep): dep is string => typeof dep === 'string')
+            .map(dep => dep.split('/').pop()?.trim() ?? '')
+            .filter(name => name.length > 0 && name !== targetUnit.name),
+    );
+    if (declaredDepNames.size > 0 && parsedImpl.valid) {
+        const redefined = Array.from(new Set(
+            findNestedPythonDefinitions(implText).filter(name => declaredDepNames.has(name)),
+        ));
+        if (redefined.length > 0) {
+            diagnostics.push(
+                `Candidate must call declared dependencies (${redefined.join(', ')}) already in scope instead of redefining them locally.`,
+            );
+        }
     }
 
     const implUnits = parsedImpl.units.filter(u => u.parentId === null);

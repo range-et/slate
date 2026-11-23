@@ -8,6 +8,7 @@ import { BoardNote, FlowExecutionSnapshot, FlowInstance, FlowRegion, HarnessDocu
 import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import {
     checkLlamaHealth,
+    DEFAULT_OUTPUT_TOKENS,
     evaluateProjectCredentialAccess,
     resolveLlmConfig,
     streamLlamaCompletion,
@@ -544,7 +545,7 @@ export class HarnessPanel implements vscode.Disposable {
             endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
             model: config.get('model', 'local'),
             contextWindowTokens: config.get('contextWindow', 4096),
-            outputTokens: config.get('outputTokens', 768),
+            outputTokens: config.get('outputTokens', DEFAULT_OUTPUT_TOKENS),
             timeoutSeconds: config.get('timeoutSeconds', 120),
             ...(apiKeyEnv ? { apiKeyEnv } : {}),
         };
@@ -1140,11 +1141,13 @@ export class HarnessPanel implements vscode.Disposable {
                         ? 'You are a constrained local component forge engine. Follow JPL-60 rules strictly and provide both implementation and unit check.'
                         : `You are a constrained local ${nodeLang === 'typescript' ? 'TypeScript' : 'JavaScript'} component forge engine. Follow JPL-60 rules strictly and provide both implementation and standalone test() unit check.`;
 
+                    let finishReason: string | undefined;
                     const raw = await streamLlamaCompletion(
                         packet.prompt,
                         {
                             ...settings,
                             system: revSystem,
+                            onFinishReason: reason => { finishReason = reason; },
                         },
                         controller.signal,
                         () => {},
@@ -1155,7 +1158,11 @@ export class HarnessPanel implements vscode.Disposable {
                     if (target) {
                         const validation = validateForgeCandidate(target.unit, parsed, nodeLang);
                         if (!validation.valid) {
-                            throw new Error(`Candidate invalid: ${validation.diagnostics.join('; ')}`);
+                            const diagText = validation.diagnostics.join('; ');
+                            const prefix = finishReason === 'length'
+                                ? `Output truncated at max_tokens=${settings.outputTokens} (finish_reason=length): `
+                                : '';
+                            throw new Error(`${prefix}Candidate invalid: ${diagText}`);
                         }
                     }
 

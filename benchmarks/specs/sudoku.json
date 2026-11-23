@@ -1,0 +1,204 @@
+{
+  "name": "sudoku_app",
+  "description": "4-wave MRV backtracking Sudoku solver compiled with a solve_from_copy composition flow",
+  "outDir": "src",
+  "stubs": [
+    {
+      "name": "sudoku/validate_grid",
+      "signature": "def validate_grid(grid: list[list[int]]) -> bool",
+      "intent": "Return True iff grid is 9x9 with values in 0..9 and no duplicate digits 1..9 in any row, column, or 3x3 box.",
+      "contract": "Accepts list[list[int]]; returns False (without mutating grid) on wrong shape, out-of-range digit, or duplicate 1..9.",
+      "cases": [
+        { "name": "empty_valid", "code": "assert validate_grid([[0]*9 for _ in range(9)]) is True" },
+        { "name": "bad_shape", "code": "assert validate_grid([[1, 2]]) is False" },
+        { "name": "row_dup", "code": "g = [[0]*9 for _ in range(9)]; g[0][0] = 5; g[0][4] = 5; assert validate_grid(g) is False" },
+        { "name": "box_dup", "code": "g = [[0]*9 for _ in range(9)]; g[0][0] = 7; g[2][2] = 7; assert validate_grid(g) is False" }
+      ]
+    },
+    {
+      "name": "sudoku/row_values",
+      "signature": "def row_values(grid: list[list[int]], row: int) -> set[int]",
+      "intent": "Return set of non-zero digits in grid[row]; raise ValueError if row < 0 or row >= 9.",
+      "contract": "Precondition: 0 <= row < 9 (else ValueError). Returns set[int] of digits 1..9 in that row.",
+      "cases": [
+        { "name": "empty_row", "code": "assert row_values([[0]*9 for _ in range(9)], 0) == set()" },
+        { "name": "row_digits", "code": "g = [[0]*9 for _ in range(9)]; g[2][1] = 4; g[2][8] = 9; assert row_values(g, 2) == {4, 9}" },
+        { "name": "bad_row", "code": "import pytest\nwith pytest.raises(ValueError):\n    row_values([[0]*9 for _ in range(9)], 9)" }
+      ]
+    },
+    {
+      "name": "sudoku/col_values",
+      "signature": "def col_values(grid: list[list[int]], col: int) -> set[int]",
+      "intent": "Return set of non-zero digits in column col; raise ValueError if col < 0 or col >= 9.",
+      "contract": "Precondition: 0 <= col < 9 (else ValueError). Returns set[int] of digits 1..9 in column col.",
+      "cases": [
+        { "name": "empty_col", "code": "assert col_values([[0]*9 for _ in range(9)], 0) == set()" },
+        { "name": "col_digits", "code": "g = [[0]*9 for _ in range(9)]; g[0][3] = 2; g[7][3] = 8; assert col_values(g, 3) == {2, 8}" },
+        { "name": "bad_col", "code": "import pytest\nwith pytest.raises(ValueError):\n    col_values([[0]*9 for _ in range(9)], -1)" }
+      ]
+    },
+    {
+      "name": "sudoku/box_values",
+      "signature": "def box_values(grid: list[list[int]], row: int, col: int) -> set[int]",
+      "intent": "Return set of non-zero digits in the 3x3 box containing (row, col); raise ValueError if row or col not in 0..8.",
+      "contract": "Precondition: 0 <= row < 9 and 0 <= col < 9 (else ValueError). Returns set[int] of digits 1..9 in that 3x3 box.",
+      "cases": [
+        { "name": "box_digits", "code": "g = [[0]*9 for _ in range(9)]; g[3][3] = 1; g[5][5] = 6; g[0][0] = 9; assert box_values(g, 4, 4) == {1, 6}" },
+        { "name": "bad_box_coord", "code": "import pytest\nwith pytest.raises(ValueError):\n    box_values([[0]*9 for _ in range(9)], 9, 0)" }
+      ]
+    },
+    {
+      "name": "sudoku/copy_grid",
+      "signature": "def copy_grid(grid: list[list[int]]) -> list[list[int]]",
+      "intent": "Return a shallow-row deep copy [list(r) for r in grid] of the 9x9 integer grid.",
+      "contract": "Mutating the returned grid never mutates the input grid.",
+      "cases": [
+        { "name": "independent_copy", "code": "g = [[1, 0], [0, 2]]; c = copy_grid(g); c[0][0] = 9; assert g[0][0] == 1 and c[0][0] == 9" }
+      ]
+    },
+    {
+      "name": "sudoku/candidates",
+      "signature": "def candidates(grid: list[list[int]], row: int, col: int) -> list[int]",
+      "intent": "Return sorted valid digits 1..9 for empty cell (row, col) using row_values, col_values, and box_values, or [] if filled; raise ValueError if out of bounds.",
+      "contract": "Precondition: 0 <= row < 9 and 0 <= col < 9 (else ValueError). Returns [] when grid[row][col] != 0.",
+      "context": ["sudoku/row_values", "sudoku/col_values", "sudoku/box_values"],
+      "cases": [
+        { "name": "filled_cell", "code": "g = [[0]*9 for _ in range(9)]; g[0][0] = 5; assert candidates(g, 0, 0) == []" },
+        { "name": "constrained_cell", "code": "g = [[0]*9 for _ in range(9)]; g[0][1] = 1; g[1][0] = 2; g[2][2] = 3; assert candidates(g, 0, 0) == [4, 5, 6, 7, 8, 9]" }
+      ]
+    },
+    {
+      "name": "sudoku/is_solved",
+      "signature": "def is_solved(grid: list[list[int]]) -> bool",
+      "intent": "Return True iff validate_grid(grid) is True and every cell is non-zero.",
+      "contract": "Uses validate_grid(grid); returns bool without mutating grid.",
+      "context": ["sudoku/validate_grid"],
+      "cases": [
+        { "name": "solved_board", "code": "g = [[((r*3 + r//3 + c) % 9) + 1 for c in range(9)] for r in range(9)]; assert is_solved(g) is True" },
+        { "name": "incomplete_board", "code": "g = [[((r*3 + r//3 + c) % 9) + 1 for c in range(9)] for r in range(9)]; g[0][0] = 0; assert is_solved(g) is False" }
+      ]
+    },
+    {
+      "name": "sudoku/find_best_empty",
+      "signature": "def find_best_empty(grid: list[list[int]]) -> tuple[int, int, list[int]] | None",
+      "intent": "Find empty cell (grid[r][c] == 0) with fewest candidates(grid, r, c) in row-major order; return (r, c, cands) or None if no empty cell.",
+      "contract": "Uses candidates(grid, r, c). If an empty cell has len(cands) == 0, immediately return (r, c, []) (do NOT return None; None means zero empty cells). Returns tuple[int, int, list[int]] | None.",
+      "context": ["sudoku/candidates"],
+      "cases": [
+        { "name": "none_when_full", "code": "g = [[((r*3 + r//3 + c) % 9) + 1 for c in range(9)] for r in range(9)]; assert find_best_empty(g) is None" },
+        { "name": "picks_fewest", "code": "g = [[0]*9 for _ in range(9)]; g[0][1] = 1; g[0][2] = 2; g[1][0] = 3; assert find_best_empty(g) == (0, 0, [4, 5, 6, 7, 8, 9])" },
+        { "name": "dead_end_cell", "code": "g = [[1, 2, 3, 4, 5, 6, 7, 8, 0], [0]*8 + [9]] + [[0]*9 for _ in range(7)]; assert find_best_empty(g) == (0, 8, [])" }
+      ]
+    },
+    {
+      "name": "sudoku/solve_sudoku",
+      "signature": "def solve_sudoku(grid: list[list[int]]) -> list[list[int]] | None",
+      "intent": "Solve 9x9 Sudoku iteratively with an explicit DFS stack (<= 100000 steps) using validate_grid, copy_grid, and find_best_empty; return solved grid or None.",
+      "contract": "Never mutates grid. Unpack r, c, cands = nxt from find_best_empty(cur) and push a copy for EVERY digit in cands onto stack; return cur when nxt is None, or None if invalid/unsolvable.",
+      "context": ["sudoku/validate_grid", "sudoku/copy_grid", "sudoku/find_best_empty"],
+      "cases": [
+        { "name": "invalid_none", "code": "g = [[1, 1] + [0]*7] + [[0]*9 for _ in range(8)]; assert solve_sudoku(g) is None" },
+        { "name": "backtracks", "code": "s='000000907000420180000705026100904000050000040000507009920108000034059000507000000'; g=[[int(s[r*9+c]) for c in range(9)] for r in range(9)]; out=solve_sudoku(g); assert out is not None and out[0][0]!=0 and g[0][0]==0" }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "flow": "solve_from_copy",
+      "inputs": [
+        { "name": "puzzle", "annotation": "list[list[int]]" }
+      ],
+      "outputs": [
+        { "name": "solution", "annotation": "list[list[int]] | None" }
+      ],
+      "instances": [
+        { "id": "dup", "node": "sudoku/copy_grid" },
+        { "id": "solver", "node": "sudoku/solve_sudoku" }
+      ],
+      "wires": [
+        { "from": "input:puzzle", "to": "dup.in:grid" },
+        { "from": "dup.out", "to": "solver.in:grid" },
+        { "from": "solver.out", "to": "output:solution" }
+      ]
+    }
+  ],
+  "pytestSource": [
+    "import os",
+    "import sys",
+    "import pytest",
+    "",
+    "SRC_DIR = os.path.join(os.path.dirname(__file__), 'src')",
+    "if SRC_DIR not in sys.path:",
+    "    sys.path.insert(0, SRC_DIR)",
+    "",
+    "import sudoku",
+    "import sudoku_app",
+    "",
+    "HARD_PUZZLE = [",
+    "    [8, 0, 0, 0, 0, 0, 0, 0, 0],",
+    "    [0, 0, 3, 6, 0, 0, 0, 0, 0],",
+    "    [0, 7, 0, 0, 9, 0, 2, 0, 0],",
+    "    [0, 5, 0, 0, 0, 7, 0, 0, 0],",
+    "    [0, 0, 0, 0, 4, 5, 7, 0, 0],",
+    "    [0, 0, 0, 1, 0, 0, 0, 3, 0],",
+    "    [0, 0, 1, 0, 0, 0, 0, 6, 8],",
+    "    [0, 0, 8, 5, 0, 0, 0, 1, 0],",
+    "    [0, 9, 0, 0, 0, 0, 4, 0, 0],",
+    "]",
+    "",
+    "CLASSIC_PUZZLE = [",
+    "    [5, 3, 0, 0, 7, 0, 0, 0, 0],",
+    "    [6, 0, 0, 1, 9, 5, 0, 0, 0],",
+    "    [0, 9, 8, 0, 0, 0, 0, 6, 0],",
+    "    [8, 0, 0, 0, 6, 0, 0, 0, 3],",
+    "    [4, 0, 0, 8, 0, 3, 0, 0, 1],",
+    "    [7, 0, 0, 0, 2, 0, 0, 0, 6],",
+    "    [0, 6, 0, 0, 0, 0, 2, 8, 0],",
+    "    [0, 0, 0, 4, 1, 9, 0, 0, 5],",
+    "    [0, 0, 0, 0, 8, 0, 0, 7, 9],",
+    "]",
+    "",
+    "def test_classic_and_hard_solve():",
+    "    classic_copy = sudoku.copy_grid(CLASSIC_PUZZLE)",
+    "    solved_classic = sudoku.solve_sudoku(classic_copy)",
+    "    assert solved_classic is not None",
+    "    assert sudoku.is_solved(solved_classic) is True",
+    "    assert classic_copy == CLASSIC_PUZZLE",
+    "",
+    "    solved_hard = sudoku.solve_sudoku(HARD_PUZZLE)",
+    "    assert solved_hard is not None",
+    "    assert sudoku.is_solved(solved_hard) is True",
+    "    for r in range(9):",
+    "        for c in range(9):",
+    "            if HARD_PUZZLE[r][c] != 0:",
+    "                assert solved_hard[r][c] == HARD_PUZZLE[r][c]",
+    "",
+    "def test_unsolvable_and_invalid():",
+    "    unsolvable = [",
+    "        [1, 2, 3, 4, 5, 6, 7, 8, 0],",
+    "        [0, 0, 0, 0, 0, 0, 0, 0, 9],",
+    "    ] + [[0]*9 for _ in range(7)]",
+    "    assert sudoku.solve_sudoku(unsolvable) is None",
+    "    bad = [[1, 1] + [0]*7] + [[0]*9 for _ in range(8)]",
+    "    assert sudoku.validate_grid(bad) is False",
+    "    assert sudoku.solve_sudoku(bad) is None",
+    "",
+    "def test_solve_from_copy_flow():",
+    "    snapshot = sudoku.copy_grid(CLASSIC_PUZZLE)",
+    "    out = sudoku_app.solve_from_copy(snapshot)",
+    "    assert out is not None",
+    "    assert sudoku.is_solved(out) is True",
+    "    assert snapshot == CLASSIC_PUZZLE"
+  ],
+  "fakeResponses": {
+    "sudoku/validate_grid": "### Implementation\n```python\ndef validate_grid(grid: list[list[int]]) -> bool:\n    if not isinstance(grid, list) or len(grid) != 9:\n        return False\n    cols: list[set[int]] = [set() for _ in range(9)]\n    boxes: list[set[int]] = [set() for _ in range(9)]\n    for r, row in enumerate(grid):\n        if not isinstance(row, list) or len(row) != 9:\n            return False\n        seen_row: set[int] = set()\n        for c, val in enumerate(row):\n            if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > 9:\n                return False\n            if val != 0:\n                b = (r // 3) * 3 + (c // 3)\n                if val in seen_row or val in cols[c] or val in boxes[b]:\n                    return False\n                seen_row.add(val)\n                cols[c].add(val)\n                boxes[b].add(val)\n    return True\n```\n\n### Unit Check\n```python\ndef test_validate_grid():\n    assert validate_grid([[0]*9 for _ in range(9)]) is True\n    assert validate_grid([[1]]) is False\n```",
+    "sudoku/row_values": "### Implementation\n```python\ndef row_values(grid: list[list[int]], row: int) -> set[int]:\n    if row < 0 or row >= 9:\n        raise ValueError(\"row must be in 0..8\")\n    return {v for v in grid[row] if v != 0}\n```\n\n### Unit Check\n```python\ndef test_row_values():\n    import pytest\n    assert row_values([[0]*9 for _ in range(9)], 0) == set()\n    with pytest.raises(ValueError):\n        row_values([[0]*9 for _ in range(9)], -1)\n```",
+    "sudoku/col_values": "### Implementation\n```python\ndef col_values(grid: list[list[int]], col: int) -> set[int]:\n    if col < 0 or col >= 9:\n        raise ValueError(\"col must be in 0..8\")\n    return {grid[r][col] for r in range(9) if grid[r][col] != 0}\n```\n\n### Unit Check\n```python\ndef test_col_values():\n    import pytest\n    assert col_values([[0]*9 for _ in range(9)], 0) == set()\n    with pytest.raises(ValueError):\n        col_values([[0]*9 for _ in range(9)], 9)\n```",
+    "sudoku/box_values": "### Implementation\n```python\ndef box_values(grid: list[list[int]], row: int, col: int) -> set[int]:\n    if row < 0 or row >= 9 or col < 0 or col >= 9:\n        raise ValueError(\"row and col must be in 0..8\")\n    br = (row // 3) * 3\n    bc = (col // 3) * 3\n    return {grid[r][c] for r in range(br, br + 3) for c in range(bc, bc + 3) if grid[r][c] != 0}\n```\n\n### Unit Check\n```python\ndef test_box_values():\n    import pytest\n    g = [[0]*9 for _ in range(9)]\n    g[4][4] = 5\n    assert box_values(g, 3, 3) == {5}\n    with pytest.raises(ValueError):\n        box_values(g, 9, 0)\n```",
+    "sudoku/copy_grid": "### Implementation\n```python\ndef copy_grid(grid: list[list[int]]) -> list[list[int]]:\n    return [list(r) for r in grid]\n```\n\n### Unit Check\n```python\ndef test_copy_grid():\n    g = [[1, 0], [0, 2]]\n    c = copy_grid(g)\n    c[0][0] = 8\n    assert g[0][0] == 1\n```",
+    "sudoku/candidates": "### Implementation\n```python\ndef candidates(grid: list[list[int]], row: int, col: int) -> list[int]:\n    if row < 0 or row >= 9 or col < 0 or col >= 9:\n        raise ValueError(\"row and col must be in 0..8\")\n    if grid[row][col] != 0:\n        return []\n    used = row_values(grid, row) | col_values(grid, col) | box_values(grid, row, col)\n    return [d for d in range(1, 10) if d not in used]\n```\n\n### Unit Check\n```python\ndef test_candidates():\n    g = [[0]*9 for _ in range(9)]\n    g[0][0] = 4\n    assert candidates(g, 0, 0) == []\n```",
+    "sudoku/is_solved": "### Implementation\n```python\ndef is_solved(grid: list[list[int]]) -> bool:\n    return validate_grid(grid) and all(cell != 0 for row in grid for cell in row)\n```\n\n### Unit Check\n```python\ndef test_is_solved():\n    assert is_solved([[0]*9 for _ in range(9)]) is False\n```",
+    "sudoku/find_best_empty": "### Implementation\n```python\ndef find_best_empty(grid: list[list[int]]) -> tuple[int, int, list[int]] | None:\n    best: tuple[int, int, list[int]] | None = None\n    for r in range(9):\n        for c in range(9):\n            if grid[r][c] == 0:\n                cands = candidates(grid, r, c)\n                if len(cands) == 0:\n                    return (r, c, [])\n                if best is None or len(cands) < len(best[2]):\n                    best = (r, c, cands)\n    return best\n```\n\n### Unit Check\n```python\ndef test_find_best_empty():\n    g = [[0]*9 for _ in range(9)]\n    res = find_best_empty(g)\n    assert res is not None and res[0] == 0 and res[1] == 0\n```",
+    "sudoku/solve_sudoku": "### Implementation\n```python\ndef solve_sudoku(grid: list[list[int]]) -> list[list[int]] | None:\n    if not validate_grid(grid):\n        return None\n    stack: list[list[list[int]]] = [copy_grid(grid)]\n    for _ in range(100000):\n        if not stack:\n            return None\n        board = stack.pop()\n        best = find_best_empty(board)\n        if best is None:\n            return board\n        r, c, cands = best\n        for d in reversed(cands):\n            nxt = copy_grid(board)\n            nxt[r][c] = d\n            stack.append(nxt)\n    return None\n```\n\n### Unit Check\n```python\ndef test_solve_sudoku():\n    assert solve_sudoku([[1, 1] + [0]*7] + [[0]*9 for _ in range(8)]) is None\n```"
+  }
+}

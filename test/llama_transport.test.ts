@@ -4,6 +4,7 @@ import {
     buildAuthHeaders,
     checkLlamaHealth,
     credentialPairingKey,
+    DEFAULT_OUTPUT_TOKENS,
     evaluateProjectCredentialAccess,
     inferProviderFromEndpoint,
     LlamaTransportError,
@@ -215,5 +216,37 @@ describe('llama.cpp transport', () => {
         expect(stripped.apiKey).toBeUndefined();
         expect(stripped.hasApiKey).toBe(false);
         expect(stripped.endpoint).toBe('https://evil.example/v1');
+    });
+
+    it('defaults outputTokens to DEFAULT_OUTPUT_TOKENS (1536) and surfaces non-empty SSE finish_reason (#55)', async () => {
+        const defaults = resolveLlmConfig(undefined, undefined, {});
+        expect(DEFAULT_OUTPUT_TOKENS).toBe(1536);
+        expect(defaults.outputTokens).toBe(1536);
+
+        server = await startFakeLlamaServer(
+            ['def add(a: int, b: int) -> int:\n', '    return a + b\n'],
+            { finishReason: 'length' },
+        );
+        const reasons: string[] = [];
+        await streamLlamaCompletion('implement add', {
+            endpoint: server.url,
+            model: 'tiny-local',
+            outputTokens: DEFAULT_OUTPUT_TOKENS,
+            timeoutMs: 1000,
+            onFinishReason: reason => reasons.push(reason),
+        }, new AbortController().signal, () => {});
+        expect(reasons).toEqual(['length']);
+
+        await server.close();
+        server = await startFakeLlamaServer(['def add(a: int, b: int) -> int:\n    return a + b\n']);
+        const omittedReasons: string[] = [];
+        await streamLlamaCompletion('implement add', {
+            endpoint: server.url,
+            model: 'tiny-local',
+            outputTokens: DEFAULT_OUTPUT_TOKENS,
+            timeoutMs: 1000,
+            onFinishReason: reason => omittedReasons.push(reason),
+        }, new AbortController().signal, () => {});
+        expect(omittedReasons).toEqual([]);
     });
 });

@@ -35,10 +35,10 @@ import {
 import { runNodeVerification, type VerificationOptions } from './verification_runner';
 
 export const BATCH_FORGE_SYSTEM_PROMPT =
-    'You are a constrained local Python component forge engine. Follow JPL-60 rules strictly, provide implementation and pytest check, and never import from slate.* (dependencies are already in scope).';
+    'You are a constrained local Python component forge engine. Follow JPL-60 rules strictly, provide concise implementation and pytest check (no docstrings or prose), and never import from slate.* or redefine dependencies already in scope.';
 
 export const TS_BATCH_FORGE_SYSTEM_PROMPT =
-    'You are a constrained local TypeScript/JavaScript component forge engine. Follow JPL-60 rules strictly and provide both the typed implementation and a standalone test() unit check.';
+    'You are a constrained local TypeScript/JavaScript component forge engine. Follow JPL-60 rules strictly and provide a concise typed implementation and standalone test() unit check (no JSDoc, prose, or redefinition of dependencies already in scope).';
 
 type BatchForgeLanguage = 'python' | 'typescript' | 'javascript';
 
@@ -442,6 +442,7 @@ async function forgeSingleTarget(
         }
 
         let raw: string;
+        let finishReason: string | undefined;
         try {
             raw = await streamLlamaCompletion(
                 packet.prompt,
@@ -452,6 +453,7 @@ async function forgeSingleTarget(
                     timeoutMs: llm.timeoutMs,
                     apiKey: llm.apiKey,
                     system: target.language === 'python' ? BATCH_FORGE_SYSTEM_PROMPT : TS_BATCH_FORGE_SYSTEM_PROMPT,
+                    onFinishReason: reason => { finishReason = reason; },
                 },
                 options.signal ?? new AbortController().signal,
                 () => {},
@@ -466,8 +468,14 @@ async function forgeSingleTarget(
         const candidate = parseForgeCandidate(raw, target.language);
         const validation = validateForgeCandidate(target.unit, candidate, target.language);
         if (!validation.valid) {
-            lastReason = validation.diagnostics.join('; ');
-            retryFeedback = `Candidate validation failed:\n${lastReason}`;
+            const diagText = validation.diagnostics.join('; ');
+            if (finishReason === 'length') {
+                lastReason = `Output truncated at max_tokens=${llm.outputTokens} (finish_reason=length): ${diagText}`;
+                retryFeedback = `Previous output was truncated at max_tokens=${llm.outputTokens} before finishing. Omit docstrings/comments and write compact, programmatic unit tests (e.g. comprehensions instead of large literal grids). Validation error: ${diagText}`;
+            } else {
+                lastReason = diagText;
+                retryFeedback = `Candidate validation failed:\n${diagText}`;
+            }
             continue;
         }
 

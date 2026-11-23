@@ -7,7 +7,7 @@ import type { NodeVerificationResult, VerificationState } from './harness_protoc
 import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
-import { parseModule, sourceHash } from './python_adapter';
+import { parseModule, sourceHash, topLevelBindings } from './python_adapter';
 import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
@@ -324,6 +324,7 @@ export function generateVerificationFiles(
     };
 
     const depCodeBlocks: string[] = [];
+    const depExportNames = new Set<string>();
     if (dependencies && dependencies.size > 0) {
         for (const [depId, depNode] of dependencies.entries()) {
             if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
@@ -333,6 +334,13 @@ export function generateVerificationFiles(
             if (depNode.code.length > 0) {
                 depCodeBlocks.push(`\n# Context: ${depNode.name}`);
                 depCodeBlocks.push(...depNode.code);
+                if (
+                    depNode.kind !== 'prelude'
+                    && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
+                    && topLevelBindings(codeText(depNode)).has(depNode.name)
+                ) {
+                    depExportNames.add(depNode.name);
+                }
             }
         }
     }
@@ -365,10 +373,18 @@ except Exception:
     pass
 `);
 
+    const checkTopBindings = hasCheck && node.check
+        ? topLevelBindings(node.check.join('\n'))
+        : new Set<string>();
+    const extraTestImports = Array.from(depExportNames)
+        .filter(name => name !== node.name && name !== 'pytest' && !checkTopBindings.has(name))
+        .sort();
+
     const testParts: string[] = [
         '# Auto-generated pytest check file for Slate atomic node',
         'import pytest',
         `from ${node.name}_impl import ${node.name}`,
+        ...(extraTestImports.length > 0 ? [`from ${node.name}_impl import ${extraTestImports.join(', ')}`] : []),
     ];
 
     if (hasCheck && node.check) {

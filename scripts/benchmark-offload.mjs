@@ -410,7 +410,12 @@ export async function runBenchmarkOffload(options = {}) {
                     pytestOutput = out.trim();
                     pytestPassed = true;
                 } catch (err) {
-                    pytestOutput = `${err.stdout ?? ''}\n${err.stderr ?? ''}`.trim();
+                    const outText = `${err.stdout ?? ''}\n${err.stderr ?? ''}`.trim();
+                    pytestOutput = outText || (
+                        err.code === 'ETIMEDOUT' || err.killed
+                            ? 'pytest timed out after 30000ms'
+                            : String(err.message ?? err)
+                    );
                     pytestPassed = false;
                 }
             } else {
@@ -510,7 +515,8 @@ function formatScorecardMarkdown(s) {
         `| Compiled pytest | ${s.pytestPassed ? 'PASS' : 'FAIL'} |`,
     ];
     if (s.pytestOutput) {
-        lines.push('', `Pytest summary: \`${s.pytestOutput}\``);
+        const label = s.pytestPassed ? 'Pytest summary' : 'Pytest failure';
+        lines.push('', `${label}: \`${s.pytestOutput}\``);
     }
     if (!s.ok && Array.isArray(s.results)) {
         const failed = s.results.filter(r => r.status !== 'forged');
