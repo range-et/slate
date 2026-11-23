@@ -866,6 +866,101 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             ]);
             expect(pyConcA.state, pyConcA.traceback).toBe('passed');
             expect(pyConcB.state, pyConcB.traceback).toBe('passed');
+
+            // Follow-up (#1 on e53821e): _prelude module constants and interfaces are exported/imported by actual bindings (not `_prelude`)
+            const preludeNode: SlateNode = {
+                name: '_prelude',
+                kind: 'prelude',
+                language: 'typescript',
+                intent: 'Module constants and config type',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: [
+                    'const LIMIT = 10;',
+                    'export const SCALE = 2;',
+                    'interface ClampCfg { offset: number; }',
+                ],
+                extra: {},
+            };
+            const usePreludeNode: SlateNode = {
+                name: 'clampScaled',
+                language: 'typescript',
+                intent: 'Scale value up to LIMIT plus offset',
+                contract: '',
+                context: ['_prelude'],
+                imports: [],
+                uses: ['_prelude'],
+                code: [
+                    'export function clampScaled(x: number, cfg: ClampCfg): number {',
+                    '    return Math.min(LIMIT, x * SCALE) + cfg.offset;',
+                    '}',
+                ],
+                cases: [
+                    { name: 'below_limit', input: { x: 4, cfg: { offset: 3 } }, expected: 11 },
+                    { name: 'capped', input: { x: 20, cfg: { offset: 3 } }, expected: 13 },
+                ],
+                extra: {},
+            };
+            const preludeRes = await runNodeVerification({
+                workspaceRoot,
+                node: usePreludeNode,
+                nodeId: 'clampScaled',
+                dependencies: new Map([['_prelude', preludeNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(preludeRes.state, preludeRes.traceback).toBe('passed');
+            expect(preludeRes.pydanticValid).toBe(true);
+
+            // Follow-up (#2 on e53821e): Mutually recursive helper (`isOdd`) calling target (`isEven`) resolves target import cleanly
+            const isOddNode: SlateNode = {
+                name: 'isOdd',
+                language: 'typescript',
+                intent: 'Odd parity via mutual recursion',
+                contract: '',
+                context: [],
+                imports: ["import { isEven } from './isEven';"],
+                uses: ['isEven'],
+                code: [
+                    'export function isOdd(n: number): boolean {',
+                    '    if (n === 0) return false;',
+                    '    return isEven(n - 1);',
+                    '}',
+                ],
+                extra: {},
+            };
+            const isEvenNode: SlateNode = {
+                name: 'isEven',
+                language: 'typescript',
+                intent: 'Even parity via mutual recursion',
+                contract: '',
+                context: ['isOdd'],
+                imports: ["import { isOdd } from './isOdd';"],
+                uses: ['isOdd'],
+                code: [
+                    'export function isEven(n: number): boolean {',
+                    '    if (n === 0) return true;',
+                    '    return isOdd(n - 1);',
+                    '}',
+                ],
+                cases: [
+                    { name: 'four_even', input: { n: 4 }, expected: true },
+                    { name: 'five_odd', input: { n: 5 }, expected: false },
+                ],
+                extra: {},
+            };
+            const mutualRes = await runNodeVerification({
+                workspaceRoot,
+                node: isEvenNode,
+                nodeId: 'isEven',
+                dependencies: new Map([['isOdd', isOddNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(mutualRes.state, mutualRes.traceback).toBe('passed');
+            expect(mutualRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });
