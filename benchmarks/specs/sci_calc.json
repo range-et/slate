@@ -1,0 +1,235 @@
+{
+  "name": "sci_calc",
+  "description": "Scientific Calculator extension over examples/calculator with trig, factorial, logs, statistics, and rms_hypot composition flow",
+  "baseExample": "examples/calculator",
+  "basePytestDir": "examples/calculator/tests",
+  "basePytestEnvVar": "SLATE_CALCULATOR_DIR",
+  "outDir": "src",
+  "stubs": [
+    {
+      "name": "scientific/power",
+      "signature": "def power(base: float, exponent: float) -> float",
+      "intent": "Raise base to exponent (base ** exponent); return 1.0 when base == 0.0 and exponent == 0.0; raise ValueError if base == 0.0 and exponent < 0.0.",
+      "contract": "Accepts floats base and exponent. 0.0 ** 0.0 -> 1.0. Raises ValueError if base == 0.0 and exponent < 0.0.",
+      "cases": [
+        { "name": "positive_int_exp", "input": { "base": 2, "exponent": 3 }, "expected": 8 },
+        { "name": "zero_exp", "input": { "base": 5, "exponent": 0 }, "expected": 1 },
+        { "name": "zero_pow_zero", "input": { "base": 0, "exponent": 0 }, "expected": 1 },
+        { "name": "fractional_exp", "input": { "base": 9, "exponent": 0.5 }, "expected": 3 },
+        { "name": "zero_neg_error", "input": { "base": 0, "exponent": -1 }, "error": "ValueError" }
+      ]
+    },
+    {
+      "name": "scientific/square_root",
+      "signature": "def square_root(x: float) -> float",
+      "intent": "Return principal square root of x using math.sqrt(x); raise ValueError if x < 0.",
+      "contract": "Precondition: x >= 0.0 (else ValueError). Returns float >= 0.0.",
+      "imports": ["import math"],
+      "cases": [
+        { "name": "zero", "input": { "x": 0 }, "expected": 0 },
+        { "name": "perfect_square", "input": { "x": 9 }, "expected": 3 },
+        { "name": "fractional", "input": { "x": 2.25 }, "expected": 1.5 },
+        { "name": "negative_error", "input": { "x": -1 }, "error": "ValueError" }
+      ]
+    },
+    {
+      "name": "scientific/factorial",
+      "signature": "def factorial(n: int) -> int",
+      "intent": "Compute exact iterative integer factorial for 0 <= n <= 20; raise ValueError if n < 0 or n > 20.",
+      "contract": "Precondition: exact int (not bool) and 0 <= n <= 20, else raise ValueError. Returns exact int n!.",
+      "cases": [
+        { "name": "zero", "input": { "n": 0 }, "expected": 1 },
+        { "name": "one", "input": { "n": 1 }, "expected": 1 },
+        { "name": "five", "input": { "n": 5 }, "expected": 120 },
+        { "name": "twenty", "input": { "n": 20 }, "expected": 2432902008176640000 },
+        { "name": "negative_error", "input": { "n": -1 }, "error": "ValueError" },
+        { "name": "too_large_error", "input": { "n": 21 }, "error": "ValueError" },
+        { "name": "bool_error", "input": { "n": true }, "error": "ValueError" }
+      ]
+    },
+    {
+      "name": "scientific/log_base",
+      "signature": "def log_base(x: float, base: float) -> float",
+      "intent": "Compute math.log(x, base); raise ValueError if x <= 0, base <= 0, or base == 1.0.",
+      "contract": "Precondition: x > 0.0, base > 0.0, and base != 1.0, else raise ValueError. Returns float.",
+      "imports": ["import math"],
+      "cases": [
+        { "name": "base_2", "input": { "x": 8, "base": 2 }, "expected": 3 },
+        { "name": "base_10", "input": { "x": 100, "base": 10 }, "expected": 2 },
+        { "name": "log_one", "input": { "x": 1, "base": 10 }, "expected": 0 },
+        { "name": "nonpos_x_error", "input": { "x": 0, "base": 10 }, "error": "ValueError" },
+        { "name": "base_one_error", "input": { "x": 10, "base": 1 }, "error": "ValueError" },
+        { "name": "neg_base_error", "input": { "x": 10, "base": -2 }, "error": "ValueError" }
+      ]
+    },
+    {
+      "name": "scientific/sin_deg",
+      "signature": "def sin_deg(degrees: float) -> float",
+      "intent": "Return sine of angle in degrees using math.sin(math.radians(degrees)); snap result with abs(val) < 1e-15 to 0.0.",
+      "contract": "Accepts float degrees; returns float in [-1.0, 1.0] with 0.0 snapped for abs(val) < 1e-15.",
+      "imports": ["import math"],
+      "cases": [
+        { "name": "zero_deg", "input": { "degrees": 0 }, "expected": 0 },
+        { "name": "thirty_deg", "input": { "degrees": 30 }, "expected": 0.5 },
+        { "name": "ninety_deg", "input": { "degrees": 90 }, "expected": 1 },
+        { "name": "one_eighty_deg", "input": { "degrees": 180 }, "expected": 0 },
+        { "name": "neg_ninety_deg", "input": { "degrees": -90 }, "expected": -1 }
+      ]
+    },
+    {
+      "name": "scientific/cos_deg",
+      "signature": "def cos_deg(degrees: float) -> float",
+      "intent": "Return cosine of angle in degrees using math.cos(math.radians(degrees)); snap result with abs(val) < 1e-15 to 0.0.",
+      "contract": "Accepts float degrees; returns float in [-1.0, 1.0] with 0.0 snapped for abs(val) < 1e-15.",
+      "cases": [
+        { "name": "zero_deg", "input": { "degrees": 0 }, "expected": 1 },
+        { "name": "sixty_deg", "input": { "degrees": 60 }, "expected": 0.5 },
+        { "name": "ninety_deg", "input": { "degrees": 90 }, "expected": 0 },
+        { "name": "one_eighty_deg", "input": { "degrees": 180 }, "expected": -1 },
+        { "name": "three_sixty_deg", "input": { "degrees": 360 }, "expected": 1 }
+      ]
+    },
+    {
+      "name": "scientific/hypotenuse",
+      "signature": "def hypotenuse(a: float, b: float) -> float",
+      "intent": "Compute Euclidean hypotenuse by calling square_root(power(a, 2.0) + power(b, 2.0)). Do not reimplement power or square_root.",
+      "contract": "Calls power(a, 2.0), power(b, 2.0), and square_root(...); returns float >= 0.0.",
+      "context": ["scientific/power", "scientific/square_root"],
+      "cases": [
+        { "name": "three_four_five", "input": { "a": 3, "b": 4 }, "expected": 5 },
+        { "name": "five_twelve_thirteen", "input": { "a": 5, "b": 12 }, "expected": 13 },
+        { "name": "zeros", "input": { "a": 0, "b": 0 }, "expected": 0 }
+      ]
+    },
+    {
+      "name": "scientific/mean",
+      "signature": "def mean(values: list[float]) -> float",
+      "intent": "Return arithmetic mean sum(values) / len(values) for non-empty list of floats; raise ValueError if values is empty.",
+      "contract": "Precondition: len(values) > 0, else raise ValueError. Returns float.",
+      "cases": [
+        { "name": "single", "input": { "values": [5] }, "expected": 5 },
+        { "name": "three_vals", "input": { "values": [1, 2, 3] }, "expected": 2 },
+        { "name": "signed", "input": { "values": [-2, 2, 6] }, "expected": 2 },
+        { "name": "empty_error", "input": { "values": [] }, "error": "ValueError" }
+      ]
+    },
+    {
+      "name": "scientific/std_dev",
+      "signature": "def std_dev(values: list[float]) -> float",
+      "intent": "Compute population standard deviation by calling mean(values) and square_root(sum((v - m) ** 2 for v in values) / len(values)); raise ValueError if values is empty.",
+      "contract": "Precondition: len(values) > 0, else raise ValueError. Calls mean(values) and square_root(...). Returns float >= 0.0.",
+      "context": ["scientific/mean", "scientific/square_root"],
+      "cases": [
+        { "name": "constant", "input": { "values": [4, 4, 4] }, "expected": 0 },
+        { "name": "wiki_pop_std", "input": { "values": [2, 4, 4, 4, 5, 5, 7, 9] }, "expected": 2 },
+        { "name": "empty_error", "input": { "values": [] }, "error": "ValueError" }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "flow": "rms_hypot",
+      "inputs": [
+        { "name": "a", "annotation": "float" },
+        { "name": "b", "annotation": "float" }
+      ],
+      "outputs": [
+        { "name": "result", "annotation": "float" }
+      ],
+      "instances": [
+        { "id": "exp_two", "kind": "value", "value": "2.0" },
+        { "id": "sq_a", "node": "scientific/power" },
+        { "id": "sq_b", "node": "scientific/power" },
+        { "id": "sum_ab", "node": "operations/add" },
+        { "id": "root", "node": "scientific/square_root" }
+      ],
+      "wires": [
+        { "from": "input:a", "to": "sq_a.in:base" },
+        { "from": "exp_two.out", "to": "sq_a.in:exponent" },
+        { "from": "input:b", "to": "sq_b.in:base" },
+        { "from": "exp_two.out", "to": "sq_b.in:exponent" },
+        { "from": "sq_a.out", "to": "sum_ab.in:a" },
+        { "from": "sq_b.out", "to": "sum_ab.in:b" },
+        { "from": "sum_ab.out", "to": "root.in:x" },
+        { "from": "root.out", "to": "output:result" }
+      ]
+    }
+  ],
+  "pytestSource": [
+    "import math",
+    "import os",
+    "import sys",
+    "import pytest",
+    "",
+    "SRC_DIR = os.path.join(os.path.dirname(__file__), 'src')",
+    "if SRC_DIR not in sys.path:",
+    "    sys.path.insert(0, SRC_DIR)",
+    "",
+    "import scientific",
+    "import sci_calc",
+    "",
+    "def test_power():",
+    "    assert scientific.power(2.0, 3.0) == 8.0",
+    "    assert scientific.power(0.0, 0.0) == 1.0",
+    "    with pytest.raises(ValueError):",
+    "        scientific.power(0.0, -1.0)",
+    "",
+    "def test_square_root():",
+    "    assert scientific.square_root(9.0) == 3.0",
+    "    assert scientific.square_root(2.25) == 1.5",
+    "    with pytest.raises(ValueError):",
+    "        scientific.square_root(-1.0)",
+    "",
+    "def test_factorial():",
+    "    assert scientific.factorial(0) == 1",
+    "    assert scientific.factorial(5) == 120",
+    "    assert scientific.factorial(20) == 2432902008176640000",
+    "    with pytest.raises(ValueError):",
+    "        scientific.factorial(-1)",
+    "    with pytest.raises(ValueError):",
+    "        scientific.factorial(21)",
+    "",
+    "def test_log_base():",
+    "    assert scientific.log_base(8.0, 2.0) == pytest.approx(3.0)",
+    "    assert scientific.log_base(100.0, 10.0) == pytest.approx(2.0)",
+    "    with pytest.raises(ValueError):",
+    "        scientific.log_base(0.0, 10.0)",
+    "    with pytest.raises(ValueError):",
+    "        scientific.log_base(10.0, 1.0)",
+    "",
+    "def test_trig_deg():",
+    "    assert scientific.sin_deg(0.0) == 0.0",
+    "    assert scientific.sin_deg(30.0) == pytest.approx(0.5)",
+    "    assert scientific.sin_deg(180.0) == 0.0",
+    "    assert scientific.cos_deg(60.0) == pytest.approx(0.5)",
+    "    assert scientific.cos_deg(90.0) == 0.0",
+    "    assert scientific.cos_deg(180.0) == -1.0",
+    "",
+    "def test_hypotenuse_and_stats():",
+    "    assert scientific.hypotenuse(3.0, 4.0) == 5.0",
+    "    assert scientific.hypotenuse(1.0, 1.0) == pytest.approx(math.sqrt(2.0))",
+    "    assert scientific.mean([-2.0, 2.0, 6.0]) == 2.0",
+    "    assert scientific.std_dev([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]) == 2.0",
+    "    with pytest.raises(ValueError):",
+    "        scientific.mean([])",
+    "    with pytest.raises(ValueError):",
+    "        scientific.std_dev([])",
+    "",
+    "def test_rms_hypot_flow():",
+    "    assert sci_calc.rms_hypot(3.0, 4.0) == 5.0",
+    "    assert sci_calc.rms_hypot(5.0, 12.0) == 13.0",
+    "    assert sci_calc.rms_hypot(-3.0, 4.0) == 5.0",
+    "    assert sci_calc.rms_hypot(0.0, 0.0) == 0.0"
+  ],
+  "fakeResponses": {
+    "scientific/power": "### Implementation\n```python\ndef power(base: float, exponent: float) -> float:\n    if base == 0.0 and exponent == 0.0:\n        return 1.0\n    if base == 0.0 and exponent < 0.0:\n        raise ValueError(\"Cannot raise zero to a negative power\")\n    return float(base ** exponent)\n```\n\n### Unit Check\n```python\ndef test_power():\n    import pytest\n    assert power(2.0, 3.0) == 8.0\n    assert power(0.0, 0.0) == 1.0\n    with pytest.raises(ValueError):\n        power(0.0, -1.0)\n```",
+    "scientific/square_root": "### Implementation\n```python\ndef square_root(x: float) -> float:\n    if x < 0.0:\n        raise ValueError(\"Cannot compute square root of negative number\")\n    return math.sqrt(x)\n```\n\n### Unit Check\n```python\ndef test_square_root():\n    import pytest\n    assert square_root(9.0) == 3.0\n    with pytest.raises(ValueError):\n        square_root(-1.0)\n```",
+    "scientific/factorial": "### Implementation\n```python\ndef factorial(n: int) -> int:\n    if isinstance(n, bool) or n < 0 or n > 20:\n        raise ValueError(\"n must be an integer in [0, 20]\")\n    result = 1\n    for k in range(2, n + 1):\n        result *= k\n    return result\n```\n\n### Unit Check\n```python\ndef test_factorial():\n    import pytest\n    assert factorial(0) == 1\n    assert factorial(5) == 120\n    with pytest.raises(ValueError):\n        factorial(-1)\n    with pytest.raises(ValueError):\n        factorial(True)\n```",
+    "scientific/log_base": "### Implementation\n```python\ndef log_base(x: float, base: float) -> float:\n    if x <= 0.0 or base <= 0.0 or base == 1.0:\n        raise ValueError(\"x must be > 0 and base must be > 0 and != 1\")\n    return math.log(x, base)\n```\n\n### Unit Check\n```python\ndef test_log_base():\n    import pytest\n    assert log_base(8.0, 2.0) == pytest.approx(3.0)\n    with pytest.raises(ValueError):\n        log_base(10.0, 1.0)\n```",
+    "scientific/sin_deg": "### Implementation\n```python\ndef sin_deg(degrees: float) -> float:\n    val = math.sin(math.radians(degrees))\n    return 0.0 if abs(val) < 1e-15 else val\n```\n\n### Unit Check\n```python\ndef test_sin_deg():\n    import pytest\n    assert sin_deg(30.0) == pytest.approx(0.5)\n    assert sin_deg(180.0) == 0.0\n```",
+    "scientific/cos_deg": "### Implementation\n```python\nimport math\n\ndef cos_deg(degrees: float) -> float:\n    val = math.cos(math.radians(degrees))\n    return 0.0 if abs(val) < 1e-15 else val\n```\n\n### Unit Check\n```python\ndef test_cos_deg():\n    import pytest\n    assert cos_deg(60.0) == pytest.approx(0.5)\n    assert cos_deg(90.0) == 0.0\n```",
+    "scientific/hypotenuse": "### Implementation\n```python\ndef hypotenuse(a: float, b: float) -> float:\n    return square_root(power(a, 2.0) + power(b, 2.0))\n```\n\n### Unit Check\n```python\ndef test_hypotenuse():\n    assert hypotenuse(3.0, 4.0) == 5.0\n    assert hypotenuse(5.0, 12.0) == 13.0\n```",
+    "scientific/mean": "### Implementation\n```python\ndef mean(values: list[float]) -> float:\n    if not values:\n        raise ValueError(\"values must not be empty\")\n    return sum(values) / len(values)\n```\n\n### Unit Check\n```python\ndef test_mean():\n    import pytest\n    assert mean([1.0, 2.0, 3.0]) == 2.0\n    with pytest.raises(ValueError):\n        mean([])\n```",
+    "scientific/std_dev": "### Implementation\n```python\ndef std_dev(values: list[float]) -> float:\n    if not values:\n        raise ValueError(\"values must not be empty\")\n    m = mean(values)\n    variance = sum((v - m) ** 2 for v in values) / len(values)\n    return square_root(variance)\n```\n\n### Unit Check\n```python\ndef test_std_dev():\n    import pytest\n    assert std_dev([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]) == 2.0\n    with pytest.raises(ValueError):\n        std_dev([])\n```"
+  }
+}

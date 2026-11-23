@@ -35,7 +35,7 @@ import {
 import { runNodeVerification, type VerificationOptions } from './verification_runner';
 
 export const BATCH_FORGE_SYSTEM_PROMPT =
-    'You are a constrained local component forge engine. Follow JPL-60 rules strictly and provide both implementation and unit check.';
+    'You are a constrained local Python component forge engine. Follow JPL-60 rules strictly, provide implementation and pytest check, and never import from slate.* (dependencies are already in scope).';
 
 export const TS_BATCH_FORGE_SYSTEM_PROMPT =
     'You are a constrained local TypeScript/JavaScript component forge engine. Follow JPL-60 rules strictly and provide both the typed implementation and a standalone test() unit check.';
@@ -80,6 +80,7 @@ export interface BatchForgeNodeResult {
     durationMs: number;
     proposedCode?: string;
     proposedCheck?: string;
+    proposedImports?: string[];
 }
 
 export interface BatchForgeResult {
@@ -89,10 +90,13 @@ export interface BatchForgeResult {
     model: string;
     hasApiKey: boolean;
     concurrency: number;
+    waves: number;
     total: number;
     forgedCount: number;
     failedCount: number;
     skippedCount: number;
+    totalAttempts: number;
+    totalDurationMs: number;
     results: BatchForgeNodeResult[];
 }
 
@@ -107,14 +111,175 @@ interface IndexedTarget {
     language: BatchForgeLanguage;
 }
 
-function collectNodeDependencies(node: SlateNode, nodesById: ReadonlyMap<string, SlateNode>): Map<string, SlateNode> {
-    const deps = new Map<string, SlateNode>();
-    for (const depId of [...node.context, ...node.uses]) {
-        if (deps.has(depId)) continue;
+function collectTransitiveDependencies(
+    rootId: string,
+    rootNode: SlateNode,
+    nodesById: ReadonlyMap<string, SlateNode>,
+): { dependencies: Map<string, SlateNode>; missingDeps: string[] } {
+    const dependencies = new Map<string, SlateNode>();
+    const missingSet = new Set<string>();
+    const visiting = new Set<string>([rootId]);
+    const visited = new Set<string>();
+
+    const visit = (depId: string) => {
+        if (depId === rootId || visiting.has(depId) || visited.has(depId)) return;
         const depNode = nodesById.get(depId);
-        if (depNode) deps.set(depId, depNode);
+        if (!depNode) {
+            missingSet.add(depId);
+            visited.add(depId);
+            return;
+        }
+        visiting.add(depId);
+        for (const subId of [...depNode.context, ...depNode.uses]) {
+            visit(subId);
+        }
+        visiting.delete(depId);
+        visited.add(depId);
+        dependencies.set(depId, depNode);
+    };
+
+    for (const depId of [...rootNode.context, ...rootNode.uses]) {
+        visit(depId);
     }
-    return deps;
+    return { dependencies, missingDeps: Array.from(missingSet).sort() };
+}
+
+/**
+ * Partitions targets into topological execution waves across transitive `context` + `uses` dependencies
+ * (including chains passing through already-implemented non-target nodes when `allNodesById` is supplied).
+ * Cycles are broken deterministically into a final wave sorted by `nodeId`.
+ */
+export function partitionTargetsIntoWaves<T extends { target: { nodeId: string; node: SlateNode } }>(
+    items: readonly T[],
+    allNodesById?: ReadonlyMap<string, SlateNode>,
+): T[][] {
+    if (items.length === 0) return [];
+    const byId = new Map<string, T>();
+    const lookupNodes = new Map<string, SlateNode>(allNodesById ?? []);
+    for (const item of items) {
+        byId.set(item.target.nodeId, item);
+        lookupNodes.set(item.target.nodeId, item.target.node);
+    }
+    const remaining = new Set<string>(byId.keys());
+    const depsById = new Map<string, Set<string>>();
+    for (const item of items) {
+        const transitive = collectTransitiveDependencies(item.target.nodeId, item.target.node, lookupNodes);
+        const internalDeps = new Set<string>();
+        for (const depId of transitive.dependencies.keys()) {
+            if (depId !== item.target.nodeId && byId.has(depId)) {
+                internalDeps.add(depId);
+            }
+        }
+        depsById.set(item.target.nodeId, internalDeps);
+    }
+
+    const waves: T[][] = [];
+    while (remaining.size > 0) {
+        const readyIds: string[] = [];
+        for (const id of remaining) {
+            const deps = depsById.get(id)!;
+            let hasUnmet = false;
+            for (const depId of deps) {
+                if (remaining.has(depId)) {
+                    hasUnmet = true;
+                    break;
+                }
+            }
+            if (!hasUnmet) {
+                readyIds.push(id);
+            }
+        }
+        readyIds.sort((a, b) => a.localeCompare(b));
+        if (readyIds.length === 0) {
+            const cycleIds = Array.from(remaining).sort((a, b) => a.localeCompare(b));
+            waves.push(cycleIds.map(id => byId.get(id)!));
+            break;
+        }
+        waves.push(readyIds.map(id => byId.get(id)!));
+        for (const id of readyIds) {
+            remaining.delete(id);
+        }
+    }
+    return waves;
+}
+
+/** Compacts verbose pytest/validation tracebacks for low-token Frontier Architect replies. */
+export function compactFailureReason(raw: string, maxChars = 360): string {
+    const clean = raw
+        .replace(/\u001b\[[0-9;]*m/g, '')
+        .replace(/\r\n?/g, '\n')
+        .trim();
+    if (!clean) return 'Verification failed.';
+
+    const lines = clean
+        .split('\n')
+        .map(line => line
+            .replace(/[A-Za-z]:\\[^\s:]*?\.slate[\\/]+build[\\/]+verify[\\/]+[^\s:]+/g, '<verify>')
+            .replace(/\/[^\s:]*?\.slate\/build\/verify\/[^\s:]+/g, '<verify>')
+            .trimEnd())
+        .filter(line => {
+            const trimmed = line.trim();
+            if (!trimmed) return false;
+            if (/^=+$/.test(trimmed) || /^_+$/.test(trimmed) || /^-+$/.test(trimmed)) return false;
+            if (/^=+\s*(?:FAILURES|ERRORS|short test summary info|test session starts)\s*=+$/i.test(trimmed)) return false;
+            return true;
+        });
+
+    const signalRe = /^(?:FAILED\s|ERROR\s|E\s{2,}|Candidate\s|>?\s*assert\s|Input should be\b|.*(?:AssertionError|ValueError|TypeError|ZeroDivisionError|ModuleNotFoundError|ImportError|NameError|ValidationError|SyntaxError))/;
+    const prioritized = lines.filter(l => signalRe.test(l.trim()));
+    const chosen = prioritized.length > 0 ? prioritized : lines.slice(-10);
+    let compact = chosen.join('\n').trim();
+    if (!compact) compact = clean;
+    if (compact.length > maxChars) {
+        compact = `${compact.slice(0, maxChars - 3).trimEnd()}...`;
+    }
+    return compact;
+}
+
+/** Formats a compact batch forge summary omitting raw tracebacks and already-written code payloads. */
+export function compactBatchForgeResult(result: BatchForgeResult): Record<string, unknown> {
+    return {
+        ok: result.ok,
+        provider: result.provider,
+        endpoint: result.endpoint,
+        model: result.model,
+        hasApiKey: result.hasApiKey,
+        concurrency: result.concurrency,
+        waves: result.waves,
+        total: result.total,
+        forgedCount: result.forgedCount,
+        failedCount: result.failedCount,
+        skippedCount: result.skippedCount,
+        totalAttempts: result.totalAttempts,
+        totalDurationMs: result.totalDurationMs,
+        results: result.results.map(item => {
+            const verification = item.verification
+                ? {
+                    state: item.verification.state,
+                    ...(item.verification.pydanticValid !== undefined ? { pydanticValid: item.verification.pydanticValid } : {}),
+                    ...(item.verification.testsPassed !== undefined ? { testsPassed: item.verification.testsPassed } : {}),
+                    ...(item.verification.testsTotal !== undefined ? { testsTotal: item.verification.testsTotal } : {}),
+                    ...(item.verification.survivingMutants !== undefined ? { survivingMutants: item.verification.survivingMutants } : {}),
+                    ...(item.verification.totalMutants !== undefined ? { totalMutants: item.verification.totalMutants } : {}),
+                }
+                : undefined;
+            return {
+                nodeId: item.nodeId,
+                status: item.status,
+                attempts: item.attempts,
+                written: item.written,
+                durationMs: item.durationMs,
+                ...(item.lineCount !== undefined ? { lineCount: item.lineCount } : {}),
+                ...(item.checkLineCount !== undefined ? { checkLineCount: item.checkLineCount } : {}),
+                ...(item.estimatedInputTokens !== undefined ? { estimatedInputTokens: item.estimatedInputTokens } : {}),
+                ...(verification ? { verification } : {}),
+                ...(item.status !== 'forged' && item.reason ? { reason: compactFailureReason(item.reason) } : {}),
+                ...(!item.written && item.status === 'forged' && item.proposedCode !== undefined ? { proposedCode: item.proposedCode } : {}),
+                ...(!item.written && item.status === 'forged' && item.proposedCheck !== undefined ? { proposedCheck: item.proposedCheck } : {}),
+                ...(!item.written && item.status === 'forged' && item.proposedImports !== undefined ? { proposedImports: item.proposedImports } : {}),
+            };
+        }),
+    };
 }
 
 function computeForgeInputFingerprint(
@@ -246,12 +411,7 @@ async function forgeSingleTarget(
     const shouldVerify = options.verify !== false;
     const shouldWrite = options.write !== false;
 
-    const dependencies = new Map<string, SlateNode>();
-    for (const depId of [...target.node.context, ...target.node.uses]) {
-        if (depId === target.nodeId || dependencies.has(depId)) continue;
-        const depNode = nodesById.get(depId);
-        if (depNode) dependencies.set(depId, depNode);
-    }
+    const { dependencies } = collectTransitiveDependencies(target.nodeId, target.node, nodesById);
 
     let retryFeedback: string | undefined;
     let lastReason = 'Forge did not produce a valid candidate.';
@@ -311,11 +471,16 @@ async function forgeSingleTarget(
             continue;
         }
 
+        const normalizedImpl = validation.normalizedImplementation ?? candidate.implementation;
+        const hoistedImports = validation.hoistedImports ?? [];
+        const mergedTargetImports = Array.from(new Set([...target.node.imports, ...hoistedImports]));
+
         let verification: NodeVerificationResult | undefined;
         if (shouldVerify) {
             const candidateNode: SlateNode = {
                 ...target.node,
-                code: codeLines(candidate.implementation),
+                imports: mergedTargetImports,
+                code: codeLines(normalizedImpl),
                 check: candidate.check ? codeLines(candidate.check) : target.node.check,
             };
             verification = await runNodeVerification({
@@ -324,7 +489,7 @@ async function forgeSingleTarget(
                 nodeId: target.nodeId,
                 dependencies,
                 isTrusted: true,
-                timeoutMs: options.verifyTimeoutMs ?? 15000,
+                timeoutMs: options.verifyTimeoutMs ?? 30000,
                 pythonPath: options.pythonPath,
                 language: target.language,
                 executeCommand: options.executeCommand,
@@ -335,7 +500,9 @@ async function forgeSingleTarget(
             if (verification.state === 'failed' || verification.state === 'mutant_survived') {
                 const failureSummary = summarizeVerificationFailure(verification);
                 lastReason = failureSummary;
-                retryFeedback = failureSummary;
+                retryFeedback = verification.state === 'mutant_survived'
+                    ? failureSummary
+                    : compactFailureReason(failureSummary, 480);
                 continue;
             }
         }
@@ -373,21 +540,34 @@ async function forgeSingleTarget(
             }
 
             const currentDeps = new Map<string, SlateNode>();
-            const missingDeps: string[] = [];
-            for (const depId of [...diskNode.context, ...diskNode.uses]) {
-                if (depId === target.nodeId || currentDeps.has(depId)) continue;
+            const currentMissing = new Set<string>();
+            const diskVisiting = new Set<string>([target.nodeId]);
+            const diskVisited = new Set<string>();
+            const visitDiskDep = async (depId: string): Promise<void> => {
+                if (depId === target.nodeId || diskVisiting.has(depId) || diskVisited.has(depId)) return;
+                let depNode: SlateNode;
                 try {
                     const safeDep = assertSafeNodeId(options.workspaceRoot, depId);
                     const depText = await fs.promises.readFile(safeDep.fullPath, 'utf8');
-                    currentDeps.set(depId, parseNode(depText));
+                    depNode = parseNode(depText);
                 } catch {
-                    if (dependencies.has(depId)) {
-                        missingDeps.push(depId);
-                    }
+                    currentMissing.add(depId);
+                    diskVisited.add(depId);
+                    return;
                 }
+                diskVisiting.add(depId);
+                for (const subId of [...depNode.context, ...depNode.uses]) {
+                    await visitDiskDep(subId);
+                }
+                diskVisiting.delete(depId);
+                diskVisited.add(depId);
+                currentDeps.set(depId, depNode);
+            };
+            for (const depId of [...diskNode.context, ...diskNode.uses]) {
+                await visitDiskDep(depId);
             }
             const currentHash = sourceHash(codeText(diskNode));
-            const currentFingerprint = computeForgeInputFingerprint(diskNode, currentDeps, missingDeps);
+            const currentFingerprint = computeForgeInputFingerprint(diskNode, currentDeps, Array.from(currentMissing).sort());
             if (currentHash !== target.initialHash || currentFingerprint !== target.initialInputFingerprint) {
                 return {
                     nodeId: target.nodeId,
@@ -400,12 +580,14 @@ async function forgeSingleTarget(
                     verification,
                     written: false,
                     durationMs: Date.now() - startMs,
-                    proposedCode: candidate.implementation,
+                    proposedCode: normalizedImpl,
                     proposedCheck: candidate.check,
+                    ...(mergedTargetImports.length > 0 ? { proposedImports: mergedTargetImports } : {}),
                 };
             }
 
-            diskNode.code = codeLines(candidate.implementation);
+            diskNode.code = codeLines(normalizedImpl);
+            diskNode.imports = Array.from(new Set([...diskNode.imports, ...hoistedImports]));
             if (candidate.check) {
                 diskNode.check = codeLines(candidate.check);
             }
@@ -431,7 +613,11 @@ async function forgeSingleTarget(
             verification,
             written,
             durationMs: Date.now() - startMs,
-            ...(shouldWrite ? {} : { proposedCode: candidate.implementation, proposedCheck: candidate.check }),
+            ...(shouldWrite ? {} : {
+                proposedCode: normalizedImpl,
+                proposedCheck: candidate.check,
+                ...(mergedTargetImports.length > 0 ? { proposedImports: mergedTargetImports } : {}),
+            }),
         };
     }
 
@@ -611,7 +797,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                 written: false,
                 durationMs: 0,
             });
-            const initialDeps = collectNodeDependencies(node, nodesById);
+            const initialDeps = collectTransitiveDependencies(req.nodeId, node, nodesById);
             activeTargets.push({
                 resultIndex,
                 target: {
@@ -621,7 +807,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     node,
                     unit,
                     initialHash: doc.sourceHash,
-                    initialInputFingerprint: computeForgeInputFingerprint(node, initialDeps),
+                    initialInputFingerprint: computeForgeInputFingerprint(node, initialDeps.dependencies, initialDeps.missingDeps),
                     language: canonicalLang,
                 },
             });
@@ -647,7 +833,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                 written: false,
                 durationMs: 0,
             });
-            const initialDeps = collectNodeDependencies(node, nodesById);
+            const initialDeps = collectTransitiveDependencies(nodeId, node, nodesById);
             activeTargets.push({
                 resultIndex,
                 target: {
@@ -657,35 +843,135 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     node,
                     unit,
                     initialHash: doc.sourceHash,
-                    initialInputFingerprint: computeForgeInputFingerprint(node, initialDeps),
+                    initialInputFingerprint: computeForgeInputFingerprint(node, initialDeps.dependencies, initialDeps.missingDeps),
                     language: canonicalLang,
                 },
             });
         }
     }
 
-    let cursor = 0;
-    const workerCount = Math.min(concurrency, activeTargets.length);
-    const workers = Array.from({ length: workerCount }, async () => {
-        while (cursor < activeTargets.length) {
-            const item = activeTargets[cursor++];
-            if (!item) break;
-            results[item.resultIndex] = await forgeSingleTarget(
-                item.target,
-                snapshot,
-                sources,
-                nodesById,
-                llm,
-                options,
-                maxRevisions,
-            );
+    const batchStartMs = Date.now();
+    const waves = partitionTargetsIntoWaves(activeTargets, nodesById);
+    const activeTargetIds = new Set(activeTargets.map(a => a.target.nodeId));
+    const resultById = new Map<string, BatchForgeNodeResult>();
+
+    for (let waveIdx = 0; waveIdx < waves.length; waveIdx++) {
+        const wave = waves[waveIdx];
+        const runnableWave: typeof wave = [];
+
+        for (const item of wave) {
+            const transitive = collectTransitiveDependencies(item.target.nodeId, item.target.node, nodesById);
+            let blockedBy: string | undefined;
+            if (waveIdx > 0) {
+                for (const depId of transitive.dependencies.keys()) {
+                    if (!activeTargetIds.has(depId)) continue;
+                    const depResult = resultById.get(depId);
+                    if (depResult && depResult.status !== 'forged') {
+                        const depNode = nodesById.get(depId);
+                        const depLang = depNode ? batchForgeLanguage(depNode.language ?? config.language) : null;
+                        if (!depNode || !depLang || validateNodeStub(depNode, depLang).valid) {
+                            blockedBy = depId;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (blockedBy) {
+                const skipped: BatchForgeNodeResult = {
+                    nodeId: item.target.nodeId,
+                    status: 'skipped',
+                    reason: `Skipped because required dependency "${blockedBy}" did not forge in an earlier wave.`,
+                    attempts: 0,
+                    written: false,
+                    durationMs: 0,
+                };
+                results[item.resultIndex] = skipped;
+                resultById.set(item.target.nodeId, skipped);
+                continue;
+            }
+
+            if (waveIdx > 0) {
+                item.target.initialInputFingerprint = computeForgeInputFingerprint(
+                    item.target.node,
+                    transitive.dependencies,
+                    transitive.missingDeps,
+                );
+            }
+            runnableWave.push(item);
         }
-    });
-    await Promise.all(workers);
+
+        let cursor = 0;
+        const workerCount = Math.min(concurrency, runnableWave.length);
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (cursor < runnableWave.length) {
+                const item = runnableWave[cursor++];
+                if (!item) break;
+                const nodeResult = await forgeSingleTarget(
+                    item.target,
+                    snapshot,
+                    sources,
+                    nodesById,
+                    llm,
+                    options,
+                    maxRevisions,
+                );
+                results[item.resultIndex] = nodeResult;
+                resultById.set(item.target.nodeId, nodeResult);
+            }
+        });
+        await Promise.all(workers);
+
+        // Refresh forged nodes in snapshot/sources/nodesById before the next wave runs.
+        if (waveIdx + 1 < waves.length) {
+            let refreshedAny = false;
+            for (const item of runnableWave) {
+                const res = resultById.get(item.target.nodeId);
+                if (!res || res.status !== 'forged') continue;
+
+                let nextText: string | null = null;
+                if (options.write !== false) {
+                    try {
+                        nextText = await fs.promises.readFile(item.target.fullPath, 'utf8');
+                    } catch {
+                        nextText = null;
+                    }
+                } else if (res.proposedCode !== undefined) {
+                    const nextNode: SlateNode = {
+                        ...item.target.node,
+                        code: codeLines(res.proposedCode),
+                        ...(res.proposedImports ? { imports: res.proposedImports } : {}),
+                        ...(res.proposedCheck ? { check: codeLines(res.proposedCheck) } : {}),
+                    };
+                    nextText = serializeNode(nextNode);
+                }
+                if (!nextText) continue;
+
+                const indexed = indexNode(item.target.relPath, nextText, config.language, null);
+                if (indexed.node) {
+                    nodesById.set(item.target.nodeId, indexed.node);
+                }
+                docById.set(item.target.nodeId, indexed.document);
+                sources.set(item.target.relPath, indexed.code);
+                const docIdx = documents.findIndex(d => d.path === item.target.relPath);
+                if (docIdx >= 0) {
+                    documents[docIdx] = indexed.document;
+                } else {
+                    documents.push(indexed.document);
+                }
+                refreshedAny = true;
+            }
+            if (refreshedAny) {
+                snapshot.revision += 1;
+            }
+        }
+    }
 
     const forgedCount = results.filter(r => r.status === 'forged').length;
     const failedCount = results.filter(r => r.status === 'failed').length;
     const skippedCount = results.filter(r => r.status === 'skipped').length;
+    const totalAttempts = results.reduce((sum, r) => sum + r.attempts, 0);
+    const totalDurationMs = Date.now() - batchStartMs;
 
     return {
         ok: failedCount === 0,
@@ -694,10 +980,13 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
         model: llm.model,
         hasApiKey: llm.hasApiKey,
         concurrency,
+        waves: waves.length,
         total: results.length,
         forgedCount,
         failedCount,
         skippedCount,
+        totalAttempts,
+        totalDurationMs,
         results,
     };
 }

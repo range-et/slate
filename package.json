@@ -20,6 +20,7 @@
     "verify:baseline": "bash scripts/verify-baseline.sh",
     "verify:launch": "npm run verify:baseline && npm run test:qa",
     "package-extension": "node scripts/package-extension.js",
+    "benchmark:offload": "node scripts/benchmark-offload.mjs --spec benchmarks/specs/sci_calc.json --provider fake",
     "demo:llama": "bash scripts/start-llama-demo.sh",
     "typecheck": "tsc -p tsconfig.json && tsc -p vscode-extension/tsconfig.json --noEmit",
     "lint": "eslint src/harness vscode-extension/src --max-warnings 0",

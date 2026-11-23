@@ -4,7 +4,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { batchForgeWorkspace } from '../vscode-extension/src/batch_forge';
+import {
+    batchForgeWorkspace,
+    compactBatchForgeResult,
+    compactFailureReason,
+    partitionTargetsIntoWaves,
+    type BatchForgeResult,
+} from '../vscode-extension/src/batch_forge';
 import { parseNode, serializeNode, type SlateNode } from '../vscode-extension/src/slate_folder';
 
 function makeStubNode(
@@ -229,6 +235,8 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         expect(result.results[0].verification?.state).toBe('passed');
         expect(prompts[1]).toContain('Candidate validation failed');
         expect(prompts[2]).toContain('Bounded Retry Feedback');
+        expect(prompts[2]).not.toContain('=====');
+        expect(prompts[2]).toContain('assert triple');
 
         const tripleDisk = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'triple.json'), 'utf8'));
         expect(tripleDisk.code).toEqual(['def triple(x: int) -> int:', '    return x * 3']);
@@ -418,5 +426,335 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         expect(depRace.results[0].reason).toContain('changed on disk');
         const depTargetDisk = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'target_dep.json'), 'utf8'));
         expect(depTargetDisk.code[1]).toBe('    raise NotImplementedError');
+    });
+
+    it('partitions DAG targets into topological waves and breaks cycles cleanly', () => {
+        const mk = (nodeId: string, context: string[] = [], uses: string[] = []) => ({
+            target: {
+                nodeId,
+                node: makeStubNode(nodeId.split('/').pop()!, `def ${nodeId.split('/').pop()!}(x: int) -> int`, 'op', undefined, {
+                    context,
+                    uses,
+                }),
+            },
+        });
+        const waves = partitionTargetsIntoWaves([
+            mk('c', ['b']),
+            mk('a'),
+            mk('b', ['a']),
+            mk('d', ['b'], ['a']),
+        ]);
+        expect(waves.map(w => w.map(i => i.target.nodeId))).toEqual([
+            ['a'],
+            ['b'],
+            ['c', 'd'],
+        ]);
+
+        const cyclic = partitionTargetsIntoWaves([mk('x', ['y']), mk('y', ['x']), mk('leaf')]);
+        expect(cyclic.map(w => w.map(i => i.target.nodeId))).toEqual([
+            ['leaf'],
+            ['x', 'y'],
+        ]);
+
+        // Transitive dependency through an already-implemented non-target helper:
+        // stub_a -> impl_b -> stub_c  ==>  Wave 0: [stub_c], Wave 1: [stub_a]
+        const implB = makeStubNode('impl_b', 'def impl_b(x: int) -> int', 'Uses c', undefined, {
+            context: ['stub_c'],
+            code: ['def impl_b(x: int) -> int:', '    return stub_c(x) * 2'],
+        });
+        const allNodes = new Map<string, SlateNode>([
+            ['impl_b', implB],
+            ['stub_a', makeStubNode('stub_a', 'def stub_a(x: int) -> int', 'Uses impl_b', undefined, { context: ['impl_b'] })],
+            ['stub_c', makeStubNode('stub_c', 'def stub_c(x: int) -> int', 'Leaf stub')],
+        ]);
+        const transitiveWaves = partitionTargetsIntoWaves([
+            mk('stub_a', ['impl_b']),
+            mk('stub_c'),
+        ], allNodes);
+        expect(transitiveWaves.map(w => w.map(i => i.target.nodeId))).toEqual([
+            ['stub_c'],
+            ['stub_a'],
+        ]);
+    });
+
+    it('orders stubs reached transitively through implemented helpers into separate waves', async () => {
+        await writeProject(
+            tmpDir,
+            { provider: 'llama.cpp', model: 'qwen/qwen3-coder-30b-a3b-instruct' },
+            {
+                stub_c: makeStubNode(
+                    'stub_c',
+                    'def stub_c(x: int) -> int',
+                    'Add 1',
+                    [{ name: 'c1', input: { x: 2 }, expected: 3 }],
+                ),
+                impl_b: makeStubNode(
+                    'impl_b',
+                    'def impl_b(x: int) -> int',
+                    'Double stub_c(x)',
+                    undefined,
+                    {
+                        context: ['stub_c'],
+                        code: ['def impl_b(x: int) -> int:', '    return stub_c(x) * 2'],
+                    },
+                ),
+                stub_a: makeStubNode(
+                    'stub_a',
+                    'def stub_a(x: int) -> int',
+                    'Return impl_b(x) + 10',
+                    [{ name: 'a1', input: { x: 2 }, expected: 16 }],
+                    { context: ['impl_b'] },
+                ),
+            },
+        );
+
+        const order: string[] = [];
+        activeServer = await startCustomSseServer(body => {
+            const prompt = String(body.messages?.[1]?.content ?? '');
+            if (prompt.includes('### Target stub: stub_c')) {
+                order.push('stub_c');
+                return '### Implementation\n```python\ndef stub_c(x: int) -> int:\n    return x + 1\n```\n### Unit Check\n```python\ndef test_stub_c():\n    assert stub_c(2) == 3\n```';
+            }
+            order.push('stub_a');
+            return '### Implementation\n```python\ndef stub_a(x: int) -> int:\n    return impl_b(x) + 10\n```\n### Unit Check\n```python\ndef test_stub_a():\n    assert stub_a(2) == 16\n```';
+        });
+
+        const res = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            concurrency: 2,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(res.ok, JSON.stringify(res.results)).toBe(true);
+        expect(res.waves).toBe(2);
+        expect(res.forgedCount).toBe(2);
+        expect(order).toEqual(['stub_c', 'stub_a']);
+    }, 20_000);
+
+    it('forges multi-wave dependencies in one batch (both write and dry-run) and hoists leading imports', async () => {
+        await writeProject(
+            tmpDir,
+            { provider: 'llama.cpp', model: 'qwen/qwen3-coder-30b-a3b-instruct' },
+            {
+                'scientific/power': makeStubNode(
+                    'power',
+                    'def power(base: float, exponent: float) -> float',
+                    'Raise base to exponent',
+                    [{ name: 'p', input: { base: 3, exponent: 2 }, expected: 9 }],
+                ),
+                'scientific/square_root': makeStubNode(
+                    'square_root',
+                    'def square_root(x: float) -> float',
+                    'Compute sqrt(x)',
+                    [{ name: 's', input: { x: 25 }, expected: 5 }],
+                ),
+                'scientific/hypotenuse': makeStubNode(
+                    'hypotenuse',
+                    'def hypotenuse(a: float, b: float) -> float',
+                    'Call square_root(power(a, 2.0) + power(b, 2.0))',
+                    [{ name: 'h', input: { a: 3, b: 4 }, expected: 5 }],
+                    { context: ['scientific/power', 'scientific/square_root'] },
+                ),
+            },
+        );
+
+        const callOrder: string[] = [];
+        activeServer = await startCustomSseServer(body => {
+            const prompt = String(body.messages?.[1]?.content ?? '');
+            if (prompt.includes('### Target stub: power')) {
+                callOrder.push('power');
+                return [
+                    '### Implementation',
+                    '```python',
+                    'def power(base: float, exponent: float) -> float:',
+                    '    return float(base ** exponent)',
+                    '```',
+                    '### Unit Check',
+                    '```python',
+                    'def test_power():',
+                    '    assert power(2.0, 3.0) == 8.0',
+                    '```',
+                ].join('\n');
+            }
+            if (prompt.includes('### Target stub: square_root')) {
+                callOrder.push('square_root');
+                return [
+                    '### Implementation',
+                    '```python',
+                    'import math',
+                    '',
+                    'def square_root(x: float) -> float:',
+                    '    return math.sqrt(x)',
+                    '```',
+                    '### Unit Check',
+                    '```python',
+                    'def test_square_root():',
+                    '    assert square_root(9.0) == 3.0',
+                    '```',
+                ].join('\n');
+            }
+            callOrder.push('hypotenuse');
+            expect(prompt).not.toContain('slate/nodes/');
+            return [
+                '### Implementation',
+                '```python',
+                'def hypotenuse(a: float, b: float) -> float:',
+                '    return square_root(power(a, 2.0) + power(b, 2.0))',
+                '```',
+                '### Unit Check',
+                '```python',
+                'def test_hypotenuse():',
+                '    assert hypotenuse(3.0, 4.0) == 5.0',
+                '```',
+            ].join('\n');
+        });
+
+        // Dry-run wave propagation (write: false)
+        const dryRes = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            concurrency: 3,
+            write: false,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(dryRes.ok, JSON.stringify(dryRes.results)).toBe(true);
+        expect(dryRes.waves).toBe(2);
+        expect(dryRes.forgedCount).toBe(3);
+        expect(callOrder.indexOf('hypotenuse')).toBeGreaterThan(callOrder.indexOf('power'));
+        expect(callOrder.indexOf('hypotenuse')).toBeGreaterThan(callOrder.indexOf('square_root'));
+
+        // Persisted single-batch multi-wave forge (write: true)
+        const writeRes = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            concurrency: 3,
+            write: true,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(writeRes.ok).toBe(true);
+        expect(writeRes.waves).toBe(2);
+        expect(writeRes.forgedCount).toBe(3);
+
+        const sqrtDisk = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'scientific', 'square_root.json'), 'utf8'));
+        expect(sqrtDisk.imports).toContain('import math');
+        expect(sqrtDisk.code[0]).toBe('def square_root(x: float) -> float:');
+    }, 30_000);
+
+    it('skips downstream Wave 2 dependents cleanly when an upstream Wave 1 dependency fails', async () => {
+        await writeProject(
+            tmpDir,
+            { provider: 'llama.cpp', model: 'qwen/qwen3-coder-30b-a3b-instruct' },
+            {
+                leaf: makeStubNode(
+                    'leaf',
+                    'def leaf(x: int) -> int',
+                    'Return x + 1',
+                    [{ name: 'c', input: { x: 1 }, expected: 2 }],
+                ),
+                downstream: makeStubNode(
+                    'downstream',
+                    'def downstream(x: int) -> int',
+                    'Call leaf(x)',
+                    [{ name: 'c', input: { x: 1 }, expected: 2 }],
+                    { context: ['leaf'] },
+                ),
+            },
+        );
+
+        let downstreamCalled = false;
+        activeServer = await startCustomSseServer(body => {
+            const prompt = String(body.messages?.[1]?.content ?? '');
+            if (prompt.includes('def downstream(')) {
+                downstreamCalled = true;
+            }
+            return 'not valid python at all';
+        });
+
+        const res = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            maxRevisions: 1,
+            verify: false,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(res.ok).toBe(false);
+        expect(res.waves).toBe(2);
+        expect(res.failedCount).toBe(1);
+        expect(res.skippedCount).toBe(1);
+        expect(downstreamCalled).toBe(false);
+        const downResult = res.results.find(r => r.nodeId === 'downstream')!;
+        expect(downResult.status).toBe('skipped');
+        expect(downResult.reason).toContain('leaf');
+    }, 15_000);
+
+    it('compacts verbose verification tracebacks and forged payloads for Frontier replies', () => {
+        const longTrace = [
+            '\u001b[31m============================= FAILURES =============================\u001b[0m',
+            'FAILED C:\\proj\\.slate\\build\\verify\\scientific\\sin_deg\\test_sin_deg.py::test_structured',
+            'E       AssertionError: assert 0.49999999999999994 == 0.5',
+            'noise line '.repeat(40),
+        ].join('\n');
+        const compacted = compactFailureReason(longTrace, 180);
+        expect(compacted.length).toBeLessThanOrEqual(180);
+        expect(compacted).not.toContain('\u001b');
+        expect(compacted).not.toContain('============================= FAILURES');
+        expect(compacted).toContain('<verify>');
+        expect(compacted).toContain('AssertionError');
+
+        const fullResult: BatchForgeResult = {
+            ok: false,
+            provider: 'openrouter',
+            endpoint: 'https://openrouter.ai/api/v1',
+            model: 'qwen/qwen3-coder-30b-a3b-instruct',
+            hasApiKey: true,
+            concurrency: 3,
+            waves: 2,
+            total: 2,
+            forgedCount: 1,
+            failedCount: 1,
+            skippedCount: 0,
+            totalAttempts: 4,
+            totalDurationMs: 1200,
+            results: [
+                {
+                    nodeId: 'ok_node',
+                    status: 'forged',
+                    attempts: 1,
+                    lineCount: 2,
+                    written: true,
+                    durationMs: 100,
+                    verification: {
+                        nodeId: 'ok_node',
+                        state: 'passed',
+                        timestamp: 1,
+                        sourceHash: 'sha256:abc',
+                        testsPassed: 2,
+                        testsTotal: 2,
+                        diagnostics: ['Pytest passed; mutmut skipped'],
+                        traceback: 'should be stripped',
+                    },
+                    proposedCode: 'should be omitted when written',
+                },
+                {
+                    nodeId: 'bad_node',
+                    status: 'failed',
+                    attempts: 3,
+                    written: false,
+                    durationMs: 1100,
+                    reason: longTrace,
+                    verification: {
+                        nodeId: 'bad_node',
+                        state: 'failed',
+                        timestamp: 1,
+                        sourceHash: 'sha256:def',
+                        testsPassed: 0,
+                        testsTotal: 1,
+                        traceback: longTrace,
+                    },
+                },
+            ],
+        };
+        const compact = compactBatchForgeResult(fullResult);
+        const rows = compact.results as Array<Record<string, unknown>>;
+        expect(rows[0].proposedCode).toBeUndefined();
+        expect((rows[0].verification as Record<string, unknown>).traceback).toBeUndefined();
+        expect((rows[1].verification as Record<string, unknown>).traceback).toBeUndefined();
+        expect(String(rows[1].reason)).toContain('AssertionError');
     });
 });

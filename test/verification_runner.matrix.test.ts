@@ -81,6 +81,40 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(lines).toContain('    with pytest.raises(ValueError):');
             expect(lines).toContain('        check_item(flag=False, empty=None)');
         });
+
+        it('supports expectedError alias, float pytest.approx matching, numeric tolerance, and approx:false override', () => {
+            const floatLines = formatCasesAsPython('sin_deg', [
+                { name: 'thirty', input: { degrees: 30 }, expected: 0.5 },
+                { name: 'custom_tol', input: { degrees: 60 }, expected: 0.5, approx: 0.001 },
+                { name: 'exact_override', input: { degrees: 0 }, expected: 0, approx: false },
+                { name: 'err_alias', input: { degrees: 'bad' }, expectedError: 'TypeError' },
+            ], { returnAnnotation: 'float' });
+            expect(floatLines).toContain('    assert sin_deg(degrees=30) == pytest.approx(0.5, rel=1e-9, abs=1e-12)');
+            expect(floatLines).toContain('    assert sin_deg(degrees=60) == pytest.approx(0.5, abs=0.001)');
+            expect(floatLines).toContain('    assert sin_deg(degrees=0) == 0');
+            expect(floatLines).toContain('    with pytest.raises(TypeError):');
+            expect(floatLines).toContain('        sin_deg(degrees="bad")');
+
+            const intLines = formatCasesAsPython('add', [
+                { a: 1, b: 2, expected: 3, expectedError: undefined },
+            ], { returnAnnotation: 'int' });
+            expect(intLines).toContain('    assert add(a=1, b=2) == 3');
+
+            const tsLines = formatCasesAsTs(makeNode({
+                name: 'scale',
+                language: 'typescript',
+                code: ['export function scale(x: number): number {', '    return x * 0.5;', '}'],
+            }), [
+                { name: 'approx_bool', input: { x: 1 }, expected: 0.5, approx: true },
+                { name: 'approx_num', input: { x: 2 }, expected: 1, approx: 0.01 },
+                { name: 'exact', input: { x: 4 }, expected: 2, approx: false },
+                { name: 'err_alias', input: { x: -1 }, expectedError: 'RangeError' },
+            ], 'typescript');
+            expect(tsLines.some(l => l.includes('expect(scale(1)).toBeCloseTo(0.5, 6);'))).toBe(true);
+            expect(tsLines.some(l => l.includes('expect(Math.abs((scale(2)) - (1))).toBeLessThanOrEqual(0.01);'))).toBe(true);
+            expect(tsLines.some(l => l.includes('expect(scale(4)).toEqual(2);'))).toBe(true);
+            expect(tsLines.some(l => l.includes('expect(() => { scale(-1); }).toThrow("RangeError");'))).toBe(true);
+        });
     });
 
     describe('generateVerificationFiles', () => {
@@ -88,8 +122,8 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             const node = makeNode();
             const { moduleContent, testContent, hasChecks } = generateVerificationFiles(node);
             expect(hasChecks).toBe(true);
-            expect(moduleContent).toContain('from pydantic import validate_call');
-            expect(moduleContent).toContain('clamp = validate_call(validate_return=True)(clamp)');
+            expect(moduleContent).toContain('from pydantic import ConfigDict, validate_call');
+            expect(moduleContent).toContain('clamp = validate_call(config=ConfigDict(strict=True), validate_return=True)(clamp)');
             expect(moduleContent).toContain('def clamp(value: int, lower: int, upper: int) -> int:');
 
             expect(testContent).toContain('import pytest');
@@ -109,13 +143,77 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
         it('includes dependency node code in module when context dependencies are provided', () => {
             const depNode = makeNode({
                 name: 'helper_func',
-                code: ['def helper_func(x: int) -> int:', '    return x * 2'],
+                imports: ['import math'],
+                code: ['def helper_func(x: int) -> int:', '    return int(math.fabs(x)) * 2'],
             });
-            const deps = new Map([['helper_func', depNode]]);
-            const node = makeNode();
-            const { moduleContent } = generateVerificationFiles(node, deps);
+            const deps = new Map([['math/helper_func', depNode]]);
+            const node = makeNode({ imports: ['import math', 'from decimal import Decimal'] });
+            const { moduleContent } = generateVerificationFiles(node, deps, 'math/clamp');
             expect(moduleContent).toContain('def helper_func(x: int) -> int:');
+            expect(moduleContent.match(/^import math$/gm)).toHaveLength(1);
+            expect(moduleContent.indexOf('import math')).toBeLessThan(moduleContent.indexOf('def helper_func'));
+            expect(moduleContent).toContain('from decimal import Decimal');
         });
+
+        it('enforces strict Pydantic bool-vs-int rejection while preserving int-to-float promotion in real pytest', async () => {
+            const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-strict-pydantic-'));
+            try {
+                const factNode = makeNode({
+                    name: 'factorial',
+                    check: ['def test_fact():', '    assert factorial(5) == 120'],
+                    cases: [
+                        { name: 'zero', input: { n: 0 }, expected: 1 },
+                        { name: 'reject_bool', input: { n: true }, error: 'ValueError' },
+                    ],
+                    code: [
+                        'def factorial(n: int) -> int:',
+                        '    if isinstance(n, bool) or n < 0:',
+                        '        raise ValueError("invalid")',
+                        '    out = 1',
+                        '    for k in range(2, n + 1):',
+                        '        out *= k',
+                        '    return out',
+                    ],
+                });
+                const factRes = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: factNode,
+                    nodeId: 'factorial',
+                    isTrusted: true,
+                });
+                expect(factRes.state, factRes.traceback).toBe('passed');
+                expect(factRes.pydanticValid).toBe(true);
+
+                const sqrtDep = makeNode({
+                    name: 'square_root',
+                    imports: ['import math'],
+                    code: ['def square_root(x: float) -> float:', '    return math.sqrt(x)'],
+                });
+                const hypotNode = makeNode({
+                    name: 'hypotenuse',
+                    context: ['scientific/square_root'],
+                    cases: [
+                        { name: 'int_inputs_to_float', input: { a: 3, b: 4 }, expected: 5 },
+                    ],
+                    check: undefined,
+                    code: [
+                        'def hypotenuse(a: float, b: float) -> float:',
+                        '    return square_root(a * a + b * b)',
+                    ],
+                });
+                const hypotRes = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: hypotNode,
+                    nodeId: 'scientific/hypotenuse',
+                    dependencies: new Map([['scientific/square_root', sqrtDep]]),
+                    isTrusted: true,
+                });
+                expect(hypotRes.state, hypotRes.traceback).toBe('passed');
+                expect(hypotRes.pydanticValid).toBe(true);
+            } finally {
+                fs.rmSync(tmpWorkspace, { recursive: true, force: true });
+            }
+        }, 20_000);
     });
 
     describe('runNodeVerification execution', () => {

@@ -1,6 +1,6 @@
 import { HarnessDocument, HarnessSnapshot, ParsedUnit, SourcePosition } from './harness_protocol';
 import { tryNormalizeLanguage } from './language_types';
-import { parseModule } from './python_adapter';
+import { findForbiddenSlateImports, hoistLeadingPythonImports, parseModule } from './python_adapter';
 import { parseTsModule, containsJsxSyntax } from './ts_adapter';
 
 export const FORGE_INPUT_BUDGET_TOKENS = 600;
@@ -88,6 +88,30 @@ export interface CandidateValidationResult {
     lineCount: number;
     checkLineCount?: number;
     diagnostics: string[];
+    hoistedImports?: string[];
+    normalizedImplementation?: string;
+}
+
+/**
+ * Splits leading top-level Python imports from a candidate implementation and detects forbidden `slate.*` imports.
+ */
+export function hoistPythonCandidateImports(
+    implementation: string,
+    check?: string,
+): { implementation: string; imports: string[]; forbiddenImports: string[] } {
+    const hoisted = hoistLeadingPythonImports(implementation);
+    if (!check) {
+        return hoisted;
+    }
+    const forbiddenSet = new Set<string>(hoisted.forbiddenImports);
+    for (const bad of findForbiddenSlateImports(check)) {
+        forbiddenSet.add(bad);
+    }
+    return {
+        implementation: hoisted.implementation,
+        imports: hoisted.imports,
+        forbiddenImports: Array.from(forbiddenSet),
+    };
 }
 
 export class PacketError extends Error {}
@@ -177,15 +201,23 @@ function formatCases(cases: unknown[]): string {
                 : typeof rec.name === 'string' ? rec.name
                 : typeof rec.id === 'string' ? rec.id
                 : `case_${i + 1}`;
+            const approx = rec.approx !== undefined ? JSON.stringify(rec.approx) : undefined;
+            if (typeof rec.code === 'string' && rec.code.trim()) {
+                let line = `- Case "${name}": code=${JSON.stringify(rec.code.trim())}`;
+                if (approx !== undefined) line += ` approx=${approx}`;
+                return line;
+            }
             const inputs = rec.inputs !== undefined ? JSON.stringify(rec.inputs) : undefined;
             const input = rec.input !== undefined ? JSON.stringify(rec.input) : undefined;
             const expected = rec.expected !== undefined ? JSON.stringify(rec.expected) : undefined;
-            const error = rec.error !== undefined ? JSON.stringify(rec.error) : undefined;
+            const rawError = rec.error !== undefined ? rec.error : rec.expectedError;
+            const error = rawError !== undefined ? JSON.stringify(rawError) : undefined;
             let line = `- Case "${name}":`;
             if (inputs !== undefined) line += ` inputs=${inputs}`;
             else if (input !== undefined) line += ` input=${input}`;
             if (expected !== undefined) line += ` expected=${expected}`;
             if (error !== undefined) line += ` error=${error}`;
+            if (approx !== undefined) line += ` approx=${approx}`;
             return line;
         }
         return `- Case ${i + 1}: ${JSON.stringify(c)}`;
@@ -301,7 +333,7 @@ export function buildGenerationPacket(
         const formatForgePrompt = (neighborList: NeighborSignatureContext[]): string => {
             const neighborSection = neighborList.length > 0
                 ? `### Reference neighbor signatures:\n${neighborList.map(n =>
-                    `### Dependency: ${n.qualifiedName} (${n.path})\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}${n.contract ? `\nContract: ${n.contract}` : ''}`
+                    `### Dependency: ${n.qualifiedName}\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}${n.contract ? `\nContract: ${n.contract}` : ''}`
                 ).join('\n\n')}`
                 : '';
 
@@ -311,14 +343,16 @@ export function buildGenerationPacket(
                     `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
                     `Intent: ${intent}`,
                     contract ? `Contract: ${contract}` : '',
+                    targetImports.length > 0 ? `Pre-declared imports (already at module top): ${targetImports.join('; ')}` : '',
                     casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
                     feedbackFormatted,
                     `Rules:`,
                     `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
                     `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
-                    `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases.`,
+                    `- Listed dependencies are already in scope inside your function; ${target.unit.name} is already imported in the test file. NEVER import from slate.* or file paths.`,
+                    `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases (use pytest.approx for float comparisons).`,
                     neighborSection,
-                    `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`python\n${items[0].source}\n\`\`\``,
+                    `### Target stub: ${target.unit.qualifiedName}\n\`\`\`python\n${items[0].source}\n\`\`\``,
                     `Output format (use these exact section headers):`,
                     `### Implementation`,
                     `\`\`\`python`,
@@ -350,7 +384,7 @@ export function buildGenerationPacket(
                         `- Only call dependencies provided in Reference neighbor signatures or standard ${langDisplay} built-ins.`,
                         `- The unit check MUST use test('${target.unit.name}', () => { ... }) with expect(...) assertions (no imports needed).`,
                         neighborSection,
-                        `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`${fenceTag}\n${items[0].source}\n\`\`\``,
+                        `### Target stub: ${target.unit.qualifiedName}\n\`\`\`${fenceTag}\n${items[0].source}\n\`\`\``,
                         `Output format (use these exact section headers):`,
                         `### Implementation`,
                         `\`\`\`${fenceTag}`,
@@ -740,9 +774,16 @@ export function validateForgeCandidate(
         return validateTsOrJsForgeCandidate(targetUnit, candidate, langKind);
     }
     const diagnostics: string[] = [];
+    const hoisted = hoistPythonCandidateImports(candidate.implementation, candidate.check);
+    if (hoisted.forbiddenImports.length > 0) {
+        diagnostics.push(
+            `Candidate must not import internal Slate modules (${hoisted.forbiddenImports.join(', ')}); target and dependency functions are already in scope.`,
+        );
+    }
 
     // 1. Implementation syntax & single function definition
-    const implText = candidate.implementation.endsWith('\n') ? candidate.implementation : `${candidate.implementation}\n`;
+    const cleanImpl = hoisted.implementation;
+    const implText = cleanImpl.endsWith('\n') ? cleanImpl : `${cleanImpl}\n`;
     const parsedImpl = parseModule(implText, '<candidate>', targetUnit.name);
     if (!parsedImpl.valid) {
         diagnostics.push('Candidate implementation is not valid Python.');
@@ -753,12 +794,11 @@ export function validateForgeCandidate(
         diagnostics.push(`Candidate must contain exactly one function definition named "${targetUnit.name}".`);
     }
 
-    let lineCount = 0;
-    const implLines = candidate.implementation.replace(/\r\n?/g, '\n').split('\n');
-    while (implLines.length > 0 && implLines[implLines.length - 1].trim() === '') {
-        implLines.pop();
+    const implLines = cleanLines(cleanImpl);
+    const lineCount = implLines.length;
+    if (lineCount === 0) {
+        diagnostics.push('Candidate implementation is empty.');
     }
-    lineCount = implLines.length;
 
     // JPL-60 line count check
     if (lineCount > JPL60_MAX_LINES) {
@@ -827,5 +867,7 @@ export function validateForgeCandidate(
         lineCount,
         checkLineCount,
         diagnostics,
+        ...(hoisted.imports.length > 0 ? { hoistedImports: hoisted.imports } : {}),
+        normalizedImplementation: cleanImpl,
     };
 }

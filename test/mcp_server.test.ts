@@ -5,7 +5,7 @@ import { PassThrough } from 'stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-    SlateMcpServer, validateStubBody, MCP_TOOLS
+    SlateMcpServer, validateStubBody, MCP_TOOLS, runSlateMcpCli
 } from '../vscode-extension/src/mcp/slate_mcp_server';
 import { startFakeLlamaServer } from './support/fake_llama_server';
 
@@ -517,6 +517,239 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
             expect(res.isError).toBe(true);
             expect(res.content[0].text).toContain('does not exist in flow');
+        });
+
+        it('declares flow inputs/outputs, preserves existing ports, validates boundary ports, and compiles end-to-end', async () => {
+            await server.callTool('slate_define_stub', {
+                name: 'scientific/double',
+                signature: 'def double(x: float) -> float',
+                intent: 'Double input x',
+                imports: ['import math'],
+                cases: [{ name: 'c1', input: { x: 2 }, expected: 4 }],
+            });
+            const nodePath = path.join(tmpDir, 'slate', 'nodes', 'scientific', 'double.json');
+            const nodeJson = JSON.parse(await fs.readFile(nodePath, 'utf8'));
+            expect(nodeJson.imports).toEqual(['import math']);
+            nodeJson.code = ['def double(x: float) -> float:', '    return float(x * 2.0)'];
+            await fs.writeFile(nodePath, JSON.stringify(nodeJson, null, 2), 'utf8');
+
+            const wireRes = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [{ name: 'val', annotation: 'float' }],
+                outputs: [{ name: 'result', annotation: 'float' }],
+                instances: [{ id: 'd1', node: 'scientific/double' }],
+                wires: [
+                    { from: 'input:val', to: 'd1.in:x' },
+                    { from: 'd1.out', to: 'output:result' },
+                ],
+            });
+            expect(wireRes.isError).toBe(false);
+            const wired = JSON.parse(wireRes.content[0].text);
+            expect(wired.flow).toBe('twice');
+            expect(wired.inputs).toEqual([{ name: 'val', annotation: 'float' }]);
+            expect(wired.outputs).toEqual([{ name: 'result', annotation: 'float' }]);
+
+            // Omitting inputs/outputs preserves existing declared ports
+            const updatePos = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                instances: [{ id: 'd1', position: { x: 100, y: 200 } }],
+            });
+            expect(updatePos.isError).toBe(false);
+            const preserved = JSON.parse(updatePos.content[0].text);
+            expect(preserved.inputs).toEqual([{ name: 'val', annotation: 'float' }]);
+
+            // Rejects undeclared boundary ports and duplicate port names
+            const missingIn = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                wires: [{ from: 'input:missing_port', to: 'd1.in:x' }],
+            });
+            expect(missingIn.isError).toBe(true);
+            expect(missingIn.content[0].text).toContain('missing_port');
+
+            const dupPort = await server.callTool('slate_wire_flow', {
+                flow: 'bad_ports',
+                inputs: [{ name: 'x' }, { name: 'x' }],
+            });
+            expect(dupPort.isError).toBe(true);
+            expect(dupPort.content[0].text).toContain('Duplicate port name');
+
+            // End-to-end compile succeeds without manual flow editing
+            const compileRes = await server.callTool('slate_compile', { outDir: 'compiled_out' });
+            expect(compileRes.isError).toBe(false);
+            const compileParsed = JSON.parse(compileRes.content[0].text);
+            expect(compileParsed.ok).toBe(true);
+            expect(compileParsed.diagnostics).toEqual([]);
+            const compiledFlowPy = await fs.readFile(path.join(tmpDir, 'compiled_out', 'sci_calc.py'), 'utf8');
+            expect(compiledFlowPy).toContain('def twice(val: float) -> float:');
+
+            // Updating inputs/outputs removes wires attached to deleted boundary ports without breaking compile
+            await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [
+                    { name: 'val', annotation: 'float' },
+                    { name: 'extra_in', annotation: 'float' },
+                ],
+                outputs: [
+                    { name: 'result', annotation: 'float' },
+                    { name: 'extra_out', annotation: 'float' },
+                ],
+                wires: [
+                    { from: 'd1.out', to: 'output:extra_out' },
+                ],
+            });
+            const pruneExtras = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [{ name: 'val', annotation: 'float' }],
+                outputs: [{ name: 'result', annotation: 'float' }],
+            });
+            expect(pruneExtras.isError).toBe(false);
+            const prunedExtrasData = JSON.parse(pruneExtras.content[0].text);
+            expect(prunedExtrasData.wires).toEqual([
+                { from: 'input:val', to: 'd1.in:x' },
+                { from: 'd1.out', to: 'output:result' },
+            ]);
+            const postExtraCompile = await server.callTool('slate_compile', { outDir: 'compiled_out' });
+            expect(JSON.parse(postExtraCompile.content[0].text)).toMatchObject({ ok: true, diagnostics: [] });
+
+            // Clearing all inputs/outputs also removes remaining boundary wires
+            const clearAll = await server.callTool('slate_wire_flow', {
+                flow: 'sci_calc/twice',
+                inputs: [],
+                outputs: [],
+                removeInstances: ['d1'],
+            });
+            expect(clearAll.isError).toBe(false);
+            const clearedData = JSON.parse(clearAll.content[0].text);
+            expect(clearedData.inputs).toEqual([]);
+            expect(clearedData.outputs).toEqual([]);
+            expect(clearedData.wires).toEqual([]);
+
+            const postPruneCompile = await server.callTool('slate_compile', { outDir: 'compiled_out' });
+            expect(postPruneCompile.isError).toBe(false);
+            const postPruneParsed = JSON.parse(postPruneCompile.content[0].text);
+            expect(postPruneParsed.ok).toBe(true);
+            expect(postPruneParsed.diagnostics).toEqual([]);
+        });
+    });
+
+    describe('MCP Tool Improvements (Issue #53)', () => {
+        it('slate_define_stub validates imports and rejects forbidden slate.* imports', async () => {
+            const badSyntax = await server.callTool('slate_define_stub', {
+                name: 'bad_imp',
+                signature: 'def bad_imp() -> int',
+                intent: 'bad',
+                imports: ['not an import'],
+            });
+            expect(badSyntax.isError).toBe(true);
+            expect(badSyntax.content[0].text).toContain('Invalid Python import');
+
+            const badSlate = await server.callTool('slate_define_stub', {
+                name: 'slate_imp',
+                signature: 'def slate_imp() -> int',
+                intent: 'bad',
+                imports: ['from slate.nodes.calc import calc'],
+            });
+            expect(badSlate.isError).toBe(true);
+            expect(badSlate.content[0].text).toContain('Forbidden internal import');
+        });
+
+        it('slate_find extracts parsed signatures instead of raw leading comments', async () => {
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'commented.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'commented',
+                    intent: 'Has leading comment',
+                    contract: 'Returns int',
+                    code: ['# SECTION HEADER', 'def commented(x: int) -> int:', '    return x + 1'],
+                }, null, 2),
+                'utf8',
+            );
+            const findRes = await server.callTool('slate_find', { query: 'commented', scope: 'nodes' });
+            expect(findRes.isError).toBe(false);
+            const data = JSON.parse(findRes.content[0].text);
+            const hit = data.nodes.find((n: any) => n.id === 'commented');
+            expect(hit.signature).toBe('def commented(x: int) -> int');
+        });
+
+        it('slate_forge_batch returns compact failure digests by default and full details with verbose:true', async () => {
+            await server.callTool('slate_define_stub', {
+                name: 'fail_stub',
+                signature: 'def fail_stub(x: int) -> int',
+                intent: 'Return x + 1',
+                contract: 'Returns x + 1',
+                cases: [{ name: 'c1', input: { x: 1 }, expected: 2 }],
+            });
+            const fakeServer = await startFakeLlamaServer(() => [
+                '### Implementation\n```python\ndef fail_stub(x: int) -> int:\n    return x + 999\n```',
+            ]);
+            try {
+                const compactRes = await server.callTool('slate_forge_batch', {
+                    nodeIds: ['fail_stub'],
+                    maxRevisions: 1,
+                    endpoint: fakeServer.url,
+                    model: 'fake',
+                });
+                expect(compactRes.isError).toBe(false);
+                const compactJson = JSON.parse(compactRes.content[0].text);
+                expect(compactJson.results[0].verification.traceback).toBeUndefined();
+                expect(compactJson.results[0].reason.length).toBeLessThanOrEqual(360);
+
+                const verboseRes = await server.callTool('slate_forge_batch', {
+                    nodeIds: ['fail_stub'],
+                    maxRevisions: 1,
+                    verbose: true,
+                    endpoint: fakeServer.url,
+                    model: 'fake',
+                });
+                const verboseJson = JSON.parse(verboseRes.content[0].text);
+                expect(verboseJson.results[0].verification.traceback).toBeTruthy();
+            } finally {
+                await fakeServer.close();
+            }
+        }, 20_000);
+
+        it('runSlateMcpCli handles --help, --list-tools, --call with --args and --args-file, and errors cleanly', async () => {
+            const runCli = async (argv: string[]) => {
+                let stdout = '';
+                let stderr = '';
+                const code = await runSlateMcpCli(argv, {
+                    stdout: s => { stdout += s; },
+                    stderr: s => { stderr += s; },
+                    cwd: tmpDir,
+                });
+                return { code, stdout, stderr };
+            };
+
+            const help = await runCli(['--help']);
+            expect(help.code).toBe(0);
+            expect(help.stdout).toContain('--list-tools');
+
+            const list = await runCli(['--list-tools']);
+            expect(list.code).toBe(0);
+            expect(JSON.parse(list.stdout).some((t: any) => t.name === 'slate_wire_flow')).toBe(true);
+
+            const callInline = await runCli(['--workspace', tmpDir, '--call', 'slate_find', '--args', '{"query":"calc"}']);
+            expect(callInline.code).toBe(0);
+            expect(JSON.parse(callInline.stdout).nodes.some((n: any) => n.id === 'calc')).toBe(true);
+
+            const argsPath = path.join(tmpDir, 'find_args.json');
+            await fs.writeFile(argsPath, JSON.stringify({ scope: 'nodes' }), 'utf8');
+            const callFile = await runCli(['--workspace', tmpDir, '--call', 'slate_find', '--args-file', argsPath]);
+            expect(callFile.code).toBe(0);
+            expect(JSON.parse(callFile.stdout).nodes.length).toBeGreaterThanOrEqual(1);
+
+            const badFlag = await runCli(['--unknown-flag']);
+            expect(badFlag.code).toBe(1);
+            expect(badFlag.stderr).toContain('Unknown argument');
+
+            const badTool = await runCli(['--workspace', tmpDir, '--call', 'nonexistent_tool']);
+            expect(badTool.code).toBe(1);
+            expect(badTool.stderr).toContain('Unknown tool');
+
+            const bothArgs = await runCli(['--call', 'slate_find', '--args', '{}', '--args-file', argsPath]);
+            expect(bothArgs.code).toBe(1);
+            expect(bothArgs.stderr).toContain('not both');
         });
     });
 
