@@ -1868,5 +1868,160 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(defaultParamOuterRes.state, defaultParamOuterRes.traceback).toBe('passed');
             expect(defaultParamOuterRes.pydanticValid).toBe(true);
         }, 40_000);
+
+        it('ignores named tuple labels and import() type qualifiers while importing element and argument types', async () => {
+            const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-tuple-import-'));
+            tempDirs.push(workspaceRoot);
+
+            const pkgDir = path.join(workspaceRoot, 'node_modules', 'slate-ext-pkg');
+            fs.mkdirSync(pkgDir, { recursive: true });
+            fs.writeFileSync(path.join(pkgDir, 'index.d.ts'), 'export type Box<T> = { wrapped: T };\n', 'utf8');
+
+            const depBoxVal = makeNode({
+                name: 'depBoxVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value Box = 7',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const Box = 7;'],
+            });
+            const depClassBox = makeNode({
+                name: 'depClassBox',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting dual value+type class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export class Box { v = 5; }'],
+            });
+            const depItemType = makeNode({
+                name: 'depItemType',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Item',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Item { n: number; }'],
+            });
+
+            const deps = new Map([
+                ['depBoxVal', depBoxVal],
+                ['depClassBox', depClassBox],
+                ['depItemType', depItemType],
+            ]);
+
+            // Test 1: Named tuple label `Box:` does not count as a type ref (so depBoxVal is chosen over depClassBox),
+            // while element type `Item` is imported.
+            const tupleTarget = makeNode({
+                name: 'sumNamedTuple',
+                language: 'typescript',
+                intent: 'Sums tuple element Item.n, tuple number, and outer const Box with a Box tuple label',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox', 'depItemType'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export function sumNamedTuple(pair: [Box: Item, extra: number]): number {',
+                    '    return pair[0].n + pair[1] + Box;',
+                    '}',
+                ],
+                check: [
+                    "test('named tuple label Box does not trigger class Box while element type Item is imported', () => {",
+                    '    expect(sumNamedTuple([{ n: 3 }, 5])).toBe(15);',
+                    '});',
+                ],
+            });
+            const tupleRes = await runNodeVerification({
+                workspaceRoot,
+                node: tupleTarget,
+                nodeId: 'sumNamedTuple',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(tupleRes.state, tupleRes.traceback).toBe('passed');
+            expect(tupleRes.pydanticValid).toBe(true);
+
+            // Test 2: `import('slate-ext-pkg').Box<Item>` ignores qualifier `.Box` while importing `<Item>`,
+            // so `+ Box` still selects `depBoxVal` over `depClassBox`.
+            const importTypeTarget = makeNode({
+                name: 'unwrapImportType',
+                language: 'typescript',
+                intent: 'Unwraps import() type whose qualifier matches depClassBox while reading outer const Box',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox', 'depItemType'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    "export function unwrapImportType(x: import('slate-ext-pkg').Box<Item>): number {",
+                    '    return x.wrapped.n + Box;',
+                    '}',
+                ],
+                check: [
+                    "test('import() type qualifier Box does not trigger class Box while type argument Item is imported', () => {",
+                    '    expect(unwrapImportType({ wrapped: { n: 4 } })).toBe(11);',
+                    '});',
+                ],
+            });
+            const importTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: importTypeTarget,
+                nodeId: 'unwrapImportType',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(importTypeRes.state, importTypeRes.traceback).toBe('passed');
+            expect(importTypeRes.pydanticValid).toBe(true);
+
+            // Test 3: Function-type parameter label `(Box: number) => Item` stays ignored while external
+            // shorthand property `{ Box }` still imports `depBoxVal` (`const Box = 7`).
+            const shorthandFnTypeTarget = makeNode({
+                name: 'shorthandAndFnType',
+                language: 'typescript',
+                intent: 'Uses Box as function-type param name and external shorthand object property',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox', 'depItemType'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export type Mapper = (Box: number) => Item;',
+                    'export function shorthandAndFnType(fn: Mapper): { Box: number; n: number } {',
+                    '    return { Box, n: fn(Box).n };',
+                    '}',
+                ],
+                check: [
+                    "test('function type param label stays ignored and external shorthand imports const Box', () => {",
+                    '    expect(shorthandAndFnType((v) => ({ n: v + 1 }))).toEqual({ Box: 7, n: 8 });',
+                    '});',
+                ],
+            });
+            const shorthandFnTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: shorthandFnTypeTarget,
+                nodeId: 'shorthandAndFnType',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(shorthandFnTypeRes.state, shorthandFnTypeRes.traceback).toBe('passed');
+            expect(shorthandFnTypeRes.pydanticValid).toBe(true);
+        }, 40_000);
     });
 });
