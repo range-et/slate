@@ -1007,6 +1007,113 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(shadowRes.state, shadowRes.traceback).toBe('passed');
             expect(shadowRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4661835679): Local type/value shadowing respects TypeScript namespace separation
+            const depNamespacesNode = makeNode({
+                name: 'ns_prelude',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value LIMIT, interface ScaleCfg, and class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: [
+                    'export const LIMIT = 10;',
+                    'export interface ScaleCfg { factor: number; }',
+                    'export class Box { v = 1; }',
+                ],
+            });
+            const localTypeShadowsValueNode = makeNode({
+                name: 'useValueWithLocalType',
+                language: 'typescript',
+                intent: 'Check body declares type LIMIT without suppressing dep value LIMIT import',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function useValueWithLocalType(n: number): number {', '    return n * LIMIT;', '}'],
+                check: [
+                    'type LIMIT = number;',
+                    "test('local type LIMIT still imports dep value LIMIT', () => {",
+                    '    const x: LIMIT = LIMIT;',
+                    '    expect(x).toBe(10);',
+                    '    expect(useValueWithLocalType(2)).toBe(20);',
+                    '});',
+                ],
+            });
+            const localTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: localTypeShadowsValueNode,
+                nodeId: 'useValueWithLocalType',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(localTypeRes.state, localTypeRes.traceback).toBe('passed');
+            expect(localTypeRes.pydanticValid).toBe(true);
+
+            const localValueShadowsTypeNode = makeNode({
+                name: 'useInterfaceWithLocalValue',
+                language: 'typescript',
+                intent: 'Check body declares const ScaleCfg without suppressing dep interface ScaleCfg import',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function useInterfaceWithLocalValue(cfg: ScaleCfg): number {', '    return cfg.factor;', '}'],
+                check: [
+                    'const ScaleCfg = 3;',
+                    "test('local const ScaleCfg still imports dep interface ScaleCfg', () => {",
+                    '    const cfg: ScaleCfg = { factor: ScaleCfg };',
+                    '    expect(cfg.factor).toBe(3);',
+                    '    expect(useInterfaceWithLocalValue(cfg)).toBe(3);',
+                    '});',
+                ],
+            });
+            const localValueRes = await runNodeVerification({
+                workspaceRoot,
+                node: localValueShadowsTypeNode,
+                nodeId: 'useInterfaceWithLocalValue',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(localValueRes.state, localValueRes.traceback).toBe('passed');
+            expect(localValueRes.pydanticValid).toBe(true);
+
+            const localTypeShadowsClassNode = makeNode({
+                name: 'useWithLocalTypeBox',
+                language: 'typescript',
+                intent: 'Check body declares type Box, suppressing conflicting dual class Box import',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function useWithLocalTypeBox(): number {', '    return new Box().v;', '}'],
+                check: [
+                    'type Box = number;',
+                    "test('local type Box suppresses conflicting dual class Box import', () => {",
+                    '    const b: Box = 42;',
+                    '    expect(b).toBe(42);',
+                    '    expect(useWithLocalTypeBox()).toBe(1);',
+                    '});',
+                ],
+            });
+            const localClassShadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: localTypeShadowsClassNode,
+                nodeId: 'useWithLocalTypeBox',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(localClassShadowRes.state, localClassShadowRes.traceback).toBe('passed');
+            expect(localClassShadowRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });

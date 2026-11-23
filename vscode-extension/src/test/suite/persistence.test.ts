@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as http from 'http';
 import * as vscode from 'vscode';
 import type { HarnessSnapshot } from '../../harness_protocol';
@@ -841,6 +842,101 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(noLayoutCompiled.files, [outPy]);
         assert.ok(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri('src', outPy)))
             .includes('v_ref_clamp = clamp(value=x, lower=lo, upper=hi)'));
+    });
+
+    test('writeText skips redundant disk writes for clean matching buffers and falls back on disk drift or unreadable target', async () => {
+        const layoutUri = uri('slate', 'layout.json');
+        await vscode.workspace.fs.writeFile(layoutUri, encode({ positions: { normalize: { x: 201, y: 202 } }, notes: [] }));
+        await act({ kind: 'refreshIndex' });
+        const layoutDoc = await vscode.workspace.openTextDocument(layoutUri);
+        await vscode.window.showTextDocument(layoutDoc);
+        await vscode.commands.executeCommand('workbench.action.files.revert');
+        await eventually(
+            async () => !layoutDoc.isDirty && JSON.parse(layoutDoc.getText()).positions?.normalize?.x === 201,
+            'layoutDoc loaded matching content',
+        );
+        const expectedText = layoutDoc.getText();
+        const origFs = vscode.workspace.fs;
+        const wrapFs = (overrides: Partial<vscode.FileSystem>): vscode.FileSystem => new Proxy({} as vscode.FileSystem, {
+            get(_target, prop) {
+                if (Object.prototype.hasOwnProperty.call(overrides, prop)) {
+                    return (overrides as Record<PropertyKey, unknown>)[prop];
+                }
+                const value = Reflect.get(origFs, prop, origFs);
+                return typeof value === 'function' ? value.bind(origFs) : value;
+            },
+        });
+
+        // 1. Equal-text no-op: when clean open buffer and disk match target text, writeFile is skipped and mtime stays untouched.
+        const past = new Date(Date.now() - 60_000);
+        fs.utimesSync(layoutUri.fsPath, past, past);
+        const mtimeBefore = fs.statSync(layoutUri.fsPath).mtimeMs;
+        let writeCount = 0;
+        replaceMethod(vscode.workspace, 'fs', wrapFs({
+            writeFile: async (targetUri, content) => {
+                if (targetUri.toString() === layoutUri.toString()) writeCount += 1;
+                return origFs.writeFile(targetUri, content);
+            },
+        }));
+        try {
+            await post({ type: 'layout', positions: { normalize: { x: 201, y: 202 } } });
+        } finally {
+            restores.pop()!();
+        }
+        assert.equal(writeCount, 0);
+        assert.equal(fs.statSync(layoutUri.fsPath).mtimeMs, mtimeBefore);
+        assert.equal(layoutDoc.isDirty, false);
+
+        // 2. Drifted-disk fallback: when disk differs from the clean matching open buffer, writeFile rewrites disk cleanly.
+        let readInjected = false;
+        let driftWrites = 0;
+        replaceMethod(vscode.workspace, 'fs', wrapFs({
+            readFile: async targetUri => {
+                if (!readInjected && targetUri.toString() === layoutUri.toString()) {
+                    readInjected = true;
+                    return encode({ positions: { normalize: { x: 999, y: 999 } }, notes: [] });
+                }
+                return origFs.readFile(targetUri);
+            },
+            writeFile: async (targetUri, content) => {
+                if (targetUri.toString() === layoutUri.toString()) driftWrites += 1;
+                return origFs.writeFile(targetUri, content);
+            },
+        }));
+        try {
+            await post({ type: 'layout', positions: { normalize: { x: 201, y: 202 } } });
+        } finally {
+            restores.pop()!();
+        }
+        assert.equal(readInjected, true);
+        assert.equal(driftWrites, 1);
+        assert.equal(layoutDoc.isDirty, false);
+        assert.equal(layoutDoc.getText(), expectedText);
+        assert.equal(fs.readFileSync(layoutUri.fsPath, 'utf8'), expectedText);
+
+        // 3a. Missing/unreadable disk file fallback restores disk from clean open buffer without dirtying it.
+        fs.unlinkSync(layoutUri.fsPath);
+        assert.equal(layoutDoc.isClosed, false);
+        assert.equal(layoutDoc.isDirty, false);
+        await post({ type: 'layout', positions: { normalize: { x: 201, y: 202 } } });
+        assert.equal(fs.existsSync(layoutUri.fsPath), true);
+        assert.equal(fs.readFileSync(layoutUri.fsPath, 'utf8'), expectedText);
+        assert.equal(layoutDoc.isDirty, false);
+
+        // 3b. Unwritable target (directory replacing layout.json) surfaces write failure instead of swallowing it.
+        const backupUri = uri('slate', 'layout.backup.json');
+        fs.renameSync(layoutUri.fsPath, backupUri.fsPath);
+        fs.mkdirSync(layoutUri.fsPath);
+        try {
+            assert.equal(layoutDoc.isClosed, false);
+            assert.equal(layoutDoc.isDirty, false);
+            await assert.rejects(Promise.resolve(post({ type: 'layout', positions: { normalize: { x: 201, y: 202 } } })));
+        } finally {
+            fs.rmSync(layoutUri.fsPath, { recursive: true, force: true });
+            fs.renameSync(backupUri.fsPath, layoutUri.fsPath);
+        }
+        assert.equal(layoutDoc.isDirty, false);
+        assert.equal(fs.readFileSync(layoutUri.fsPath, 'utf8'), expectedText);
     });
 
     test('protocol search, packetPreview, reveal, createNode, placeholder conversions, root addInstance/extractFlow, and validation guards', async () => {

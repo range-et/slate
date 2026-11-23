@@ -858,12 +858,16 @@ function hasWorkspaceReactTypes(startDir: string): boolean {
 function inspectTsModuleDeclarations(
     source: string,
     fileName: string,
-): { allSymbols: string[]; unexportedValues: string[]; unexportedTypes: string[] } {
+): { allSymbols: string[]; valueSymbols: string[]; typeSymbols: string[]; unexportedValues: string[]; unexportedTypes: string[] } {
     const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindForPath(fileName, source));
     const allSymbols: string[] = [];
+    const valueSymbols: string[] = [];
+    const typeSymbols: string[] = [];
     const unexportedValues: string[] = [];
     const unexportedTypes: string[] = [];
     const seen = new Set<string>();
+    const seenValues = new Set<string>();
+    const seenTypes = new Set<string>();
     const seenUnexportedVal = new Set<string>();
     const seenUnexportedType = new Set<string>();
 
@@ -879,15 +883,23 @@ function inspectTsModuleDeclarations(
         }
     };
 
-    const record = (names: readonly string[], isNamedExport: boolean, isTypeOnly: boolean) => {
+    const record = (names: readonly string[], isNamedExport: boolean, kind: 'value' | 'type' | 'both') => {
         for (const sym of names) {
             if (!sym) continue;
             if (!seen.has(sym)) {
                 seen.add(sym);
                 allSymbols.push(sym);
             }
+            if ((kind === 'value' || kind === 'both') && !seenValues.has(sym)) {
+                seenValues.add(sym);
+                valueSymbols.push(sym);
+            }
+            if ((kind === 'type' || kind === 'both') && !seenTypes.has(sym)) {
+                seenTypes.add(sym);
+                typeSymbols.push(sym);
+            }
             if (!isNamedExport) {
-                if (isTypeOnly) {
+                if (kind === 'type') {
                     if (!seenUnexportedType.has(sym)) {
                         seenUnexportedType.add(sym);
                         unexportedTypes.push(sym);
@@ -912,15 +924,17 @@ function inspectTsModuleDeclarations(
             for (const decl of stmt.declarationList.declarations) {
                 collectBindingNames(decl.name, names);
             }
-            record(names, isNamedExport, false);
-        } else if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt) || ts.isEnumDeclaration(stmt)) {
-            if (stmt.name) record([stmt.name.text], isNamedExport, false);
+            record(names, isNamedExport, 'value');
+        } else if (ts.isFunctionDeclaration(stmt)) {
+            if (stmt.name) record([stmt.name.text], isNamedExport, 'value');
+        } else if (ts.isClassDeclaration(stmt) || ts.isEnumDeclaration(stmt)) {
+            if (stmt.name) record([stmt.name.text], isNamedExport, 'both');
         } else if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) {
-            record([stmt.name.text], isNamedExport, true);
+            record([stmt.name.text], isNamedExport, 'type');
         }
     }
 
-    return { allSymbols, unexportedValues, unexportedTypes };
+    return { allSymbols, valueSymbols, typeSymbols, unexportedValues, unexportedTypes };
 }
 
 function stripInjectedImports(lines: readonly string[], symbolNames: ReadonlySet<string>, stripTestImports: boolean): string[] {
@@ -951,17 +965,21 @@ function stripInjectedImports(lines: readonly string[], symbolNames: ReadonlySet
     return out;
 }
 
-function dedupeNormalizedImports(lines: readonly string[]): { lines: string[]; bindings: Set<string> } {
+function dedupeNormalizedImports(lines: readonly string[]): { lines: string[]; valueBindings: Set<string>; typeBindings: Set<string> } {
     const out: string[] = [];
     const seen = new Set<string>();
-    const bindings = new Set<string>();
+    const valueBindings = new Set<string>();
+    const typeBindings = new Set<string>();
     for (const raw of lines) {
         const trimmed = raw.trim();
         if (!trimmed) continue;
         const parsed = splitTsImport(trimmed);
         if (parsed.length > 0) {
             for (const item of parsed) {
-                if (item.binding) bindings.add(item.binding);
+                if (item.binding) {
+                    typeBindings.add(item.binding);
+                    if (!item.isTypeOnly) valueBindings.add(item.binding);
+                }
                 if (!seen.has(item.line)) {
                     seen.add(item.line);
                     out.push(item.line);
@@ -972,7 +990,7 @@ function dedupeNormalizedImports(lines: readonly string[]): { lines: string[]; b
             out.push(trimmed);
         }
     }
-    return { lines: out, bindings };
+    return { lines: out, valueBindings, typeBindings };
 }
 
 function runStrictTsTypecheck(
@@ -1116,6 +1134,8 @@ async function runTsNodeVerification(
             cjsPath: string;
             needsJsx: boolean;
             exportedSymbols: string[];
+            exportedValues: Set<string>;
+            exportedTypes: Set<string>;
             source: string;
         }
 
@@ -1129,6 +1149,8 @@ async function runTsNodeVerification(
             const exportedSymbols = decls.allSymbols.length > 0
                 ? decls.allSymbols
                 : (!dep.kind ? [dep.name] : []);
+            const exportedValues = new Set<string>(decls.allSymbols.length > 0 ? decls.valueSymbols : (!dep.kind ? [dep.name] : []));
+            const exportedTypes = new Set<string>(decls.allSymbols.length > 0 ? decls.typeSymbols : []);
             return {
                 dep,
                 moduleBase,
@@ -1138,8 +1160,28 @@ async function runTsNodeVerification(
                 needsJsx: depNeedsJsx,
                 decls,
                 exportedSymbols,
+                exportedValues,
+                exportedTypes,
             };
         });
+
+        const canImportDepSymbol = (
+            depSpec: { exportedValues: ReadonlySet<string>; exportedTypes: ReadonlySet<string> },
+            sym: string,
+            boundValues: ReadonlySet<string>,
+            boundTypes: ReadonlySet<string>,
+        ): boolean => !(depSpec.exportedValues.has(sym) && boundValues.has(sym))
+            && !(depSpec.exportedTypes.has(sym) && boundTypes.has(sym));
+
+        const recordDepSymbol = (
+            depSpec: { exportedValues: ReadonlySet<string>; exportedTypes: ReadonlySet<string> },
+            sym: string,
+            boundValues: Set<string>,
+            boundTypes: Set<string>,
+        ): void => {
+            if (depSpec.exportedValues.has(sym)) boundValues.add(sym);
+            if (depSpec.exportedTypes.has(sym)) boundTypes.add(sym);
+        };
 
         const availableSymbols = new Set<string>([
             node.name,
@@ -1147,27 +1189,30 @@ async function runTsNodeVerification(
         ]);
 
         const depModules: DepModuleSpec[] = depSpecsRaw.map((spec) => {
-            const { dep, moduleBase, ext: depExt, tsPath, cjsPath, needsJsx: depNeedsJsx, decls, exportedSymbols } = spec;
+            const { dep, moduleBase, ext: depExt, tsPath, cjsPath, needsJsx: depNeedsJsx, decls, exportedSymbols, exportedValues, exportedTypes } = spec;
             const depImports = dedupeNormalizedImports(stripInjectedImports(dep.imports ?? [], availableSymbols, false));
             const depLines = stripInjectedImports(dep.code, availableSymbols, false);
             const depText = depLines.join('\n');
             const depIdents = tsIdentifierNames(depText, `dep_${dep.name}${depExt}`);
-            const boundInDep = new Set<string>([...depImports.bindings, ...decls.allSymbols]);
+            const boundValuesInDep = new Set<string>([...depImports.valueBindings, ...decls.valueSymbols]);
+            const boundTypesInDep = new Set<string>([...depImports.typeBindings, ...decls.typeSymbols]);
             const depParts: string[] = [...depImports.lines];
 
             for (const other of depSpecsRaw) {
                 if (other.dep === dep) continue;
-                const needed = other.exportedSymbols.filter(sym => depIdents.has(sym) && !boundInDep.has(sym));
+                const needed = other.exportedSymbols.filter(
+                    sym => depIdents.has(sym) && canImportDepSymbol(other, sym, boundValuesInDep, boundTypesInDep),
+                );
                 if (needed.length > 0) {
                     depParts.push(`import { ${needed.join(', ')} } from './${other.moduleBase}';`);
-                    for (const sym of needed) boundInDep.add(sym);
+                    for (const sym of needed) recordDepSymbol(other, sym, boundValuesInDep, boundTypesInDep);
                 }
             }
 
             // Support mutual recursion (helper calling target function)
-            if (depIdents.has(node.name) && !boundInDep.has(node.name)) {
+            if (depIdents.has(node.name) && !boundValuesInDep.has(node.name) && !boundTypesInDep.has(node.name)) {
                 depParts.push(`import { ${node.name} } from './${safeBase}_impl';`);
-                boundInDep.add(node.name);
+                boundValuesInDep.add(node.name);
             }
 
             depParts.push(...depLines);
@@ -1188,6 +1233,8 @@ async function runTsNodeVerification(
                 cjsPath,
                 needsJsx: depNeedsJsx,
                 exportedSymbols,
+                exportedValues,
+                exportedTypes,
                 source: depParts.join('\n') + '\n',
             };
         });
@@ -1198,14 +1245,17 @@ async function runTsNodeVerification(
         const targetText = targetLines.join('\n');
         const targetIdents = tsIdentifierNames(targetText, `target${ext}`);
         const targetDecls = inspectTsModuleDeclarations(targetText, `target${ext}`);
-        const boundInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.allSymbols]);
+        const boundValuesInTarget = new Set<string>([...targetImports.valueBindings, ...targetDecls.valueSymbols]);
+        const boundTypesInTarget = new Set<string>([...targetImports.typeBindings, ...targetDecls.typeSymbols]);
 
         const implParts: string[] = [...targetImports.lines];
         for (const depSpec of depModules) {
-            const needed = depSpec.exportedSymbols.filter(sym => targetIdents.has(sym) && !boundInTarget.has(sym));
+            const needed = depSpec.exportedSymbols.filter(
+                sym => targetIdents.has(sym) && canImportDepSymbol(depSpec, sym, boundValuesInTarget, boundTypesInTarget),
+            );
             if (needed.length > 0) {
                 implParts.push(`import { ${needed.join(', ')} } from './${depSpec.moduleBase}';`);
-                for (const sym of needed) boundInTarget.add(sym);
+                for (const sym of needed) recordDepSymbol(depSpec, sym, boundValuesInTarget, boundTypesInTarget);
             }
         }
         implParts.push(...targetLines);
@@ -1225,23 +1275,27 @@ async function runTsNodeVerification(
         }
         const testBodyText = testBodyLines.join('\n');
         const testIdents = tsIdentifierNames(testBodyText, `test_${safeBase}${ext}`);
-        const boundInTest = new Set<string>([node.name]);
-        for (const sym of inspectTsModuleDeclarations(testBodyText, `test_${safeBase}${ext}`).allSymbols) {
-            boundInTest.add(sym);
-        }
+        const testDecls = inspectTsModuleDeclarations(testBodyText, `test_${safeBase}${ext}`);
+        const boundValuesInTest = new Set<string>([node.name, ...testDecls.valueSymbols]);
+        const boundTypesInTest = new Set<string>([node.name, ...testDecls.typeSymbols]);
         for (const line of testBodyLines) {
             if (/^\s*import\b/.test(line)) {
                 for (const item of splitTsImport(line)) {
-                    if (item.binding) boundInTest.add(item.binding);
+                    if (item.binding) {
+                        boundTypesInTest.add(item.binding);
+                        if (!item.isTypeOnly) boundValuesInTest.add(item.binding);
+                    }
                 }
             }
         }
         const testHeader: string[] = [`import { ${node.name} } from './${safeBase}_impl';`];
         for (const depSpec of depModules) {
-            const needed = depSpec.exportedSymbols.filter(sym => testIdents.has(sym) && !boundInTest.has(sym));
+            const needed = depSpec.exportedSymbols.filter(
+                sym => testIdents.has(sym) && canImportDepSymbol(depSpec, sym, boundValuesInTest, boundTypesInTest),
+            );
             if (needed.length > 0) {
                 testHeader.push(`import { ${needed.join(', ')} } from './${depSpec.moduleBase}';`);
-                for (const sym of needed) boundInTest.add(sym);
+                for (const sym of needed) recordDepSymbol(depSpec, sym, boundValuesInTest, boundTypesInTest);
             }
         }
         const testSource = [...testHeader, ...testBodyLines].join('\n') + '\n';
