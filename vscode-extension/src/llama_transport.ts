@@ -1,3 +1,5 @@
+import type { SlateLlmConfig, SlateLlmProvider } from './slate_folder';
+
 export interface LlamaOptions {
     endpoint: string;
     model: string;
@@ -5,6 +7,36 @@ export interface LlamaOptions {
     timeoutMs: number;
     /** System message; defaults to the function implementation contract. */
     system?: string;
+    /** Optional runtime Bearer API key (never persisted to disk or settings). */
+    apiKey?: string;
+    /** Optional additional HTTP headers. */
+    headers?: Record<string, string>;
+}
+
+export interface LlamaHealthOptions {
+    apiKey?: string;
+    headers?: Record<string, string>;
+}
+
+export interface LlmConfigInput extends SlateLlmConfig {
+    /** Alias for contextWindow used by panel settings. */
+    contextWindowTokens?: number;
+    /** Runtime-only API key (never persisted). */
+    apiKey?: string;
+}
+
+export interface ResolvedLlmConfig {
+    provider: SlateLlmProvider;
+    endpoint: string;
+    model: string;
+    apiKeyEnv?: string;
+    apiKey?: string;
+    hasApiKey: boolean;
+    concurrency: number;
+    timeoutSeconds: number;
+    timeoutMs: number;
+    outputTokens: number;
+    contextWindowTokens: number;
 }
 
 export interface LlamaHealthResult {
@@ -16,6 +48,143 @@ export interface LlamaHealthResult {
 }
 
 export class LlamaTransportError extends Error {}
+
+const PROVIDER_DEFAULTS: Record<SlateLlmProvider, { endpoint: string; apiKeyEnv?: string }> = {
+    'llama.cpp': { endpoint: 'http://127.0.0.1:8080' },
+    ollama: { endpoint: 'http://127.0.0.1:11434/v1' },
+    openrouter: { endpoint: 'https://openrouter.ai/api/v1', apiKeyEnv: 'OPENROUTER_API_KEY' },
+    'openai-compatible': { endpoint: 'http://127.0.0.1:8080/v1', apiKeyEnv: 'SLATE_LLM_API_KEY' },
+};
+
+function isOpenRouterEndpoint(endpoint: string): boolean {
+    if (typeof endpoint !== 'string') return false;
+    try {
+        const host = new URL(endpoint.trim()).hostname.toLowerCase();
+        return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
+    } catch {
+        return false;
+    }
+}
+
+export function inferProviderFromEndpoint(endpoint: string): SlateLlmProvider {
+    if (typeof endpoint !== 'string') return 'llama.cpp';
+    try {
+        const parsed = new URL(endpoint.trim());
+        const host = parsed.hostname.toLowerCase();
+        if (host === 'openrouter.ai' || host.endsWith('.openrouter.ai')) return 'openrouter';
+        if (parsed.port === '11434') return 'ollama';
+    } catch {
+        // Ignore unparseable endpoints; default to llama.cpp.
+    }
+    return 'llama.cpp';
+}
+
+function cleanString(value: string | undefined): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Resolve effective LLM settings and runtime API key from project config, fallback settings,
+ * environment variables, and optional per-call overrides. Never mutates or writes secrets.
+ */
+export function resolveLlmConfig(
+    projectLlm?: SlateLlmConfig,
+    fallback?: LlmConfigInput,
+    env: Readonly<Record<string, string | undefined>> = process.env,
+    override?: LlmConfigInput,
+): ResolvedLlmConfig {
+    const overrideEndpoint = cleanString(override?.endpoint);
+    const projectEndpoint = cleanString(projectLlm?.endpoint);
+    const fallbackEndpoint = cleanString(fallback?.endpoint);
+
+    let endpoint: string;
+    if (overrideEndpoint) endpoint = overrideEndpoint;
+    else if (override?.provider) endpoint = PROVIDER_DEFAULTS[override.provider].endpoint;
+    else if (projectEndpoint) endpoint = projectEndpoint;
+    else if (projectLlm?.provider) endpoint = PROVIDER_DEFAULTS[projectLlm.provider].endpoint;
+    else if (fallbackEndpoint) endpoint = fallbackEndpoint;
+    else if (fallback?.provider) endpoint = PROVIDER_DEFAULTS[fallback.provider].endpoint;
+    else endpoint = PROVIDER_DEFAULTS['llama.cpp'].endpoint;
+
+    let provider: SlateLlmProvider;
+    if (override?.provider) provider = override.provider;
+    else if (overrideEndpoint) provider = inferProviderFromEndpoint(overrideEndpoint);
+    else if (projectLlm?.provider) provider = projectLlm.provider;
+    else if (projectEndpoint) provider = inferProviderFromEndpoint(projectEndpoint);
+    else if (fallback?.provider) provider = fallback.provider;
+    else provider = inferProviderFromEndpoint(endpoint);
+
+    const model = cleanString(override?.model)
+        ?? cleanString(projectLlm?.model)
+        ?? cleanString(fallback?.model)
+        ?? 'local';
+
+    const apiKeyEnv = cleanString(override?.apiKeyEnv)
+        ?? cleanString(projectLlm?.apiKeyEnv)
+        ?? cleanString(fallback?.apiKeyEnv)
+        ?? PROVIDER_DEFAULTS[provider].apiKeyEnv;
+
+    const rawConcurrency = override?.concurrency ?? projectLlm?.concurrency ?? fallback?.concurrency ?? 3;
+    const concurrency = Math.max(1, Math.min(16, Math.trunc(Number.isFinite(rawConcurrency) ? rawConcurrency : 3)));
+
+    const rawTimeout = override?.timeoutSeconds ?? projectLlm?.timeoutSeconds ?? fallback?.timeoutSeconds ?? 120;
+    const timeoutSeconds = Math.max(5, Math.trunc(Number.isFinite(rawTimeout) ? rawTimeout : 120));
+
+    const rawOutputTokens = override?.outputTokens ?? projectLlm?.outputTokens ?? fallback?.outputTokens ?? 768;
+    const outputTokens = Math.max(64, Math.trunc(Number.isFinite(rawOutputTokens) ? rawOutputTokens : 768));
+
+    const rawContextWindow = override?.contextWindow
+        ?? override?.contextWindowTokens
+        ?? projectLlm?.contextWindow
+        ?? fallback?.contextWindow
+        ?? fallback?.contextWindowTokens
+        ?? 4096;
+    const contextWindowTokens = Math.max(1024, Math.trunc(Number.isFinite(rawContextWindow) ? rawContextWindow : 4096));
+
+    const apiKey = cleanString(override?.apiKey)
+        ?? cleanString(fallback?.apiKey)
+        ?? (apiKeyEnv ? cleanString(env[apiKeyEnv]) : undefined)
+        ?? cleanString(env.SLATE_LLM_API_KEY)
+        ?? ((provider === 'openrouter' || isOpenRouterEndpoint(endpoint)) ? cleanString(env.OPENROUTER_API_KEY) : undefined);
+
+    return {
+        provider,
+        endpoint,
+        model,
+        ...(apiKeyEnv ? { apiKeyEnv } : {}),
+        ...(apiKey ? { apiKey } : {}),
+        hasApiKey: Boolean(apiKey),
+        concurrency,
+        timeoutSeconds,
+        timeoutMs: timeoutSeconds * 1000,
+        outputTokens,
+        contextWindowTokens,
+    };
+}
+
+export function buildAuthHeaders(
+    endpoint: string,
+    apiKey?: string,
+    extra?: Record<string, string>,
+): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (isOpenRouterEndpoint(endpoint)) {
+        headers['http-referer'] = 'https://github.com/range-et/slate';
+        headers['x-title'] = 'Slate Component Forge';
+    }
+    const cleanKey = cleanString(apiKey);
+    if (cleanKey) {
+        headers.authorization = `Bearer ${cleanKey}`;
+    }
+    if (extra) {
+        for (const [key, val] of Object.entries(extra)) {
+            if (typeof val === 'string') headers[key.toLowerCase()] = val;
+        }
+    }
+    return headers;
+}
 
 function completionUrl(endpoint: string): string {
     const clean = endpoint.replace(/\/+$/, '');
@@ -31,11 +200,13 @@ export async function checkLlamaHealth(
     endpoint: string,
     model?: string,
     timeoutMs = 3000,
+    options?: LlamaHealthOptions,
 ): Promise<LlamaHealthResult> {
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(new Error('Connection timed out')), timeoutMs);
     try {
         const clean = endpoint.replace(/\/+$/, '');
+        const authHeaders = buildAuthHeaders(endpoint, options?.apiKey, options?.headers);
         let response: Response | null = null;
         let lastError: unknown = null;
 
@@ -43,7 +214,7 @@ export async function checkLlamaHealth(
         try {
             response = await fetch(modelsUrl(endpoint), {
                 method: 'GET',
-                headers: { accept: 'application/json' },
+                headers: { accept: 'application/json', ...authHeaders },
                 signal: timeout.signal,
             });
         } catch (error) {
@@ -60,11 +231,22 @@ export async function checkLlamaHealth(
             };
         }
 
+        if (response && (response.status === 401 || response.status === 403)) {
+            const fallbackText = response.status === 401 ? 'Unauthorized' : 'Forbidden';
+            return {
+                ok: false,
+                endpoint,
+                model,
+                statusText: `HTTP ${response.status} ${response.statusText || fallbackText}`,
+            };
+        }
+
         // Fall back to /health endpoint (native to llama.cpp server and ollama)
         if (!response || !response.ok) {
             try {
                 response = await fetch(`${clean}/health`, {
                     method: 'GET',
+                    ...(Object.keys(authHeaders).length > 0 ? { headers: authHeaders } : {}),
                     signal: timeout.signal,
                 });
             } catch (error) {
@@ -132,9 +314,10 @@ export async function streamLlamaCompletion(
     const timer = setTimeout(() => timeout.abort(new Error('llama.cpp request timed out')), options.timeoutMs);
     const combined = AbortSignal.any([signal, timeout.signal]);
     try {
+        const authHeaders = buildAuthHeaders(options.endpoint, options.apiKey, options.headers);
         const response = await fetch(completionUrl(options.endpoint), {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: { 'content-type': 'application/json', ...authHeaders },
             body: JSON.stringify({
                 model: options.model,
                 messages: [
@@ -170,6 +353,15 @@ export async function streamLlamaCompletion(
                     let payload: unknown;
                     try { payload = JSON.parse(data); }
                     catch { throw new LlamaTransportError('llama.cpp sent malformed streaming JSON.'); }
+                    const streamError = (payload as { error?: { message?: unknown } | string }).error;
+                    if (streamError) {
+                        const message = typeof streamError === 'string'
+                            ? streamError
+                            : typeof streamError.message === 'string'
+                                ? streamError.message
+                                : JSON.stringify(streamError);
+                        throw new LlamaTransportError(`llama.cpp stream error: ${message}`);
+                    }
                     const content = (payload as { choices?: Array<{ delta?: { content?: unknown } }> })
                         .choices?.[0]?.delta?.content;
                     if (typeof content === 'string') {

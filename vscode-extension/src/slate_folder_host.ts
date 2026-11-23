@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 
 import { FLOWS_DIR, flowIdForPath, MAIN_FLOW, migrateRootOccurrences, parseFlow, pathForFlowId, serializeFlow, unitSignature, type CallableSignature } from './flow';
 import type { CanvasRef, HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
+import { getLanguageAdapter } from './language_adapter';
+import { inferLanguageFromPath, tryNormalizeLanguage, type CanonicalLanguage } from './language_types';
 import { parseModule } from './python_adapter';
 import {
     CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
@@ -144,9 +146,20 @@ export class SlateFolderHost {
         }
     }
 
-    /** Library files from slate.json `library` (files or folders of .py), with top-level ids `lib:<path>:<name>`. */
+    /** Library files from slate.json `library` (files or folders), with top-level ids `lib:<path>:<name>`. */
     async readLibrary(config: SlateConfig): Promise<LibraryDocument[]> {
         const documents: LibraryDocument[] = [];
+        const projectLang = tryNormalizeLanguage(config.language) ?? 'python';
+        const matchesProjectFamily = (fileLang: CanonicalLanguage | null): boolean => {
+            if (!fileLang) return false;
+            if (projectLang === 'typescript' || projectLang === 'javascript') {
+                return fileLang === 'typescript' || fileLang === 'javascript';
+            }
+            if (projectLang === 'cpp' || projectLang === 'arduino') {
+                return fileLang === 'cpp' || fileLang === 'arduino';
+            }
+            return fileLang === projectLang;
+        };
         const visit = async (relativePath: string): Promise<void> => {
             const uri = this.uri(relativePath);
             let type: vscode.FileType;
@@ -158,13 +171,19 @@ export class SlateFolderHost {
             }
             if (type & vscode.FileType.Directory) {
                 for (const [name, childType] of await vscode.workspace.fs.readDirectory(uri)) {
-                    if (childType & vscode.FileType.Directory ? !name.startsWith('.') && name !== '__pycache__' : name.endsWith('.py')) {
+                    const isDir = (childType & vscode.FileType.Directory) !== 0;
+                    const skipDir = name.startsWith('.') || ['__pycache__', 'node_modules', 'dist', 'build', 'bin', 'obj'].includes(name);
+                    if (isDir ? !skipDir : !name.endsWith('.d.ts') && matchesProjectFamily(inferLanguageFromPath(name))) {
                         await visit(`${relativePath.replace(/\/+$/, '')}/${name}`);
                     }
                 }
                 return;
             }
-            const parsed = parseModule((await this.read(relativePath))?.text ?? '', relativePath);
+            const fileLang = inferLanguageFromPath(relativePath) ?? projectLang;
+            const sourceText = (await this.read(relativePath))?.text ?? '';
+            const parsed = fileLang === 'python'
+                ? parseModule(sourceText, relativePath)
+                : await getLanguageAdapter(fileLang).parseModule(sourceText, relativePath);
             const ids = new Map(parsed.units.filter(unit => unit.parentId === null).map(unit => [unit.id, `lib:${relativePath}:${unit.name}`]));
             documents.push({
                 path: relativePath,

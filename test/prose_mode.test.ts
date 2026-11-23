@@ -803,6 +803,16 @@ describe('Phase 8.5 (S-850): Prose / Grant & Research Mode (`language: "prose"`)
             expect(texUnresolved).toContain('\\subsubsection{Subsub}');
             expect(texUnresolved).toContain('\\textit{italic}');
             expect(texUnresolved).toContain('\\bibitem{missingKey} Unresolved citation missingKey.');
+
+            const texExistingHeadings = renderProseLatex(
+                'Grant Proposal',
+                '\\section{Specific Aims & Goals}\n\\subsection*{Methods [@knuth1984]}\nBody text.',
+                new Map([['knuth1984', explicitCitations[0]]]),
+                ['knuth1984'],
+            );
+            expect(texExistingHeadings).toContain('\\section{Specific Aims \\& Goals}');
+            expect(texExistingHeadings).toContain('\\subsection*{Methods \\cite{knuth1984}}');
+            expect(texExistingHeadings).not.toContain('\\textbackslash{}section');
         });
     });
 });

@@ -1,5 +1,7 @@
 import { HarnessDocument, HarnessSnapshot, ParsedUnit, SourcePosition } from './harness_protocol';
+import { tryNormalizeLanguage } from './language_types';
 import { parseModule } from './python_adapter';
+import { parseTsModule } from './ts_adapter';
 
 export const FORGE_INPUT_BUDGET_TOKENS = 600;
 export const JPL60_MAX_LINES = 60;
@@ -65,6 +67,15 @@ export interface ForgeOptions {
     neighbors?: Array<{ id: string; signature: string; intent: string }>;
     occurrence?: { flowId: string; instanceId: string };
     fullContextIds?: string[];
+    language?: string;
+}
+
+type ForgeLanguageKind = 'python' | 'typescript' | 'javascript';
+
+function forgeLanguageKind(language?: string): ForgeLanguageKind {
+    const normalized = language ? tryNormalizeLanguage(language) : undefined;
+    if (normalized === 'typescript' || normalized === 'javascript') return normalized;
+    return 'python';
 }
 
 export interface ForgeCandidate {
@@ -199,11 +210,20 @@ export function buildGenerationPacket(
     if (target.unit.identity !== 'durable' || !target.unit.annotation) {
         throw new PacketError('Generation works on a node function; select the node itself.');
     }
+    const langKind = forgeLanguageKind(options?.language);
     if (!['function', 'method'].includes(target.unit.kind)) {
         throw new PacketError('Generation currently supports top-level functions and methods.');
     }
-    if (!target.unit.returnAnnotation || !target.unit.parameters) {
-        throw new PacketError('Generation requires a typed parameter list and return annotation.');
+    if (langKind === 'python') {
+        if (!target.unit.returnAnnotation || !target.unit.parameters) {
+            throw new PacketError('Generation requires a typed parameter list and return annotation.');
+        }
+    } else if (langKind === 'typescript') {
+        if (!target.unit.returnAnnotation || target.unit.parameters == null) {
+            throw new PacketError('Generation requires a typed parameter list and return annotation.');
+        }
+    } else if (target.unit.parameters == null) {
+        throw new PacketError('Generation requires a parameter list.');
     }
     if (target.unit.annotation.locked === true) throw new PacketError('This function is locked.');
     const intent = textField(target.unit, 'intent');
@@ -285,31 +305,67 @@ export function buildGenerationPacket(
                 ).join('\n\n')}`
                 : '';
 
-            const promptParts = [
-                `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
-                `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
-                `Intent: ${intent}`,
-                contract ? `Contract: ${contract}` : '',
-                casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
-                feedbackFormatted,
-                `Rules:`,
-                `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
-                `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
-                `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases.`,
-                neighborSection,
-                `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`python\n${items[0].source}\n\`\`\``,
-                `Output format (use these exact section headers):`,
-                `### Implementation`,
-                `\`\`\`python`,
-                `def ${target.unit.name}(...):`,
-                `    ...`,
-                `\`\`\``,
-                `### Unit Check`,
-                `\`\`\`python`,
-                `def test_${target.unit.name}():`,
-                `    ...`,
-                `\`\`\``,
-            ].filter(Boolean);
+            const promptParts = langKind === 'python'
+                ? [
+                    `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
+                    `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
+                    `Intent: ${intent}`,
+                    contract ? `Contract: ${contract}` : '',
+                    casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
+                    feedbackFormatted,
+                    `Rules:`,
+                    `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
+                    `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
+                    `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases.`,
+                    neighborSection,
+                    `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`python\n${items[0].source}\n\`\`\``,
+                    `Output format (use these exact section headers):`,
+                    `### Implementation`,
+                    `\`\`\`python`,
+                    `def ${target.unit.name}(...):`,
+                    `    ...`,
+                    `\`\`\``,
+                    `### Unit Check`,
+                    `\`\`\`python`,
+                    `def test_${target.unit.name}():`,
+                    `    ...`,
+                    `\`\`\``,
+                ].filter(Boolean)
+                : (() => {
+                    const fenceTag = langKind === 'typescript' ? 'ts' : 'js';
+                    const langDisplay = langKind === 'typescript' ? 'TypeScript' : 'JavaScript';
+                    const typeRule = langKind === 'typescript' ? ' type annotations' : '';
+                    const strictRule = langKind === 'typescript' ? ', strictly typed,' : '';
+                    const retExample = langKind === 'typescript' ? ': ...' : '';
+                    return [
+                        `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
+                        `Implement exactly the ${langDisplay} function below and forge its corresponding standalone unit check.`,
+                        `Intent: ${intent}`,
+                        contract ? `Contract: ${contract}` : '',
+                        casesFormatted ? `Structured Cases:\n${casesFormatted}` : '',
+                        feedbackFormatted,
+                        `Rules:`,
+                        `- Preserve export modifiers, function name, signature, and parameter/return${typeRule}.`,
+                        `- The implementation MUST be <=60 lines${strictRule} with bounded control flow (JPL-60).`,
+                        `- Only call dependencies provided in Reference neighbor signatures or standard ${langDisplay} built-ins.`,
+                        `- The unit check MUST use test('${target.unit.name}', () => { ... }) with expect(...) assertions (no imports needed).`,
+                        neighborSection,
+                        `### Target stub: ${target.unit.qualifiedName} (${target.document.path})\n\`\`\`${fenceTag}\n${items[0].source}\n\`\`\``,
+                        `Output format (use these exact section headers):`,
+                        `### Implementation`,
+                        `\`\`\`${fenceTag}`,
+                        `export function ${target.unit.name}(...)${retExample} {`,
+                        `    ...`,
+                        `}`,
+                        `\`\`\``,
+                        `### Unit Check`,
+                        `\`\`\`${fenceTag}`,
+                        `test('${target.unit.name}', () => {`,
+                        `    ...`,
+                        `});`,
+                        `\`\`\``,
+                    ].filter(Boolean);
+                })();
 
             return promptParts.join('\n\n');
         };
@@ -332,11 +388,16 @@ export function buildGenerationPacket(
             let sig = depUnit.signature;
             if (!sig) {
                 const params = depUnit.parameters ?? '';
-                const ret = depUnit.returnAnnotation ? ` -> ${depUnit.returnAnnotation}` : '';
-                sig = `def ${depUnit.name}(${params})${ret}`;
+                if (langKind === 'python') {
+                    const ret = depUnit.returnAnnotation ? ` -> ${depUnit.returnAnnotation}` : '';
+                    sig = `def ${depUnit.name}(${params})${ret}`;
+                } else {
+                    const ret = depUnit.returnAnnotation ? `: ${depUnit.returnAnnotation}` : '';
+                    sig = `function ${depUnit.name}(${params})${ret}`;
+                }
             }
-            if (sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
-            const promptSig = `${sig}:`;
+            if (langKind === 'python' && sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
+            const promptSig = langKind === 'python' ? `${sig}:` : sig;
             const depIntent = textField(depUnit, 'intent');
             const depContract = textField(depUnit, 'contract');
             neighborSignatures[dependencyId] = { signature: sig, sourceHash: dependency.document.sourceHash };
@@ -420,7 +481,7 @@ export function buildGenerationPacket(
     const neighborSignatures: Record<string, { signature: string; sourceHash: string }> = {};
     for (const item of items.slice(1)) {
         let sig = item.source.split('\n')[0] ?? '';
-        if (sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
+        if (langKind === 'python' && sig.endsWith(':')) sig = sig.slice(0, -1).trimEnd();
         neighborSignatures[item.id] = { signature: sig, sourceHash: item.sourceHash };
     }
 
@@ -470,14 +531,25 @@ export function buildForgePacket(
     );
 }
 
-export function stripModelEnvelope(value: string): string {
+export function stripModelEnvelope(value: string, language?: string): string {
     const trimmed = value.trim();
-    const fenced = trimmed.match(/^```(?:python)?\s*\n([\s\S]*?)\n```$/i);
+    const langKind = language ? forgeLanguageKind(language) : 'python';
+    const fenceRegex = langKind === 'python'
+        ? /^```(?:python)?\s*\n([\s\S]*?)\n```$/i
+        : /^```(?:typescript|tsx?|javascript|jsx?)?\s*\n([\s\S]*?)\n```$/i;
+    const fenced = trimmed.match(fenceRegex);
     return (fenced?.[1] ?? trimmed).trim();
 }
 
-export function parseForgeCandidate(raw: string): ForgeCandidate {
+export function parseForgeCandidate(raw: string, language?: string): ForgeCandidate {
     const text = raw.trim();
+    const langKind = language ? forgeLanguageKind(language) : 'python';
+    const testSplitRegex = langKind === 'python'
+        ? /\n(?=(?:async\s+)?def\s+test_)/i
+        : /\n(?=(?:(?:export\s+)?(?:(?:async\s+)?function\s+test\w*|(?:test|it|describe)\s*\()))/;
+    const allFencesRegex = langKind === 'python'
+        ? /```(?:python)?\s*\n([\s\S]*?)\n```/gi
+        : /```(?:typescript|tsx?|javascript|jsx?|python)?\s*\n([\s\S]*?)\n```/gi;
 
     // 1. Check for explicit section headers: ### Implementation ... ### Unit Check ...
     const implHeaderRegex = /(?:^|\n)###\s*(?:Implementation|Function|Code)[\s\S]*?(?=(?:\n###\s*(?:Unit\s*Check|Check|Test|Tests|Pytest)|$))/i;
@@ -486,27 +558,53 @@ export function parseForgeCandidate(raw: string): ForgeCandidate {
     const implMatch = text.match(implHeaderRegex);
     const checkMatch = text.match(checkHeaderRegex);
 
-    if (implMatch && checkMatch) {
+    if (implMatch) {
         const rawImpl = implMatch[0].replace(/(?:^|\n)###\s*(?:Implementation|Function|Code)\s*/i, '').trim();
-        const rawCheck = checkMatch[1].trim();
+        const strippedImpl = stripModelEnvelope(rawImpl, language);
+        if (checkMatch) {
+            const rawCheck = checkMatch[1].trim();
+            return {
+                implementation: strippedImpl,
+                check: stripModelEnvelope(rawCheck, language) || undefined,
+            };
+        }
+        const testSplit = strippedImpl.search(testSplitRegex);
+        if (testSplit !== -1) {
+            return {
+                implementation: strippedImpl.slice(0, testSplit).trim(),
+                check: strippedImpl.slice(testSplit).trim() || undefined,
+            };
+        }
         return {
-            implementation: stripModelEnvelope(rawImpl),
-            check: stripModelEnvelope(rawCheck) || undefined,
+            implementation: strippedImpl,
         };
     }
 
-    // 2. Check for multiple markdown code fences: ```python ... ``` followed by ```python ... ```
-    const fences = [...text.matchAll(/```(?:python)?\s*\n([\s\S]*?)\n```/gi)].map(m => m[1].trim());
+    // 2. Check for markdown code fences
+    const fences = [...text.matchAll(allFencesRegex)].map(m => m[1].trim());
     if (fences.length >= 2) {
         return {
             implementation: fences[0],
             check: fences[1],
         };
     }
+    if (fences.length === 1) {
+        const single = fences[0];
+        const testSplit = single.search(testSplitRegex);
+        if (testSplit !== -1) {
+            return {
+                implementation: single.slice(0, testSplit).trim(),
+                check: single.slice(testSplit).trim() || undefined,
+            };
+        }
+        return {
+            implementation: single,
+        };
+    }
 
-    // 3. Check for single block with both def <target> and def test_...
-    const stripped = stripModelEnvelope(text);
-    const testSplit = stripped.search(/\n(?=(?:async\s+)?def\s+test_)/i);
+    // 3. Check for single block with both target implementation and unit check
+    const stripped = stripModelEnvelope(text, language);
+    const testSplit = stripped.search(testSplitRegex);
     if (testSplit !== -1) {
         const impl = stripped.slice(0, testSplit).trim();
         const check = stripped.slice(testSplit).trim();
@@ -522,10 +620,102 @@ export function parseForgeCandidate(raw: string): ForgeCandidate {
     };
 }
 
+function validateTsOrJsForgeCandidate(
+    targetUnit: ParsedUnit,
+    candidate: ForgeCandidate,
+    langKind: 'typescript' | 'javascript',
+): CandidateValidationResult {
+    const diagnostics: string[] = [];
+    const needsJsx = Boolean(
+        targetUnit.returnAnnotation?.includes('JSX')
+        || candidate.implementation.includes('</'),
+    );
+    const implExt = langKind === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
+    const implText = candidate.implementation.endsWith('\n') ? candidate.implementation : `${candidate.implementation}\n`;
+    const parsedImpl = parseTsModule(implText, `<candidate>${implExt}`, targetUnit.name);
+    const langDisplay = langKind === 'typescript' ? 'TypeScript' : 'JavaScript';
+    if (!parsedImpl.valid) {
+        diagnostics.push(`Candidate implementation is not valid ${langDisplay}.`);
+    }
+
+    const implUnits = parsedImpl.units.filter(u => u.parentId === null);
+    if (implUnits.length !== 1 || implUnits[0].name !== targetUnit.name) {
+        diagnostics.push(`Candidate must contain exactly one definition named "${targetUnit.name}".`);
+    }
+
+    const implLines = cleanLines(candidate.implementation);
+    const lineCount = implLines.length;
+    if (lineCount === 0) {
+        diagnostics.push('Candidate implementation is empty.');
+    }
+    if (lineCount > JPL60_MAX_LINES) {
+        diagnostics.push(`Candidate exceeds JPL-60 limit of 60 lines (${lineCount} lines).`);
+    }
+
+    if (implUnits.length === 1 && implUnits[0].name === targetUnit.name) {
+        const generatedUnit = implUnits[0];
+        const targetParams = (targetUnit.params ?? []).filter(p => p.name !== 'self' && p.name !== 'this');
+        const generatedParams = (generatedUnit.params ?? []).filter(p => p.name !== 'self' && p.name !== 'this');
+        if (generatedParams.length !== targetParams.length) {
+            diagnostics.push(`Candidate parameter count does not match target stub (expected ${targetParams.length}, got ${generatedParams.length}).`);
+        } else {
+            for (let i = 0; i < targetParams.length; i++) {
+                const tp = targetParams[i];
+                const gp = generatedParams[i];
+                if (gp.name !== tp.name) {
+                    diagnostics.push(`Candidate parameter ${i + 1} named "${gp.name}" does not match target parameter "${tp.name}".`);
+                }
+                if (langKind === 'typescript' && (gp.annotation ?? '').trim() !== (tp.annotation ?? '').trim()) {
+                    diagnostics.push(`Candidate parameter "${tp.name}" type annotation "${gp.annotation ?? ''}" does not match target "${tp.annotation ?? ''}".`);
+                }
+            }
+        }
+        if (langKind === 'typescript') {
+            const expectedRet = (targetUnit.returnAnnotation ?? '').trim();
+            const actualRet = (generatedUnit.returnAnnotation ?? '').trim();
+            if (expectedRet !== actualRet) {
+                diagnostics.push(`Candidate return type annotation "${actualRet}" does not match target "${expectedRet}".`);
+            }
+        }
+    }
+
+    let checkLineCount: number | undefined;
+    if (candidate.check) {
+        const checkExt = langKind === 'javascript' ? '.js' : '.ts';
+        const checkText = candidate.check.endsWith('\n') ? candidate.check : `${candidate.check}\n`;
+        const parsedCheck = parseTsModule(checkText, `<check>${checkExt}`);
+        if (!parsedCheck.valid) {
+            diagnostics.push(`Candidate unit check is not valid ${langDisplay}.`);
+        } else {
+            const hasTestCall = /\b(?:test|it|describe)\s*\(/.test(checkText)
+                || parsedCheck.units.some(u => u.parentId === null && u.kind === 'function' && u.name.startsWith('test'));
+            if (!hasTestCall) {
+                diagnostics.push('Candidate unit check must define at least one test case (e.g. test(...) or function test_...()).');
+            }
+        }
+        checkLineCount = cleanLines(candidate.check).length;
+        if (checkLineCount > JPL60_MAX_LINES) {
+            diagnostics.push(`Candidate unit check exceeds 60 lines (${checkLineCount} lines).`);
+        }
+    }
+
+    return {
+        valid: diagnostics.length === 0,
+        lineCount,
+        checkLineCount,
+        diagnostics,
+    };
+}
+
 export function validateForgeCandidate(
     targetUnit: ParsedUnit,
     candidate: ForgeCandidate,
+    language?: string,
 ): CandidateValidationResult {
+    const langKind = language ? forgeLanguageKind(language) : 'python';
+    if (langKind !== 'python') {
+        return validateTsOrJsForgeCandidate(targetUnit, candidate, langKind);
+    }
     const diagnostics: string[] = [];
 
     // 1. Implementation syntax & single function definition

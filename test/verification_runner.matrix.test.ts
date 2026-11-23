@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     formatCasesAsPython,
+    formatCasesAsTs,
     generateVerificationFiles,
     isVerificationStale,
     runNodeVerification,
@@ -66,6 +70,16 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
         it('handles empty cases array gracefully with pass', () => {
             const lines = formatCasesAsPython('foo', []);
             expect(lines).toEqual(['def test_structured_cases_foo():', '    pass']);
+        });
+
+        it('formats MCP input cases, Python booleans/None literals, and expected errors', () => {
+            const lines = formatCasesAsPython('check_item', [
+                { name: 'mcp_case', input: { flag: true, empty: null }, expected: false },
+                { name: 'raises_case', input: { flag: false, empty: null }, error: 'ValueError' },
+            ]);
+            expect(lines).toContain('    assert check_item(flag=True, empty=None) == False');
+            expect(lines).toContain('    with pytest.raises(ValueError):');
+            expect(lines).toContain('        check_item(flag=False, empty=None)');
         });
     });
 
@@ -411,5 +425,167 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(loop.finalResult.state).toBe('failed');
             expect(loop.finalResult.retryCount).toBe(3);
         });
+    });
+
+    describe('TypeScript and JavaScript verification runner', () => {
+        const tempDirs: string[] = [];
+        afterEach(() => {
+            while (tempDirs.length > 0) {
+                fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
+            }
+        });
+
+        function makeTempWorkspace(): string {
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ts-verify-'));
+            tempDirs.push(dir);
+            return dir;
+        }
+
+        it('runs strict tsc check and executes real Node unit check and structured cases', async () => {
+            const workspaceRoot = makeTempWorkspace();
+            const helperNode: SlateNode = {
+                name: 'doubleIt',
+                language: 'typescript',
+                intent: 'Double input',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['function doubleIt(x: number): number {', '    return x * 2;', '}'],
+                extra: {},
+            };
+            const targetNode: SlateNode = {
+                name: 'quadruple',
+                language: 'typescript',
+                intent: 'Quadruple integer',
+                contract: 'Returns 4 * x',
+                context: ['doubleIt'],
+                imports: [],
+                uses: [],
+                code: ['export function quadruple(x: number): number {', '    return doubleIt(doubleIt(x));', '}'],
+                cases: [{ name: 'basic', inputs: { x: 3 }, expected: 12 }],
+                check: [
+                    "import { expect, test } from 'vitest';",
+                    "import { quadruple } from './quadruple';",
+                    "test('quadruple zero and negative', () => {",
+                    '    expect(quadruple(0)).toBe(0);',
+                    '    expect(quadruple(-2)).toBe(-8);',
+                    '});',
+                ],
+                extra: {},
+            };
+
+            const deps = new Map<string, SlateNode>([['doubleIt', helperNode]]);
+            const res = await runNodeVerification({
+                workspaceRoot,
+                node: targetNode,
+                nodeId: 'quadruple',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+
+            expect(res.state).toBe('passed');
+            expect(res.pydanticValid).toBe(true);
+            expect(res.testsPassed).toBe(2);
+            expect(res.testsTotal).toBe(2);
+        }, 20_000);
+
+        it('fails with strict tsc diagnostics when TS types are invalid', async () => {
+            const workspaceRoot = makeTempWorkspace();
+            const badTypeNode: SlateNode = {
+                name: 'badReturn',
+                language: 'typescript',
+                intent: 'Bad return type',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function badReturn(x: number): number {', '    return String(x);', '}'],
+                check: ["test('bad', () => { expect(badReturn(1)).toBe(1); });"],
+                extra: {},
+            };
+
+            const res = await runNodeVerification({
+                workspaceRoot,
+                node: badTypeNode,
+                nodeId: 'badReturn',
+                isTrusted: true,
+                language: 'typescript',
+            });
+
+            expect(res.state).toBe('failed');
+            expect(res.pydanticValid).toBe(false);
+            expect(res.traceback).toContain('TS2322');
+        }, 20_000);
+
+        it('fails runtime assertion and returns traceback + formatted cases support', async () => {
+            const workspaceRoot = makeTempWorkspace();
+            const buggyNode: SlateNode = {
+                name: 'buggySum',
+                language: 'typescript',
+                intent: 'Sum two numbers',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function buggySum(a: number, b: number): number {', '    return a - b;', '}'],
+                cases: [{ name: 'sum', inputs: [2, 3], expected: 5 }],
+                extra: {},
+            };
+
+            expect(formatCasesAsTs(buggyNode, buggyNode.cases!, 'typescript').join('\n')).toContain('expect(buggySum(2, 3)).toEqual(5)');
+
+            const res = await runNodeVerification({
+                workspaceRoot,
+                node: buggyNode,
+                nodeId: 'buggySum',
+                isTrusted: true,
+                language: 'typescript',
+            });
+
+            expect(res.state).toBe('failed');
+            expect(res.pydanticValid).toBe(true);
+            expect(res.testsPassed).toBe(0);
+            expect(res.traceback).toContain('Expected deep equal 5');
+        }, 20_000);
+
+        it('executes JavaScript node verification and returns untested when no checks exist', async () => {
+            const workspaceRoot = makeTempWorkspace();
+            const noChecksNode: SlateNode = {
+                name: 'plainJs',
+                language: 'javascript',
+                intent: 'Plain JS',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function plainJs(x) { return x + 1; }'],
+                extra: {},
+            };
+
+            const untested = await runNodeVerification({
+                workspaceRoot,
+                node: noChecksNode,
+                nodeId: 'plainJs',
+                isTrusted: true,
+                language: 'javascript',
+            });
+            expect(untested.state).toBe('untested');
+
+            const checkedNode: SlateNode = {
+                ...noChecksNode,
+                cases: [{ name: 'inc', inputs: [4], expected: 5 }],
+            };
+            const passed = await runNodeVerification({
+                workspaceRoot,
+                node: checkedNode,
+                nodeId: 'plainJs',
+                isTrusted: true,
+                language: 'javascript',
+            });
+            expect(passed.state).toBe('passed');
+            expect(passed.testsPassed).toBe(1);
+        }, 20_000);
     });
 });

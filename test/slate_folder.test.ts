@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { buildGenerationPacket } from '../vscode-extension/src/generation';
 import {
-    checkJpl60, checkNodeCode, indexNode, nodeFromSignature, parseConfig, parseLayout, parseNode, serializeNode, SlateFormatError,
+    checkJpl60, checkNodeCode, indexNode, nodeFromSignature, parseConfig, parseLayout, parseNode,
+    serializeConfig, serializeNode, SlateFormatError, tsNodeFromSignature, validateNodeStub, validateTsStubBody,
 } from '../vscode-extension/src/slate_folder';
 
 const normalize = {
@@ -75,13 +76,33 @@ describe('slate/ folder format', () => {
 
     it('reports malformed node JSON and unsupported languages as invalid documents', () => {
         expect(indexNode('slate/nodes/x.json', '{ not json', 'python', null).document.valid).toBe(false);
-        const csharp = indexNode('slate/nodes/normalize.json', json({ ...normalize, language: 'csharp' }), 'python', null);
-        expect(csharp.document.valid).toBe(false);
-        expect(csharp.node?.language).toBe('csharp');
+        const rust = indexNode('slate/nodes/normalize.json', json({ ...normalize, language: 'rust' }), 'python', null);
+        expect(rust.document.valid).toBe(false);
+        expect(rust.node?.language).toBe('rust');
         const brokenCode = indexNode('custom/normalize.json', json({ ...normalize, code: ['def normalize(:'] }), 'python', null);
         expect(brokenCode.document.valid).toBe(false);
         expect(brokenCode.document.id).toBe('node:custom/normalize.json');
         expect(brokenCode.document.diagnostics[0].code).toBe('python-syntax');
+    });
+
+    it('indexes TypeScript, TSX, C#, C++, and Arduino nodes validly and supports TS stub helpers', () => {
+        const tsNode = tsNodeFromSignature('export function add(a: number, b: number): number', 'Add numbers', 'typescript', '.ts');
+        expect(indexNode('slate/nodes/add.json', serializeNode(tsNode), 'typescript', null).document.valid).toBe(true);
+        expect(validateNodeStub(tsNode, 'typescript').valid).toBe(true);
+        expect(validateTsStubBody('export function add(a: number, b: number): number', 'return a + b;', '.ts').valid).toBe(false);
+        expect(validateTsStubBody('export function add(a: number, b: number): number', 'throw new Error("todo");', '.ts').valid).toBe(true);
+
+        const tsxNode = tsNodeFromSignature('export function Badge(label: string): JSX.Element', 'Render badge', 'typescript', '.tsx');
+        expect(indexNode('slate/nodes/Badge.json', serializeNode(tsxNode), 'typescript', null).document.valid).toBe(true);
+
+        const csNode = { slate: 3, name: 'Double', language: 'csharp', code: ['public static int Double(int x) { return x * 2; }'] };
+        expect(indexNode('slate/nodes/Double.json', json(csNode), 'csharp', null).document.valid).toBe(true);
+
+        const cppNode = { slate: 3, name: 'inc', language: 'cpp', code: ['int inc(int x) { return x + 1; }'] };
+        expect(indexNode('slate/nodes/inc.json', json(cppNode), 'cpp', null).document.valid).toBe(true);
+
+        const inoNode = { slate: 3, name: 'setup', language: 'arduino', code: ['void setup() { pinMode(13, OUTPUT); }'] };
+        expect(indexNode('slate/nodes/setup.json', json(inoNode), 'arduino', null).document.valid).toBe(true);
     });
 
     it('accepts replacement code only when it is one definition with the node name', () => {
@@ -151,5 +172,88 @@ describe('slate/ folder format', () => {
         expect(packet.items.map(item => [item.role, item.id])).toEqual([['target', 'normalize'], ['required-context', 'clamp']]);
         expect(packet.items[1].source).toContain('return max(lower, min(value, upper))');
         expect(() => buildGenerationPacket(snapshot, sources, 'clamp', 4096, 512)).toThrow(/locked/);
+    });
+
+    it('parses and round-trips non-secret llm config in slate.json while rejecting raw secrets', () => {
+        const config = parseConfig(JSON.stringify({
+            slate: 3,
+            name: 'self_host',
+            language: 'python',
+            compile: { outDir: 'dist' },
+            library: ['lib.py'],
+            llm: {
+                provider: 'openrouter',
+                endpoint: 'https://openrouter.ai/api/v1',
+                model: 'qwen/qwen3-coder-30b-a3b-instruct',
+                apiKeyEnv: 'OPENROUTER_API_KEY',
+                concurrency: 4,
+                timeoutSeconds: 90,
+                outputTokens: 768,
+                contextWindow: 8192,
+            },
+        }));
+        expect(config.llm).toEqual({
+            provider: 'openrouter',
+            endpoint: 'https://openrouter.ai/api/v1',
+            model: 'qwen/qwen3-coder-30b-a3b-instruct',
+            apiKeyEnv: 'OPENROUTER_API_KEY',
+            concurrency: 4,
+            timeoutSeconds: 90,
+            outputTokens: 768,
+            contextWindow: 8192,
+        });
+        expect(parseConfig(serializeConfig(config))).toEqual(config);
+
+        for (const provider of ['llama.cpp', 'ollama', 'openrouter', 'openai-compatible'] as const) {
+            expect(parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { provider } })).llm?.provider).toBe(provider);
+        }
+
+        for (const secretField of ['apiKey', 'api_key', 'token', 'secret', 'authorization']) {
+            expect(() => parseConfig(JSON.stringify({
+                slate: 3,
+                name: 'p',
+                llm: { [secretField]: 'sk-fake-secret' },
+            }))).toThrow(/must not contain raw API keys/);
+        }
+
+        expect(() => parseConfig(JSON.stringify({
+            slate: 3,
+            name: 'p',
+            llm: { apiKeyEnv: 'sk-fake-test-secret' },
+        }))).toThrow(/not a raw API key/);
+
+        expect(() => parseConfig(JSON.stringify({
+            slate: 3,
+            name: 'p',
+            llm: { apiKeyEnv: 'Bearer fake' },
+        }))).toThrow(/not a raw API key/);
+
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: 'bad' }))).toThrow(/must be an object/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { provider: 'unknown' } }))).toThrow(/provider/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { endpoint: 'ftp://bad' } }))).toThrow(/http/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { model: '   ' } }))).toThrow(/model/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { concurrency: 0 } }))).toThrow(/concurrency/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { concurrency: 17 } }))).toThrow(/concurrency/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { timeoutSeconds: 4 } }))).toThrow(/timeoutSeconds/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { outputTokens: 32 } }))).toThrow(/outputTokens/);
+        expect(() => parseConfig(JSON.stringify({ slate: 3, name: 'p', llm: { contextWindow: 512 } }))).toThrow(/contextWindow/);
+    });
+
+    it('detects multiline stubs vs implemented nodes with validateNodeStub', () => {
+        const multilineStub = parseNode(json({
+            slate: 3,
+            name: 'compute',
+            code: [
+                'def compute(',
+                '    value: int,',
+                '    scale: int,',
+                ') -> int:',
+                '    raise NotImplementedError',
+            ],
+        }));
+        expect(validateNodeStub(multilineStub).valid).toBe(true);
+
+        const implemented = parseNode(json(clamp));
+        expect(validateNodeStub(implemented).valid).toBe(false);
     });
 });

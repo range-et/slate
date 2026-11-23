@@ -1,10 +1,13 @@
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as ts from 'typescript';
 import type { NodeVerificationResult, VerificationState } from './harness_protocol';
+import { tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
 import { sourceHash } from './python_adapter';
+import { parseTsModule } from './ts_adapter';
 
 export interface GeneratedVerification {
     moduleContent: string;
@@ -48,6 +51,27 @@ export function resolvePythonPath(configuredPath?: string): string {
     return 'python3';
 }
 
+function toPythonLiteral(value: unknown): string {
+    if (value === null || value === undefined) return 'None';
+    if (typeof value === 'boolean') return value ? 'True' : 'False';
+    if (typeof value === 'number') {
+        if (Number.isNaN(value)) return "float('nan')";
+        if (value === Infinity) return "float('inf')";
+        if (value === -Infinity) return "float('-inf')";
+        return String(value);
+    }
+    if (typeof value === 'string') return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(toPythonLiteral).join(', ')}]`;
+    if (typeof value === 'object') {
+        return `{${Object.entries(value as Record<string, unknown>)
+            .map(([k, v]) => `${JSON.stringify(k)}: ${toPythonLiteral(v)}`)
+            .join(', ')}}`;
+    }
+    return JSON.stringify(value);
+}
+
+const CASE_METADATA_KEYS = new Set(['name', 'id', 'description', 'error', 'expected', 'return', 'output']);
+
 /** Formats structured cases into executable pytest test assertions. */
 export function formatCasesAsPython(nodeName: string, cases: unknown[]): string[] {
     const lines: string[] = [];
@@ -78,40 +102,115 @@ export function formatCasesAsPython(nodeName: string, cases: unknown[]): string[
         }
 
         const expected = obj.expected ?? obj.return ?? obj.output;
-        const inputs = obj.inputs ?? obj.args ?? obj.params;
+        const expectedError = typeof obj.error === 'string' && obj.error.trim() ? obj.error.trim() : undefined;
+        const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
 
+        let callExpr: string | null = null;
         if (inputs && typeof inputs === 'object' && !Array.isArray(inputs)) {
-            const kwargs = Object.entries(inputs)
-                .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+            const kwargs = Object.entries(inputs as Record<string, unknown>)
+                .map(([k, v]) => `${k}=${toPythonLiteral(v)}`)
                 .join(', ');
-            if (expected !== undefined) {
-                lines.push(`    assert ${nodeName}(${kwargs}) == ${JSON.stringify(expected)}`);
-            } else {
-                lines.push(`    ${nodeName}(${kwargs})`);
-            }
+            callExpr = `${nodeName}(${kwargs})`;
         } else if (Array.isArray(inputs)) {
-            const args = inputs.map(v => JSON.stringify(v)).join(', ');
-            if (expected !== undefined) {
-                lines.push(`    assert ${nodeName}(${args}) == ${JSON.stringify(expected)}`);
-            } else {
-                lines.push(`    ${nodeName}(${args})`);
-            }
+            const args = inputs.map(v => toPythonLiteral(v)).join(', ');
+            callExpr = `${nodeName}(${args})`;
         } else {
-            // Check if object keys themselves are parameter names
-            const keys = Object.keys(obj).filter(k => k !== 'expected' && k !== 'return' && k !== 'output');
+            const keys = Object.keys(obj).filter(k => !CASE_METADATA_KEYS.has(k));
             if (keys.length > 0) {
-                const kwargs = keys.map(k => `${k}=${JSON.stringify(obj[k])}`).join(', ');
-                if (expected !== undefined) {
-                    lines.push(`    assert ${nodeName}(${kwargs}) == ${JSON.stringify(expected)}`);
-                } else {
-                    lines.push(`    ${nodeName}(${kwargs})`);
-                }
-            } else {
-                lines.push(`    # Untyped case: ${JSON.stringify(obj)}`);
+                const kwargs = keys.map(k => `${k}=${toPythonLiteral(obj[k])}`).join(', ');
+                callExpr = `${nodeName}(${kwargs})`;
             }
+        }
+
+        if (!callExpr) {
+            lines.push(`    # Untyped case: ${JSON.stringify(obj)}`);
+        } else if (expectedError) {
+            const excClass = /^[A-Za-z_][A-Za-z0-9_]*$/.test(expectedError) ? expectedError : 'Exception';
+            lines.push(`    with pytest.raises(${excClass}):`);
+            lines.push(`        ${callExpr}`);
+        } else if (expected !== undefined) {
+            lines.push(`    assert ${callExpr} == ${toPythonLiteral(expected)}`);
+        } else {
+            lines.push(`    ${callExpr}`);
         }
     });
 
+    return lines;
+}
+
+/** Formats structured cases into standalone TypeScript/JavaScript test() blocks. */
+export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'typescript' | 'javascript' = 'typescript'): string[] {
+    const ext = language === 'javascript' ? '.js' : '.ts';
+    const parsed = parseTsModule(codeText(node), `<cases>${ext}`, node.name);
+    const targetUnit = parsed.units.find(u => u.parentId === null && u.name === node.name);
+    const paramNames = (targetUnit?.params ?? []).filter(p => p.name !== 'this' && p.name !== 'self').map(p => p.name);
+
+    const lines: string[] = [];
+    lines.push(`test('structured cases for ${node.name}', () => {`);
+    if (cases.length === 0) {
+        lines.push('});');
+        return lines;
+    }
+
+    cases.forEach((item, index) => {
+        if (!item || typeof item !== 'object') {
+            const str = String(item).trim();
+            if (str.length > 0) {
+                lines.push(`    // Case ${index + 1}`);
+                lines.push(str.startsWith('expect(') ? `    ${str}` : `    expect(${str}).toBeTruthy();`);
+            }
+            return;
+        }
+
+        const obj = item as Record<string, unknown>;
+        lines.push(`    // Case ${index + 1}`);
+        if (typeof obj.code === 'string') {
+            lines.push(`    ${obj.code.trim()}`);
+            return;
+        }
+
+        const expected = obj.expected ?? obj.return ?? obj.output;
+        const expectedError = typeof obj.error === 'string' && obj.error.trim() ? obj.error.trim() : undefined;
+        const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
+
+        let callExpr: string | null = null;
+        if (Array.isArray(inputs)) {
+            callExpr = `${node.name}(${inputs.map(v => JSON.stringify(v)).join(', ')})`;
+        } else if (inputs && typeof inputs === 'object') {
+            const rec = inputs as Record<string, unknown>;
+            const recKeys = Object.keys(rec);
+            if (paramNames.length > 0 && paramNames.every(p => p in rec) && recKeys.length === paramNames.length) {
+                callExpr = `${node.name}(${paramNames.map(p => JSON.stringify(rec[p])).join(', ')})`;
+            } else if (paramNames.length === 1) {
+                callExpr = `${node.name}(${JSON.stringify(rec)})`;
+            } else {
+                callExpr = `${node.name}(${Object.values(rec).map(v => JSON.stringify(v)).join(', ')})`;
+            }
+        } else if (inputs !== undefined) {
+            callExpr = `${node.name}(${JSON.stringify(inputs)})`;
+        } else {
+            const keys = Object.keys(obj).filter(k => !CASE_METADATA_KEYS.has(k));
+            if (keys.length > 0) {
+                if (paramNames.length > 0 && paramNames.every(p => p in obj)) {
+                    callExpr = `${node.name}(${paramNames.map(p => JSON.stringify(obj[p])).join(', ')})`;
+                } else {
+                    callExpr = `${node.name}(${keys.map(k => JSON.stringify(obj[k])).join(', ')})`;
+                }
+            }
+        }
+
+        if (!callExpr) {
+            lines.push(`    // Untyped case: ${JSON.stringify(obj)}`);
+        } else if (expectedError) {
+            lines.push(`    expect(() => { ${callExpr}; }).toThrow(${JSON.stringify(expectedError)});`);
+        } else if (expected !== undefined) {
+            lines.push(`    expect(${callExpr}).toEqual(${JSON.stringify(expected)});`);
+        } else {
+            lines.push(`    ${callExpr};`);
+        }
+    });
+
+    lines.push('});');
     return lines;
 }
 
@@ -195,6 +294,7 @@ export interface VerificationOptions {
     timeoutMs?: number;
     signal?: AbortSignal;
     pythonPath?: string;
+    language?: string;
     executeCommand?: (cmd: string, args: string[], cwd: string, timeoutMs: number, signal?: AbortSignal) => Promise<{ code: number; stdout: string; stderr: string; timedOut?: boolean }>;
 }
 
@@ -215,7 +315,15 @@ function defaultExecute(
             return;
         }
 
-        const proc = child_process.spawn(cmd, args, { cwd, shell: process.platform === 'win32' });
+        const env = process.versions.electron && cmd === process.execPath
+            ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+            : undefined;
+        const useShell = process.platform === 'win32' && cmd !== process.execPath && !cmd.toLowerCase().endsWith('.exe');
+        const proc = child_process.spawn(cmd, args, {
+            cwd,
+            shell: useShell,
+            ...(env ? { env } : {}),
+        });
 
         const timer = setTimeout(() => {
             timedOut = true;
@@ -277,8 +385,13 @@ function extractTraceback(stdout: string, stderr: string): string {
     return text.trim();
 }
 
-/** Runs scoped verification (Pydantic contract + pytest + mutmut) for an atomic node in .slate/build/. */
+/** Runs scoped verification (Pydantic + pytest + mutmut for Python; strict tsc + isolated Node runner for TS/JS). */
 export async function runNodeVerification(options: VerificationOptions): Promise<NodeVerificationResult> {
+    const effectiveLang = tryNormalizeLanguage(options.language ?? options.node.language) ?? 'python';
+    if (effectiveLang === 'typescript' || effectiveLang === 'javascript') {
+        return runTsNodeVerification({ ...options, language: effectiveLang });
+    }
+
     const {
         workspaceRoot,
         node,
@@ -480,6 +593,537 @@ export async function runNodeVerification(options: VerificationOptions): Promise
         testsTotal: total,
         survivingMutants: 0,
         totalMutants: totalMutants > 0 ? totalMutants : undefined,
+    };
+}
+
+const TS_HARNESS_SOURCE = `const { isDeepStrictEqual } = require('node:util');
+
+const __slateTests = [];
+function describe(_name, fn) { fn(); }
+function test(name, fn) { __slateTests.push({ name: String(name), fn }); }
+const it = test;
+
+function makeMatchers(actual, negated) {
+    const check = (pass, message) => {
+        const ok = negated ? !pass : pass;
+        if (!ok) throw new Error(negated ? 'Negated expectation failed: ' + message : message);
+    };
+    return {
+        toBe: (expected) => check(Object.is(actual, expected), 'Expected ' + JSON.stringify(expected) + ', received ' + JSON.stringify(actual)),
+        toEqual: (expected) => check(isDeepStrictEqual(actual, expected), 'Expected deep equal ' + JSON.stringify(expected) + ', received ' + JSON.stringify(actual)),
+        toStrictEqual: (expected) => check(isDeepStrictEqual(actual, expected), 'Expected strict equal ' + JSON.stringify(expected) + ', received ' + JSON.stringify(actual)),
+        toBeTruthy: () => check(Boolean(actual), 'Expected truthy value, received ' + JSON.stringify(actual)),
+        toBeFalsy: () => check(!actual, 'Expected falsy value, received ' + JSON.stringify(actual)),
+        toBeNull: () => check(actual === null, 'Expected null, received ' + JSON.stringify(actual)),
+        toBeUndefined: () => check(actual === undefined, 'Expected undefined, received ' + JSON.stringify(actual)),
+        toBeDefined: () => check(actual !== undefined, 'Expected defined value, received undefined'),
+        toContain: (item) => {
+            const has = typeof actual === 'string'
+                ? actual.includes(String(item))
+                : Array.isArray(actual) || actual instanceof Set
+                    ? [...actual].includes(item)
+                    : false;
+            check(has, 'Expected ' + JSON.stringify(actual) + ' to contain ' + JSON.stringify(item));
+        },
+        toHaveLength: (len) => check(actual != null && actual.length === len, 'Expected length ' + len + ', received ' + (actual ? actual.length : actual)),
+        toBeGreaterThan: (n) => check(typeof actual === 'number' && actual > n, 'Expected ' + actual + ' > ' + n),
+        toBeGreaterThanOrEqual: (n) => check(typeof actual === 'number' && actual >= n, 'Expected ' + actual + ' >= ' + n),
+        toBeLessThan: (n) => check(typeof actual === 'number' && actual < n, 'Expected ' + actual + ' < ' + n),
+        toBeLessThanOrEqual: (n) => check(typeof actual === 'number' && actual <= n, 'Expected ' + actual + ' <= ' + n),
+        toBeCloseTo: (n, precision = 2) => {
+            const diff = Math.abs(Number(actual) - n);
+            check(diff < Math.pow(10, -precision) / 2, 'Expected ' + actual + ' to be close to ' + n);
+        },
+        toMatch: (pat) => check(pat instanceof RegExp ? pat.test(String(actual)) : String(actual).includes(String(pat)), 'Expected ' + JSON.stringify(actual) + ' to match ' + String(pat)),
+        toThrow: (expected) => {
+            if (typeof actual !== 'function') throw new Error('toThrow requires a function');
+            let threw = false;
+            let caught = null;
+            try { actual(); } catch (e) { threw = true; caught = e; }
+            let matched = threw;
+            if (threw && expected !== undefined) {
+                const msg = caught && caught.message ? caught.message : String(caught);
+                matched = expected instanceof RegExp ? expected.test(msg) : msg.includes(String(expected));
+            }
+            check(matched, expected !== undefined ? 'Expected function to throw matching ' + String(expected) : 'Expected function to throw');
+        },
+    };
+}
+
+function expect(actual) {
+    return Object.assign(makeMatchers(actual, false), { not: makeMatchers(actual, true) });
+}
+
+globalThis.describe = describe;
+globalThis.test = test;
+globalThis.it = it;
+globalThis.expect = expect;
+globalThis.__slateJsx = (tag, props, ...children) => ({ type: tag, props: props || {}, children });
+globalThis.__slateFragment = Symbol.for('slate.fragment');
+
+(async () => {
+    const testEntry = process.argv[2];
+    const failures = [];
+    let passed = 0;
+    let failed = 0;
+    try {
+        require(testEntry);
+    } catch (err) {
+        failed += 1;
+        failures.push('module load: ' + (err && err.stack ? err.stack : String(err)));
+    }
+    for (const t of __slateTests) {
+        try {
+            await t.fn();
+            passed += 1;
+        } catch (err) {
+            failed += 1;
+            failures.push(t.name + ': ' + (err && err.stack ? err.stack : String(err)));
+        }
+    }
+    const total = passed + failed;
+    console.log('SLATE_TS_VERIFY_RESULT:' + JSON.stringify({ passed, failed, total, failures }));
+    process.exit(failed > 0 ? 1 : 0);
+})();
+`;
+
+const TS_PRELUDE_DECLARATIONS = `
+declare function describe(name: string, fn: () => void): void;
+declare function it(name: string, fn: () => void | Promise<void>): void;
+declare function test(name: string, fn: () => void | Promise<void>): void;
+interface SlateExpectMatchers {
+    toBe(expected: unknown): void;
+    toEqual(expected: unknown): void;
+    toStrictEqual(expected: unknown): void;
+    toBeTruthy(): void;
+    toBeFalsy(): void;
+    toBeNull(): void;
+    toBeUndefined(): void;
+    toBeDefined(): void;
+    toContain(item: unknown): void;
+    toHaveLength(len: number): void;
+    toBeGreaterThan(n: number): void;
+    toBeGreaterThanOrEqual(n: number): void;
+    toBeLessThan(n: number): void;
+    toBeLessThanOrEqual(n: number): void;
+    toBeCloseTo(n: number, precision?: number): void;
+    toMatch(pattern: RegExp | string): void;
+    toThrow(expected?: string | RegExp): void;
+}
+declare function expect(actual: unknown): SlateExpectMatchers & { not: SlateExpectMatchers };
+declare module 'vitest' {
+    export { describe, it, test, expect };
+}
+`;
+
+const TS_FALLBACK_NO_LIB_DECLARATIONS = `
+type PropertyKey = string | number | symbol;
+interface Array<T> {
+    readonly length: number;
+    [n: number]: T;
+    push(...items: T[]): number;
+    pop(): T | undefined;
+    map<U>(fn: (value: T, index: number, array: T[]) => U): U[];
+    filter(fn: (value: T, index: number, array: T[]) => unknown): T[];
+    reduce<U>(fn: (acc: U, value: T, index: number) => U, init: U): U;
+    forEach(fn: (value: T, index: number) => void): void;
+    some(fn: (value: T, index: number) => unknown): boolean;
+    every(fn: (value: T, index: number) => unknown): boolean;
+    find(fn: (value: T, index: number) => unknown): T | undefined;
+    includes(value: T): boolean;
+    indexOf(value: T): number;
+    slice(start?: number, end?: number): T[];
+    join(sep?: string): string;
+    sort(cmp?: (a: T, b: T) => number): this;
+    [Symbol.iterator](): IterableIterator<T>;
+}
+interface ReadonlyArray<T> extends Array<T> {}
+interface Iterable<T> { [Symbol.iterator](): Iterator<T>; }
+interface Iterator<T> { next(): { value: T; done: boolean }; }
+interface IterableIterator<T> extends Iterable<T>, Iterator<T> {}
+interface SymbolConstructor { readonly iterator: unique symbol; }
+declare var Symbol: SymbolConstructor;
+interface Function {}
+interface Object {}
+interface RegExp { test(input: string): boolean; exec(input: string): string[] | null; }
+interface String {
+    readonly length: number;
+    trim(): string;
+    trimStart(): string;
+    trimEnd(): string;
+    toLowerCase(): string;
+    toUpperCase(): string;
+    includes(search: string): boolean;
+    startsWith(search: string): boolean;
+    endsWith(search: string): boolean;
+    indexOf(search: string): number;
+    slice(start?: number, end?: number): string;
+    split(sep: string | RegExp): string[];
+    replace(search: string | RegExp, replace: string): string;
+    match(pat: RegExp): string[] | null;
+}
+interface Boolean {}
+interface Number { toFixed(digits?: number): string; }
+interface IArguments {}
+interface Error { name: string; message: string; stack?: string; }
+declare var Error: { new (message?: string): Error; (message?: string): Error; };
+interface Promise<T> { then<U>(fn?: (val: T) => U | Promise<U>): Promise<U>; catch(fn?: (err: unknown) => unknown): Promise<T>; }
+interface Set<T> { add(val: T): this; has(val: T): boolean; delete(val: T): boolean; readonly size: number; }
+interface Map<K, V> { get(k: K): V | undefined; set(k: K, v: V): this; has(k: K): boolean; delete(k: K): boolean; readonly size: number; }
+type Record<K extends keyof any, T> = { [P in K]: T };
+type Partial<T> = { [P in keyof T]?: T[P] };
+type Readonly<T> = { readonly [P in keyof T]: T[P] };
+declare var Array: { isArray(arg: unknown): arg is unknown[]; from<T>(it: Iterable<T>): T[]; };
+declare var Object: { keys(o: object): string[]; values<T>(o: Record<string, T>): T[]; entries<T>(o: Record<string, T>): [string, T][]; assign<T extends object, U>(t: T, u: U): T & U; is(a: unknown, b: unknown): boolean; };
+declare var Math: { min(...vals: number[]): number; max(...vals: number[]): number; floor(x: number): number; ceil(x: number): number; round(x: number): number; abs(x: number): number; sqrt(x: number): number; pow(x: number, y: number): number; };
+declare var JSON: { stringify(v: unknown): string; parse(text: string): unknown; };
+declare var Number: { isNaN(v: unknown): boolean; isFinite(v: unknown): boolean; isInteger(v: unknown): boolean; (v?: unknown): number; };
+declare var String: { (v?: unknown): string; };
+declare var Boolean: { (v?: unknown): boolean; };
+declare var console: { log(...args: unknown[]): void; error(...args: unknown[]): void; warn(...args: unknown[]): void; };
+`;
+
+function resolveTypeScriptLibDir(): string | undefined {
+    try {
+        const tsEntry = require.resolve('typescript');
+        const dir = path.dirname(tsEntry);
+        if (fs.existsSync(path.join(dir, 'lib.es2022.d.ts')) || fs.existsSync(path.join(dir, 'lib.d.ts'))) {
+            return dir;
+        }
+    } catch {
+        // Standalone bundle without node_modules/typescript on disk
+    }
+    return undefined;
+}
+
+function hasWorkspaceReactTypes(startDir: string): boolean {
+    let dir = path.resolve(startDir);
+    for (let i = 0; i < 6; i++) {
+        if (fs.existsSync(path.join(dir, 'node_modules', '@types', 'react'))) return true;
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    return false;
+}
+
+function stripInjectedImports(lines: readonly string[], symbolNames: ReadonlySet<string>, stripTestImports: boolean): string[] {
+    const out: string[] = [];
+    for (const line of lines) {
+        const match = line.match(/^\s*import\s+(?:type\s+)?([\s\S]+?)\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/);
+        if (match) {
+            const specifiers = match[1];
+            const modPath = match[2];
+            if (stripTestImports && (modPath === 'vitest' || modPath === '@jest/globals' || modPath === 'node:test')) {
+                continue;
+            }
+            if (modPath.startsWith('./') && [...symbolNames].some(sym => new RegExp(`\\b${sym}\\b`).test(specifiers))) {
+                continue;
+            }
+        }
+        out.push(line);
+    }
+    return out;
+}
+
+function runStrictTsTypecheck(
+    workspaceRoot: string,
+    virtualFiles: ReadonlyMap<string, string>,
+    checkedFiles: readonly string[],
+    useStandaloneJsx: boolean,
+): string[] {
+    const tsLibDir = resolveTypeScriptLibDir();
+    const compilerOptions: ts.CompilerOptions = {
+        strict: true,
+        noEmit: true,
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS,
+        moduleResolution: ts.ModuleResolutionKind.Node10,
+        ...(useStandaloneJsx
+            ? { jsx: ts.JsxEmit.React, jsxFactory: '__slateJsx', jsxFragmentFactory: '__slateFragment' }
+            : { jsx: ts.JsxEmit.ReactJSX }),
+        esModuleInterop: true,
+        skipLibCheck: true,
+        ...(tsLibDir ? { lib: ['lib.es2022.d.ts', 'lib.dom.d.ts'] } : { noLib: true }),
+    };
+
+    const host = ts.createCompilerHost(compilerOptions, true);
+    const normMap = new Map<string, string>();
+    for (const [k, v] of virtualFiles.entries()) {
+        normMap.set(path.resolve(k).toLowerCase(), v);
+    }
+
+    const resolveVirtualOrLib = (fileName: string): { key: string; content: string } | undefined => {
+        const resolved = path.resolve(fileName).toLowerCase();
+        const direct = normMap.get(resolved);
+        if (direct !== undefined) return { key: fileName, content: direct };
+        if (tsLibDir) {
+            const base = path.basename(fileName);
+            if (/^lib(?:\.[^.]+)*\.d\.ts$/i.test(base)) {
+                const libCandidate = path.join(tsLibDir, base);
+                if (fs.existsSync(libCandidate)) {
+                    return { key: libCandidate, content: fs.readFileSync(libCandidate, 'utf8') };
+                }
+            }
+        }
+        return undefined;
+    };
+
+    const origFileExists = host.fileExists.bind(host);
+    const origReadFile = host.readFile.bind(host);
+    const origGetSourceFile = host.getSourceFile.bind(host);
+
+    host.getDefaultLibFileName = (opts) => tsLibDir
+        ? path.join(tsLibDir, ts.getDefaultLibFileName(opts))
+        : '__slate_lib_none.d.ts';
+    host.fileExists = (fileName) => resolveVirtualOrLib(fileName) !== undefined || origFileExists(fileName);
+    host.readFile = (fileName) => resolveVirtualOrLib(fileName)?.content ?? origReadFile(fileName);
+    host.getSourceFile = (fileName, languageVersion, onError, shouldCreate) => {
+        const hit = resolveVirtualOrLib(fileName);
+        if (hit !== undefined) {
+            return ts.createSourceFile(fileName, hit.content, languageVersion, true);
+        }
+        return origGetSourceFile(fileName, languageVersion, onError, shouldCreate);
+    };
+    host.getCurrentDirectory = () => workspaceRoot;
+    host.writeFile = () => {};
+
+    const roots = Array.from(virtualFiles.keys());
+    const program = ts.createProgram(roots, compilerOptions, host);
+    const checkedSet = new Set(checkedFiles.map(f => path.resolve(f).toLowerCase()));
+    const allDiags = ts.getPreEmitDiagnostics(program);
+    const messages: string[] = [];
+
+    for (const d of allDiags) {
+        if (d.file && !checkedSet.has(path.resolve(d.file.fileName).toLowerCase())) continue;
+        const msg = ts.flattenDiagnosticMessageText(d.messageText, '\n');
+        if (d.file && d.start !== undefined) {
+            const { line, character } = d.file.getLineAndCharacterOfPosition(d.start);
+            messages.push(`${path.basename(d.file.fileName)}(${line + 1},${character + 1}): TS${d.code}: ${msg}`);
+        } else {
+            messages.push(`TS${d.code}: ${msg}`);
+        }
+    }
+    return messages;
+}
+
+/** Runs scoped TypeScript/JavaScript verification (strict tsc typecheck + isolated Node harness). */
+async function runTsNodeVerification(
+    options: VerificationOptions & { language: 'typescript' | 'javascript' },
+): Promise<NodeVerificationResult> {
+    const {
+        workspaceRoot,
+        node,
+        nodeId,
+        dependencies,
+        isTrusted,
+        timeoutMs = 15000,
+        executeCommand = defaultExecute,
+        signal,
+        language,
+    } = options;
+
+    const currentHash = sourceHash(codeText(node));
+    if (signal?.aborted) {
+        return { nodeId, state: 'failed', timestamp: Date.now(), sourceHash: currentHash, diagnostics: ['Verification was cancelled.'] };
+    }
+    if (!isTrusted) {
+        return { nodeId, state: 'failed', timestamp: Date.now(), sourceHash: currentHash, diagnostics: ['Workspace is not trusted. Cannot execute verification.'] };
+    }
+
+    const hasCases = Array.isArray(node.cases) && node.cases.length > 0;
+    const hasCheck = Array.isArray(node.check) && node.check.length > 0;
+    if (!hasCases && !hasCheck) {
+        return {
+            nodeId,
+            state: 'untested',
+            timestamp: Date.now(),
+            sourceHash: currentHash,
+            diagnostics: ['Node has no check or cases; status is untested.'],
+        };
+    }
+
+    const safeNodeDir = nodeId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const buildDir = path.join(workspaceRoot, '.slate', 'build', safeNodeDir);
+    fs.mkdirSync(buildDir, { recursive: true });
+
+    const depNodes = dependencies ? Array.from(dependencies.values()).filter(d => d.name !== node.name && d.code.length > 0) : [];
+    const availableSymbols = new Set<string>([node.name, ...depNodes.map(d => d.name)]);
+
+    const needsJsx = (node.code.join('\n') + '\n' + (node.check?.join('\n') ?? '')).includes('</');
+    const ext = language === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
+    const safeBase = node.name.replace(/[^a-zA-Z0-9_$]/g, '_') || 'node';
+
+    const implParts: string[] = [];
+    if (node.imports.length > 0) {
+        implParts.push(...stripInjectedImports(node.imports, availableSymbols, false));
+    }
+    const reExports = new Set<string>();
+    const exportedNames = new Set<string>([node.name]);
+    for (const dep of depNodes) {
+        const depLines = stripInjectedImports(dep.code, availableSymbols, false);
+        implParts.push(...depLines);
+        const parsedDep = parseTsModule(depLines.join('\n') + '\n', `dep_${dep.name}${ext}`, dep.name);
+        const depUnit = parsedDep.units.find(u => u.parentId === null && u.name === dep.name);
+        if (depUnit) {
+            exportedNames.add(dep.name);
+            const depNamed = Boolean(depUnit.signature?.startsWith('export ') && !depUnit.signature.startsWith('export default '));
+            if (!depNamed) {
+                reExports.add(dep.name);
+            }
+        }
+    }
+    const targetLines = stripInjectedImports(node.code, availableSymbols, false);
+    implParts.push(...targetLines);
+
+    const parsedTarget = parseTsModule(targetLines.join('\n') + '\n', `target${ext}`, node.name);
+    const targetUnit = parsedTarget.units.find(u => u.parentId === null && u.name === node.name);
+    const isNamedExported = Boolean(targetUnit?.signature?.startsWith('export ') && !targetUnit.signature.startsWith('export default '));
+    if (!isNamedExported) {
+        reExports.add(node.name);
+    }
+    if (reExports.size > 0) {
+        implParts.push(`export { ${Array.from(reExports).join(', ')} };`);
+    }
+    const implSource = implParts.join('\n') + '\n';
+
+    const testParts: string[] = [`import { ${Array.from(exportedNames).join(', ')} } from './${safeBase}_impl';`];
+    if (hasCheck && node.check) {
+        testParts.push(...stripInjectedImports(node.check, availableSymbols, true));
+    }
+    if (hasCases && node.cases) {
+        testParts.push(...formatCasesAsTs(node, node.cases, language));
+    }
+    const testSource = testParts.join('\n') + '\n';
+
+    const implTsPath = path.join(buildDir, `${safeBase}_impl${ext}`);
+    const testTsPath = path.join(buildDir, `${safeBase}_test${ext}`);
+    const preludePath = path.join(buildDir, '__slate_prelude.d.ts');
+
+    const useStandaloneJsx = needsJsx && !hasWorkspaceReactTypes(workspaceRoot);
+    const jsxFallback = useStandaloneJsx
+        ? '\ndeclare namespace JSX { interface IntrinsicElements { [elem: string]: unknown; } type Element = unknown; }\ndeclare function __slateJsx(tag: unknown, props: unknown, ...children: unknown[]): JSX.Element;\ndeclare const __slateFragment: unique symbol;\n'
+        : '';
+    const preludeContent = (resolveTypeScriptLibDir() ? '' : TS_FALLBACK_NO_LIB_DECLARATIONS) + TS_PRELUDE_DECLARATIONS + jsxFallback;
+
+    if (language === 'typescript') {
+        const virtualFiles = new Map<string, string>([
+            [preludePath, preludeContent],
+            [implTsPath, implSource],
+            [testTsPath, testSource],
+        ]);
+        const typeErrors = runStrictTsTypecheck(workspaceRoot, virtualFiles, [implTsPath, testTsPath], useStandaloneJsx);
+        if (typeErrors.length > 0) {
+            return {
+                nodeId,
+                state: 'failed',
+                timestamp: Date.now(),
+                sourceHash: currentHash,
+                pydanticValid: false,
+                traceback: typeErrors.join('\n'),
+                diagnostics: typeErrors,
+            };
+        }
+    }
+
+    const transpileOpts: ts.TranspileOptions = {
+        compilerOptions: {
+            target: ts.ScriptTarget.ES2022,
+            module: ts.ModuleKind.CommonJS,
+            ...(useStandaloneJsx
+                ? { jsx: ts.JsxEmit.React, jsxFactory: '__slateJsx', jsxFragmentFactory: '__slateFragment' }
+                : { jsx: ts.JsxEmit.ReactJSX }),
+            esModuleInterop: true,
+        },
+        reportDiagnostics: true,
+    };
+    const implTranspiled = ts.transpileModule(implSource, { ...transpileOpts, fileName: implTsPath });
+    const testTranspiled = ts.transpileModule(testSource, { ...transpileOpts, fileName: testTsPath });
+    const syntaxErrors = [...(implTranspiled.diagnostics ?? []), ...(testTranspiled.diagnostics ?? [])]
+        .filter(d => d.category === ts.DiagnosticCategory.Error)
+        .map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+    if (syntaxErrors.length > 0) {
+        return {
+            nodeId,
+            state: 'failed',
+            timestamp: Date.now(),
+            sourceHash: currentHash,
+            pydanticValid: false,
+            traceback: syntaxErrors.join('\n'),
+            diagnostics: syntaxErrors,
+        };
+    }
+
+    const testBase = `${safeBase}_test`;
+    const implCjsPath = path.join(buildDir, `${safeBase}_impl.cjs`);
+    const testCjsPath = path.join(buildDir, `${testBase}.cjs`);
+    const harnessPath = path.join(buildDir, '__slate_harness.cjs');
+
+    const rewrittenTestJs = testTranspiled.outputText.replace(
+        new RegExp(`require\\((['"])\\.\\/${safeBase}_impl\\1\\)`, 'g'),
+        `require('./${safeBase}_impl.cjs')`,
+    );
+    fs.writeFileSync(implCjsPath, implTranspiled.outputText, 'utf8');
+    fs.writeFileSync(testCjsPath, rewrittenTestJs, 'utf8');
+    fs.writeFileSync(harnessPath, TS_HARNESS_SOURCE, 'utf8');
+
+    const runRes = await executeCommand(process.execPath, [harnessPath, testCjsPath], buildDir, timeoutMs, signal);
+    if (signal?.aborted) {
+        return { nodeId, state: 'failed', timestamp: Date.now(), sourceHash: currentHash, diagnostics: ['Verification was cancelled.'] };
+    }
+    if (runRes.timedOut) {
+        return { nodeId, state: 'failed', timestamp: Date.now(), sourceHash: currentHash, pydanticValid: true, diagnostics: [`Node verification timed out after ${timeoutMs}ms.`] };
+    }
+
+    const marker = runRes.stdout.split(/\r?\n/).find(l => l.startsWith('SLATE_TS_VERIFY_RESULT:'));
+    if (marker) {
+        try {
+            const parsed = JSON.parse(marker.slice('SLATE_TS_VERIFY_RESULT:'.length)) as {
+                passed?: number;
+                failed?: number;
+                total?: number;
+                failures?: string[];
+            };
+            const passed = parsed.passed ?? 0;
+            const total = parsed.total ?? 0;
+            const failed = parsed.failed ?? 0;
+            const failures = Array.isArray(parsed.failures) ? parsed.failures : [];
+            if (runRes.code === 0 && failed === 0 && passed > 0) {
+                return {
+                    nodeId,
+                    state: 'passed',
+                    timestamp: Date.now(),
+                    sourceHash: currentHash,
+                    pydanticValid: true,
+                    testsPassed: passed,
+                    testsTotal: total,
+                };
+            }
+            return {
+                nodeId,
+                state: 'failed',
+                timestamp: Date.now(),
+                sourceHash: currentHash,
+                pydanticValid: true,
+                testsPassed: passed,
+                testsTotal: total,
+                traceback: failures.join('\n') || runRes.stderr.trim() || runRes.stdout.trim(),
+                diagnostics: failures.length > 0 ? failures : ['Node unit check failed.'],
+            };
+        } catch {
+            // Fall through to generic failure handling
+        }
+    }
+
+    const fallbackMsg = `${runRes.stderr}\n${runRes.stdout}`.trim() || `Node verification exited with code ${runRes.code}.`;
+    return {
+        nodeId,
+        state: runRes.code === 0 ? 'passed' : 'failed',
+        timestamp: Date.now(),
+        sourceHash: currentHash,
+        pydanticValid: true,
+        traceback: runRes.code === 0 ? undefined : fallbackMsg,
+        diagnostics: runRes.code === 0 ? undefined : [fallbackMsg],
     };
 }
 

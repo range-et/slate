@@ -1,10 +1,11 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 
 export type FakeLlamaRequest = Record<string, unknown>;
 
 export type FakeLlamaServer = {
     url: string;
     requests: FakeLlamaRequest[];
+    headers: IncomingHttpHeaders[];
     close(): Promise<void>;
 };
 
@@ -12,6 +13,8 @@ export type FakeLlamaBehavior = {
     malformed?: boolean;
     omitDone?: boolean;
     delayMs?: number;
+    requiredAuth?: string;
+    streamError?: string;
 };
 
 /** Fixed chunks for every request, or chunks computed per request (0-based index). */
@@ -22,13 +25,22 @@ export async function startFakeLlamaServer(
     behavior: FakeLlamaBehavior = {},
 ): Promise<FakeLlamaServer> {
     const requests: FakeLlamaRequest[] = [];
+    const headers: IncomingHttpHeaders[] = [];
     const server: Server = createServer((request, response) => {
+        if (behavior.requiredAuth && request.headers.authorization !== behavior.requiredAuth) {
+            headers.push(request.headers);
+            response.writeHead(401, { 'content-type': 'application/json' });
+            response.end(JSON.stringify({ error: { message: 'Unauthorized' } }));
+            return;
+        }
         if (request.method === 'GET' && request.url === '/health') {
+            headers.push(request.headers);
             response.writeHead(200, { 'content-type': 'application/json' });
             response.end(JSON.stringify({ status: 'ok' }));
             return;
         }
         if (request.method === 'GET' && (request.url === '/v1/models' || request.url === '/models')) {
+            headers.push(request.headers);
             response.writeHead(200, { 'content-type': 'application/json' });
             response.end(JSON.stringify({ data: [{ id: 'tiny-local' }, { id: 'qwen2.5-coder' }] }));
             return;
@@ -49,6 +61,7 @@ export async function startFakeLlamaServer(
                 response.end(JSON.stringify({ error: { message: 'invalid JSON' } }));
                 return;
             }
+            headers.push(request.headers);
             requests.push(parsed);
             const chunks = typeof reply === 'function' ? reply(parsed, requests.length - 1) : reply;
             if (parsed.stream === true) {
@@ -59,7 +72,9 @@ export async function startFakeLlamaServer(
                 });
                 setTimeout(() => {
                     if (behavior.malformed) response.write('data: {not-json}\n\n');
-                    else for (const content of chunks) {
+                    else if (behavior.streamError) {
+                        response.write(`data: ${JSON.stringify({ error: { message: behavior.streamError } })}\n\n`);
+                    } else for (const content of chunks) {
                         response.write(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`);
                     }
                     response.end(behavior.omitDone ? '' : 'data: [DONE]\n\n');
@@ -79,6 +94,7 @@ export async function startFakeLlamaServer(
     return {
         url: `http://127.0.0.1:${address.port}`,
         requests,
+        headers,
         close: () => new Promise<void>((resolve, reject) => {
             server.close(error => error ? reject(error) : resolve());
             server.closeAllConnections();

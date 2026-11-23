@@ -47,7 +47,9 @@ keep outstanding tasks on GitHub.
 | Verified candidates & revision loop (S-701, Issue #13) | ✅ shipped |
 | Retire legacy notebook & product landing page (S-001, Issue #2) | ✅ shipped |
 | Interactive Monad micro-canvas explainer (S-002, Issue #47) | ✅ shipped |
-| Loops / zones (repeat, for-each, branch) | ❌ not started |
+| Loops / zones (repeat, for-each, branch) (S-800, Issue #14, PR #49) | ✅ shipped |
+| Prose / Grant & Research mode (`language: "prose"`, S-850, Issue #27, PR #49) | ✅ shipped |
+| Project LLM provider config (`slate.json`) & stateless MCP batch forge (`slate_forge_batch`) | ✅ shipped (Python stubs) |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
 | Queue / generate-all in the new harness | ❌ not started |
 
@@ -581,13 +583,25 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
 - The project index exposes Prose ports and contracts on the canvas. The Architect can define Prose signatures, and Compile Project verifies wired inputs and contracts before writing Markdown and LaTeX. Previewing flow execution with the Run control remains Python-only.
 - Verification includes Prose compiler regressions, real Extension Host indexing, wiring and document compilation, and `npm run verify:launch`.
 
+## Shipped — Project LLM Configuration, Multi-Language Adapters & Stage 1 TS Self-Hosting (2026-11-22)
+
+Branch `feat/multi-lang-self-host` (converging PR #49 follow-ups, LLM batch forge, parallel language adapters, and Stage 1 self-hosting)
+
+- **Non-secret project LLM config (`vscode-extension/src/slate_folder.ts`).** `slate/slate.json` supports an optional `llm` object (`provider`: `'llama.cpp' | 'ollama' | 'openrouter' | 'openai-compatible'`, `endpoint`, `model`, `apiKeyEnv`, `concurrency`, `timeoutSeconds`, `outputTokens`, `contextWindow`). `parseConfig` and `serializeConfig` strictly reject raw secret properties (`apiKey`, `api_key`, `token`, `secret`, `authorization`) and raw secret prefixes in `apiKeyEnv`.
+- **Provider & Bearer auth transport (`vscode-extension/src/llama_transport.ts`, `vscode-extension/src/harness_panel.ts`, `vscode-extension/package.json`).** `resolveLlmConfig` resolves settings in order `override > slate.json llm > VS Code settings / SecretStorage > provider defaults`, loading Bearer keys only at runtime from `env[apiKeyEnv]`, `SLATE_LLM_API_KEY`, `OPENROUTER_API_KEY` (for OpenRouter), or VS Code `SecretStorage`. `checkLlamaHealth` preserves `401`/`403` auth errors rather than masking them behind `/health`, and `streamLlamaCompletion` handles mid-stream SSE `error` payloads and OpenRouter attribution headers.
+- **Multi-language adapters, importers, and compilers ([Issue #15](https://github.com/range-et/slate/issues/15)).** Converges shared `language_types.ts` and `language_adapter.ts` dispatch across Python, TypeScript/TSX/JavaScript/JSX (`ts_adapter.ts`, `port/ts_importer.ts`, `compile/ts.ts`), C# (`csharp_adapter.ts`, `port/csharp_importer.ts`, `compile/csharp.ts`), C++/Arduino (`cpp_adapter.ts`, `port/cpp_importer.ts`, `compile/cpp.ts`), and Markdown/LaTeX Prose (`port/prose_importer.ts`, `compile/prose.ts` with raw `\section`/`\subsection*` heading preservation). Wired through `slate_folder.ts`, `slate_folder_host.ts`, `harness_panel.ts`, `port_compile_host.ts`, and `extension.ts` (`slate.portAnyProject`). Non-generated files lacking Slate headers are protected from accidental compiler overwrite (`isSlateGeneratedContent`).
+- **TypeScript Two-Tier Forge & MCP Expansion (`vscode-extension/src/generation.ts`, `vscode-extension/src/verification_runner.ts`, `vscode-extension/src/batch_forge.ts`, `vscode-extension/src/mcp/slate_mcp_server.ts`).** Extends Frontier Architect MCP to 10 tools (`slate_define_stub` with TS/JS/Prose support and `modulePath`/`extension` metadata, `slate_forge_batch` supporting Python and TS/JS atomic stubs with bounded retry feedback, `slate_references` AST usage/caller inspection via `indexNode` + `buildUsageIndex`, `slate_compile` safe multi-language build with stale generated-file pruning, plus `slate_llm_status` and `slate_configure_llm`). `runNodeVerification` runs strict in-process `ts.createProgram` typechecking plus an isolated `.cjs` Node runner for `typescript`/`javascript` nodes and structured `cases`.
+- **Stage 1 self-hosting gate (`test/self_host_stage1.test.ts`).** Verifies porting real Slate TypeScript source files (`src/harness/palette.ts`, `src/harness/health.ts`, `vscode-extension/src/search.ts`) into `slate/nodes/`, inspecting AST dependencies via `slate_references`, executing TS Two-Tier forge retries via `slate_forge_batch`, and compiling back to runnable `.ts`/`.tsx` modules via `slate_compile`.
+- **Limitations:** Automated per-node test execution in `batchForgeWorkspace` currently supports Python and TypeScript/JavaScript; C#, C++, and Arduino adapters support porting, editing, JPL-60 checks, and deterministic compilation without automated per-node test runners. Dependency-ordered placeholder generation ([Issue #17](https://github.com/range-et/slate/issues/17)) remains follow-up work.
+- Verification includes unit/regression tests across adapters, `slate_folder`, `generation`, `verification_runner`, `batch_forge`, `mcp_server`, `self_host_stage1`, and `npm run verify:launch`.
+
 ## Not started
 
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
-- Dependency-ordered queue / generate-all for the harness.
+- Dependency-ordered queue / generate-all for the harness ([Issue #17](https://github.com/range-et/slate/issues/17)).
 - Clean-profile VSIX install/update/restart test.
-- Additional code languages beyond Python and Prose (Slate cannot map its own TypeScript code).
+- Automated per-node runtime test loops for C#, C++, and Arduino nodes (port/edit/compile are shipped; test-runner forge execution is Python and TS/JS only).
 
 ## Removed
 

@@ -311,4 +311,87 @@ describe('S-512 local llama.cpp component forge matrix', () => {
         expect(res2.valid).toBe(false);
         expect(res2.diagnostics.some(d => d.includes('must define at least one top-level pytest test function'))).toBe(true);
     });
+
+    it('builds TypeScript forge packets (including 0-arg functions), strips TS fences, and validates TS candidates', () => {
+        const dep = indexNode(
+            'slate/nodes/clamp.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'clamp',
+                language: 'typescript',
+                intent: 'Clamp number to bounds',
+                contract: 'lower <= upper',
+                code: ['export function clamp(v: number, lo: number, hi: number): number {', '    return Math.min(hi, Math.max(lo, v));', '}'],
+            }),
+            'typescript',
+            1,
+        );
+        const target = indexNode(
+            'slate/nodes/zeroArgVersion.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'zeroArgVersion',
+                language: 'typescript',
+                intent: 'Return semantic version string',
+                contract: 'Always non-empty',
+                context: ['clamp'],
+                cases: [{ name: 'version', input: {}, expected: '1.0.0' }],
+                code: ['export function zeroArgVersion(): string {', '    throw new Error("Not implemented");', '}'],
+            }),
+            'typescript',
+            1,
+        );
+        const snapshot = { revision: 1, projectName: 'ts-demo', documents: [target.document, dep.document] };
+        const sources = new Map([
+            [target.document.path, target.code],
+            [dep.document.path, dep.code],
+        ]);
+
+        const packet = buildForgePacket(snapshot, sources, 'zeroArgVersion', { language: 'typescript' });
+        expect(packet.boundInputs).toBe(true);
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.prompt).toContain('TypeScript');
+        expect(packet.prompt).toContain('```ts');
+        expect(packet.prompt).toContain('clamp');
+
+        expect(stripModelEnvelope('```ts\nexport const x = 1;\n```', 'typescript')).toBe('export const x = 1;');
+        expect(stripModelEnvelope('```javascript\nexport const x = 1;\n```', 'javascript')).toBe('export const x = 1;');
+
+        const rawReply = [
+            '### Implementation',
+            '```typescript',
+            'export function zeroArgVersion(): string {',
+            "    return '1.0.0';",
+            '}',
+            '```',
+            '### Unit Check',
+            '```ts',
+            "test('zeroArgVersion', () => {",
+            "    expect(zeroArgVersion()).toBe('1.0.0');",
+            '});',
+            '```',
+        ].join('\n');
+        const parsed = parseForgeCandidate(rawReply, 'typescript');
+        expect(parsed.implementation).toContain("return '1.0.0'");
+        expect(parsed.check).toContain("test('zeroArgVersion'");
+
+        const validRes = validateForgeCandidate(target.document.units[0], parsed, 'typescript');
+        expect(validRes.valid).toBe(true);
+        expect(validRes.diagnostics).toEqual([]);
+
+        const badReturn = validateForgeCandidate(
+            target.document.units[0],
+            { implementation: 'export function zeroArgVersion(): number {\n    return 1;\n}' },
+            'typescript',
+        );
+        expect(badReturn.valid).toBe(false);
+        expect(badReturn.diagnostics.some(d => d.includes('return type annotation'))).toBe(true);
+
+        const singleBlock = parseForgeCandidate(
+            "```ts\nexport function zeroArgVersion(): string {\n    return '1.0.0';\n}\n\ntest('zeroArgVersion', () => {\n    expect(zeroArgVersion()).toBe('1.0.0');\n});\n```",
+            'typescript',
+        );
+        expect(singleBlock.implementation).toContain('zeroArgVersion()');
+        expect(singleBlock.check).toContain("test('zeroArgVersion'");
+    });
 });
