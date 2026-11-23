@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { PROSE_GENERATED_MD_HEADER, PROSE_GENERATED_TEX_HEADER } from './compile/prose';
@@ -10,6 +11,7 @@ import {
     portProjectForLanguage,
     tryNormalizeLanguage,
 } from './language_adapter';
+import { normalizeCompileOutputPath } from './language_types';
 import { formatPortReport } from './port/python_importer';
 import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, pathForNodeId, serializeLayout, serializeNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
@@ -188,20 +190,58 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
     );
     if (migrated.main) flows.set(MAIN_FLOW, migrated.main);
     const outDir = (config.compile?.outDir ?? 'src').replace(/\\/g, '/').replace(/\/+$/, '');
-    const outRoot = vscode.Uri.joinPath(root, ...outDir.split('/'));
+    const normalizedOutDir = normalizeCompileOutputPath(outDir);
+    const diagnostics: CompileDiagnostic[] = [
+        ...errors.map(message => ({ severity: 'error' as const, message })),
+        ...flowFiles.filter(item => item.problem).map(item => ({ severity: 'error' as const, message: `flows/${item.id}: ${item.problem}` })),
+    ];
+    if (!normalizedOutDir || normalizedOutDir === 'slate' || normalizedOutDir.startsWith('slate/')) {
+        diagnostics.push({ severity: 'error', message: `compile.outDir "${outDir}" must be a relative folder outside slate/.` });
+        const output = slateOutput();
+        output.clear();
+        for (const diagnostic of diagnostics) output.appendLine(`${diagnostic.severity}: ${diagnostic.message}`);
+        output.show(true);
+        vscode.window.showErrorMessage(`Slate: compile stopped with ${diagnostics.length} error(s); nothing was written (see Output → Slate).`);
+        return { files: [], diagnostics };
+    }
+    const outRoot = vscode.Uri.joinPath(root, ...normalizedOutDir.split('/'));
     const existingFiles = await exists(outRoot) ? await readExistingOutFiles(outRoot) : undefined;
     const library = tryNormalizeLanguage(config.language) === 'prose'
         ? new Map()
         : SlateFolderHost.librarySignatures(await host.readLibrary(config));
     const result = compileProjectForLanguage(nodes, config, flows, library, existingFiles);
-    const diagnostics: CompileDiagnostic[] = [
-        ...errors.map(message => ({ severity: 'error' as const, message })),
-        ...flowFiles.filter(item => item.problem).map(item => ({ severity: 'error' as const, message: `flows/${item.id}: ${item.problem}` })),
-        ...result.diagnostics,
-    ];
-    if (!outDir || outDir.startsWith('/') || outDir.split('/').includes('..') || outDir.split('/')[0] === 'slate') {
-        diagnostics.push({ severity: 'error', message: `compile.outDir "${outDir}" must be a relative folder outside slate/.` });
+    diagnostics.push(...result.diagnostics);
+
+    const resolvedOutRoot = path.resolve(outRoot.fsPath);
+    const normalizedFiles = new Map<string, string>();
+    for (const [relative, text] of result.files) {
+        const normRel = normalizeCompileOutputPath(relative);
+        if (!normRel) {
+            diagnostics.push({ severity: 'error', message: `Refusing unsafe output path "${relative}" outside "${normalizedOutDir}".` });
+            continue;
+        }
+        if (normalizedFiles.has(normRel)) {
+            diagnostics.push({ severity: 'error', message: `Refusing duplicate output destination "${normRel}" from "${relative}".` });
+            continue;
+        }
+        const destUri = vscode.Uri.joinPath(outRoot, ...normRel.split('/'));
+        const relCheck = path.relative(resolvedOutRoot, path.resolve(destUri.fsPath));
+        if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
+            diagnostics.push({ severity: 'error', message: `Refusing output path "${relative}" escaping "${normalizedOutDir}".` });
+            continue;
+        }
+        if (await exists(destUri)) {
+            const existingDiskText = decoder.decode(await vscode.workspace.fs.readFile(destUri));
+            if (!hasSlateOutputHeader(existingDiskText)) {
+                const alreadyReported = diagnostics.some(d => d.severity === 'error' && (d.message.includes(normRel) || d.message.includes(relative)));
+                if (!alreadyReported) {
+                    diagnostics.push({ severity: 'error', message: `Refusing to overwrite existing non-generated file "${normRel}".` });
+                }
+            }
+        }
+        normalizedFiles.set(normRel, text);
     }
+
     const output = slateOutput();
     output.clear();
     for (const diagnostic of diagnostics) output.appendLine(`${diagnostic.severity}: ${diagnostic.message}`);
@@ -212,14 +252,23 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
         return { files: [], diagnostics };
     }
     if (await exists(outRoot)) {
-        for (const stale of (await readGenerated(outRoot)).filter(path => !result.files.has(path))) {
+        for (const stale of (await readGenerated(outRoot)).filter(relPath => !normalizedFiles.has(relPath))) {
             await vscode.workspace.fs.delete(vscode.Uri.joinPath(outRoot, ...stale.split('/')));
         }
     }
-    for (const [relative, text] of result.files) await writeText(vscode.Uri.joinPath(outRoot, ...relative.split('/')), text);
-    output.appendLine(`Compiled ${result.files.size} file(s) into ${outDir}/.`);
-    vscode.window.showInformationMessage(`Slate: compiled ${result.files.size} file(s) into ${outDir}/${diagnostics.length ? ` with ${diagnostics.length} warning(s)` : ''}.`);
-    return { files: [...result.files.keys()], diagnostics };
+    for (const [relative, text] of normalizedFiles) await writeText(vscode.Uri.joinPath(outRoot, ...relative.split('/')), text);
+    output.appendLine(`Compiled ${normalizedFiles.size} file(s) into ${normalizedOutDir}/.`);
+    vscode.window.showInformationMessage(`Slate: compiled ${normalizedFiles.size} file(s) into ${normalizedOutDir}/${diagnostics.length ? ` with ${diagnostics.length} warning(s)` : ''}.`);
+    return { files: [...normalizedFiles.keys()], diagnostics };
+}
+
+function hasSlateOutputHeader(text: string): boolean {
+    return (
+        text.startsWith(GENERATED_HEADER) ||
+        text.startsWith(PROSE_GENERATED_MD_HEADER) ||
+        text.startsWith(PROSE_GENERATED_TEX_HEADER) ||
+        isSlateGeneratedContent(text)
+    );
 }
 
 async function readExistingOutFiles(root: vscode.Uri, prefix = '', files = new Map<string, string>()): Promise<Map<string, string>> {

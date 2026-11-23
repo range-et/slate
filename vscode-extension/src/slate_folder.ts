@@ -448,7 +448,11 @@ export function indexNode(
                 range: ZERO_RANGE,
             });
         }
-        if (nodeId.split('/').pop() !== node.name) {
+        const leafId = nodeId.split('/').pop() ?? nodeId;
+        const isOverloadId = (canonical === 'csharp' || canonical === 'cpp' || canonical === 'arduino')
+            && leafId.startsWith(`${node.name}__overload_`)
+            && /^\d+$/.test(leafId.slice(`${node.name}__overload_`.length));
+        if (leafId !== node.name && !isOverloadId) {
             diagnostics.push({ code: 'node-name-mismatch', message: `File name must match name "${node.name}".`, range: ZERO_RANGE });
         }
         if (options?.checkJpl60 && !node.kind) {

@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -102,7 +103,52 @@ interface IndexedTarget {
     node: SlateNode;
     unit: ParsedUnit;
     initialHash: string;
+    initialInputFingerprint: string;
     language: BatchForgeLanguage;
+}
+
+function collectNodeDependencies(node: SlateNode, nodesById: ReadonlyMap<string, SlateNode>): Map<string, SlateNode> {
+    const deps = new Map<string, SlateNode>();
+    for (const depId of [...node.context, ...node.uses]) {
+        if (deps.has(depId)) continue;
+        const depNode = nodesById.get(depId);
+        if (depNode) deps.set(depId, depNode);
+    }
+    return deps;
+}
+
+function computeForgeInputFingerprint(
+    node: SlateNode,
+    dependencies: ReadonlyMap<string, SlateNode>,
+    missingDependencyIds: readonly string[] = [],
+): string {
+    const depPayload = Array.from(dependencies.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([depId, dep]) => [
+            depId,
+            {
+                language: dep.language ?? null,
+                intent: dep.intent,
+                contract: dep.contract,
+                imports: dep.imports,
+                code: codeLines(codeText(dep)),
+            },
+        ]);
+    const payload = {
+        language: node.language ?? null,
+        intent: node.intent,
+        contract: node.contract,
+        cases: node.cases ?? [],
+        check: node.check ?? [],
+        context: node.context,
+        uses: node.uses,
+        imports: node.imports,
+        locked: node.locked,
+        code: codeLines(codeText(node)),
+        dependencies: depPayload,
+        missingDependencies: [...missingDependencyIds].sort(),
+    };
+    return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
 function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
@@ -326,12 +372,27 @@ async function forgeSingleTarget(
                 };
             }
 
+            const currentDeps = new Map<string, SlateNode>();
+            const missingDeps: string[] = [];
+            for (const depId of [...diskNode.context, ...diskNode.uses]) {
+                if (depId === target.nodeId || currentDeps.has(depId)) continue;
+                try {
+                    const safeDep = assertSafeNodeId(options.workspaceRoot, depId);
+                    const depText = await fs.promises.readFile(safeDep.fullPath, 'utf8');
+                    currentDeps.set(depId, parseNode(depText));
+                } catch {
+                    if (dependencies.has(depId)) {
+                        missingDeps.push(depId);
+                    }
+                }
+            }
             const currentHash = sourceHash(codeText(diskNode));
-            if (currentHash !== target.initialHash) {
+            const currentFingerprint = computeForgeInputFingerprint(diskNode, currentDeps, missingDeps);
+            if (currentHash !== target.initialHash || currentFingerprint !== target.initialInputFingerprint) {
                 return {
                     nodeId: target.nodeId,
                     status: 'failed',
-                    reason: `Node "${target.nodeId}" changed on disk while forging; skipped write to avoid overwriting concurrent edits.`,
+                    reason: `Node "${target.nodeId}" or its verification inputs/dependencies changed on disk while forging; skipped write to avoid overwriting concurrent edits.`,
                     attempts: attemptsRun,
                     lineCount: validation.lineCount,
                     checkLineCount: validation.checkLineCount,
@@ -550,6 +611,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                 written: false,
                 durationMs: 0,
             });
+            const initialDeps = collectNodeDependencies(node, nodesById);
             activeTargets.push({
                 resultIndex,
                 target: {
@@ -559,6 +621,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     node,
                     unit,
                     initialHash: doc.sourceHash,
+                    initialInputFingerprint: computeForgeInputFingerprint(node, initialDeps),
                     language: canonicalLang,
                 },
             });
@@ -584,6 +647,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                 written: false,
                 durationMs: 0,
             });
+            const initialDeps = collectNodeDependencies(node, nodesById);
             activeTargets.push({
                 resultIndex,
                 target: {
@@ -593,6 +657,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     node,
                     unit,
                     initialHash: doc.sourceHash,
+                    initialInputFingerprint: computeForgeInputFingerprint(node, initialDeps),
                     language: canonicalLang,
                 },
             });

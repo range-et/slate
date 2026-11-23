@@ -822,4 +822,58 @@ describe('C# flow and control-flow region compilation (branch, foreach, repeat)'
         expect(res.files.size).toBe(0);
         expect(res.diagnostics.some(d => d.severity === 'error' && d.message.includes('Refusing to overwrite'))).toBe(true);
     });
+
+    it('rejects unsafe compile output paths (#2), keeps multi-class files separate (#5), preserves full type declarations (#6), and keeps valid C# overloads (#7)', () => {
+        // #2: unsafe traversal path rejected
+        const escapeRes = compileCSharp(
+            new Map([['bad', makeNode({ name: 'Bad', code: ['public static int Bad() { return 1; }'], extra: { modulePath: '../../Evil.cs' } })]]),
+            csharpConfig,
+        );
+        expect(escapeRes.files.size).toBe(0);
+        expect(escapeRes.diagnostics.some(d => d.severity === 'error' && /unsafe output path/i.test(d.message))).toBe(true);
+
+        // #5, #6, #7: multi-class file + rich struct header + overloads
+        const multiSource = [
+            'using System;',
+            '',
+            'namespace App.Core {',
+            '    public interface IBox<T> { T Value { get; } }',
+            '',
+            '    [Serializable]',
+            '    public readonly struct Box<T> : IBox<T> where T : struct {',
+            '        public T Value => default(T);',
+            '        public T Echo(T item) { return item; }',
+            '    }',
+            '',
+            '    public static class Alpha {',
+            '        public static int Run(int x) { return x + 1; }',
+            '        public static string Run(string s) { return s + "!"; }',
+            '    }',
+            '',
+            '    internal class Beta {',
+            '        public int Compute(int n) { return Alpha.Run(n) * 2; }',
+            '    }',
+            '}',
+        ].join('\n');
+
+        const ported = portCSharpProject({ 'Multi.cs': multiSource });
+        expect(ported.report.warnings).toEqual([]);
+        const keys = [...ported.nodes.keys()];
+        // Both Alpha.Run(int) and Alpha.Run(string) preserved with distinct IDs
+        const alphaRunNodes = keys.filter(k => k.includes('Run'));
+        expect(alphaRunNodes).toHaveLength(2);
+        expect(keys.some(k => k.includes('Echo'))).toBe(true);
+        expect(keys.some(k => k.includes('Compute'))).toBe(true);
+
+        const compiled = compileCSharp(ported.nodes, ported.config, ported.flows);
+        expect(compiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        const out = compiled.files.get('Multi.cs')!;
+        expect(out).toBeDefined();
+        expect(out).toContain('[Serializable]');
+        expect(out).toContain('public readonly struct Box<T> : IBox<T> where T : struct');
+        expect(out).toContain('public static class Alpha');
+        expect(out).toContain('internal class Beta');
+        expect(out).toContain('public static int Run(int x)');
+        expect(out).toContain('public static string Run(string s)');
+    });
 });

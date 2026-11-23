@@ -1,7 +1,7 @@
 import { HarnessDocument, HarnessSnapshot, ParsedUnit, SourcePosition } from './harness_protocol';
 import { tryNormalizeLanguage } from './language_types';
 import { parseModule } from './python_adapter';
-import { parseTsModule } from './ts_adapter';
+import { parseTsModule, containsJsxSyntax } from './ts_adapter';
 
 export const FORGE_INPUT_BUDGET_TOKENS = 600;
 export const JPL60_MAX_LINES = 60;
@@ -620,6 +620,13 @@ export function parseForgeCandidate(raw: string, language?: string): ForgeCandid
     };
 }
 
+function tsExportKind(signature?: string | null): 'default' | 'named' | 'none' {
+    const trimmed = (signature ?? '').trimStart();
+    if (trimmed.startsWith('export default ')) return 'default';
+    if (trimmed.startsWith('export ')) return 'named';
+    return 'none';
+}
+
 function validateTsOrJsForgeCandidate(
     targetUnit: ParsedUnit,
     candidate: ForgeCandidate,
@@ -628,7 +635,7 @@ function validateTsOrJsForgeCandidate(
     const diagnostics: string[] = [];
     const needsJsx = Boolean(
         targetUnit.returnAnnotation?.includes('JSX')
-        || candidate.implementation.includes('</'),
+        || containsJsxSyntax(candidate.implementation),
     );
     const implExt = langKind === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
     const implText = candidate.implementation.endsWith('\n') ? candidate.implementation : `${candidate.implementation}\n`;
@@ -654,6 +661,14 @@ function validateTsOrJsForgeCandidate(
 
     if (implUnits.length === 1 && implUnits[0].name === targetUnit.name) {
         const generatedUnit = implUnits[0];
+        if (Boolean(generatedUnit.async) !== Boolean(targetUnit.async)) {
+            diagnostics.push(`Candidate async modifier (${Boolean(generatedUnit.async)}) does not match target (${Boolean(targetUnit.async)}).`);
+        }
+        const expectedExport = tsExportKind(targetUnit.signature);
+        const actualExport = tsExportKind(generatedUnit.signature);
+        if (expectedExport !== actualExport) {
+            diagnostics.push(`Candidate export modifier "${actualExport}" does not match target "${expectedExport}".`);
+        }
         const targetParams = (targetUnit.params ?? []).filter(p => p.name !== 'self' && p.name !== 'this');
         const generatedParams = (generatedUnit.params ?? []).filter(p => p.name !== 'self' && p.name !== 'this');
         if (generatedParams.length !== targetParams.length) {
@@ -665,6 +680,12 @@ function validateTsOrJsForgeCandidate(
                 if (gp.name !== tp.name) {
                     diagnostics.push(`Candidate parameter ${i + 1} named "${gp.name}" does not match target parameter "${tp.name}".`);
                 }
+                if ((gp.kind ?? 'keyword') !== (tp.kind ?? 'keyword')) {
+                    diagnostics.push(`Candidate parameter "${tp.name}" kind "${gp.kind ?? 'keyword'}" does not match target "${tp.kind ?? 'keyword'}".`);
+                }
+                if ((gp.default ?? '').trim() !== (tp.default ?? '').trim()) {
+                    diagnostics.push(`Candidate parameter "${tp.name}" default/optional value "${gp.default ?? ''}" does not match target "${tp.default ?? ''}".`);
+                }
                 if (langKind === 'typescript' && (gp.annotation ?? '').trim() !== (tp.annotation ?? '').trim()) {
                     diagnostics.push(`Candidate parameter "${tp.name}" type annotation "${gp.annotation ?? ''}" does not match target "${tp.annotation ?? ''}".`);
                 }
@@ -673,7 +694,9 @@ function validateTsOrJsForgeCandidate(
         if (langKind === 'typescript') {
             const expectedRet = (targetUnit.returnAnnotation ?? '').trim();
             const actualRet = (generatedUnit.returnAnnotation ?? '').trim();
-            if (expectedRet !== actualRet) {
+            const explicitRetRe = /^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\b[^(]*\([^)]*\)|const\s+[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*(?:async\s*)?\([^)]*\))\s*:\s*JSX\.Element\b/;
+            const inferredJsxFromUntypedComponent = expectedRet === '' && actualRet === 'JSX.Element' && needsJsx && !explicitRetRe.test(candidate.implementation);
+            if (expectedRet !== actualRet && !inferredJsxFromUntypedComponent) {
                 diagnostics.push(`Candidate return type annotation "${actualRet}" does not match target "${expectedRet}".`);
             }
         }

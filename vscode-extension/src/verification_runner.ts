@@ -1,4 +1,5 @@
 import * as child_process from 'child_process';
+import { createHash, randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
@@ -7,7 +8,7 @@ import { tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
 import { sourceHash } from './python_adapter';
-import { parseTsModule } from './ts_adapter';
+import { containsJsxSyntax, parseTsModule } from './ts_adapter';
 
 export interface GeneratedVerification {
     moduleContent: string;
@@ -138,15 +139,31 @@ export function formatCasesAsPython(nodeName: string, cases: unknown[]): string[
     return lines;
 }
 
+function buildTsPositionalArgs(paramNames: readonly string[], rec: Record<string, unknown>, keyList: readonly string[]): string[] | null {
+    if (paramNames.length === 0 || keyList.length === 0) return null;
+    if (!keyList.every(k => paramNames.includes(k))) return null;
+    const maxIdx = Math.max(...keyList.map(k => paramNames.indexOf(k)));
+    const args: string[] = [];
+    for (let idx = 0; idx <= maxIdx; idx++) {
+        const paramName = paramNames[idx];
+        args.push(Object.prototype.hasOwnProperty.call(rec, paramName) ? JSON.stringify(rec[paramName]) : 'undefined');
+    }
+    return args;
+}
+
 /** Formats structured cases into standalone TypeScript/JavaScript test() blocks. */
 export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'typescript' | 'javascript' = 'typescript'): string[] {
-    const ext = language === 'javascript' ? '.js' : '.ts';
-    const parsed = parseTsModule(codeText(node), `<cases>${ext}`, node.name);
+    const extHint = typeof node.extra?.extension === 'string'
+        ? node.extra.extension
+        : (language === 'javascript' ? '.js' : '.ts');
+    const parsed = parseTsModule(codeText(node), `<cases>${extHint}`, node.name);
     const targetUnit = parsed.units.find(u => u.parentId === null && u.name === node.name);
     const paramNames = (targetUnit?.params ?? []).filter(p => p.name !== 'this' && p.name !== 'self').map(p => p.name);
+    const isAsync = Boolean(targetUnit?.async)
+        || Boolean(targetUnit?.returnAnnotation && /^\s*Promise\s*</.test(targetUnit.returnAnnotation));
 
     const lines: string[] = [];
-    lines.push(`test('structured cases for ${node.name}', () => {`);
+    lines.push(`test('structured cases for ${node.name}', ${isAsync ? 'async ' : ''}() => {`);
     if (cases.length === 0) {
         lines.push('});');
         return lines;
@@ -169,7 +186,14 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
             return;
         }
 
-        const expected = obj.expected ?? obj.return ?? obj.output;
+        const hasExpected = Object.prototype.hasOwnProperty.call(obj, 'expected')
+            || Object.prototype.hasOwnProperty.call(obj, 'return')
+            || Object.prototype.hasOwnProperty.call(obj, 'output');
+        const expected = Object.prototype.hasOwnProperty.call(obj, 'expected')
+            ? obj.expected
+            : Object.prototype.hasOwnProperty.call(obj, 'return')
+                ? obj.return
+                : obj.output;
         const expectedError = typeof obj.error === 'string' && obj.error.trim() ? obj.error.trim() : undefined;
         const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
 
@@ -179,8 +203,9 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
         } else if (inputs && typeof inputs === 'object') {
             const rec = inputs as Record<string, unknown>;
             const recKeys = Object.keys(rec);
-            if (paramNames.length > 0 && paramNames.every(p => p in rec) && recKeys.length === paramNames.length) {
-                callExpr = `${node.name}(${paramNames.map(p => JSON.stringify(rec[p])).join(', ')})`;
+            const posArgs = buildTsPositionalArgs(paramNames, rec, recKeys);
+            if (posArgs) {
+                callExpr = `${node.name}(${posArgs.join(', ')})`;
             } else if (paramNames.length === 1) {
                 callExpr = `${node.name}(${JSON.stringify(rec)})`;
             } else {
@@ -191,8 +216,9 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
         } else {
             const keys = Object.keys(obj).filter(k => !CASE_METADATA_KEYS.has(k));
             if (keys.length > 0) {
-                if (paramNames.length > 0 && paramNames.every(p => p in obj)) {
-                    callExpr = `${node.name}(${paramNames.map(p => JSON.stringify(obj[p])).join(', ')})`;
+                const posArgs = buildTsPositionalArgs(paramNames, obj, keys);
+                if (posArgs) {
+                    callExpr = `${node.name}(${posArgs.join(', ')})`;
                 } else {
                     callExpr = `${node.name}(${keys.map(k => JSON.stringify(obj[k])).join(', ')})`;
                 }
@@ -202,11 +228,24 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
         if (!callExpr) {
             lines.push(`    // Untyped case: ${JSON.stringify(obj)}`);
         } else if (expectedError) {
-            lines.push(`    expect(() => { ${callExpr}; }).toThrow(${JSON.stringify(expectedError)});`);
-        } else if (expected !== undefined) {
-            lines.push(`    expect(${callExpr}).toEqual(${JSON.stringify(expected)});`);
+            if (isAsync) {
+                lines.push(`    {`);
+                lines.push(`        let __caught: unknown = null;`);
+                lines.push(`        try {`);
+                lines.push(`            await ${callExpr};`);
+                lines.push(`        } catch (err) {`);
+                lines.push(`            __caught = err;`);
+                lines.push(`        }`);
+                lines.push(`        expect(() => { if (__caught) throw __caught; }).toThrow(${JSON.stringify(expectedError)});`);
+                lines.push(`    }`);
+            } else {
+                lines.push(`    expect(() => { ${callExpr}; }).toThrow(${JSON.stringify(expectedError)});`);
+            }
+        } else if (hasExpected) {
+            const awaitedExpr = isAsync ? `await ${callExpr}` : callExpr;
+            lines.push(`    expect(${awaitedExpr}).toEqual(${JSON.stringify(expected)});`);
         } else {
-            lines.push(`    ${callExpr};`);
+            lines.push(`    ${isAsync ? 'await ' : ''}${callExpr};`);
         }
     });
 
@@ -943,21 +982,30 @@ async function runTsNodeVerification(
         };
     }
 
-    const safeNodeDir = nodeId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const buildDir = path.join(workspaceRoot, '.slate', 'build', safeNodeDir);
+    const idHash = createHash('sha256').update(nodeId).digest('hex').slice(0, 12);
+    const runNonce = randomUUID().slice(0, 8);
+    const safeNodeDir = `${nodeId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${idHash}-${runNonce}`;
+    const buildDir = path.join(workspaceRoot, '.slate', 'build', 'ts-verify', safeNodeDir);
     fs.mkdirSync(buildDir, { recursive: true });
 
-    const depNodes = dependencies ? Array.from(dependencies.values()).filter(d => d.name !== node.name && d.code.length > 0) : [];
-    const availableSymbols = new Set<string>([node.name, ...depNodes.map(d => d.name)]);
+    try {
+        const depNodes = dependencies ? Array.from(dependencies.values()).filter(d => d.name !== node.name && d.code.length > 0) : [];
+        const availableSymbols = new Set<string>([node.name, ...depNodes.map(d => d.name)]);
 
-    const needsJsx = (node.code.join('\n') + '\n' + (node.check?.join('\n') ?? '')).includes('</');
-    const ext = language === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
-    const safeBase = node.name.replace(/[^a-zA-Z0-9_$]/g, '_') || 'node';
+        const extHint = typeof node.extra?.extension === 'string' ? node.extra.extension : undefined;
+        const combinedJsxSource = `${node.code.join('\n')}\n${node.check?.join('\n') ?? ''}`;
+        const needsJsx = containsJsxSyntax(combinedJsxSource, extHint);
+        const ext = language === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
+        const safeBase = node.name.replace(/[^a-zA-Z0-9_$]/g, '_') || 'node';
 
-    const implParts: string[] = [];
-    if (node.imports.length > 0) {
-        implParts.push(...stripInjectedImports(node.imports, availableSymbols, false));
-    }
+        const implParts: string[] = [];
+        const mergedImports = Array.from(new Set([
+            ...depNodes.flatMap(dep => dep.imports ?? []),
+            ...(node.imports ?? []),
+        ]));
+        if (mergedImports.length > 0) {
+            implParts.push(...stripInjectedImports(mergedImports, availableSymbols, false));
+        }
     const reExports = new Set<string>();
     const exportedNames = new Set<string>([node.name]);
     for (const dep of depNodes) {
@@ -1002,7 +1050,7 @@ async function runTsNodeVerification(
 
     const useStandaloneJsx = needsJsx && !hasWorkspaceReactTypes(workspaceRoot);
     const jsxFallback = useStandaloneJsx
-        ? '\ndeclare namespace JSX { interface IntrinsicElements { [elem: string]: unknown; } type Element = unknown; }\ndeclare function __slateJsx(tag: unknown, props: unknown, ...children: unknown[]): JSX.Element;\ndeclare const __slateFragment: unique symbol;\n'
+        ? '\ndeclare namespace JSX { interface IntrinsicElements { [elem: string]: unknown; } interface Element { type: unknown; props: Record<string, unknown>; children?: unknown[]; } }\ndeclare function __slateJsx(tag: unknown, props: unknown, ...children: unknown[]): JSX.Element;\ndeclare const __slateFragment: unique symbol;\n'
         : '';
     const preludeContent = (resolveTypeScriptLibDir() ? '' : TS_FALLBACK_NO_LIB_DECLARATIONS) + TS_PRELUDE_DECLARATIONS + jsxFallback;
 
@@ -1125,6 +1173,13 @@ async function runTsNodeVerification(
         traceback: runRes.code === 0 ? undefined : fallbackMsg,
         diagnostics: runRes.code === 0 ? undefined : [fallbackMsg],
     };
+    } finally {
+        try {
+            fs.rmSync(buildDir, { recursive: true, force: true });
+        } catch {
+            // Best-effort cleanup of per-run verification scratch dir
+        }
+    }
 }
 
 /** Determines if an existing verification result is stale against current node contents. */

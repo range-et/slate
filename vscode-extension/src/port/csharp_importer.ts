@@ -20,6 +20,9 @@ interface CSharpDefinition {
     namespace: string | null;
     className: string | null;
     classModifiers: string | null;
+    classDeclaration: string | null;
+    overloadKey: string;
+    overloadIndex?: number;
 }
 
 interface CSharpModuleScan {
@@ -28,6 +31,7 @@ interface CSharpModuleScan {
     namespace: string | null;
     className: string | null;
     classModifiers: string | null;
+    classDeclaration: string | null;
     usings: CSharpUsing[];
     definitions: CSharpDefinition[];
     prelude: string;
@@ -199,6 +203,9 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
     let primaryClassModifiers: string | null = classUnits[0]
         ? (parsed.unitDetails.get(classUnits[0].id)?.classModifiers ?? 'public static')
         : null;
+    let primaryClassDeclaration: string | null = classUnits[0]
+        ? (parsed.unitDetails.get(classUnits[0].id)?.classDeclaration ?? null)
+        : null;
 
     if (methodUnits.length > 0) {
         for (const unit of methodUnits) {
@@ -212,10 +219,24 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
                 continue;
             }
 
-            const existingIdx = definitions.findIndex(d => d.name === unit.name);
-            if (existingIdx >= 0) {
+            const ns = details?.namespace ?? parsed.namespace;
+            const clsName = details?.className ?? primaryClassName;
+            const clsMods = details?.classModifiers ?? primaryClassModifiers;
+            const clsDecl = details?.classDeclaration ?? primaryClassDeclaration;
+            const paramSig = (unit.params ?? []).map(p => (p.annotation ?? '').replace(/\s+/g, '')).join(',');
+            const overloadKey = `${clsName ?? ''}|${unit.name}(${paramSig})`;
+
+            let overloadIndex: number | undefined;
+            const existingSameSigIdx = definitions.findIndex(d => d.overloadKey === overloadKey);
+            if (existingSameSigIdx >= 0) {
                 warnings.push(`${normalizedPath}: ${unit.name} is defined more than once; kept the last definition.`);
-                definitions.splice(existingIdx, 1);
+                overloadIndex = definitions[existingSameSigIdx].overloadIndex;
+                definitions.splice(existingSameSigIdx, 1);
+            } else {
+                const sameNameCount = definitions.filter(d => d.name === unit.name).length;
+                if (sameNameCount > 0) {
+                    overloadIndex = sameNameCount + 1;
+                }
             }
 
             const lineStart = source.lastIndexOf('\n', offsets.wrapper.from - 1) + 1;
@@ -226,19 +247,22 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
             const code = unindentBlock(rawMethod);
             const docMeta = extractLeadingXmlSummary(source, lineStart);
 
-            const ns = details?.namespace ?? parsed.namespace;
-            const clsName = details?.className ?? primaryClassName;
-            const clsMods = details?.classModifiers ?? primaryClassModifiers;
+            const targetNodeId = overloadIndex
+                ? join(folder, `${unit.name}__overload_${overloadIndex}`)
+                : join(folder, unit.name);
 
             definitions.push({
                 name: unit.name,
-                nodeId: join(folder, unit.name),
+                nodeId: targetNodeId,
                 code,
                 intent: docMeta.intent,
                 contract: docMeta.contract,
                 namespace: ns,
                 className: clsName,
                 classModifiers: clsMods,
+                classDeclaration: clsDecl,
+                overloadKey,
+                ...(overloadIndex !== undefined ? { overloadIndex } : {}),
             });
         }
     } else if (classUnits.length > 0) {
@@ -262,6 +286,8 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
                 namespace: details?.namespace ?? parsed.namespace,
                 className: unit.name,
                 classModifiers: details?.classModifiers ?? 'public',
+                classDeclaration: details?.classDeclaration ?? null,
+                overloadKey: `${unit.name}|class`,
             });
         }
     }
@@ -281,6 +307,7 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
         namespace: parsed.namespace,
         className: primaryClassName,
         classModifiers: primaryClassModifiers,
+        classDeclaration: primaryClassDeclaration,
         usings: parsed.usings,
         definitions,
         prelude,
@@ -339,6 +366,8 @@ export function portCSharpProject(
             ns: string | null,
             clsName: string | null,
             clsMods: string | null,
+            clsDecl: string | null,
+            overloadIdx?: number,
         ): Record<string, unknown> => {
             const extra: Record<string, unknown> = {
                 modulePath: scan.path,
@@ -346,6 +375,8 @@ export function portCSharpProject(
             if (ns) extra.namespace = ns;
             if (clsName) extra.className = clsName;
             if (clsMods) extra.classModifiers = clsMods;
+            if (clsDecl) extra.classDeclaration = clsDecl;
+            if (overloadIdx !== undefined) extra.overloadIndex = overloadIdx;
             return extra;
         };
 
@@ -357,8 +388,10 @@ export function portCSharpProject(
             ns: string | null,
             clsName: string | null,
             clsMods: string | null,
+            clsDecl: string | null,
             kind?: NodeKind,
             order?: number,
+            overloadIdx?: number,
         ): SlateNode => {
             const idents = csharpIdentifierNames(code);
             const uses = new Set<string>();
@@ -372,7 +405,7 @@ export function portCSharpProject(
 
             // Cross-module method dependencies (either `ClassName.MethodName` or unique `MethodName`)
             for (const [qualifiedKey, targetDef] of defsByClassAndName) {
-                if (targetDef.nodeId === join(scan.folder, name)) continue;
+                if (targetDef.nodeId === (overloadIdx ? join(scan.folder, `${name}__overload_${overloadIdx}`) : join(scan.folder, name))) continue;
                 const [targetCls, targetMethod] = qualifiedKey.split('.');
                 if (idents.has(targetCls) && idents.has(targetMethod)) {
                     uses.add(targetDef.nodeId);
@@ -409,7 +442,7 @@ export function portCSharpProject(
                 imports: [...new Set(nodeImports.length > 0 ? nodeImports : importLines)],
                 uses: [...uses].sort(),
                 code: codeLines(code),
-                extra: buildExtra(ns, clsName, clsMods),
+                extra: buildExtra(ns, clsName, clsMods, clsDecl, overloadIdx),
             };
         };
 
@@ -425,6 +458,7 @@ export function portCSharpProject(
                     scan.namespace,
                     scan.className,
                     scan.classModifiers,
+                    scan.classDeclaration,
                     'prelude',
                 ),
             );
@@ -442,8 +476,10 @@ export function portCSharpProject(
                     def.namespace,
                     def.className,
                     def.classModifiers,
+                    def.classDeclaration,
                     undefined,
                     order,
+                    def.overloadIndex,
                 ),
             );
         });

@@ -18,6 +18,10 @@ import {
     parseCSharpModule,
     splitCSharpUsing,
 } from '../csharp_adapter';
+import {
+    isSlateGeneratedContent,
+    normalizeCompileOutputPath,
+} from '../language_types';
 import type { SlateConfig, SlateNode } from '../slate_folder';
 import type { CompileDiagnostic, CompileResult } from './python';
 
@@ -761,8 +765,13 @@ function toStringMap(
     input?: ReadonlyMap<string, string> | Record<string, string>,
 ): Map<string, string> {
     if (!input) return new Map();
-    if (input instanceof Map) return new Map(input);
-    return new Map(Object.entries(input));
+    const entries = input instanceof Map ? [...input.entries()] : Object.entries(input);
+    const out = new Map<string, string>();
+    for (const [k, v] of entries) {
+        const norm = normalizeCompileOutputPath(k);
+        if (norm) out.set(norm, v);
+    }
+    return out;
 }
 
 /**
@@ -861,35 +870,68 @@ export function compileCSharp(
     const nodeContainerInfo = new Map<string, { namespace: string; className: string; filePath: string }>();
 
     for (const [nodeId, node] of valid) {
-        const filePath = modulePathForNode(nodeId, node);
+        const rawFilePath = modulePathForNode(nodeId, node);
+        const filePath = normalizeCompileOutputPath(rawFilePath);
+        if (!filePath) {
+            error(`${nodeId}: invalid unsafe output path "${rawFilePath}".`);
+            continue;
+        }
         const list = groupedByFile.get(filePath) ?? [];
         list.push([nodeId, node]);
         groupedByFile.set(filePath, list);
     }
 
-    // First pass: determine namespace and container className for each file
-    const fileMeta = new Map<
+    // First pass: resolve per-node namespace and container class metadata cleanly (preserving multi-class files)
+    const fileDefaultMeta = new Map<
         string,
-        { namespace: string; className: string; classModifiers: string; folder: string }
+        { namespace: string; className: string; classModifiers: string; classDeclaration: string | null }
     >();
+    const memberContainerMeta = new Map<
+        string,
+        { namespace: string; className: string; classModifiers: string; classDeclaration: string }
+    >();
+
     for (const [filePath, members] of groupedByFile) {
         const folder = filePath.endsWith('.cs') ? filePath.slice(0, -'.cs'.length) : filePath;
-        const explicitNs = members
+        const defaultNs = members
             .map(([, n]) => (typeof n.extra?.namespace === 'string' ? n.extra.namespace.trim() : ''))
-            .find(Boolean);
-        const explicitClass = members
+            .find(Boolean) || projectCSharpNamespace(config.name, folder);
+        const defaultClass = members
             .map(([, n]) => (typeof n.extra?.className === 'string' ? n.extra.className.trim() : ''))
-            .find(Boolean);
-        const explicitMods = members
+            .find(Boolean) || defaultCSharpClassName(folder, config.name);
+        const defaultMods = members
             .map(([, n]) => (typeof n.extra?.classModifiers === 'string' ? n.extra.classModifiers.trim() : ''))
-            .find(Boolean);
+            .find(Boolean) || 'public static';
+        const defaultDecl = members
+            .map(([, n]) => (typeof n.extra?.classDeclaration === 'string' ? n.extra.classDeclaration.trim() : ''))
+            .find(Boolean) || null;
 
-        const ns = explicitNs || projectCSharpNamespace(config.name, folder);
-        const cls = explicitClass || defaultCSharpClassName(folder, config.name);
-        const mods = explicitMods || 'public static';
+        fileDefaultMeta.set(filePath, {
+            namespace: defaultNs,
+            className: defaultClass,
+            classModifiers: defaultMods,
+            classDeclaration: defaultDecl,
+        });
 
-        fileMeta.set(filePath, { namespace: ns, className: cls, classModifiers: mods, folder });
-        for (const [nodeId] of members) {
+        for (const [nodeId, n] of members) {
+            const ns = typeof n.extra?.namespace === 'string' && n.extra.namespace.trim()
+                ? n.extra.namespace.trim()
+                : defaultNs;
+            const cls = typeof n.extra?.className === 'string' && n.extra.className.trim()
+                ? n.extra.className.trim()
+                : defaultClass;
+            const mods = typeof n.extra?.classModifiers === 'string' && n.extra.classModifiers.trim()
+                ? n.extra.classModifiers.trim()
+                : defaultMods;
+            const rawDecl = typeof n.extra?.classDeclaration === 'string' && n.extra.classDeclaration.trim()
+                ? n.extra.classDeclaration.trim()
+                : (cls === defaultClass && defaultDecl ? defaultDecl : `${mods} class ${cls}`);
+            memberContainerMeta.set(nodeId, {
+                namespace: ns,
+                className: cls,
+                classModifiers: mods,
+                classDeclaration: rawDecl,
+            });
             nodeContainerInfo.set(nodeId, { namespace: ns, className: cls, filePath });
         }
     }
@@ -905,12 +947,12 @@ export function compileCSharp(
 
     for (const [filePath, rawMembers] of [...groupedByFile.entries()].sort(([a], [b]) => a.localeCompare(b))) {
         const existingContent = existingFiles.get(filePath);
-        if (existingContent !== undefined && !existingContent.includes('// Generated by Slate')) {
+        if (existingContent !== undefined && !isSlateGeneratedContent(existingContent) && !existingContent.includes('// Generated by Slate')) {
             error(`Refusing to overwrite existing file "${filePath}" without a "// Generated by Slate" header.`);
             continue;
         }
 
-        const meta = fileMeta.get(filePath)!;
+        const meta = fileDefaultMeta.get(filePath)!;
         const members = [...rawMembers].sort(
             ([leftId, left], [rightId, right]) =>
                 blockOrder(left) - blockOrder(right) ||
@@ -922,6 +964,7 @@ export function compileCSharp(
         const staticUsingsSet = new Set<string>();
 
         for (const [nodeId, node] of members) {
+            const memberMeta = memberContainerMeta.get(nodeId)!;
             for (const rawImport of node.imports) {
                 const parsedUsings = splitCSharpUsing(rawImport.endsWith(';') ? rawImport : `${rawImport};`);
                 if (parsedUsings.length > 0) {
@@ -942,8 +985,10 @@ export function compileCSharp(
                     continue;
                 }
                 const targetMeta = nodeContainerInfo.get(target);
-                if (!targetMeta || targetMeta.filePath === filePath) continue;
-                if (targetMeta.namespace !== meta.namespace) {
+                if (!targetMeta || (targetMeta.filePath === filePath && targetMeta.className === memberMeta.className && targetMeta.namespace === memberMeta.namespace)) {
+                    continue;
+                }
+                if (targetMeta.namespace !== memberMeta.namespace) {
                     usingsSet.add(`using ${targetMeta.namespace};`);
                 }
                 // If the caller invokes the method by bare name without qualifying `TargetClass.Method`,
@@ -956,11 +1001,24 @@ export function compileCSharp(
 
         const allUsings = [...usingsSet, ...staticUsingsSet];
 
-        // Partition members into standalone type declarations vs class-body members (methods/preludes)
-        const standaloneTypeBlocks: string[] = [];
-        const classMemberBlocks: string[] = [];
+        // Group members by namespace -> (standalone types vs class-container groups preserving declaration headers)
+        interface ClassGroup {
+            header: string;
+            blocks: string[];
+        }
+        const nsGroups = new Map<string, { classes: Map<string, ClassGroup>; standalone: string[] }>();
+        const ensureNsBucket = (ns: string) => {
+            let bucket = nsGroups.get(ns);
+            if (!bucket) {
+                bucket = { classes: new Map(), standalone: [] };
+                nsGroups.set(ns, bucket);
+            }
+            return bucket;
+        };
 
         for (const [nodeId, node] of members) {
+            const memberMeta = memberContainerMeta.get(nodeId)!;
+            const nsBucket = ensureNsBucket(memberMeta.namespace);
             const stamp = `// slate: ${node.extra?.flow ? 'flows' : 'nodes'}/${nodeId}`;
             const intentLines = csharpComment('intent', node.intent);
             const contractLines = csharpComment('contract', node.contract);
@@ -976,39 +1034,50 @@ export function compileCSharp(
 
             if (isTopLevelType) {
                 const blockLines = [stamp, ...intentLines, ...contractLines, ...node.code];
-                standaloneTypeBlocks.push(indentLines(blockLines, 4).join('\n'));
+                nsBucket.standalone.push(indentLines(blockLines, 4).join('\n'));
             } else {
                 const blockLines = [stamp, ...intentLines, ...contractLines, ...node.code];
-                classMemberBlocks.push(indentLines(blockLines, 8).join('\n'));
+                const classKey = `${memberMeta.className}|${memberMeta.classDeclaration}`;
+                let clsGroup = nsBucket.classes.get(classKey);
+                if (!clsGroup) {
+                    clsGroup = { header: memberMeta.classDeclaration, blocks: [] };
+                    nsBucket.classes.set(classKey, clsGroup);
+                }
+                clsGroup.blocks.push(indentLines(blockLines, 8).join('\n'));
             }
         }
 
-        const namespaceBodyParts: string[] = [];
-        if (classMemberBlocks.length > 0) {
-            const classBlock = [
-                `    ${meta.classModifiers} class ${meta.className}`,
-                '    {',
-                classMemberBlocks.join('\n\n'),
-                '    }',
-            ].join('\n');
-            namespaceBodyParts.push(classBlock);
+        const nsSections: string[] = [];
+        for (const [ns, bucket] of nsGroups.entries()) {
+            const namespaceBodyParts: string[] = [];
+            for (const clsGroup of bucket.classes.values()) {
+                const headerLines = clsGroup.header.split('\n').map(l => `    ${l}`);
+                namespaceBodyParts.push([
+                    ...headerLines,
+                    '    {',
+                    clsGroup.blocks.join('\n\n'),
+                    '    }',
+                ].join('\n'));
+            }
+            if (bucket.standalone.length > 0) {
+                namespaceBodyParts.push(...bucket.standalone);
+            }
+            nsSections.push([
+                `namespace ${ns}`,
+                '{',
+                namespaceBodyParts.join('\n\n'),
+                '}',
+            ].join('\n'));
         }
-        if (standaloneTypeBlocks.length > 0) {
-            namespaceBodyParts.push(...standaloneTypeBlocks);
+        if (nsSections.length === 0) {
+            nsSections.push([`namespace ${meta.namespace}`, '{', '}'].join('\n'));
         }
 
         const fileSections: string[] = [CSHARP_GENERATED_HEADER];
         if (allUsings.length > 0) {
             fileSections.push(allUsings.join('\n'));
         }
-        fileSections.push(
-            [
-                `namespace ${meta.namespace}`,
-                '{',
-                namespaceBodyParts.join('\n\n'),
-                '}',
-            ].join('\n'),
-        );
+        fileSections.push(...nsSections);
 
         files.set(filePath, `${fileSections.join('\n\n')}\n`);
     }

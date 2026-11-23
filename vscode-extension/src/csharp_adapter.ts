@@ -54,6 +54,7 @@ interface ParsedUnitDetail {
     namespace: string | null;
     className: string | null;
     classModifiers: string | null;
+    classDeclaration: string | null;
 }
 
 export interface CSharpParseDetails extends ParseModuleResult {
@@ -72,6 +73,7 @@ export interface CSharpParseDetails extends ParseModuleResult {
             namespace: string | null;
             className: string | null;
             classModifiers: string | null;
+            classDeclaration: string | null;
         }
     >;
 }
@@ -736,6 +738,7 @@ export function parseCSharpDetailed(
         currentNamespace: string | null,
         currentClassName: string | null,
         currentClassModifiers: string | null,
+        currentClassDeclaration: string | null = null,
     ): void => {
         let i = fromIdx;
         while (i < toIdx && !syntaxError) {
@@ -814,7 +817,7 @@ export function parseCSharpDetailed(
                         };
                         return;
                     }
-                    parseDeclarations(i + 1, closeBrace, null, fullNs, null, null);
+                    parseDeclarations(i + 1, closeBrace, null, fullNs, null, null, null);
                     i = closeBrace + 1;
                     continue;
                 }
@@ -919,6 +922,12 @@ export function parseCSharpDetailed(
                     decorators: attrRes.decorators,
                 };
                 const classMods = modifiers.length > 0 ? modifiers.join(' ') : 'public static';
+                const rawDeclHeader = source.slice(declFrom, tokens[i].from).replace(/\r\n?/g, '\n');
+                const classDecl = rawDeclHeader
+                    .split('\n')
+                    .map(l => l.trim())
+                    .filter(Boolean)
+                    .join('\n') || `${classMods} ${declKeyword} ${typeName}`;
                 detailsList.push({
                     unit: classUnit,
                     wrapperFrom: declFrom,
@@ -927,6 +936,7 @@ export function parseCSharpDetailed(
                     namespace: currentNamespace,
                     className: typeName,
                     classModifiers: classMods,
+                    classDeclaration: classDecl,
                 });
 
                 if (tokens[i].text === '{') {
@@ -937,6 +947,7 @@ export function parseCSharpDetailed(
                         currentNamespace,
                         typeName,
                         classMods,
+                        classDecl,
                     );
                 }
                 i = endTokIdx + 1;
@@ -1155,6 +1166,7 @@ export function parseCSharpDetailed(
                     namespace: currentNamespace,
                     className: currentClassName,
                     classModifiers: currentClassModifiers,
+                    classDeclaration: currentClassDeclaration,
                 });
 
                 i = endMethodIdx + 1;
@@ -1197,7 +1209,7 @@ export function parseCSharpDetailed(
         }
     };
 
-    parseDeclarations(0, tokens.length, null, null, null, null);
+    parseDeclarations(0, tokens.length, null, null, null, null, null);
 
     if (syntaxError) {
         return {
@@ -1235,6 +1247,29 @@ export function parseCSharpDetailed(
         }
     }
 
+    // Disambiguate provisional overload IDs so offsets and unitDetails never collide across same-named methods.
+    const idGroups = new Map<string, ParsedUnitDetail[]>();
+    for (const item of detailsList) {
+        const group = idGroups.get(item.unit.id) ?? [];
+        group.push(item);
+        idGroups.set(item.unit.id, group);
+    }
+    const assignedIds = new Set<string>();
+    for (const item of detailsList) {
+        const group = idGroups.get(item.unit.id)!;
+        if (group.length > 1 && item.unit.identity !== 'durable') {
+            const paramSig = (item.unit.params ?? []).map(p => (p.annotation ?? '').replace(/\s+/g, '')).join(',');
+            let candidate = stableId(documentPath, item.unit.kind, `${item.unit.qualifiedName}(${paramSig})`);
+            if (assignedIds.has(candidate)) {
+                let n = 2;
+                while (assignedIds.has(`${candidate}#${n}`)) n++;
+                candidate = `${candidate}#${n}`;
+            }
+            item.unit.id = candidate;
+        }
+        assignedIds.add(item.unit.id);
+    }
+
     const units: ParsedUnit[] = [];
     const offsets: CSharpParseDetails['offsets'] = new Map();
     const unitDetails: CSharpParseDetails['unitDetails'] = new Map();
@@ -1249,6 +1284,7 @@ export function parseCSharpDetailed(
             namespace: item.namespace,
             className: item.className,
             classModifiers: item.classModifiers,
+            classDeclaration: item.classDeclaration,
         });
     }
 

@@ -39,6 +39,92 @@ export interface ResolvedLlmConfig {
     contextWindowTokens: number;
 }
 
+export interface ProjectCredentialAccessInput {
+    projectLlm?: SlateLlmConfig;
+    resolved: ResolvedLlmConfig;
+    isTrusted: boolean;
+    approvedPairings?: ReadonlySet<string> | readonly string[];
+}
+
+export interface ProjectCredentialAccessDecision {
+    allowCredential: boolean;
+    requiresApproval: boolean;
+    pairingKey: string | null;
+    credentialSource?: string;
+    reason?: string;
+}
+
+export function credentialPairingKey(endpoint: string, apiKeyEnv?: string): string {
+    const raw = endpoint.trim();
+    let normalizedEndpoint = raw.replace(/\/+$/, '').toLowerCase();
+    try {
+        const parsed = new URL(raw);
+        const pathPart = parsed.pathname.replace(/\/+$/, '');
+        normalizedEndpoint = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${pathPart}`;
+    } catch {
+        // Keep trimmed lowercase fallback for unparseable URLs
+    }
+    const credKey = cleanString(apiKeyEnv) ? `env:${cleanString(apiKeyEnv)}` : 'secret-storage';
+    return `${normalizedEndpoint}|${credKey}`;
+}
+
+export function evaluateProjectCredentialAccess(
+    input: ProjectCredentialAccessInput,
+): ProjectCredentialAccessDecision {
+    const { projectLlm, resolved, isTrusted, approvedPairings } = input;
+    if (!resolved.hasApiKey || !resolved.apiKey) {
+        return { allowCredential: false, requiresApproval: false, pairingKey: null };
+    }
+    const projectDirectsLlm = Boolean(
+        cleanString(projectLlm?.endpoint)
+        || cleanString(projectLlm?.apiKeyEnv)
+        || projectLlm?.provider,
+    );
+    if (!projectDirectsLlm) {
+        return { allowCredential: true, requiresApproval: false, pairingKey: null };
+    }
+
+    const source = cleanString(resolved.apiKeyEnv) ? `environment variable "${resolved.apiKeyEnv}"` : 'stored API key';
+    const pairingKey = credentialPairingKey(resolved.endpoint, resolved.apiKeyEnv);
+    if (!isTrusted) {
+        return {
+            allowCredential: false,
+            requiresApproval: true,
+            pairingKey,
+            credentialSource: source,
+            reason: `Workspace is not trusted; refusing to send ${source} to project-configured LLM endpoint "${resolved.endpoint}".`,
+        };
+    }
+
+    const approvedSet = approvedPairings instanceof Set
+        ? approvedPairings
+        : new Set(approvedPairings ?? []);
+    if (approvedSet.has(pairingKey)) {
+        return {
+            allowCredential: true,
+            requiresApproval: false,
+            pairingKey,
+            credentialSource: source,
+        };
+    }
+
+    return {
+        allowCredential: false,
+        requiresApproval: true,
+        pairingKey,
+        credentialSource: source,
+        reason: `Explicit user approval required before sending ${source} to project-configured LLM endpoint "${resolved.endpoint}".`,
+    };
+}
+
+export function stripDisallowedCredential(resolved: ResolvedLlmConfig): ResolvedLlmConfig {
+    return {
+        ...resolved,
+        apiKey: undefined,
+        hasApiKey: false,
+    };
+}
+
 export interface LlamaHealthResult {
     ok: boolean;
     endpoint: string;

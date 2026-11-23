@@ -19,7 +19,7 @@ import {
 } from '../slate_folder';
 import type { BoardNote, FlowInstance, FlowWire, HarnessDocument, HarnessFlow, SlateFlow } from '../harness_protocol';
 import { compileProjectForLanguage } from '../language_adapter';
-import { isSlateGeneratedContent, tryNormalizeLanguage } from '../language_types';
+import { isSlateGeneratedContent, normalizeCompileOutputPath, tryNormalizeLanguage } from '../language_types';
 import { checkLlamaHealth, resolveLlmConfig, type LlmConfigInput } from '../llama_transport';
 import { parseProseNode, proseStub } from '../prose_adapter';
 import { identifierNames } from '../python_adapter';
@@ -1646,8 +1646,24 @@ export class SlateMcpServer {
         const compiled = compileProjectForLanguage(nodes, config, flows, new Map(), existingFiles);
         diagnostics.push(...compiled.diagnostics);
 
-        for (const [relFile] of compiled.files.entries()) {
-            const absOut = path.resolve(resolvedOut, relFile);
+        const normalizedFiles = new Map<string, string>();
+        for (const [relFile, content] of compiled.files.entries()) {
+            const normRel = normalizeCompileOutputPath(relFile);
+            if (!normRel) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing unsafe output path "${relFile}" outside "${relToRoot}".`,
+                });
+                continue;
+            }
+            if (normalizedFiles.has(normRel)) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing duplicate output destination "${normRel}" from "${relFile}".`,
+                });
+                continue;
+            }
+            const absOut = path.resolve(resolvedOut, normRel);
             const relCheck = path.relative(resolvedOut, absOut);
             if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
                 diagnostics.push({
@@ -1656,28 +1672,42 @@ export class SlateMcpServer {
                 });
                 continue;
             }
-            const existingContent = existingFiles.get(relFile);
+            let existingContent = existingFiles.get(normRel);
+            if (existingContent === undefined) {
+                try {
+                    existingContent = await fs.readFile(absOut, 'utf8');
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                        diagnostics.push({
+                            severity: 'error',
+                            message: `Cannot inspect existing destination "${normRel}": ${(error as Error).message}`,
+                        });
+                        continue;
+                    }
+                }
+            }
             if (existingContent !== undefined && !isSlateGeneratedContent(existingContent)) {
-                const alreadyFlagged = diagnostics.some(d => d.severity === 'error' && d.message.includes(relFile));
+                const alreadyFlagged = diagnostics.some(d => d.severity === 'error' && (d.message.includes(normRel) || d.message.includes(relFile)));
                 if (!alreadyFlagged) {
                     diagnostics.push({
                         severity: 'error',
-                        message: `Refusing to overwrite existing non-generated file "${relFile}" (missing Slate generated header).`,
+                        message: `Refusing to overwrite existing non-generated file "${normRel}" (missing Slate generated header).`,
                     });
                 }
             }
+            normalizedFiles.set(normRel, content);
         }
 
         const dryRun = args.dryRun === true;
         const hasErrors = diagnostics.some(d => d.severity === 'error');
-        const generatedPaths = Array.from(compiled.files.keys()).sort();
+        const generatedPaths = Array.from(normalizedFiles.keys()).sort();
         const writtenFiles: string[] = [];
         const removedFiles: string[] = [];
 
         if (!dryRun && !hasErrors) {
             await fs.mkdir(resolvedOut, { recursive: true });
             for (const [prevRel, prevContent] of existingFiles.entries()) {
-                if (!compiled.files.has(prevRel) && isSlateGeneratedContent(prevContent)) {
+                if (!normalizedFiles.has(prevRel) && isSlateGeneratedContent(prevContent)) {
                     const prevAbs = path.resolve(resolvedOut, prevRel);
                     const prevRelCheck = path.relative(resolvedOut, prevAbs);
                     if (prevRelCheck && !prevRelCheck.startsWith('..') && !path.isAbsolute(prevRelCheck)) {
@@ -1689,7 +1719,7 @@ export class SlateMcpServer {
             for (const relFile of generatedPaths) {
                 const absOut = path.resolve(resolvedOut, relFile);
                 await fs.mkdir(path.dirname(absOut), { recursive: true });
-                await fs.writeFile(absOut, compiled.files.get(relFile)!, 'utf8');
+                await fs.writeFile(absOut, normalizedFiles.get(relFile)!, 'utf8');
                 writtenFiles.push(relFile);
             }
         }
@@ -1699,7 +1729,7 @@ export class SlateMcpServer {
             language: config.language,
             outDir: relToRoot,
             dryRun,
-            fileCount: compiled.files.size,
+            fileCount: normalizedFiles.size,
             files: generatedPaths,
             writtenFiles,
             removedFiles: removedFiles.sort(),

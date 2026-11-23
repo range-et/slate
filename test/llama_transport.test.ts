@@ -3,10 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     buildAuthHeaders,
     checkLlamaHealth,
+    credentialPairingKey,
+    evaluateProjectCredentialAccess,
     inferProviderFromEndpoint,
     LlamaTransportError,
     resolveLlmConfig,
     streamLlamaCompletion,
+    stripDisallowedCredential,
 } from '../vscode-extension/src/llama_transport';
 import { startFakeLlamaServer, type FakeLlamaServer } from './support/fake_llama_server';
 
@@ -140,5 +143,77 @@ describe('llama.cpp transport', () => {
             hasApiKey: true,
         });
         vi.unstubAllGlobals();
+    });
+
+    it('guards project-directed credentials against silent disclosure without workspace trust and explicit approval (#1)', () => {
+        const key1 = credentialPairingKey('HTTPS://Example.COM/v1/', 'MY_SECRET');
+        const key2 = credentialPairingKey('https://example.com/v1', 'MY_SECRET');
+        expect(key1).toBe(key2);
+        expect(credentialPairingKey('https://example.com/v1/')).toBe('https://example.com/v1|secret-storage');
+
+        const projectLlm = {
+            provider: 'openai-compatible' as const,
+            endpoint: 'https://evil.example/v1',
+            model: 'qwen',
+            apiKeyEnv: 'MY_SECRET',
+        };
+        const resolved = resolveLlmConfig(projectLlm, undefined, { MY_SECRET: 'super-secret-value' });
+        expect(resolved.hasApiKey).toBe(true);
+
+        // Untrusted workspace always refuses credential transmission even if previously approved
+        const untrusted = evaluateProjectCredentialAccess({
+            projectLlm,
+            resolved,
+            isTrusted: false,
+            approvedPairings: new Set([key1]),
+        });
+        expect(untrusted.allowCredential).toBe(false);
+        expect(untrusted.requiresApproval).toBe(true);
+        expect(untrusted.reason).toContain('not trusted');
+
+        // Trusted workspace without explicit pairing approval requires approval
+        const unapproved = evaluateProjectCredentialAccess({
+            projectLlm,
+            resolved,
+            isTrusted: true,
+            approvedPairings: [],
+        });
+        expect(unapproved.allowCredential).toBe(false);
+        expect(unapproved.requiresApproval).toBe(true);
+        expect(unapproved.pairingKey).toBe(credentialPairingKey('https://evil.example/v1', 'MY_SECRET'));
+        expect(unapproved.reason).toContain('Explicit user approval required');
+
+        // Trusted workspace with matching approved pairing allows credential
+        const approved = evaluateProjectCredentialAccess({
+            projectLlm,
+            resolved,
+            isTrusted: true,
+            approvedPairings: new Set([unapproved.pairingKey!]),
+        });
+        expect(approved.allowCredential).toBe(true);
+        expect(approved.requiresApproval).toBe(false);
+
+        // User-configured settings with no project-directed endpoint/provider/apiKeyEnv do not prompt
+        const userOnly = evaluateProjectCredentialAccess({
+            projectLlm: { model: 'qwen' },
+            resolved,
+            isTrusted: true,
+        });
+        expect(userOnly.allowCredential).toBe(true);
+        expect(userOnly.requiresApproval).toBe(false);
+
+        // Requests with no resolved API key need no credential approval
+        const noCred = evaluateProjectCredentialAccess({
+            projectLlm,
+            resolved: stripDisallowedCredential(resolved),
+            isTrusted: false,
+        });
+        expect(noCred.allowCredential).toBe(false);
+        expect(noCred.requiresApproval).toBe(false);
+
+        const stripped = stripDisallowedCredential(resolved);
+        expect(stripped.apiKey).toBeUndefined();
+        expect(stripped.hasApiKey).toBe(false);
+        expect(stripped.endpoint).toBe('https://evil.example/v1');
     });
 });

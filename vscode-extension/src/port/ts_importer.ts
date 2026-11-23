@@ -21,6 +21,7 @@ interface TsDefinition {
     name: string;
     code: string;
     exported: boolean;
+    defaultExport: boolean;
 }
 
 interface TsModuleScan {
@@ -91,6 +92,13 @@ function isExportedStatement(stmt: ts.Statement): boolean {
     return Boolean(mods?.some(m => m.kind === ts.SyntaxKind.ExportKeyword));
 }
 
+function isDefaultExportStatement(stmt: ts.Statement): boolean {
+    if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) return true;
+    if (!ts.canHaveModifiers(stmt)) return false;
+    const mods = ts.getModifiers(stmt);
+    return Boolean(mods?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword));
+}
+
 function scanTsModule(
     path: string,
     source: string,
@@ -133,6 +141,7 @@ function scanTsModule(
                 name: defName,
                 code: fullText,
                 exported: isExportedStatement(stmt),
+                defaultExport: isDefaultExportStatement(stmt),
             });
             defined.add(defName);
             continue;
@@ -247,8 +256,18 @@ export function portTsProject(
             } else if (item.name !== 'default' && item.binding !== item.name) {
                 warnings.push(`${scan.path}: aliased import "${item.line}" kept as is.`);
                 kept.push(item);
+            } else if (item.name === 'default') {
+                const defaultDef = target.definitions.find(d => d.defaultExport && d.name === item.binding)
+                    ?? (target.definitions.filter(d => d.defaultExport).length === 1
+                        ? target.definitions.find(d => d.defaultExport)
+                        : undefined);
+                if (defaultDef && defaultDef.name === item.binding) {
+                    provided.set(item.binding, join(targetFolder, defaultDef.name));
+                } else {
+                    kept.push(item);
+                }
             } else {
-                const lookupName = item.name === 'default' ? item.binding : item.name;
+                const lookupName = item.name;
                 const matchedDef = target.definitions.find(d => d.name === lookupName);
                 if (matchedDef) {
                     provided.set(item.binding, join(targetFolder, matchedDef.name));
@@ -263,7 +282,14 @@ export function portTsProject(
         const ownPrelude = preludeNames.get(scan.folder)!;
         const localDefs = new Set(scan.definitions.map(d => d.name));
 
-        const makeNode = (name: string, code: string, kind?: NodeKind, order?: number, exported?: boolean): SlateNode => {
+        const makeNode = (
+            name: string,
+            code: string,
+            kind?: NodeKind,
+            order?: number,
+            exported?: boolean,
+            defaultExport?: boolean,
+        ): SlateNode => {
             const names = tsIdentifierNames(code, scan.path);
             const uses = new Set<string>();
             for (const [binding, targetNodeId] of provided) {
@@ -292,6 +318,7 @@ export function portTsProject(
                     modulePath: scan.path,
                     extension: scan.extension,
                     ...(exported !== undefined ? { exported } : {}),
+                    ...(defaultExport ? { defaultExport: true } : {}),
                 },
             };
         };
@@ -302,7 +329,7 @@ export function portTsProject(
         }
         scan.definitions.forEach((def, order) => {
             const nodeId = join(scan.folder, def.name);
-            nodes.set(nodeId, makeNode(def.name, def.code, undefined, order, def.exported));
+            nodes.set(nodeId, makeNode(def.name, def.code, undefined, order, def.exported, def.defaultExport));
             if (ownPrelude.has(def.name)) {
                 warnings.push(`${nodeId}: the prelude also binds ${def.name}.`);
             }

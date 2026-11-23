@@ -336,4 +336,87 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         expect(cancelled.ok).toBe(false);
         expect(cancelled.results[0].reason).toContain('cancelled');
     });
+
+    it('detects concurrent edits to target cases/check/contract and dependency code (#14)', async () => {
+        // Part A: concurrent edit to target cases (code unchanged) aborts write-back
+        await writeProject(
+            tmpDir,
+            { provider: 'llama.cpp', model: 'qwen' },
+            {
+                helper: makeStubNode('helper', 'def helper(x: int) -> int', 'Double input', undefined, {
+                    code: ['def helper(x: int) -> int:', '    return x * 2'],
+                }),
+                target_cases: makeStubNode(
+                    'target_cases',
+                    'def target_cases(x: int) -> int',
+                    'Call helper',
+                    [{ name: 'c1', inputs: { x: 2 }, expected: 4 }],
+                    { context: ['helper'] },
+                ),
+            },
+        );
+
+        activeServer = await startCustomSseServer(async () => {
+            const p = path.join(tmpDir, 'slate', 'nodes', 'target_cases.json');
+            const edited = parseNode(await fs.readFile(p, 'utf8'));
+            edited.cases = [{ name: 'c_new', inputs: { x: 5 }, expected: 10 }];
+            await fs.writeFile(p, serializeNode(edited), 'utf8');
+            return '### Implementation\n```python\ndef target_cases(x: int) -> int:\n    return helper(x)\n```';
+        });
+
+        const casesRace = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            nodeIds: ['target_cases'],
+            verify: false,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(casesRace.ok).toBe(false);
+        expect(casesRace.failedCount).toBe(1);
+        expect(casesRace.results[0].written).toBe(false);
+        expect(casesRace.results[0].reason).toContain('changed on disk');
+        const casesDisk = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'target_cases.json'), 'utf8'));
+        expect(casesDisk.cases).toEqual([{ name: 'c_new', inputs: { x: 5 }, expected: 10 }]);
+        expect(casesDisk.code[1]).toBe('    raise NotImplementedError');
+
+        await activeServer.close();
+
+        // Part B: concurrent edit to dependency node code aborts target write-back
+        await writeProject(
+            tmpDir,
+            { provider: 'llama.cpp', model: 'qwen' },
+            {
+                helper: makeStubNode('helper', 'def helper(x: int) -> int', 'Double input', undefined, {
+                    code: ['def helper(x: int) -> int:', '    return x * 2'],
+                }),
+                target_dep: makeStubNode(
+                    'target_dep',
+                    'def target_dep(x: int) -> int',
+                    'Call helper',
+                    [{ name: 'c1', inputs: { x: 2 }, expected: 4 }],
+                    { context: ['helper'] },
+                ),
+            },
+        );
+
+        activeServer = await startCustomSseServer(async () => {
+            const depPath = path.join(tmpDir, 'slate', 'nodes', 'helper.json');
+            const depEdited = parseNode(await fs.readFile(depPath, 'utf8'));
+            depEdited.code = ['def helper(x: int) -> int:', '    return x * 10'];
+            await fs.writeFile(depPath, serializeNode(depEdited), 'utf8');
+            return '### Implementation\n```python\ndef target_dep(x: int) -> int:\n    return helper(x)\n```';
+        });
+
+        const depRace = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            nodeIds: ['target_dep'],
+            verify: false,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(depRace.ok).toBe(false);
+        expect(depRace.failedCount).toBe(1);
+        expect(depRace.results[0].written).toBe(false);
+        expect(depRace.results[0].reason).toContain('changed on disk');
+        const depTargetDisk = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'target_dep.json'), 'utf8'));
+        expect(depTargetDisk.code[1]).toBe('    raise NotImplementedError');
+    });
 });

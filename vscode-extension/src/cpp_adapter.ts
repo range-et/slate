@@ -31,10 +31,19 @@ export interface CppCheckOptions {
     throwOnError?: boolean;
 }
 
-interface ParsedCppDetails extends ParseModuleResult {
+export interface CppNamespaceSpan {
+    header: string;
+    headerFrom: number;
+    braceFrom: number;
+    closeFrom: number;
+}
+
+export interface ParsedCppDetails extends ParseModuleResult {
     offsets: Map<string, {
         code: { from: number; to: number };
     }>;
+    unitNamespaces: Map<string, string[]>;
+    namespaceSpans: CppNamespaceSpan[];
 }
 
 const ZERO_RANGE: SourceRange = {
@@ -648,6 +657,9 @@ function scanDeclarationsInRange(
     parent: ParsedUnit | null,
     units: ParsedUnit[],
     offsets: ParsedCppDetails['offsets'],
+    namespaceStack: string[] = [],
+    unitNamespaces: Map<string, string[]> = new Map(),
+    namespaceSpans: CppNamespaceSpan[] = [],
 ): void {
     let pos = rangeFrom;
 
@@ -733,7 +745,15 @@ function scanDeclarationsInRange(
         const headerMasked = masked.slice(declStart, foundBrace);
 
         // 1. Check for `namespace ... { ... }` or `extern "C" { ... }`
-        if (/^(?:inline\s+)?namespace\b/.test(headerMasked) || /^extern\b/.test(headerMasked)) {
+        if (/^(?:inline\s+)?namespace\b/.test(headerMasked)) {
+            const nsHeader = source.slice(declStart, foundBrace).replace(/\s+/g, ' ').trim();
+            namespaceSpans.push({
+                header: nsHeader,
+                headerFrom: declStart,
+                braceFrom: foundBrace,
+                closeFrom: closeBrace,
+            });
+            namespaceStack.push(nsHeader);
             scanDeclarationsInRange(
                 source,
                 masked,
@@ -746,6 +766,30 @@ function scanDeclarationsInRange(
                 parent,
                 units,
                 offsets,
+                namespaceStack,
+                unitNamespaces,
+                namespaceSpans,
+            );
+            namespaceStack.pop();
+            pos = closeBrace + 1;
+            continue;
+        }
+        if (/^extern\b/.test(headerMasked)) {
+            scanDeclarationsInRange(
+                source,
+                masked,
+                starts,
+                foundBrace + 1,
+                closeBrace,
+                documentPath,
+                nodeName,
+                nodeId,
+                parent,
+                units,
+                offsets,
+                namespaceStack,
+                unitNamespaces,
+                namespaceSpans,
             );
             pos = closeBrace + 1;
             continue;
@@ -788,6 +832,9 @@ function scanDeclarationsInRange(
             };
             units.push(unit);
             offsets.set(id, { code: { from: declStart, to: declTo } });
+            if (namespaceStack.length > 0 && !parent) {
+                unitNamespaces.set(id, [...namespaceStack]);
+            }
 
             scanDeclarationsInRange(
                 source,
@@ -801,6 +848,9 @@ function scanDeclarationsInRange(
                 unit,
                 units,
                 offsets,
+                namespaceStack,
+                unitNamespaces,
+                namespaceSpans,
             );
 
             pos = declTo;
@@ -853,7 +903,17 @@ function scanDeclarationsInRange(
                                 ? `${scopePrefix}.${fnName}`
                                 : fnName;
                         const isNode = !parent && nodeName !== undefined && fnName === nodeName;
-                        const id = isNode ? nodeId! : stableId(documentPath, kind, qualifiedName);
+                        let id = isNode ? nodeId! : stableId(documentPath, kind, qualifiedName);
+                        if (!isNode && offsets.has(id)) {
+                            const paramSig = structured.map(p => (p.annotation ?? '').replace(/\s+/g, '')).join(',');
+                            const overloaded = stableId(documentPath, kind, `${qualifiedName}(${paramSig})`);
+                            id = overloaded;
+                            if (offsets.has(id)) {
+                                let n = 2;
+                                while (offsets.has(`${overloaded}#${n}`)) n++;
+                                id = `${overloaded}#${n}`;
+                            }
+                        }
 
                         const signature = `${returnAnnotation ? `${returnAnnotation} ` : ''}${fnName}(${parameters})`;
 
@@ -878,6 +938,9 @@ function scanDeclarationsInRange(
                         };
                         units.push(unit);
                         offsets.set(id, { code: { from: declStart, to: declTo } });
+                        if (namespaceStack.length > 0 && !parent) {
+                            unitNamespaces.set(id, [...namespaceStack]);
+                        }
                         pos = declTo;
                         continue;
                     }
@@ -889,7 +952,7 @@ function scanDeclarationsInRange(
     }
 }
 
-function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: string): ParsedCppDetails {
+export function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: string): ParsedCppDetails {
     const starts = lineStarts(source);
     const { masked, unclosedOffset, unclosedMessage } = maskCommentsAndStrings(source);
     if (unclosedOffset !== null && unclosedMessage !== null) {
@@ -904,6 +967,8 @@ function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: st
                 range: rangeAt(starts, unclosedOffset, unclosedOffset + 1),
             }],
             offsets: new Map(),
+            unitNamespaces: new Map(),
+            namespaceSpans: [],
         };
     }
 
@@ -920,6 +985,8 @@ function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: st
                 range: rangeAt(starts, delimiterError.offset, delimiterError.offset + 1),
             }],
             offsets: new Map(),
+            unitNamespaces: new Map(),
+            namespaceSpans: [],
         };
     }
 
@@ -942,12 +1009,16 @@ function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: st
                 range: rangeAt(starts, firstTokenOffset, firstTokenOffset + 1),
             }],
             offsets: new Map(),
+            unitNamespaces: new Map(),
+            namespaceSpans: [],
         };
     }
 
     const nodeName = nodeId?.split('/').pop();
     const units: ParsedUnit[] = [];
     const offsets: ParsedCppDetails['offsets'] = new Map();
+    const unitNamespaces = new Map<string, string[]>();
+    const namespaceSpans: CppNamespaceSpan[] = [];
 
     scanDeclarationsInRange(
         source,
@@ -961,6 +1032,9 @@ function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: st
         null,
         units,
         offsets,
+        [],
+        unitNamespaces,
+        namespaceSpans,
     );
 
     return {
@@ -970,6 +1044,8 @@ function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: st
         units,
         diagnostics: [],
         offsets,
+        unitNamespaces,
+        namespaceSpans,
     };
 }
 
@@ -977,7 +1053,7 @@ function parseCppDetailed(source: string, documentPath = '<memory>', nodeId?: st
  * Parse a C++ (`.cpp`, `.cc`, `.h`, `.hpp`) or Arduino (`.ino`) source file into `ParseModuleResult`.
  */
 export function parseCppModule(source: string, documentPath = '<memory>', nodeId?: string): ParseModuleResult {
-    const { offsets: _offsets, ...result } = parseCppDetailed(source, documentPath, nodeId);
+    const { offsets: _offsets, unitNamespaces: _ns, namespaceSpans: _spans, ...result } = parseCppDetailed(source, documentPath, nodeId);
     return result;
 }
 

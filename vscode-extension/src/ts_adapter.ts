@@ -175,7 +175,7 @@ function rawParameterSlice(
 function inferJsxReturnAnnotation(fn: ts.FunctionLikeDeclarationBase, sourceFile: ts.SourceFile): string | null {
     if (fn.type) return fn.type.getText(sourceFile).trim();
     const bodyText = fn.body ? fn.body.getText(sourceFile) : '';
-    if (/<[A-Za-z]/.test(bodyText)) return 'JSX.Element';
+    if (bodyText && containsJsxSyntax(bodyText)) return 'JSX.Element';
     return null;
 }
 
@@ -761,6 +761,44 @@ export function checkTsNodeCode(
         executableLines: executable,
         diagnostics,
     };
+}
+
+/**
+ * Determine whether TypeScript/JavaScript source contains real JSX syntax (elements,
+ * self-closing tags, or fragments) via the TypeScript AST or an explicit `.tsx`/`.jsx` extension hint.
+ */
+export function containsJsxSyntax(source: string, extHint?: string): boolean {
+    const lowerExt = extHint?.toLowerCase() ?? '';
+    if (lowerExt.endsWith('.tsx') || lowerExt.endsWith('.jsx')) {
+        return true;
+    }
+    const sfTsx = ts.createSourceFile('<jsx-check>.tsx', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
+    let found = false;
+    const visit = (node: ts.Node) => {
+        if (found) return;
+        if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node)) {
+            found = true;
+            return;
+        }
+        ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(sfTsx, visit);
+    if (!found) return false;
+    // Disambiguate TypeScript generics/type-assertions such as `<T>(x: T) => x`
+    // which parse validly in `.ts` without JSX tags and trigger parse errors in `.tsx`.
+    const sfTs = ts.createSourceFile(
+        '<jsx-check>.ts',
+        source,
+        ts.ScriptTarget.Latest,
+        false,
+        lowerExt.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS,
+    );
+    const tsDiags = (sfTs as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length ?? 0;
+    const tsxDiags = (sfTsx as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length ?? 0;
+    if (tsDiags === 0 && tsxDiags > 0) {
+        return false;
+    }
+    return true;
 }
 
 export class TypeScriptAdapter implements LanguageAdapter {

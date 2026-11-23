@@ -1009,6 +1009,53 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(collisionParsed.diagnostics.some((d: any) => d.message.includes('Refusing to overwrite'))).toBe(true);
             const preserved = await fs.readFile(path.join(tmpDir, 'built-ts', 'greet.ts'), 'utf8');
             expect(preserved).toContain('// Hand-written file');
+
+            // Regression (#2): dot-segment modulePath `sub/../victim.ts` must NOT bypass existing-file overwrite check,
+            // and parent traversal `../../victim.ts` must NOT write outside outDir.
+            await fs.writeFile(path.join(tmpDir, 'built-ts', 'victim.ts'), '// Hand-written victim\nexport const keep = 1;\n', 'utf8');
+            await fs.rm(path.join(tmpDir, 'slate', 'nodes', 'greet.json'), { force: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'dotdot_inside.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'dotdot_inside',
+                    language: 'typescript',
+                    intent: 'Attempt raw-key bypass via sub/../victim.ts',
+                    contract: '',
+                    modulePath: 'sub/../victim.ts',
+                    extension: '.ts',
+                    code: ['export function dotdot_inside(): number {', '    return 1;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+            const rawKeyBypass = await server.callTool('slate_compile', {});
+            expect(rawKeyBypass.isError).toBe(false);
+            const rawBypassParsed = JSON.parse(rawKeyBypass.content[0].text);
+            expect(rawBypassParsed.ok).toBe(false);
+            expect(rawBypassParsed.diagnostics.some((d: any) => d.message.includes('Refusing to overwrite'))).toBe(true);
+            expect(await fs.readFile(path.join(tmpDir, 'built-ts', 'victim.ts'), 'utf8')).toContain('// Hand-written victim');
+
+            await fs.rm(path.join(tmpDir, 'slate', 'nodes', 'dotdot_inside.json'), { force: true });
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'escape_outside.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'escape_outside',
+                    language: 'typescript',
+                    intent: 'Attempt escape via ../../outside.ts',
+                    contract: '',
+                    modulePath: '../../outside.ts',
+                    extension: '.ts',
+                    code: ['export function escape_outside(): number {', '    return 1;', '}'],
+                }, null, 2),
+                'utf8',
+            );
+            const escapeAttempt = await server.callTool('slate_compile', {});
+            expect(escapeAttempt.isError).toBe(false);
+            const escapeParsed = JSON.parse(escapeAttempt.content[0].text);
+            expect(escapeParsed.ok).toBe(false);
+            expect(escapeParsed.diagnostics.some((d: any) => /unsafe/i.test(String(d.message)))).toBe(true);
+            await expect(fs.stat(path.join(tmpDir, 'outside.ts'))).rejects.toThrow();
         });
     });
 });

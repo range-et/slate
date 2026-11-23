@@ -531,6 +531,30 @@ function restoreRenderedInlineCitations(
     });
 }
 
+function updateFenceState(
+    line: string,
+    activeFence: { char: '`' | '~'; len: number } | null,
+): { nextFence: { char: '`' | '~'; len: number } | null; insideFence: boolean } {
+    const trimmed = line.trim();
+    if (!activeFence) {
+        const openMatch = trimmed.match(/^(`{3,}|~{3,})/);
+        if (openMatch) {
+            const ch = openMatch[1][0] as '`' | '~';
+            // Note: CommonMark info strings on backtick fences cannot contain backticks
+            const rest = trimmed.slice(openMatch[1].length);
+            if (!(ch === '`' && rest.includes('`'))) {
+                return { nextFence: { char: ch, len: openMatch[1].length }, insideFence: true };
+            }
+        }
+        return { nextFence: null, insideFence: false };
+    }
+    const closeMatch = trimmed.match(/^(`{3,}|~{3,})\s*$/);
+    if (closeMatch && closeMatch[1][0] === activeFence.char && closeMatch[1].length >= activeFence.len) {
+        return { nextFence: null, insideFence: true };
+    }
+    return { nextFence: activeFence, insideFence: true };
+}
+
 function parseMarkdownDocument(path: string, source: string): ParsedDocument {
     const { title: fmTitle, contract: fmContract, remainingContent } = parseYamlFrontmatter(source);
     const rawLines = remainingContent.split(/\r?\n/);
@@ -538,13 +562,19 @@ function parseMarkdownDocument(path: string, source: string): ParsedDocument {
     let inferredTitle: string | null = fmTitle;
     let docDirectiveContract: ProseContractSpec = { ...fmContract };
 
-    // First pass: check if there is a top-level `# Title` and `## Section` headings
-    const headingLines = rawLines
-        .map((line, idx) => {
-            const m = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
-            return m ? { idx, level: m[1].length, text: m[2].trim() } : null;
-        })
-        .filter((x): x is { idx: number; level: number; text: string } => x !== null);
+    // First pass: check if there is a top-level `# Title` and `## Section` headings (ignoring fenced code blocks)
+    const headingLines: Array<{ idx: number; level: number; text: string }> = [];
+    let scanFence: { char: '`' | '~'; len: number } | null = null;
+    for (let idx = 0; idx < rawLines.length; idx++) {
+        const line = rawLines[idx];
+        const fenceUpdate = updateFenceState(line, scanFence);
+        scanFence = fenceUpdate.nextFence;
+        if (fenceUpdate.insideFence) continue;
+        const m = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+        if (m) {
+            headingLines.push({ idx, level: m[1].length, text: m[2].trim() });
+        }
+    }
 
     const h1Count = headingLines.filter(h => h.level === 1).length;
     const h2PlusCount = headingLines.filter(h => h.level >= 2).length;
@@ -573,10 +603,13 @@ function parseMarkdownDocument(path: string, source: string): ParsedDocument {
     }
     const rawChunks: RawChunk[] = [];
     let currentChunk: RawChunk | null = null;
+    let chunkFence: { char: '`' | '~'; len: number } | null = null;
 
     for (let i = startLineIdx; i < rawLines.length; i++) {
         const line = rawLines[i];
-        const hm = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+        const fenceUpdate = updateFenceState(line, chunkFence);
+        chunkFence = fenceUpdate.nextFence;
+        const hm = !fenceUpdate.insideFence ? line.match(/^\s*(#{1,6})\s+(.+?)\s*$/) : null;
         if (hm) {
             const level = hm[1].length;
             const headingText = hm[2].trim();
@@ -601,15 +634,7 @@ function parseMarkdownDocument(path: string, source: string): ParsedDocument {
         rawChunks.push(currentChunk);
     } else if (preHeadingLines.length > 0) {
         rawChunks.push({ heading: null, level: 0, lines: [...preHeadingLines] });
-    }
-
-    // Check if there were pre-heading lines before the first section
-    if (rawChunks.length > 0 && preHeadingLines.length > 0) {
-        const { contract: preContract, cleanedLines: preCleaned } = extractCommentDirectives(preHeadingLines);
-        docDirectiveContract = mergeContracts(docDirectiveContract, preContract);
-        if (preCleaned.length > 0) {
-            rawChunks.unshift({ heading: null, level: 0, lines: preCleaned });
-        }
+        preHeadingLines.length = 0;
     }
 
     const extractedCitations = new Map<string, ProseCitationEntry>();
@@ -755,7 +780,33 @@ function parseLatexDocument(path: string, source: string): ParsedDocument {
  * Replace inline citations (`[@key]` and `\cite{key}`) with `{cite_<safeKey>}` placeholders
  * and return the ordered list of referenced citation keys.
  */
-function parameterizeSectionCitations(text: string): {
+function collectSectionCitationKeys(text: string): string[] {
+    const orderedKeys: string[] = [];
+    const seen = new Set<string>();
+    const recordKey = (rawKey: string) => {
+        const norm = normalizeCitationKey(rawKey);
+        if (!seen.has(norm)) {
+            seen.add(norm);
+            orderedKeys.push(norm);
+        }
+    };
+    for (const match of text.matchAll(/\[([^\[\]]*@[A-Za-z0-9_:-]+[^\[\]]*)\]/g)) {
+        for (const m of match[1].matchAll(/@([A-Za-z0-9_:-]+)/g)) {
+            recordKey(m[1]);
+        }
+    }
+    for (const match of text.matchAll(/\\cite[a-zA-Z]*\{([^}]+)\}/g)) {
+        for (const k of match[1].split(',').map(s => s.trim()).filter(Boolean)) {
+            recordKey(k);
+        }
+    }
+    return orderedKeys;
+}
+
+function parameterizeSectionCitations(
+    text: string,
+    resolveParamName: (normKey: string) => string = safeCitationNodeName,
+): {
     templateText: string;
     citationKeys: string[];
 } {
@@ -776,7 +827,7 @@ function parameterizeSectionCitations(text: string): {
         if (matches.length === 0) return full;
         const placeholders = matches.map(m => {
             const norm = recordKey(m[1]);
-            return `{${safeCitationNodeName(norm)}}`;
+            return `{${resolveParamName(norm)}}`;
         });
         return placeholders.join(' ');
     });
@@ -787,7 +838,7 @@ function parameterizeSectionCitations(text: string): {
         if (keys.length === 0) return full;
         const placeholders = keys.map(k => {
             const norm = recordKey(k);
-            return `{${safeCitationNodeName(norm)}}`;
+            return `{${resolveParamName(norm)}}`;
         });
         return placeholders.join(' ');
     });
@@ -979,8 +1030,8 @@ export function portProseProject(
             totalDocumentWords += sectionWordCount;
 
             const directCitations = extractCitations(fullSectionRaw).map(normalizeCitationKey);
-            const { templateText, citationKeys } = parameterizeSectionCitations(fullSectionRaw);
-            const allSectionCites = [...new Set([...directCitations, ...citationKeys])];
+            const preCollectedCites = collectSectionCitationKeys(fullSectionRaw);
+            const allSectionCites = [...new Set([...directCitations, ...preCollectedCites])];
 
             for (const cKey of allSectionCites) {
                 allDiscoveredCitations.add(cKey);
@@ -993,6 +1044,11 @@ export function portProseProject(
                     citationNodeNameByKey.set(cKey, cNodeName);
                 }
             }
+
+            const { templateText } = parameterizeSectionCitations(
+                fullSectionRaw,
+                normKey => citationNodeNameByKey.get(normKey) ?? safeCitationNodeName(normKey),
+            );
 
             if (isSection && sec.heading) {
                 allDiscoveredSections.push(sec.heading);

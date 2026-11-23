@@ -12,6 +12,7 @@ import type { FlowRegion, SlateFlow } from '../harness_protocol';
 import {
     GENERATED_SLASH_HEADER,
     isSlateGeneratedContent,
+    normalizeCompileOutputPath,
     normalizeLanguage,
     type CanonicalLanguage,
 } from '../language_types';
@@ -660,10 +661,13 @@ function normalizeExistingFiles(
     existingFiles?: ReadonlyMap<string, string> | Record<string, string>,
 ): Map<string, string> {
     if (!existingFiles) return new Map();
-    if (existingFiles instanceof Map) {
-        return new Map([...existingFiles.entries()].map(([k, v]) => [k.replace(/\\/g, '/').replace(/^\.\//, ''), v]));
+    const entries = existingFiles instanceof Map ? [...existingFiles.entries()] : Object.entries(existingFiles);
+    const out = new Map<string, string>();
+    for (const [k, v] of entries) {
+        const norm = normalizeCompileOutputPath(k);
+        if (norm) out.set(norm, v);
     }
-    return new Map(Object.entries(existingFiles).map(([k, v]) => [k.replace(/\\/g, '/').replace(/^\.\//, ''), v]));
+    return out;
 }
 
 /**
@@ -771,25 +775,22 @@ export function compileTypeScript(
 
     const folderPathMap = new Map<string, string>();
     for (const folder of folders) {
-        const members = [...valid].filter(([nodeId]) => folderOf(nodeId) === folder);
-        const explicitPath = members
-            .map(([, n]) => (typeof n.extra?.modulePath === 'string' ? n.extra.modulePath.replace(/\\/g, '/').replace(/^\.\//, '') : null))
-            .find((p): p is string => Boolean(p));
+        const implicitMembers = [...valid].filter(
+            ([nodeId, n]) => folderOf(nodeId) === folder && !(typeof n.extra?.modulePath === 'string' && n.extra.modulePath.trim()),
+        );
+        const membersForExt = implicitMembers.length > 0
+            ? implicitMembers
+            : [...valid].filter(([nodeId]) => folderOf(nodeId) === folder);
 
-        if (explicitPath) {
-            folderPathMap.set(folder, explicitPath);
-            continue;
-        }
-
-        const explicitExt = members
+        const explicitExt = membersForExt
             .map(([, n]) => (typeof n.extra?.extension === 'string' ? n.extra.extension : null))
             .find((e): e is string => Boolean(e));
 
-        const hasJsx = members.some(([, n]) => {
+        const hasJsx = membersForExt.some(([, n]) => {
             const text = n.code.join('\n');
             return /<[A-Za-z][A-Za-z0-9.]*(\s|>|\/)/.test(text) && /return\s*\(?[\s\S]*</.test(text);
         });
-        const folderIsJs = members.every(([, n]) => {
+        const folderIsJs = membersForExt.every(([, n]) => {
             const l = n.language ?? config.language;
             try {
                 return normalizeLanguage(l) === 'javascript';
@@ -807,13 +808,36 @@ export function compileTypeScript(
         folderPathMap.set(folder, outPath);
     }
 
+    const fileMembers = new Map<string, Array<[string, SlateNode]>>();
+    const fileForNode = new Map<string, string>();
+    const sourceFoldersByFile = new Map<string, Set<string>>();
+
+    for (const [nodeId, node] of valid) {
+        const folder = folderOf(nodeId);
+        const rawOutPath = typeof node.extra?.modulePath === 'string' && node.extra.modulePath.trim()
+            ? node.extra.modulePath.trim()
+            : (folderPathMap.get(folder) ?? `${folder || rootModule}.ts`);
+        const normOutPath = normalizeCompileOutputPath(rawOutPath);
+        if (!normOutPath) {
+            error(`${nodeId}: invalid unsafe modulePath "${rawOutPath}".`);
+            continue;
+        }
+        fileForNode.set(nodeId, normOutPath);
+        const list = fileMembers.get(normOutPath) ?? [];
+        list.push([nodeId, node]);
+        fileMembers.set(normOutPath, list);
+        const fset = sourceFoldersByFile.get(normOutPath) ?? new Set<string>();
+        fset.add(folder);
+        sourceFoldersByFile.set(normOutPath, fset);
+    }
+
     const modulePath = (folder: string) => folderPathMap.get(folder) ?? `${folder || rootModule}.ts`;
 
     const preludeNames = new Map<string, Set<string>>();
     const definitions = new Map<string, string[]>();
     for (const [nodeId, node] of valid) {
         if (node.kind === 'prelude') {
-            preludeNames.set(nodeId, tsTopLevelBindings(node.code.join('\n'), modulePath(folderOf(nodeId))));
+            preludeNames.set(nodeId, tsTopLevelBindings(node.code.join('\n'), fileForNode.get(nodeId) ?? modulePath(folderOf(nodeId))));
         } else if (!node.kind) {
             definitions.set(node.name, [...(definitions.get(node.name) ?? []), nodeId]);
         }
@@ -822,9 +846,10 @@ export function compileTypeScript(
     const existingMap = normalizeExistingFiles(existingFiles);
     const files = new Map<string, string>();
     const moduleEdges = new Map<string, Set<string>>();
+    const isDefaultExportNode = (node: SlateNode): boolean =>
+        node.extra?.defaultExport === true || /^\s*export\s+default\b/.test(node.code.join('\n'));
 
-    for (const folder of folders) {
-        const outFilePath = modulePath(folder);
+    for (const [outFilePath, rawMembers] of [...fileMembers.entries()].sort(([a], [b]) => a.localeCompare(b))) {
         if (existingMap.has(outFilePath)) {
             const existingContent = existingMap.get(outFilePath)!;
             if (!isSlateGeneratedContent(existingContent)) {
@@ -835,14 +860,12 @@ export function compileTypeScript(
             }
         }
 
-        const members = [...valid]
-            .filter(([nodeId]) => folderOf(nodeId) === folder)
-            .sort(
-                ([leftId, left], [rightId, right]) =>
-                    blockOrder(left) - blockOrder(right) ||
-                    (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER) ||
-                    leftId.localeCompare(rightId),
-            );
+        const members = [...rawMembers].sort(
+            ([leftId, left], [rightId, right]) =>
+                blockOrder(left) - blockOrder(right) ||
+                (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER) ||
+                leftId.localeCompare(rightId),
+        );
 
         const localNames = new Set<string>();
         for (const [nodeId, node] of members) {
@@ -886,14 +909,17 @@ export function compileTypeScript(
             }
 
             const importFrom = (targetNodeId: string, name: string) => {
-                const targetFolder = folderOf(targetNodeId);
-                const targetFile = modulePath(targetFolder);
+                const targetFile = fileForNode.get(targetNodeId);
+                if (!targetFile || targetFile === outFilePath) return;
                 const relSpec = relativeModuleSpecifier(outFilePath, targetFile);
-                const line = `import { ${name} } from "${relSpec}";`;
+                const targetNode = valid.get(targetNodeId);
+                const line = targetNode && isDefaultExportNode(targetNode)
+                    ? `import ${name} from "${relSpec}";`
+                    : `import { ${name} } from "${relSpec}";`;
                 crossModule.push(line);
                 own.add(name);
                 bind(name, `"${line}"`, nodeId);
-                moduleEdges.set(folder, (moduleEdges.get(folder) ?? new Set()).add(targetFolder));
+                moduleEdges.set(outFilePath, (moduleEdges.get(outFilePath) ?? new Set()).add(targetFile));
             };
 
             for (const target of node.uses) {
@@ -902,7 +928,7 @@ export function compileTypeScript(
                     error(`${nodeId} uses ${target}, which ${nodes.has(target) ? 'did not compile' : 'does not exist'}.`);
                     continue;
                 }
-                if (folderOf(target) === folder) continue;
+                if (fileForNode.get(target) === outFilePath) continue;
                 if (used.kind === 'prelude') {
                     [...preludeNames.get(target)!]
                         .filter(name => names.has(name))
@@ -914,7 +940,7 @@ export function compileTypeScript(
 
             for (const name of names) {
                 if (name === node.name || own.has(name) || localNames.has(name)) continue;
-                const candidates = (definitions.get(name) ?? []).filter(candidate => folderOf(candidate) !== folder);
+                const candidates = (definitions.get(name) ?? []).filter(candidate => fileForNode.get(candidate) !== outFilePath);
                 if (candidates.length === 1) {
                     importFrom(candidates[0], name);
                 } else if (candidates.length > 1) {
@@ -924,18 +950,23 @@ export function compileTypeScript(
         }
 
         const mergedImports = [...mergeTsImports(external), ...mergeTsImports(crossModule)];
+        const primaryFolder = [...(sourceFoldersByFile.get(outFilePath) ?? [''])].sort()[0] ?? '';
         const headerSection = [
             GENERATED_SLASH_HEADER,
-            `// Source: slate/nodes/${folder}${folder ? '/' : ''}`,
+            `// Source: slate/nodes/${primaryFolder}${primaryFolder ? '/' : ''}`,
         ].join('\n');
 
         const sections = [headerSection, ...(mergedImports.length ? [mergedImports.join('\n')] : [])];
 
         const neededFromPrelude = new Set<string>();
-        for (const [ otherId, otherNode] of valid) {
-            if (folderOf(otherId) !== folder && otherNode.uses.includes( folder ? `${folder}/_prelude` : '_prelude')) {
-                const pSet = preludeNames.get(folder ? `${folder}/_prelude` : '_prelude');
-                if (pSet) pSet.forEach(n => neededFromPrelude.add(n));
+        for (const [otherId, otherNode] of valid) {
+            if (fileForNode.get(otherId) !== outFilePath && otherNode.uses.some(u => fileForNode.get(u) === outFilePath && valid.get(u)?.kind === 'prelude')) {
+                for (const u of otherNode.uses) {
+                    if (fileForNode.get(u) === outFilePath && valid.get(u)?.kind === 'prelude') {
+                        const pSet = preludeNames.get(u);
+                        if (pSet) pSet.forEach(n => neededFromPrelude.add(n));
+                    }
+                }
             }
         }
 
@@ -960,21 +991,21 @@ export function compileTypeScript(
     const visiting: string[] = [];
     const done = new Set<string>();
     const reported = new Set<string>();
-    const visit = (folder: string) => {
-        if (done.has(folder)) return;
-        const at = visiting.indexOf(folder);
+    const visit = (filePath: string) => {
+        if (done.has(filePath)) return;
+        const at = visiting.indexOf(filePath);
         if (at >= 0) {
-            const cycle = [...visiting.slice(at), folder].map(modulePath).join(' → ');
+            const cycle = [...visiting.slice(at), filePath].join(' → ');
             if (!reported.has(cycle)) diagnostics.push({ severity: 'warning', message: `Import cycle: ${cycle}.` });
             reported.add(cycle);
             return;
         }
-        visiting.push(folder);
-        for (const next of [...(moduleEdges.get(folder) ?? [])].sort()) visit(next);
+        visiting.push(filePath);
+        for (const next of [...(moduleEdges.get(filePath) ?? [])].sort()) visit(next);
         visiting.pop();
-        done.add(folder);
+        done.add(filePath);
     };
-    folders.forEach(visit);
+    [...fileMembers.keys()].sort().forEach(visit);
 
     return {
         files: new Map([...files].sort(([left], [right]) => left.localeCompare(right))),

@@ -587,5 +587,198 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(passed.state).toBe('passed');
             expect(passed.testsPassed).toBe(1);
         }, 20_000);
+
+        it('verifies self-closing JSX (#11), merges dependency imports (#12), isolates concurrent colliding slugs (#13), and handles null/async/optional TS cases (#16-#18)', async () => {
+            const workspaceRoot = makeTempWorkspace();
+
+            // #11: Self-closing JSX component passes strict TSX compilation and Node execution
+            const jsxNode: SlateNode = {
+                name: 'SelfTag',
+                language: 'typescript',
+                intent: 'Render self-closing span',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: [
+                    'export function SelfTag(id: string) {',
+                    '    return <span data-id={id} />;',
+                    '}',
+                ],
+                check: [
+                    "test('SelfTag returns jsx element props', () => {",
+                    "    const el = SelfTag('abc');",
+                    "    expect(el.type).toBe('span');",
+                    "    expect(el.props['data-id']).toBe('abc');",
+                    '});',
+                ],
+                extra: { extension: '.tsx' },
+            };
+            const jsxRes = await runNodeVerification({
+                workspaceRoot,
+                node: jsxNode,
+                nodeId: 'SelfTag',
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(jsxRes.state).toBe('passed');
+            expect(jsxRes.pydanticValid).toBe(true);
+
+            // #12: Target depending on helper whose imports bring in an external module merges helper imports cleanly
+            const helperPkgDir = path.join(workspaceRoot, 'node_modules', 'slate_helper_pkg');
+            fs.mkdirSync(helperPkgDir, { recursive: true });
+            fs.writeFileSync(path.join(helperPkgDir, 'package.json'), JSON.stringify({ name: 'slate_helper_pkg', main: 'index.js', types: 'index.d.ts' }), 'utf8');
+            fs.writeFileSync(path.join(helperPkgDir, 'index.js'), 'exports.joinWithSlash = (a, b) => `${a}/${b}`;\n', 'utf8');
+            fs.writeFileSync(path.join(helperPkgDir, 'index.d.ts'), 'export declare function joinWithSlash(a: string, b: string): string;\n', 'utf8');
+
+            const pathHelper: SlateNode = {
+                name: 'joinSafe',
+                language: 'typescript',
+                intent: 'Join POSIX path segments',
+                contract: '',
+                context: [],
+                imports: ["import { joinWithSlash } from 'slate_helper_pkg';"],
+                uses: [],
+                code: ['function joinSafe(a: string, b: string): string {', '    return joinWithSlash(a, b);', '}'],
+                extra: {},
+            };
+            const depConsumer: SlateNode = {
+                name: 'buildKey',
+                language: 'typescript',
+                intent: 'Build storage key',
+                contract: '',
+                context: ['joinSafe'],
+                imports: [],
+                uses: [],
+                code: ['export function buildKey(dir: string, file: string): string {', '    return joinSafe(dir, file);', '}'],
+                cases: [{ name: 'key', input: { dir: 'nodes', file: 'a.json' }, expected: 'nodes/a.json' }],
+                extra: {},
+            };
+            const depRes = await runNodeVerification({
+                workspaceRoot,
+                node: depConsumer,
+                nodeId: 'buildKey',
+                dependencies: new Map([['joinSafe', pathHelper]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(depRes.state).toBe('passed');
+
+            // #13: Concurrent verifications on colliding sanitized slugs ('a/b/f' vs 'a_b/f') never race
+            const nodeLeft: SlateNode = {
+                name: 'f',
+                language: 'typescript',
+                intent: 'Return 11',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function f(x: number): number { return x + 11; }'],
+                cases: [{ name: 'c1', input: { x: 1 }, expected: 12 }],
+                extra: {},
+            };
+            const nodeRight: SlateNode = {
+                name: 'f',
+                language: 'typescript',
+                intent: 'Return 22',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function f(x: number): number { return x + 22; }'],
+                cases: [{ name: 'c1', input: { x: 1 }, expected: 23 }],
+                extra: {},
+            };
+            const [resLeft, resRight] = await Promise.all([
+                runNodeVerification({ workspaceRoot, node: nodeLeft, nodeId: 'a/b/f', isTrusted: true, language: 'typescript' }),
+                runNodeVerification({ workspaceRoot, node: nodeRight, nodeId: 'a_b/f', isTrusted: true, language: 'typescript' }),
+            ]);
+            expect(resLeft.state).toBe('passed');
+            expect(resRight.state).toBe('passed');
+
+            // #16: expected: null is preserved and checked rigorously
+            const nullNode: SlateNode = {
+                name: 'findMissing',
+                language: 'typescript',
+                intent: 'Return null when absent',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function findMissing(flag: boolean): string | null {', "    return flag ? 'ok' : null;", '}'],
+                cases: [{ name: 'returns_null', input: { flag: false }, expected: null }],
+                extra: {},
+            };
+            expect(formatCasesAsTs(nullNode, nullNode.cases!, 'typescript').join('\n')).toContain('.toEqual(null)');
+            expect((await runNodeVerification({
+                workspaceRoot,
+                node: nullNode,
+                nodeId: 'findMissing',
+                isTrusted: true,
+                language: 'typescript',
+            })).state).toBe('passed');
+            const nullMismatch = await runNodeVerification({
+                workspaceRoot,
+                node: { ...nullNode, code: ['export function findMissing(_flag: boolean): string | null {', "    return 'unexpected';", '}'] },
+                nodeId: 'findMissingMismatch',
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(nullMismatch.state).toBe('failed');
+
+            // #17: async functions await result and handle rejected Promise error cases
+            const asyncNode: SlateNode = {
+                name: 'loadScore',
+                language: 'typescript',
+                intent: 'Resolve or reject async score',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: [
+                    'export async function loadScore(id: number): Promise<number> {',
+                    "    if (id < 0) throw new Error('invalid id');",
+                    '    return id * 10;',
+                    '}',
+                ],
+                cases: [
+                    { name: 'ok', input: { id: 3 }, expected: 30 },
+                    { name: 'neg_rejects', input: { id: -1 }, error: 'invalid id' },
+                ],
+                extra: {},
+            };
+            const formattedAsync = formatCasesAsTs(asyncNode, asyncNode.cases!, 'typescript').join('\n');
+            expect(formattedAsync).toContain('async () =>');
+            expect(formattedAsync).toContain('await loadScore(');
+            expect((await runNodeVerification({
+                workspaceRoot,
+                node: asyncNode,
+                nodeId: 'loadScore',
+                isTrusted: true,
+                language: 'typescript',
+            })).state).toBe('passed');
+
+            // #18: Partial object inputs with omitted leading optional parameters pad `undefined`
+            const optNode: SlateNode = {
+                name: 'addWithDefaults',
+                language: 'typescript',
+                intent: 'Add optional defaults',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                code: ['export function addWithDefaults(a: number = 1, b: number = 2): number {', '    return a + b;', '}'],
+                cases: [{ name: 'only_b', input: { b: 7 }, expected: 8 }],
+                extra: {},
+            };
+            expect(formatCasesAsTs(optNode, optNode.cases!, 'typescript').join('\n')).toContain('addWithDefaults(undefined, 7)');
+            expect((await runNodeVerification({
+                workspaceRoot,
+                node: optNode,
+                nodeId: 'addWithDefaults',
+                isTrusted: true,
+                language: 'typescript',
+            })).state).toBe('passed');
+        }, 40_000);
     });
 });

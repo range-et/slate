@@ -17,6 +17,7 @@ import {
     type RegionPorts,
 } from '../flow';
 import type { FlowRegion, SlateFlow } from '../harness_protocol';
+import { normalizeCompileOutputPath } from '../language_types';
 import type { SlateConfig, SlateNode } from '../slate_folder';
 import { projectModuleName, type CompileDiagnostic, type CompileResult } from './python';
 
@@ -48,10 +49,15 @@ function normalizeStringMap(
     input?: ReadonlyMap<string, string> | Record<string, string>,
 ): Map<string, string> {
     if (!input) return new Map();
-    if (input instanceof Map || (typeof (input as ReadonlyMap<string, string>).entries === 'function' && !(input instanceof Array))) {
-        return new Map(input as ReadonlyMap<string, string>);
+    const entries = (input instanceof Map || (typeof (input as ReadonlyMap<string, string>).entries === 'function' && !(input instanceof Array)))
+        ? [...(input as ReadonlyMap<string, string>).entries()]
+        : Object.entries(input as Record<string, string>);
+    const out = new Map<string, string>();
+    for (const [k, v] of entries) {
+        const norm = normalizeCompileOutputPath(k);
+        if (norm) out.set(norm, v);
     }
-    return new Map(Object.entries(input as Record<string, string>));
+    return out;
 }
 
 function isArduinoLanguage(lang: string | undefined): boolean {
@@ -159,22 +165,192 @@ export function cppNodeSignature(node: SlateNode): CallableSignature | null {
     return unitSignature(unit, parsed.units);
 }
 
-function stripDefaultArgsFromSignature(signature: string): string {
-    const openParen = signature.indexOf('(');
-    const closeParen = signature.lastIndexOf(')');
-    if (openParen < 0 || closeParen < openParen) return signature;
-    const prefix = signature.slice(0, openParen).trim();
-    const rawParams = signature.slice(openParen + 1, closeParen).trim();
-    if (!rawParams || rawParams === 'void') return `${prefix}()`;
+function stripDefaultArgsFromParamList(rawParams: string): string {
+    const cleanedParts: string[] = [];
+    let current = '';
+    let inDefault = false;
+    let paren = 0;
+    let angle = 0;
+    let bracket = 0;
+    let brace = 0;
+    let quote: string | null = null;
+    let escaped = false;
 
-    const probe = parseCppModule(`${signature} {}\n`, '<proto>');
-    const unit = probe.units[0];
-    if (!unit || !unit.params) return `${prefix}(${rawParams})`;
+    for (let i = 0; i < rawParams.length; i++) {
+        const ch = rawParams[i];
+        if (quote) {
+            if (!inDefault) current += ch;
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === quote) {
+                quote = null;
+            }
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+            if (!inDefault) current += ch;
+            continue;
+        }
+        if (ch === '(') paren++;
+        else if (ch === ')' && paren > 0) paren--;
+        else if (ch === '[') bracket++;
+        else if (ch === ']' && bracket > 0) bracket--;
+        else if (ch === '{') brace++;
+        else if (ch === '}' && brace > 0) brace--;
+        else if (ch === '<' && !inDefault && rawParams[i + 1] !== '=' && rawParams[i - 1] !== '-') angle++;
+        else if (ch === '>' && angle > 0 && rawParams[i - 1] !== '-') angle--;
 
-    const cleanParams = unit.params
-        .map(p => (p.annotation ? `${p.annotation} ${p.name}` : p.name))
-        .join(', ');
-    return `${prefix}(${cleanParams})`;
+        const atTop = paren === 0 && angle === 0 && bracket === 0 && brace === 0;
+        if (atTop && ch === '=' && !inDefault) {
+            inDefault = true;
+            current = current.trimEnd();
+            continue;
+        }
+        if (atTop && ch === ',') {
+            cleanedParts.push(current.trim());
+            current = '';
+            inDefault = false;
+            continue;
+        }
+        if (!inDefault) current += ch;
+    }
+    if (current.trim()) cleanedParts.push(current.trim());
+    return cleanedParts.join(', ');
+}
+
+function extractCppForwardDeclaration(bodyCode: string): string | null {
+    // Strip leading line/block comments cleanly while preserving template<...> and qualifiers
+    let i = 0;
+    const len = bodyCode.length;
+    while (i < len) {
+        while (i < len && /\s/.test(bodyCode[i])) i++;
+        if (bodyCode.startsWith('//', i)) {
+            const nl = bodyCode.indexOf('\n', i);
+            i = nl >= 0 ? nl + 1 : len;
+            continue;
+        }
+        if (bodyCode.startsWith('/*', i)) {
+            const end = bodyCode.indexOf('*/', i + 2);
+            i = end >= 0 ? end + 2 : len;
+            continue;
+        }
+        break;
+    }
+    const declSliceStart = i;
+
+    let openBodyBrace = -1;
+    let paren = 0;
+    let angle = 0;
+    let bracket = 0;
+    let quote: string | null = null;
+    let escaped = false;
+    let openParamParen = -1;
+    let closeParamParen = -1;
+
+    for (; i < len; i++) {
+        const ch = bodyCode[i];
+        if (quote) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === quote) {
+                quote = null;
+            }
+            continue;
+        }
+        if (bodyCode.startsWith('//', i)) {
+            const nl = bodyCode.indexOf('\n', i);
+            i = nl >= 0 ? nl : len;
+            continue;
+        }
+        if (bodyCode.startsWith('/*', i)) {
+            const end = bodyCode.indexOf('*/', i + 2);
+            i = end >= 0 ? end + 1 : len;
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+            continue;
+        }
+        if (ch === '[') {
+            bracket++;
+        } else if (ch === ']' && bracket > 0) {
+            bracket--;
+        } else if (ch === '<' && paren === 0 && bracket === 0 && bodyCode[i + 1] !== '=' && bodyCode[i - 1] !== '-') {
+            angle++;
+        } else if (ch === '>' && angle > 0 && paren === 0 && bracket === 0 && bodyCode[i - 1] !== '-') {
+            angle--;
+        } else if (ch === '(') {
+            if (paren === 0 && angle === 0 && bracket === 0 && openParamParen < 0) {
+                openParamParen = i;
+            }
+            paren++;
+        } else if (ch === ')' && paren > 0) {
+            paren--;
+            if (paren === 0 && openParamParen >= 0 && closeParamParen < 0) {
+                closeParamParen = i;
+            }
+        } else if (ch === '{' && paren === 0 && angle === 0 && bracket === 0) {
+            openBodyBrace = i;
+            break;
+        }
+    }
+
+    if (openBodyBrace < 0 || openParamParen < 0 || closeParamParen < openParamParen) {
+        return null;
+    }
+
+    const beforeParam = bodyCode.slice(declSliceStart, openParamParen).trimEnd();
+    const rawParams = bodyCode.slice(openParamParen + 1, closeParamParen);
+    const afterParam = bodyCode.slice(closeParamParen + 1, openBodyBrace).replace(/\s+/g, ' ').trim();
+    const strippedParams = stripDefaultArgsFromParamList(rawParams);
+    const decl = `${beforeParam}(${strippedParams})${afterParam ? ` ${afterParam}` : ''}`;
+    // Normalize whitespace inside header lines while preserving template<...> readability
+    const normalized = decl
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return normalized ? `${normalized};` : null;
+}
+
+function wrapWithCppNamespaces(
+    entries: Array<{ scopes: string[]; text: string }>,
+    joiner = '\n\n',
+): string[] {
+    if (entries.length === 0) return [];
+    const output: string[] = [];
+    let i = 0;
+    while (i < entries.length) {
+        const currentScopes = entries[i].scopes;
+        const grouped: string[] = [entries[i].text];
+        let j = i + 1;
+        while (
+            j < entries.length
+            && entries[j].scopes.length === currentScopes.length
+            && entries[j].scopes.every((s, idx) => s === currentScopes[idx])
+        ) {
+            grouped.push(entries[j].text);
+            j++;
+        }
+        let chunk = grouped.join(joiner);
+        for (let sIdx = currentScopes.length - 1; sIdx >= 0; sIdx--) {
+            const indented = chunk
+                .split('\n')
+                .map(line => (line.length > 0 ? `    ${line}` : ''))
+                .join('\n');
+            chunk = `${currentScopes[sIdx]} {\n${indented}\n}`;
+        }
+        output.push(chunk);
+        i = j;
+    }
+    return output;
 }
 
 /**
@@ -871,15 +1047,16 @@ export function compileCpp(
         const isArd = projectIsArduino || isArduinoLanguage(node.language) || node.extra?.arduinoSketch === true;
         const defaultExt = isArd ? '.ino' : '.cpp';
 
-        let outPath: string;
-        if (typeof node.extra?.modulePath === 'string' && node.extra.modulePath.trim()) {
-            outPath = node.extra.modulePath.trim().replace(/\\/g, '/');
-        } else if (folder) {
-            const ext = typeof node.extra?.extension === 'string' ? node.extra.extension : defaultExt;
-            outPath = `${folder}${ext}`;
-        } else {
-            const ext = typeof node.extra?.extension === 'string' ? node.extra.extension : defaultExt;
-            outPath = `${rootModule}${ext}`;
+        const rawOutPath = typeof node.extra?.modulePath === 'string' && node.extra.modulePath.trim()
+            ? node.extra.modulePath.trim()
+            : folder
+                ? `${folder}${typeof node.extra?.extension === 'string' ? node.extra.extension : defaultExt}`
+                : `${rootModule}${typeof node.extra?.extension === 'string' ? node.extra.extension : defaultExt}`;
+
+        const outPath = normalizeCompileOutputPath(rawOutPath);
+        if (!outPath) {
+            error(`${nodeId}: invalid unsafe output path "${rawOutPath}".`);
+            continue;
         }
 
         const group = fileGroups.get(outPath) ?? [];
@@ -947,9 +1124,9 @@ export function compileCpp(
         }
 
         const preludeBlocks: string[] = [];
-        const classBlocks: string[] = [];
-        const forwardPrototypes: string[] = [];
-        const functionBlocks: string[] = [];
+        const classBlocks: Array<{ scopes: string[]; text: string }> = [];
+        const forwardPrototypes: Array<{ scopes: string[]; text: string }> = [];
+        const functionBlocks: Array<{ scopes: string[]; text: string }> = [];
         const epilogueBlocks: string[] = [];
 
         const definedFnNames = new Set<string>();
@@ -965,6 +1142,9 @@ export function compileCpp(
                 continue;
             }
 
+            const scopes = Array.isArray(node.extra?.namespaceScopes)
+                ? node.extra.namespaceScopes.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+                : [];
             const parsed = parseCppModule(`${bodyCode}\n`, nodeId, node.name);
             const topUnit = parsed.units.find(u => u.parentId === null);
             const blockLines = [
@@ -975,13 +1155,16 @@ export function compileCpp(
             ];
 
             if (topUnit?.kind === 'class' || node.extra?.cppKind === 'class') {
-                classBlocks.push(blockLines.join('\n'));
+                classBlocks.push({ scopes, text: blockLines.join('\n') });
             } else {
                 definedFnNames.add(node.name);
                 if (topUnit?.signature && node.name !== 'main') {
-                    forwardPrototypes.push(`${stripDefaultArgsFromSignature(topUnit.signature)};`);
+                    const fwd = extractCppForwardDeclaration(bodyCode);
+                    if (fwd) {
+                        forwardPrototypes.push({ scopes, text: fwd });
+                    }
                 }
-                functionBlocks.push(blockLines.join('\n'));
+                functionBlocks.push({ scopes, text: blockLines.join('\n') });
             }
         }
 
@@ -990,20 +1173,21 @@ export function compileCpp(
             const hasFlowNode = orderedMembers.some(([, n]) => n.extra?.flow === true);
             if (hasFlowNode) {
                 if (!definedFnNames.has('setup')) {
-                    forwardPrototypes.push('void setup();');
-                    functionBlocks.push(['void setup() {', '}'].join('\n'));
+                    forwardPrototypes.push({ scopes: [], text: 'void setup();' });
+                    functionBlocks.push({ scopes: [], text: ['void setup() {', '}'].join('\n') });
                     definedFnNames.add('setup');
                 }
                 if (!definedFnNames.has('loop')) {
                     const mainFlowNode = orderedMembers.find(([, n]) => n.extra?.flow === true && n.name === 'main');
                     const mainSig = mainFlowNode ? cppNodeSignature(mainFlowNode[1]) : null;
                     const canCallMain = mainSig && mainSig.params.filter(p => p.default === null).length === 0;
-                    forwardPrototypes.push('void loop();');
-                    functionBlocks.push(
-                        canCallMain
+                    forwardPrototypes.push({ scopes: [], text: 'void loop();' });
+                    functionBlocks.push({
+                        scopes: [],
+                        text: canCallMain
                             ? ['void loop() {', '    main();', '}'].join('\n')
                             : ['void loop() {', '}'].join('\n'),
-                    );
+                    });
                     definedFnNames.add('loop');
                 }
             }
@@ -1019,14 +1203,17 @@ export function compileCpp(
         if (preludeBlocks.length > 0) {
             sections.push(preludeBlocks.join('\n\n'));
         }
-        if (classBlocks.length > 0) {
-            sections.push(classBlocks.join('\n\n'));
+        const wrappedClasses = wrapWithCppNamespaces(classBlocks, '\n\n');
+        if (wrappedClasses.length > 0) {
+            sections.push(wrappedClasses.join('\n\n'));
         }
-        if (forwardPrototypes.length > 0 && !isHeaderFile) {
-            sections.push(forwardPrototypes.join('\n'));
+        const wrappedProtos = !isHeaderFile ? wrapWithCppNamespaces(forwardPrototypes, '\n') : [];
+        if (wrappedProtos.length > 0) {
+            sections.push(wrappedProtos.join('\n'));
         }
-        if (functionBlocks.length > 0) {
-            sections.push(functionBlocks.join('\n\n'));
+        const wrappedFunctions = wrapWithCppNamespaces(functionBlocks, '\n\n');
+        if (wrappedFunctions.length > 0) {
+            sections.push(wrappedFunctions.join('\n\n'));
         }
         if (epilogueBlocks.length > 0) {
             sections.push(epilogueBlocks.join('\n\n'));

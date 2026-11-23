@@ -618,4 +618,56 @@ describe('C++ & Arduino Importer & Compiler Round-Trips', () => {
         expect(cppNodeSignature(nodes.get('blinkStep')!)?.name).toBe('blinkStep');
         expect(typeof cppFlowToNode).toBe('function');
     });
+
+    it('blocks unsafe C++ output paths (#2), keeps overloads (#7), preserves namespaces (#8), and emits accurate forward declarations (#9)', () => {
+        // #2: traversal path rejected
+        const badOut = compileCpp(
+            new Map([['bad', { name: 'bad', language: 'cpp', intent: '', contract: '', context: [], examples: [], locked: false, imports: [], uses: [], code: ['int bad() { return 1; }'], extra: { modulePath: '../../evil.cpp' } }]]),
+            { slate: 3, name: 'app', language: 'cpp' },
+        );
+        expect(badOut.files.size).toBe(0);
+        expect(badOut.diagnostics.some(d => d.severity === 'error' && /unsafe output path/i.test(d.message))).toBe(true);
+
+        // #7 + #8: namespace ownership + valid overloads
+        const nsSource = [
+            'namespace math {',
+            '    int calc(int x) { return x + 1; }',
+            '    double calc(double x) { return x + 0.5; }',
+            '}',
+        ].join('\n');
+        const portedNs = portCppProject({ 'math_ops.cpp': nsSource });
+        expect(portedNs.report.warnings).toEqual([]);
+        const calcIds = [...portedNs.nodes.keys()].filter(k => k.includes('calc'));
+        expect(calcIds).toHaveLength(2);
+        for (const id of calcIds) {
+            expect(portedNs.nodes.get(id)?.extra?.namespaceScopes).toEqual(['namespace math']);
+        }
+        // Namespace wrapper braces must not leak into prelude/epilogue
+        const preludeNodes = [...portedNs.nodes.values()].filter(n => n.kind === 'prelude' || n.kind === 'epilogue');
+        for (const pn of preludeNodes) {
+            expect(pn.code.join('\n')).not.toContain('namespace math');
+        }
+        const compiledNs = compileCpp(portedNs.nodes, portedNs.config, portedNs.flows);
+        expect(compiledNs.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        const outNs = compiledNs.files.get('math_ops.cpp')!;
+        expect(outNs).toContain('namespace math {');
+        expect(outNs).toContain('int calc(int x)');
+        expect(outNs).toContain('double calc(double x)');
+
+        // #9: forward prototypes preserve qualifiers, templates, and array parameters while stripping defaults
+        const fwdCompiled = compileCpp(
+            new Map<string, SlateNode>([
+                ['id', { name: 'id', language: 'cpp', intent: '', contract: '', context: [], examples: [], locked: false, imports: [], uses: [], code: ['template <typename T>', 'T id(T v) {', '    return v;', '}'], extra: { modulePath: 'fwd.cpp' } }],
+                ['sum', { name: 'sum', language: 'cpp', intent: '', contract: '', context: [], examples: [], locked: false, imports: [], uses: [], code: ['int sum(int arr[4]) {', '    return arr[0] + arr[1];', '}'], extra: { modulePath: 'fwd.cpp' } }],
+                ['helper', { name: 'helper', language: 'cpp', intent: '', contract: '', context: [], examples: [], locked: false, imports: [], uses: [], code: ['static int helper(int x = 1) {', '    return x * 2;', '}'], extra: { modulePath: 'fwd.cpp' } }],
+            ]),
+            { slate: 3, name: 'fwd', language: 'cpp' },
+        );
+        expect(fwdCompiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        const fwdOut = fwdCompiled.files.get('fwd.cpp')!;
+        expect(fwdOut).toContain('static int helper(int x);');
+        expect(fwdOut).not.toContain('static int helper(int x = 1);');
+        expect(fwdOut).toContain('template <typename T> T id(T v);');
+        expect(fwdOut).toContain('int sum(int arr[4]);');
+    });
 });

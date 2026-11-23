@@ -318,4 +318,51 @@ Literate programming [@knuth1984; @lamport1994] unifies source code and human-re
             'minWords: 10, maxWords: 50, requiredCitations: [@smith2024]',
         );
     });
+
+    it('avoids duplicate headingless passages (#19), deduplicates colliding citation params (#20), and ignores # headings inside fenced code blocks (#21)', () => {
+        // #19: headingless document produces only one passage node and compiles text once
+        const headingless = portProseProject({
+            'solo.md': 'Single paragraph without headings about deterministic graphs.\n\nSecond paragraph still in one chunk.',
+        });
+        expect(headingless.nodes.has('solo_passage_1')).toBe(true);
+        expect(headingless.nodes.has('solo_passage_2')).toBe(false);
+        const compiledSolo = compileProse(headingless.nodes, headingless.config, headingless.flows);
+        const soloMd = compiledSolo.files.get('solo.md')!;
+        expect(soloMd.split('Single paragraph without headings').length - 1).toBe(1);
+
+        // #20: colliding citation keys [@a-b] and [@a_b] or reserved section parameter name 'cite_ref'
+        const colliding = portProseProject({
+            'collide.md': [
+                '# Collisions',
+                '',
+                '## Cite Ref',
+                'Compare [@a-b] and [@a_b] rigorously.',
+            ].join('\n'),
+        });
+        expect(colliding.nodes.has('cite_a_b')).toBe(true);
+        expect(colliding.nodes.has('cite_a_b_2')).toBe(true);
+        const compiledCollide = compileProse(colliding.nodes, colliding.config, colliding.flows);
+        expect(compiledCollide.diagnostics).toEqual([]);
+
+        // #21: headings inside fenced code blocks must not split sections or hijack title
+        const fenced = portProseProject({
+            'code_doc.md': [
+                '## Methods',
+                'Below is sample Python config:',
+                '```python',
+                '# Not a document title',
+                '## Not a section split',
+                'x = 42',
+                '```',
+                'After fence text stays in Methods.',
+            ].join('\n'),
+        });
+        expect(fenced.nodes.has('methods')).toBe(true);
+        expect(fenced.nodes.has('not_a_document_title')).toBe(false);
+        expect(fenced.nodes.has('not_a_section_split')).toBe(false);
+        const methodsCode = fenced.nodes.get('methods')!.code.join('\n');
+        expect(methodsCode).toContain('# Not a document title');
+        expect(methodsCode).toContain('## Not a section split');
+        expect(methodsCode).toContain('After fence text stays in Methods.');
+    });
 });

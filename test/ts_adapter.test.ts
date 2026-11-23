@@ -8,6 +8,7 @@ import {
     GENERATED_TEX_HEADER,
     inferLanguageFromPath,
     isSlateGeneratedContent,
+    normalizeCompileOutputPath,
     normalizeLanguage,
     tryNormalizeLanguage,
 } from '../vscode-extension/src/language_adapter';
@@ -700,5 +701,62 @@ describe('TypeScript/JavaScript Importer & Compiler Round-Trips', () => {
         expect(rootFile).toContain('[v_loopPair_a, v_loopPair_b, _cond_loopPair] = pairStep(v_loopPair_a, v_loopPair_b);');
         expect(rootFile).toContain('if (!_cond_loopPair) break;');
         expect(rootFile).toContain('return [v_loopPair_a, v_loopPair_b];');
+    });
+
+    it('normalizes compile output paths, blocks escapes/raw-key bypasses, compiles distinct root modulePaths, and preserves default exports (#2, #3, #4)', () => {
+        // #2: normalizeCompileOutputPath unit boundary checks
+        expect(normalizeCompileOutputPath('a/b.ts')).toBe('a/b.ts');
+        expect(normalizeCompileOutputPath('sub\\../victim.ts')).toBe('victim.ts');
+        expect(normalizeCompileOutputPath('../../escape.ts')).toBeNull();
+        expect(normalizeCompileOutputPath('/abs/path.ts')).toBeNull();
+        expect(normalizeCompileOutputPath('C:/win/path.ts')).toBeNull();
+
+        const escapeCompiled = compileTypeScript(
+            new Map([
+                ['bad', makeNode({ name: 'bad', code: ['export function bad(): number { return 1; }'], extra: { modulePath: '../../escape.ts' } })],
+            ]),
+            { slate: 3, name: 'app', language: 'typescript' },
+        );
+        expect(escapeCompiled.files.size).toBe(0);
+        expect(escapeCompiled.diagnostics.some(d => d.severity === 'error' && /unsafe/i.test(d.message))).toBe(true);
+
+        const dotBypass = compileTypeScript(
+            new Map([
+                ['victim', makeNode({ name: 'victim', code: ['export function victim(): number { return 1; }'], extra: { modulePath: 'sub/../victim.ts' } })],
+            ]),
+            { slate: 3, name: 'app', language: 'typescript' },
+            undefined,
+            new Map(),
+            { 'victim.ts': '// Hand-written victim\nexport const keep = 1;\n' },
+        );
+        expect(dotBypass.files.size).toBe(0);
+        expect(dotBypass.diagnostics.some(d => d.severity === 'error' && d.message.includes('Refusing to overwrite'))).toBe(true);
+
+        // #3: two root-level nodes with distinct modulePaths compile into separate files with relative cross-import
+        const splitCompiled = compileTypeScript(
+            new Map([
+                ['helper', makeNode({ name: 'helper', code: ['export function helper(x: number): number { return x + 1; }'], extra: { modulePath: 'a.ts' } })],
+                ['caller', makeNode({ name: 'caller', uses: ['helper'], code: ['export function caller(x: number): number { return helper(x) * 2; }'], extra: { modulePath: 'b.ts' } })],
+            ]),
+            { slate: 3, name: 'app', language: 'typescript' },
+        );
+        expect(splitCompiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        expect(splitCompiled.files.has('a.ts')).toBe(true);
+        expect(splitCompiled.files.has('b.ts')).toBe(true);
+        expect(splitCompiled.files.get('a.ts')).toContain('export function helper');
+        expect(splitCompiled.files.get('b.ts')).toContain('import { helper } from "./a";');
+        expect(splitCompiled.files.get('b.ts')).toContain('export function caller');
+
+        // #4: default export/import round-trip preserves default import form
+        const ported = portTsProject({
+            'helper.ts': 'export default function helper(x: number): number {\n    return x + 10;\n}\n',
+            'app.ts': 'import helper from "./helper";\nexport function run(x: number): number {\n    return helper(x);\n}\n',
+        });
+        expect(ported.nodes.get('helper/helper')?.extra?.defaultExport).toBe(true);
+        const recompiled = compileTypeScript(ported.nodes, { slate: 3, name: 'app', language: 'typescript' });
+        expect(recompiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        expect(recompiled.files.get('helper.ts')).toContain('export default function helper');
+        expect(recompiled.files.get('app.ts')).toContain('import helper from "./helper";');
+        expect(recompiled.files.get('app.ts')).not.toContain('import { helper }');
     });
 });

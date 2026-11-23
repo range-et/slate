@@ -2,7 +2,7 @@ import {
     cppIdentifierNames,
     cppTopLevelBindings,
     isCppGeneratedFile,
-    parseCppModule,
+    parseCppDetailed,
     splitCppInclude,
     type CppInclude,
 } from '../cpp_adapter';
@@ -14,9 +14,13 @@ export { EPILOGUE, formatPortReport, PRELUDE, type PortReport };
 
 interface CppDefinition {
     name: string;
+    nodeIdName: string;
     kind: 'function' | 'class';
     signature: string;
     code: string;
+    namespaceScopes: string[];
+    overloadKey: string;
+    overloadIndex?: number;
 }
 
 interface CppModuleScan {
@@ -110,7 +114,7 @@ function scanCppModule(
     warnings: string[],
     mode?: 'cpp' | 'arduino',
 ): CppModuleScan | null {
-    const parsed = parseCppModule(source, path);
+    const parsed = parseCppDetailed(source, path);
     if (!parsed.valid) {
         warnings.push(`${path}: could not be parsed; not ported.`);
         return null;
@@ -159,31 +163,75 @@ function scanCppModule(
             warnings.push(`${path}: ${name} is a reserved node name; it stays in the prelude.`);
             continue;
         }
-        const existingIdx = definitions.findIndex(d => d.name === name);
-        if (existingIdx >= 0) {
+        const nsScopes = parsed.unitNamespaces.get(span.unit.id) ?? [];
+        const paramSig = (span.unit.params ?? []).map(p => (p.annotation ?? '').replace(/\s+/g, '')).join(',');
+        const overloadKey = `${nsScopes.join('::')}|${name}(${paramSig})`;
+
+        let overloadIndex: number | undefined;
+        const existingSameSigIdx = definitions.findIndex(d => d.overloadKey === overloadKey);
+        if (existingSameSigIdx >= 0) {
             warnings.push(`${path}: ${name} is defined more than once; kept the last definition.`);
-            definitions.splice(existingIdx, 1);
+            overloadIndex = definitions[existingSameSigIdx].overloadIndex;
+            definitions.splice(existingSameSigIdx, 1);
+        } else {
+            const sameNameCount = definitions.filter(d => d.name === name).length;
+            if (sameNameCount > 0) {
+                overloadIndex = sameNameCount + 1;
+            }
         }
+
+        const nodeIdName = overloadIndex ? `${name}__overload_${overloadIndex}` : name;
         definitions.push({
             name,
+            nodeIdName,
             kind: span.unit.kind === 'class' || span.unit.kind === 'nested_class' ? 'class' : 'function',
             signature: span.unit.signature ?? name,
             code: source.slice(span.from, span.to).trim(),
+            namespaceScopes: nsScopes,
+            overloadKey,
+            ...(overloadIndex !== undefined ? { overloadIndex } : {}),
         });
         definedNames.add(name);
     }
 
-    // Collect gaps outside unitSpans to extract `#include` directives, prelude (#define, constants), and epilogue
+    // Collect gaps outside unitSpans AND outside `namespace ... {` / `}` wrappers to extract `#include`, prelude, and epilogue
+    const excludedSpans: Array<{ from: number; to: number }> = [
+        ...unitSpans.map(s => ({ from: s.from, to: s.to })),
+        ...parsed.namespaceSpans.flatMap(ns => [
+            { from: ns.headerFrom, to: ns.braceFrom + 1 },
+            { from: ns.closeFrom, to: ns.closeFrom + 1 },
+        ]),
+    ].sort((a, b) => a.from - b.from || a.to - b.to);
+
+    const mergedExcluded: Array<{ from: number; to: number }> = [];
+    for (const s of excludedSpans) {
+        const last = mergedExcluded[mergedExcluded.length - 1];
+        if (last && s.from <= last.to) {
+            last.to = Math.max(last.to, s.to);
+        } else {
+            mergedExcluded.push({ ...s });
+        }
+    }
+
+    const lastUnitEnd = unitSpans.length > 0 ? Math.max(...unitSpans.map(s => s.to)) : 0;
     const gaps: Array<{ from: number; to: number; afterDefinitions: boolean }> = [];
     let cursor = 0;
-    for (const span of unitSpans) {
+    for (const span of mergedExcluded) {
         if (span.from > cursor) {
-            gaps.push({ from: cursor, to: span.from, afterDefinitions: false });
+            gaps.push({
+                from: cursor,
+                to: span.from,
+                afterDefinitions: unitSpans.length > 0 && cursor >= lastUnitEnd,
+            });
         }
         cursor = Math.max(cursor, span.to);
     }
     if (cursor < source.length) {
-        gaps.push({ from: cursor, to: source.length, afterDefinitions: unitSpans.length > 0 });
+        gaps.push({
+            from: cursor,
+            to: source.length,
+            afterDefinitions: unitSpans.length > 0 && cursor >= lastUnitEnd,
+        });
     }
 
     const includes: CppInclude[] = [];
@@ -297,9 +345,9 @@ export function portCppProject(
     for (const scan of scans) {
         preludeBindingsByFolder.set(scan.folder, cppTopLevelBindings(scan.prelude));
         for (const def of scan.definitions) {
-            const nodeId = join(scan.folder, def.name);
+            const nodeId = join(scan.folder, def.nodeIdName);
             const list = defNodeIdByName.get(def.name) ?? [];
-            list.push(nodeId);
+            if (!list.includes(nodeId)) list.push(nodeId);
             defNodeIdByName.set(def.name, list);
         }
     }
@@ -320,6 +368,8 @@ export function portCppProject(
             kind?: NodeKind,
             order?: number,
             defKind?: 'function' | 'class',
+            namespaceScopes?: string[],
+            overloadIndex?: number,
         ): SlateNode => {
             const idents = cppIdentifierNames(code);
             const uses = new Set<string>();
@@ -327,7 +377,10 @@ export function portCppProject(
             // Local definitions in the same translation unit
             for (const otherName of localDefNames) {
                 if (otherName !== name && idents.has(otherName)) {
-                    uses.add(join(scan.folder, otherName));
+                    const targetDefs = scan.definitions.filter(d => d.name === otherName);
+                    for (const td of targetDefs) {
+                        uses.add(join(scan.folder, td.nodeIdName));
+                    }
                 }
             }
 
@@ -367,6 +420,12 @@ export function portCppProject(
             if (defKind === 'class') {
                 extra.cppKind = 'class';
             }
+            if (namespaceScopes && namespaceScopes.length > 0) {
+                extra.namespaceScopes = namespaceScopes;
+            }
+            if (overloadIndex !== undefined) {
+                extra.overloadIndex = overloadIndex;
+            }
 
             return {
                 name,
@@ -391,8 +450,8 @@ export function portCppProject(
         }
 
         scan.definitions.forEach((def, index) => {
-            const nodeId = join(scan.folder, def.name);
-            nodes.set(nodeId, makeNode(def.name, def.code, undefined, index, def.kind));
+            const nodeId = join(scan.folder, def.nodeIdName);
+            nodes.set(nodeId, makeNode(def.name, def.code, undefined, index, def.kind, def.namespaceScopes, def.overloadIndex));
         });
 
         if (scan.epilogue) {

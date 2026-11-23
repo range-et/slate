@@ -225,6 +225,7 @@ export async function runNodeGuardrails(options: NodeGuardrailsOptions): Promise
         pythonPath,
         isTrusted: isTrusted !== false,
         signal,
+        language: node.language ?? config.language,
     });
 
     const nodeCasesFailures: string[] = [];
