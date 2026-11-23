@@ -8,7 +8,7 @@ import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_typ
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
 import { sourceHash } from './python_adapter';
-import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport, tsIdentifierNames } from './ts_adapter';
+import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
     moduleContent: string;
@@ -858,12 +858,25 @@ function hasWorkspaceReactTypes(startDir: string): boolean {
 function inspectTsModuleDeclarations(
     source: string,
     fileName: string,
-): { allSymbols: string[]; unexportedValues: string[]; unexportedTypes: string[] } {
+): {
+    allSymbols: string[];
+    valueSymbols: string[];
+    typeSymbols: string[];
+    exportedVariables: string[];
+    unexportedValues: string[];
+    unexportedTypes: string[];
+} {
     const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindForPath(fileName, source));
     const allSymbols: string[] = [];
+    const valueSymbols: string[] = [];
+    const typeSymbols: string[] = [];
+    const exportedVariables: string[] = [];
     const unexportedValues: string[] = [];
     const unexportedTypes: string[] = [];
     const seen = new Set<string>();
+    const seenValues = new Set<string>();
+    const seenTypes = new Set<string>();
+    const seenExportedVars = new Set<string>();
     const seenUnexportedVal = new Set<string>();
     const seenUnexportedType = new Set<string>();
 
@@ -879,15 +892,23 @@ function inspectTsModuleDeclarations(
         }
     };
 
-    const record = (names: readonly string[], isNamedExport: boolean, isTypeOnly: boolean) => {
+    const record = (names: readonly string[], isNamedExport: boolean, kind: 'value' | 'type' | 'both') => {
         for (const sym of names) {
             if (!sym) continue;
             if (!seen.has(sym)) {
                 seen.add(sym);
                 allSymbols.push(sym);
             }
+            if ((kind === 'value' || kind === 'both') && !seenValues.has(sym)) {
+                seenValues.add(sym);
+                valueSymbols.push(sym);
+            }
+            if ((kind === 'type' || kind === 'both') && !seenTypes.has(sym)) {
+                seenTypes.add(sym);
+                typeSymbols.push(sym);
+            }
             if (!isNamedExport) {
-                if (isTypeOnly) {
+                if (kind === 'type') {
                     if (!seenUnexportedType.has(sym)) {
                         seenUnexportedType.add(sym);
                         unexportedTypes.push(sym);
@@ -912,15 +933,308 @@ function inspectTsModuleDeclarations(
             for (const decl of stmt.declarationList.declarations) {
                 collectBindingNames(decl.name, names);
             }
-            record(names, isNamedExport, false);
-        } else if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt) || ts.isEnumDeclaration(stmt)) {
-            if (stmt.name) record([stmt.name.text], isNamedExport, false);
+            record(names, isNamedExport, 'value');
+            if (isNamedExport) {
+                for (const sym of names) {
+                    if (sym && !seenExportedVars.has(sym)) {
+                        seenExportedVars.add(sym);
+                        exportedVariables.push(sym);
+                    }
+                }
+            }
+        } else if (ts.isFunctionDeclaration(stmt)) {
+            if (stmt.name) record([stmt.name.text], isNamedExport, 'value');
+        } else if (ts.isClassDeclaration(stmt) || ts.isEnumDeclaration(stmt)) {
+            if (stmt.name) record([stmt.name.text], isNamedExport, 'both');
         } else if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) {
-            record([stmt.name.text], isNamedExport, true);
+            record([stmt.name.text], isNamedExport, 'type');
         }
     }
 
-    return { allSymbols, unexportedValues, unexportedTypes };
+    return { allSymbols, valueSymbols, typeSymbols, exportedVariables, unexportedValues, unexportedTypes };
+}
+
+function collectTsReferencedNamespaces(
+    source: string,
+    fileName: string,
+): { valueRefs: Set<string>; typeRefs: Set<string> } {
+    const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindForPath(fileName, source));
+    const host: ts.CompilerHost = {
+        getSourceFile: (requested) => (requested === fileName ? sf : undefined),
+        writeFile: () => {},
+        getCurrentDirectory: () => '',
+        getDirectories: () => [],
+        fileExists: (requested) => requested === fileName,
+        readFile: () => undefined,
+        getCanonicalFileName: (name) => name,
+        useCaseSensitiveFileNames: () => true,
+        getNewLine: () => '\n',
+        getDefaultLibFileName: () => '__slate_no_lib.d.ts',
+    };
+    const program = ts.createProgram(
+        [fileName],
+        {
+            allowJs: true,
+            noLib: true,
+            noResolve: true,
+            jsx: ts.JsxEmit.Preserve,
+            target: ts.ScriptTarget.Latest,
+            module: ts.ModuleKind.ESNext,
+        },
+        host,
+    );
+    const checker = program.getTypeChecker();
+    const isLocallyResolved = (sym: ts.Symbol | undefined): boolean =>
+        Boolean(sym?.declarations && sym.declarations.some(decl => decl.getSourceFile() === sf));
+
+    const valueRefs = new Set<string>();
+    const typeRefs = new Set<string>();
+
+    const recordEntityNameRoot = (name: ts.EntityName, target: Set<string>): void => {
+        let cur: ts.EntityName = name;
+        while (ts.isQualifiedName(cur)) {
+            cur = cur.left;
+        }
+        if (ts.isIdentifier(cur) && !isLocallyResolved(checker.getSymbolAtLocation(cur))) {
+            target.add(cur.text);
+        }
+    };
+
+    const visitDecorators = (node: ts.Node): void => {
+        if (!ts.canHaveDecorators(node)) return;
+        for (const dec of ts.getDecorators(node) ?? []) {
+            visit(dec, false);
+        }
+    };
+
+    const visitBindingPattern = (binding: ts.BindingName): void => {
+        if (ts.isIdentifier(binding)) return;
+        for (const el of binding.elements) {
+            if (!ts.isBindingElement(el)) continue;
+            if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {
+                visit(el.propertyName.expression, false);
+            }
+            visitBindingPattern(el.name);
+            if (el.initializer) visit(el.initializer, false);
+        }
+    };
+
+    const visit = (node: ts.Node, inType: boolean): void => {
+        if (ts.isImportDeclaration(node) || ts.isJsxClosingElement(node)) return;
+        visitDecorators(node);
+
+        if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+            visitBindingPattern(node.name);
+            if (node.type) visit(node.type, true);
+            if (node.initializer) visit(node.initializer, false);
+            return;
+        }
+
+        if (
+            ts.isFunctionDeclaration(node)
+            || ts.isFunctionExpression(node)
+            || ts.isArrowFunction(node)
+            || ts.isMethodDeclaration(node)
+            || ts.isMethodSignature(node)
+            || ts.isGetAccessorDeclaration(node)
+            || ts.isSetAccessorDeclaration(node)
+            || ts.isConstructorDeclaration(node)
+            || ts.isCallSignatureDeclaration(node)
+            || ts.isConstructSignatureDeclaration(node)
+            || ts.isFunctionTypeNode(node)
+            || ts.isConstructorTypeNode(node)
+        ) {
+            if ('name' in node && node.name && ts.isComputedPropertyName(node.name)) {
+                visit(node.name.expression, false);
+            }
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            for (const param of node.parameters) visit(param, false);
+            if (node.type) visit(node.type, true);
+            if ('body' in node && node.body) visit(node.body, false);
+            return;
+        }
+
+        if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            for (const hc of node.heritageClauses ?? []) {
+                const isImplements = hc.token === ts.SyntaxKind.ImplementsKeyword;
+                for (const t of hc.types) {
+                    visit(t.expression, isImplements);
+                    for (const ta of t.typeArguments ?? []) visit(ta, true);
+                }
+            }
+            for (const member of node.members) visit(member, false);
+            return;
+        }
+
+        if (ts.isInterfaceDeclaration(node)) {
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            for (const hc of node.heritageClauses ?? []) {
+                for (const t of hc.types) visit(t, true);
+            }
+            for (const member of node.members) visit(member, true);
+            return;
+        }
+
+        if (ts.isTypeAliasDeclaration(node)) {
+            for (const tp of node.typeParameters ?? []) visit(tp, true);
+            visit(node.type, true);
+            return;
+        }
+
+        if (ts.isEnumDeclaration(node)) {
+            for (const member of node.members) {
+                if (ts.isComputedPropertyName(member.name)) {
+                    visit(member.name.expression, false);
+                }
+                if (member.initializer) visit(member.initializer, false);
+            }
+            return;
+        }
+
+        if (ts.isTypeParameterDeclaration(node)) {
+            if (node.constraint) visit(node.constraint, true);
+            if (node.default) visit(node.default, true);
+            return;
+        }
+
+        if (ts.isTypePredicateNode(node)) {
+            if (node.type) visit(node.type, true);
+            return;
+        }
+
+        if (ts.isInferTypeNode(node)) {
+            visit(node.typeParameter, true);
+            return;
+        }
+
+        if (ts.isNamedTupleMember(node)) {
+            visit(node.type, true);
+            return;
+        }
+
+        if (ts.isImportTypeNode(node)) {
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            return;
+        }
+
+        if (ts.isTypeQueryNode(node)) {
+            recordEntityNameRoot(node.exprName, valueRefs);
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            return;
+        }
+
+        if (ts.isTypeReferenceNode(node)) {
+            recordEntityNameRoot(node.typeName, typeRefs);
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            return;
+        }
+
+        if (ts.isTypeNode(node)) {
+            ts.forEachChild(node, child => visit(child, true));
+            return;
+        }
+
+        if (ts.isPropertyAccessExpression(node)) {
+            visit(node.expression, inType);
+            return;
+        }
+
+        if (ts.isPropertyAssignment(node)) {
+            if (ts.isComputedPropertyName(node.name)) {
+                visit(node.name.expression, false);
+            }
+            visit(node.initializer, false);
+            return;
+        }
+
+        if (ts.isShorthandPropertyAssignment(node)) {
+            if (!isLocallyResolved(checker.getShorthandAssignmentValueSymbol(node))) {
+                valueRefs.add(node.name.text);
+            }
+            if (node.objectAssignmentInitializer) {
+                visit(node.objectAssignmentInitializer, false);
+            }
+            return;
+        }
+
+        if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+            if (ts.isComputedPropertyName(node.name)) {
+                visit(node.name.expression, false);
+            }
+            if (node.type) visit(node.type, true);
+            if ('initializer' in node && node.initializer) visit(node.initializer, false);
+            return;
+        }
+
+        if (ts.isExportDeclaration(node)) {
+            if (node.moduleSpecifier) return;
+            if (node.exportClause && ts.isNamedExports(node.exportClause)) {
+                for (const spec of node.exportClause.elements) {
+                    if (isLocallyResolved(checker.getExportSpecifierLocalTargetSymbol(spec))) continue;
+                    const ref = spec.propertyName ?? spec.name;
+                    if (node.isTypeOnly || spec.isTypeOnly) {
+                        typeRefs.add(ref.text);
+                    } else {
+                        valueRefs.add(ref.text);
+                        typeRefs.add(ref.text);
+                    }
+                }
+            }
+            return;
+        }
+
+        if (ts.isExportAssignment(node)) {
+            if (ts.isIdentifier(node.expression)) {
+                if (!isLocallyResolved(checker.getSymbolAtLocation(node.expression))) {
+                    valueRefs.add(node.expression.text);
+                    typeRefs.add(node.expression.text);
+                }
+            } else {
+                visit(node.expression, false);
+            }
+            return;
+        }
+
+        if (ts.isLabeledStatement(node)) {
+            visit(node.statement, false);
+            return;
+        }
+
+        if (ts.isBreakOrContinueStatement(node)) {
+            return;
+        }
+
+        if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+            if (ts.isPropertyAccessExpression(node.tagName)) {
+                visit(node.tagName, false);
+            } else if (ts.isIdentifier(node.tagName)) {
+                if (!/^[a-z]/.test(node.tagName.text) && !isLocallyResolved(checker.getSymbolAtLocation(node.tagName))) {
+                    valueRefs.add(node.tagName.text);
+                }
+            }
+            for (const ta of node.typeArguments ?? []) visit(ta, true);
+            visit(node.attributes, false);
+            return;
+        }
+
+        if (ts.isJsxAttribute(node)) {
+            if (node.initializer) visit(node.initializer, false);
+            return;
+        }
+
+        if (ts.isIdentifier(node)) {
+            if (!isLocallyResolved(checker.getSymbolAtLocation(node))) {
+                (inType ? typeRefs : valueRefs).add(node.text);
+            }
+            return;
+        }
+
+        ts.forEachChild(node, child => visit(child, inType));
+    };
+
+    ts.forEachChild(sf, child => visit(child, false));
+    return { valueRefs, typeRefs };
 }
 
 function stripInjectedImports(lines: readonly string[], symbolNames: ReadonlySet<string>, stripTestImports: boolean): string[] {
@@ -1116,6 +1430,8 @@ async function runTsNodeVerification(
             cjsPath: string;
             needsJsx: boolean;
             exportedSymbols: string[];
+            exportedValues: Set<string>;
+            exportedTypes: Set<string>;
             source: string;
         }
 
@@ -1129,6 +1445,8 @@ async function runTsNodeVerification(
             const exportedSymbols = decls.allSymbols.length > 0
                 ? decls.allSymbols
                 : (!dep.kind ? [dep.name] : []);
+            const exportedValues = new Set<string>(decls.allSymbols.length > 0 ? decls.valueSymbols : (!dep.kind ? [dep.name] : []));
+            const exportedTypes = new Set<string>(decls.allSymbols.length > 0 ? decls.typeSymbols : []);
             return {
                 dep,
                 moduleBase,
@@ -1138,8 +1456,100 @@ async function runTsNodeVerification(
                 needsJsx: depNeedsJsx,
                 decls,
                 exportedSymbols,
+                exportedValues,
+                exportedTypes,
             };
         });
+
+        const canImportDepSymbol = (
+            depSpec: { exportedValues: ReadonlySet<string>; exportedTypes: ReadonlySet<string> },
+            sym: string,
+            boundValues: ReadonlySet<string>,
+            boundTypes: ReadonlySet<string>,
+        ): boolean => !(depSpec.exportedValues.has(sym) && boundValues.has(sym))
+            && !(depSpec.exportedTypes.has(sym) && boundTypes.has(sym));
+
+        const recordDepSymbol = (
+            sym: string,
+            boundValues: Set<string>,
+            boundTypes: Set<string>,
+        ): void => {
+            boundValues.add(sym);
+            boundTypes.add(sym);
+        };
+
+        type DepImportCandidate = {
+            moduleBase: string;
+            exportedSymbols: readonly string[];
+            exportedValues: ReadonlySet<string>;
+            exportedTypes: ReadonlySet<string>;
+        };
+
+        const emitAllDepImports = (
+            depSpecs: readonly DepImportCandidate[],
+            refs: { valueRefs: ReadonlySet<string>; typeRefs: ReadonlySet<string> },
+            boundValues: Set<string>,
+            boundTypes: Set<string>,
+            outLines: string[],
+        ): void => {
+            const perDep = new Map<string, { valueNeeded: string[]; typeOnlyNeeded: string[] }>();
+            const tryAcquire = (depSpec: DepImportCandidate, sym: string): void => {
+                if (!canImportDepSymbol(depSpec, sym, boundValues, boundTypes)) return;
+                let entry = perDep.get(depSpec.moduleBase);
+                if (!entry) {
+                    entry = { valueNeeded: [], typeOnlyNeeded: [] };
+                    perDep.set(depSpec.moduleBase, entry);
+                }
+                if (depSpec.exportedValues.has(sym)) {
+                    entry.valueNeeded.push(sym);
+                } else {
+                    entry.typeOnlyNeeded.push(sym);
+                }
+                recordDepSymbol(sym, boundValues, boundTypes);
+            };
+
+            // Pass 1: dual providers when a symbol needs both value and type namespaces
+            for (const depSpec of depSpecs) {
+                for (const sym of depSpec.exportedSymbols) {
+                    if (
+                        depSpec.exportedValues.has(sym) && depSpec.exportedTypes.has(sym)
+                        && refs.valueRefs.has(sym) && refs.typeRefs.has(sym)
+                    ) {
+                        tryAcquire(depSpec, sym);
+                    }
+                }
+            }
+            // Pass 2: value providers whenever a value reference exists, so an earlier
+            // type-only dependency does not reserve the name and block required runtime bindings
+            for (const depSpec of depSpecs) {
+                for (const sym of depSpec.exportedSymbols) {
+                    if (depSpec.exportedValues.has(sym) && refs.valueRefs.has(sym)) {
+                        tryAcquire(depSpec, sym);
+                    }
+                }
+            }
+            // Pass 3: remaining type-only providers for remaining type references
+            for (const depSpec of depSpecs) {
+                for (const sym of depSpec.exportedSymbols) {
+                    if (depSpec.exportedTypes.has(sym) && refs.typeRefs.has(sym)) {
+                        tryAcquire(depSpec, sym);
+                    }
+                }
+            }
+
+            for (const depSpec of depSpecs) {
+                const entry = perDep.get(depSpec.moduleBase);
+                if (!entry) continue;
+                if (entry.valueNeeded.length > 0) {
+                    entry.valueNeeded.sort();
+                    outLines.push(`import { ${entry.valueNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+                }
+                if (entry.typeOnlyNeeded.length > 0) {
+                    entry.typeOnlyNeeded.sort();
+                    outLines.push(`import type { ${entry.typeOnlyNeeded.join(', ')} } from './${depSpec.moduleBase}';`);
+                }
+            }
+        };
 
         const availableSymbols = new Set<string>([
             node.name,
@@ -1147,27 +1557,31 @@ async function runTsNodeVerification(
         ]);
 
         const depModules: DepModuleSpec[] = depSpecsRaw.map((spec) => {
-            const { dep, moduleBase, ext: depExt, tsPath, cjsPath, needsJsx: depNeedsJsx, decls, exportedSymbols } = spec;
+            const { dep, moduleBase, ext: depExt, tsPath, cjsPath, needsJsx: depNeedsJsx, decls, exportedSymbols, exportedValues, exportedTypes } = spec;
             const depImports = dedupeNormalizedImports(stripInjectedImports(dep.imports ?? [], availableSymbols, false));
             const depLines = stripInjectedImports(dep.code, availableSymbols, false);
             const depText = depLines.join('\n');
-            const depIdents = tsIdentifierNames(depText, `dep_${dep.name}${depExt}`);
-            const boundInDep = new Set<string>([...depImports.bindings, ...decls.allSymbols]);
+            const depRefs = collectTsReferencedNamespaces(depText, `dep_${dep.name}${depExt}`);
+            const boundValuesInDep = new Set<string>([...depImports.bindings, ...decls.valueSymbols]);
+            const boundTypesInDep = new Set<string>([...depImports.bindings, ...decls.typeSymbols, ...decls.exportedVariables]);
             const depParts: string[] = [...depImports.lines];
 
-            for (const other of depSpecsRaw) {
-                if (other.dep === dep) continue;
-                const needed = other.exportedSymbols.filter(sym => depIdents.has(sym) && !boundInDep.has(sym));
-                if (needed.length > 0) {
-                    depParts.push(`import { ${needed.join(', ')} } from './${other.moduleBase}';`);
-                    for (const sym of needed) boundInDep.add(sym);
-                }
-            }
+            emitAllDepImports(
+                depSpecsRaw.filter(other => other.dep !== dep),
+                depRefs,
+                boundValuesInDep,
+                boundTypesInDep,
+                depParts,
+            );
 
             // Support mutual recursion (helper calling target function)
-            if (depIdents.has(node.name) && !boundInDep.has(node.name)) {
+            if (
+                (depRefs.valueRefs.has(node.name) || depRefs.typeRefs.has(node.name))
+                && !boundValuesInDep.has(node.name)
+                && !boundTypesInDep.has(node.name)
+            ) {
                 depParts.push(`import { ${node.name} } from './${safeBase}_impl';`);
-                boundInDep.add(node.name);
+                recordDepSymbol(node.name, boundValuesInDep, boundTypesInDep);
             }
 
             depParts.push(...depLines);
@@ -1188,6 +1602,8 @@ async function runTsNodeVerification(
                 cjsPath,
                 needsJsx: depNeedsJsx,
                 exportedSymbols,
+                exportedValues,
+                exportedTypes,
                 source: depParts.join('\n') + '\n',
             };
         });
@@ -1196,18 +1612,13 @@ async function runTsNodeVerification(
         const targetImports = dedupeNormalizedImports(stripInjectedImports(node.imports ?? [], availableSymbols, false));
         const targetLines = stripInjectedImports(node.code, availableSymbols, false);
         const targetText = targetLines.join('\n');
-        const targetIdents = tsIdentifierNames(targetText, `target${ext}`);
+        const targetRefs = collectTsReferencedNamespaces(targetText, `target${ext}`);
         const targetDecls = inspectTsModuleDeclarations(targetText, `target${ext}`);
-        const boundInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.allSymbols]);
+        const boundValuesInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.valueSymbols]);
+        const boundTypesInTarget = new Set<string>([...targetImports.bindings, ...targetDecls.typeSymbols, ...targetDecls.exportedVariables]);
 
         const implParts: string[] = [...targetImports.lines];
-        for (const depSpec of depModules) {
-            const needed = depSpec.exportedSymbols.filter(sym => targetIdents.has(sym) && !boundInTarget.has(sym));
-            if (needed.length > 0) {
-                implParts.push(`import { ${needed.join(', ')} } from './${depSpec.moduleBase}';`);
-                for (const sym of needed) boundInTarget.add(sym);
-            }
-        }
+        emitAllDepImports(depModules, targetRefs, boundValuesInTarget, boundTypesInTarget, implParts);
         implParts.push(...targetLines);
 
         if (targetDecls.unexportedValues.includes(node.name) || !targetDecls.allSymbols.includes(node.name)) {
@@ -1224,23 +1635,22 @@ async function runTsNodeVerification(
             testBodyLines.push(...formatCasesAsTs(node, node.cases, language));
         }
         const testBodyText = testBodyLines.join('\n');
-        const testIdents = tsIdentifierNames(testBodyText, `test_${safeBase}${ext}`);
-        const boundInTest = new Set<string>([node.name]);
+        const testRefs = collectTsReferencedNamespaces(testBodyText, `test_${safeBase}${ext}`);
+        const testDecls = inspectTsModuleDeclarations(testBodyText, `test_${safeBase}${ext}`);
+        const boundValuesInTest = new Set<string>([node.name, ...testDecls.valueSymbols]);
+        const boundTypesInTest = new Set<string>([node.name, ...testDecls.typeSymbols, ...testDecls.exportedVariables]);
         for (const line of testBodyLines) {
             if (/^\s*import\b/.test(line)) {
                 for (const item of splitTsImport(line)) {
-                    if (item.binding) boundInTest.add(item.binding);
+                    if (item.binding) {
+                        boundValuesInTest.add(item.binding);
+                        boundTypesInTest.add(item.binding);
+                    }
                 }
             }
         }
         const testHeader: string[] = [`import { ${node.name} } from './${safeBase}_impl';`];
-        for (const depSpec of depModules) {
-            const needed = depSpec.exportedSymbols.filter(sym => testIdents.has(sym) && !boundInTest.has(sym));
-            if (needed.length > 0) {
-                testHeader.push(`import { ${needed.join(', ')} } from './${depSpec.moduleBase}';`);
-                for (const sym of needed) boundInTest.add(sym);
-            }
-        }
+        emitAllDepImports(depModules, testRefs, boundValuesInTest, boundTypesInTest, testHeader);
         const testSource = [...testHeader, ...testBodyLines].join('\n') + '\n';
 
         const implTsPath = path.join(buildDir, `${safeBase}_impl${ext}`);

@@ -961,6 +961,1067 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(mutualRes.state, mutualRes.traceback).toBe('passed');
             expect(mutualRes.pydanticValid).toBe(true);
+
+            // Top-level declarations inside node.check shadow exported _prelude symbols without duplicate import injection
+            const shadowPreludeNode = makeNode({
+                name: 'helper_prelude',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude constant exported to helpers',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: ['export const LIMIT = 10;'],
+            });
+            const usePreludeLimitNode = makeNode({
+                name: 'scaleWithLimit',
+                language: 'typescript',
+                intent: 'Multiply value by prelude LIMIT',
+                contract: '',
+                context: ['helper_prelude'],
+                imports: [],
+                uses: ['helper_prelude'],
+                cases: undefined,
+                code: [
+                    'export function scaleWithLimit(n: number): number {',
+                    '    return n * LIMIT;',
+                    '}',
+                ],
+                check: [
+                    'const LIMIT = 99;',
+                    "test('shadows prelude LIMIT in check body without duplicate import', () => {",
+                    '    expect(LIMIT).toBe(99);',
+                    '    expect(scaleWithLimit(2)).toBe(20);',
+                    '});',
+                ],
+            });
+            const shadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: usePreludeLimitNode,
+                nodeId: 'scaleWithLimit',
+                dependencies: new Map([['helper_prelude', shadowPreludeNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(shadowRes.state, shadowRes.traceback).toBe('passed');
+            expect(shadowRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4661835679): Local type/value shadowing respects TypeScript namespace separation
+            const depNamespacesNode = makeNode({
+                name: 'ns_prelude',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value LIMIT, interface ScaleCfg, and class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: [
+                    'export const LIMIT = 10;',
+                    'export interface ScaleCfg { factor: number; }',
+                    'export class Box { v = 1; }',
+                ],
+            });
+            const localTypeShadowsValueNode = makeNode({
+                name: 'useValueWithLocalType',
+                language: 'typescript',
+                intent: 'Check body declares type LIMIT without suppressing dep value LIMIT import',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function useValueWithLocalType(n: number): number {', '    return n * LIMIT;', '}'],
+                check: [
+                    'type LIMIT = number;',
+                    "test('local type LIMIT still imports dep value LIMIT', () => {",
+                    '    const x: LIMIT = LIMIT;',
+                    '    expect(x).toBe(10);',
+                    '    expect(useValueWithLocalType(2)).toBe(20);',
+                    '});',
+                ],
+            });
+            const localTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: localTypeShadowsValueNode,
+                nodeId: 'useValueWithLocalType',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(localTypeRes.state, localTypeRes.traceback).toBe('passed');
+            expect(localTypeRes.pydanticValid).toBe(true);
+
+            const localValueShadowsTypeNode = makeNode({
+                name: 'useInterfaceWithLocalValue',
+                language: 'typescript',
+                intent: 'Check body declares const ScaleCfg without suppressing dep interface ScaleCfg import',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function useInterfaceWithLocalValue(cfg: ScaleCfg): number {', '    return cfg.factor;', '}'],
+                check: [
+                    'const ScaleCfg = 3;',
+                    "test('local const ScaleCfg still imports dep interface ScaleCfg', () => {",
+                    '    const cfg: ScaleCfg = { factor: ScaleCfg };',
+                    '    expect(cfg.factor).toBe(3);',
+                    '    expect(useInterfaceWithLocalValue(cfg)).toBe(3);',
+                    '});',
+                ],
+            });
+            const localValueRes = await runNodeVerification({
+                workspaceRoot,
+                node: localValueShadowsTypeNode,
+                nodeId: 'useInterfaceWithLocalValue',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(localValueRes.state, localValueRes.traceback).toBe('passed');
+            expect(localValueRes.pydanticValid).toBe(true);
+
+            const localTypeShadowsClassNode = makeNode({
+                name: 'useWithLocalTypeBox',
+                language: 'typescript',
+                intent: 'Check body declares type Box, suppressing conflicting dual class Box import',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function useWithLocalTypeBox(): number {', '    return new Box().v;', '}'],
+                check: [
+                    'type Box = number;',
+                    "test('local type Box suppresses conflicting dual class Box import', () => {",
+                    '    const b: Box = 42;',
+                    '    expect(b).toBe(42);',
+                    '    expect(useWithLocalTypeBox()).toBe(1);',
+                    '});',
+                ],
+            });
+            const localClassShadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: localTypeShadowsClassNode,
+                nodeId: 'useWithLocalTypeBox',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(localClassShadowRes.state, localClassShadowRes.traceback).toBe('passed');
+            expect(localClassShadowRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4662023802): import / import type bindings stay reserved across both value & type sets (no TS2300 duplicate imports)
+            const configTypesDir = path.join(workspaceRoot, 'node_modules', 'config_types');
+            fs.mkdirSync(configTypesDir, { recursive: true });
+            fs.writeFileSync(path.join(configTypesDir, 'package.json'), JSON.stringify({ name: 'config_types', types: 'index.d.ts' }), 'utf8');
+            fs.writeFileSync(path.join(configTypesDir, 'index.d.ts'), 'export type LIMIT = number;\n', 'utf8');
+
+            const importTypeTargetNode = makeNode({
+                name: 'acceptLimit',
+                language: 'typescript',
+                intent: 'Use type-only LIMIT import in target signature even when context prelude exports const LIMIT',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: ["import type { LIMIT } from 'config_types';"],
+                uses: [],
+                check: undefined,
+                cases: [{ name: 'inc', input: { x: 4 }, expected: 5 }],
+                code: ['export function acceptLimit(x: LIMIT): number {', '    return x + 1;', '}'],
+            });
+            const acceptLimitRes = await runNodeVerification({
+                workspaceRoot,
+                node: importTypeTargetNode,
+                nodeId: 'acceptLimit',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(acceptLimitRes.state, acceptLimitRes.traceback).toBe('passed');
+            expect(acceptLimitRes.pydanticValid).toBe(true);
+
+            const importTypeCheckNode = makeNode({
+                name: 'targetUsesDepLimit',
+                language: 'typescript',
+                intent: 'Target uses dep const LIMIT while check uses import type LIMIT from config_types',
+                contract: '',
+                context: ['ns_prelude'],
+                imports: [],
+                uses: ['ns_prelude'],
+                cases: undefined,
+                code: ['export function targetUsesDepLimit(n: number): number {', '    return n * LIMIT;', '}'],
+                check: [
+                    "import type { LIMIT } from 'config_types';",
+                    "test('check-body import type LIMIT suppresses duplicate value import', () => {",
+                    '    const v: LIMIT = 7;',
+                    '    expect(v).toBe(7);',
+                    '    expect(targetUsesDepLimit(2)).toBe(20);',
+                    '});',
+                ],
+            });
+            const importTypeCheckRes = await runNodeVerification({
+                workspaceRoot,
+                node: importTypeCheckNode,
+                nodeId: 'targetUsesDepLimit',
+                dependencies: new Map([['ns_prelude', depNamespacesNode]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(importTypeCheckRes.state, importTypeCheckRes.traceback).toBe('passed');
+            expect(importTypeCheckRes.pydanticValid).toBe(true);
+
+            const depSharedVal = makeNode({
+                name: 'depSharedVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports value SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const SHARED = 7;'],
+            });
+            const depSharedType = makeNode({
+                name: 'depSharedType',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports type SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export type SHARED = string;'],
+            });
+            const consumeSharedVal = makeNode({
+                name: 'getShared',
+                language: 'typescript',
+                intent: 'Consumes SHARED value from first matching dep without duplicate import from second dep',
+                contract: '',
+                context: ['depSharedVal', 'depSharedType'],
+                imports: [],
+                uses: ['depSharedVal'],
+                check: undefined,
+                cases: [{ name: 'shared', inputs: {}, expected: 7 }],
+                code: ['export function getShared(): number {', '    return SHARED;', '}'],
+            });
+            const sharedDepsRes = await runNodeVerification({
+                workspaceRoot,
+                node: consumeSharedVal,
+                nodeId: 'getShared',
+                dependencies: new Map([
+                    ['depSharedVal', depSharedVal],
+                    ['depSharedType', depSharedType],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(sharedDepsRes.state, sharedDepsRes.traceback).toBe('passed');
+            expect(sharedDepsRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4663312534): Exported functions do not spuriously import same-named prelude interfaces;
+            // default-exported functions + legitimate same-name parameter types emit `import type` without clobbering CJS exports;
+            // helper modules with same-named interface prelude also avoid conflicting imports.
+            const depInterfaceFoo = makeNode({
+                name: 'depInterfaceFoo',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Foo',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Foo { a: number; }'],
+            });
+            const exportFnFooNode = makeNode({
+                name: 'Foo',
+                language: 'typescript',
+                intent: 'Exported function Foo ignoring same-named prelude interface Foo',
+                contract: '',
+                context: ['depInterfaceFoo'],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: [{ name: 'inc', input: { x: 2 }, expected: 3 }],
+                code: ['export function Foo(x: number): number {', '    return x + 1;', '}'],
+            });
+            const exportFnFooRes = await runNodeVerification({
+                workspaceRoot,
+                node: exportFnFooNode,
+                nodeId: 'Foo',
+                dependencies: new Map([['depInterfaceFoo', depInterfaceFoo]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(exportFnFooRes.state, exportFnFooRes.traceback).toBe('passed');
+            expect(exportFnFooRes.pydanticValid).toBe(true);
+
+            const defaultFnFooNode = makeNode({
+                name: 'Foo',
+                language: 'typescript',
+                intent: 'Default-exported function Foo executed via CJS import { Foo } alongside prelude interface Foo',
+                contract: '',
+                context: ['depInterfaceFoo'],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: [{ name: 'inc_default', input: { x: 2 }, expected: 3 }],
+                code: ['export default function Foo(x: number): number {', '    return x + 1;', '}'],
+            });
+            const defaultFnFooRes = await runNodeVerification({
+                workspaceRoot,
+                node: defaultFnFooNode,
+                nodeId: 'FooDefault',
+                dependencies: new Map([['depInterfaceFoo', depInterfaceFoo]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(defaultFnFooRes.state, defaultFnFooRes.traceback).toBe('passed');
+            expect(defaultFnFooRes.pydanticValid).toBe(true);
+
+            const fnUsingSameNameIfaceNode = makeNode({
+                name: 'Foo',
+                language: 'typescript',
+                intent: 'Exported function Foo accepting prelude interface Foo parameter emits import type cleanly',
+                contract: '',
+                context: ['depInterfaceFoo'],
+                imports: [],
+                uses: ['depInterfaceFoo'],
+                check: undefined,
+                cases: [{ name: 'use_iface', input: { x: { a: 4 } }, expected: 5 }],
+                code: ['export function Foo(x: Foo): number {', '    return x.a + 1;', '}'],
+            });
+            const fnUsingSameNameIfaceRes = await runNodeVerification({
+                workspaceRoot,
+                node: fnUsingSameNameIfaceNode,
+                nodeId: 'FooUsesSameIface',
+                dependencies: new Map([['depInterfaceFoo', depInterfaceFoo]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(fnUsingSameNameIfaceRes.state, fnUsingSameNameIfaceRes.traceback).toBe('passed');
+            expect(fnUsingSameNameIfaceRes.pydanticValid).toBe(true);
+
+            const depIfaceHelper = makeNode({
+                name: 'depIfaceHelper',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports interface Helper',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Helper { a: number; }'],
+            });
+            const depFnHelper = makeNode({
+                name: 'Helper',
+                language: 'typescript',
+                intent: 'Helper function named Helper alongside interface Helper prelude',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export function Helper(x: number): number {', '    return x + 1;', '}'],
+            });
+            const callHelperTarget = makeNode({
+                name: 'callHelper',
+                language: 'typescript',
+                intent: 'Calls Helper function without helper-to-helper import conflict',
+                contract: '',
+                context: ['depIfaceHelper', 'Helper'],
+                imports: [],
+                uses: ['Helper'],
+                check: undefined,
+                cases: [{ name: 'call', input: { x: 9 }, expected: 10 }],
+                code: ['export function callHelper(x: number): number {', '    return Helper(x);', '}'],
+            });
+            const helperConflictRes = await runNodeVerification({
+                workspaceRoot,
+                node: callHelperTarget,
+                nodeId: 'callHelper',
+                dependencies: new Map([
+                    ['depIfaceHelper', depIfaceHelper],
+                    ['Helper', depFnHelper],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(helperConflictRes.state, helperConflictRes.traceback).toBe('passed');
+            expect(helperConflictRes.pydanticValid).toBe(true);
+
+            // PR #51 P1 (#discussion_r4663480771): `export type { Config }` and `export { type Config }` and `export { Config }`
+            // collect type references accurately, while re-exports with `moduleSpecifier` (`from '...'`) never inject local imports.
+            const depConfigIface = makeNode({
+                name: 'depConfigIface',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Config',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Config { ok: boolean; }'],
+            });
+            const exportTypeReexportNode = makeNode({
+                name: 'fnExportType',
+                language: 'typescript',
+                intent: 'Check body contains standalone export type { Config }',
+                contract: '',
+                context: ['depConfigIface'],
+                imports: [],
+                uses: ['depConfigIface'],
+                cases: undefined,
+                code: ['export function fnExportType(): number {', '    return 1;', '}'],
+                check: [
+                    'export type { Config };',
+                    "test('export type Config re-exports prelude interface cleanly', () => {",
+                    '    expect(fnExportType()).toBe(1);',
+                    '});',
+                ],
+            });
+            const exportTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: exportTypeReexportNode,
+                nodeId: 'fnExportType',
+                dependencies: new Map([['depConfigIface', depConfigIface]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(exportTypeRes.state, exportTypeRes.traceback).toBe('passed');
+            expect(exportTypeRes.pydanticValid).toBe(true);
+
+            const exportInlineTypeNode = makeNode({
+                name: 'fnExportInlineType',
+                language: 'typescript',
+                intent: 'Check body contains inline export { type Config }',
+                contract: '',
+                context: ['depConfigIface'],
+                imports: [],
+                uses: ['depConfigIface'],
+                cases: undefined,
+                code: ['export function fnExportInlineType(): number {', '    return 2;', '}'],
+                check: [
+                    'export { type Config };',
+                    "test('export { type Config } re-exports prelude interface cleanly', () => {",
+                    '    expect(fnExportInlineType()).toBe(2);',
+                    '});',
+                ],
+            });
+            const exportInlineTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: exportInlineTypeNode,
+                nodeId: 'fnExportInlineType',
+                dependencies: new Map([['depConfigIface', depConfigIface]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(exportInlineTypeRes.state, exportInlineTypeRes.traceback).toBe('passed');
+            expect(exportInlineTypeRes.pydanticValid).toBe(true);
+
+            const helperReexportNamed = makeNode({
+                name: 'helperReexportCfg',
+                language: 'typescript',
+                intent: 'Helper module re-exporting interface Config via export { Config }',
+                contract: '',
+                context: ['depConfigIface'],
+                imports: [],
+                uses: ['depConfigIface'],
+                check: undefined,
+                cases: undefined,
+                code: [
+                    'export { Config };',
+                    'export function helperReexportCfg(): number {',
+                    '    return 3;',
+                    '}',
+                ],
+            });
+            const externalModuleReexportTarget = makeNode({
+                name: 'callReexportHelper',
+                language: 'typescript',
+                intent: 'Calls helper re-exporting Config while target itself re-exports external config_types LIMIT without colliding with depNamespacesNode const LIMIT',
+                contract: '',
+                context: ['depConfigIface', 'helperReexportCfg', 'ns_prelude'],
+                imports: [],
+                uses: ['helperReexportCfg'],
+                cases: undefined,
+                code: [
+                    "export type { LIMIT } from 'config_types';",
+                    'export function callReexportHelper(): number {',
+                    '    return helperReexportCfg();',
+                    '}',
+                ],
+                check: [
+                    'export { Config };',
+                    "test('helper and check re-exports compile cleanly without external from-reexport collision', () => {",
+                    '    expect(callReexportHelper()).toBe(3);',
+                    '});',
+                ],
+            });
+            const reexportCombinedRes = await runNodeVerification({
+                workspaceRoot,
+                node: externalModuleReexportTarget,
+                nodeId: 'callReexportHelper',
+                dependencies: new Map([
+                    ['depConfigIface', depConfigIface],
+                    ['helperReexportCfg', helperReexportNamed],
+                    ['ns_prelude', depNamespacesNode],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(reexportCombinedRes.state, reexportCombinedRes.traceback).toBe('passed');
+            expect(reexportCombinedRes.pydanticValid).toBe(true);
+        }, 40_000);
+
+        it('prioritizes dual and value dep providers before earlier type-only imports across deps, target, and tests', async () => {
+            const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-priority-'));
+            tempDirs.push(workspaceRoot);
+
+            const depSharedType = makeNode({
+                name: 'depSharedType',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports type SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export type SHARED = string;'],
+            });
+            const depSharedVal = makeNode({
+                name: 'depSharedVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Exports value SHARED',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const SHARED = 7;'],
+            });
+
+            // Case 1: `[depSharedType, depSharedVal]` (`type` FIRST, `value` SECOND) with value + `export { SHARED }` re-export
+            const namedReexportTarget = makeNode({
+                name: 'pickSharedNamed',
+                language: 'typescript',
+                intent: 'Checks combined value + named re-export reference resolves SHARED value even when depSharedType comes first',
+                contract: '',
+                context: ['depSharedType', 'depSharedVal'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: ['export function pickSharedNamed(): number {', '    return 1;', '}'],
+                check: [
+                    'export { SHARED };',
+                    "test('picks value over earlier type for combined value+reexport refs', () => {",
+                    '    expect(SHARED).toBe(7);',
+                    '    expect(pickSharedNamed()).toBe(1);',
+                    '});',
+                ],
+            });
+            const namedReexportRes = await runNodeVerification({
+                workspaceRoot,
+                node: namedReexportTarget,
+                nodeId: 'pickSharedNamed',
+                dependencies: new Map([
+                    ['depSharedType', depSharedType],
+                    ['depSharedVal', depSharedVal],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(namedReexportRes.state, namedReexportRes.traceback).toBe('passed');
+            expect(namedReexportRes.pydanticValid).toBe(true);
+
+            // Case 2: `[depSharedType, depSharedVal]` (`type` FIRST, `value` SECOND) with value + `export default SHARED`
+            const defaultReexportTarget = makeNode({
+                name: 'pickSharedDefault',
+                language: 'typescript',
+                intent: 'Checks combined value + export default reference resolves SHARED value even when depSharedType comes first',
+                contract: '',
+                context: ['depSharedType', 'depSharedVal'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: ['export function pickSharedDefault(): number {', '    return 1;', '}'],
+                check: [
+                    'export default SHARED;',
+                    "test('picks value over earlier type for export default refs', () => {",
+                    '    expect(SHARED).toBe(7);',
+                    '    expect(pickSharedDefault()).toBe(1);',
+                    '});',
+                ],
+            });
+            const defaultReexportRes = await runNodeVerification({
+                workspaceRoot,
+                node: defaultReexportTarget,
+                nodeId: 'pickSharedDefault',
+                dependencies: new Map([
+                    ['depSharedType', depSharedType],
+                    ['depSharedVal', depSharedVal],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(defaultReexportRes.state, defaultReexportRes.traceback).toBe('passed');
+            expect(defaultReexportRes.pydanticValid).toBe(true);
+
+            // Case 3: Dual provider (`export class Box`) beats earlier value-only provider (`export const Box = 1`)
+            // across dep helper module, target impl module, and test module when both value & type refs exist.
+            const depBoxVal = makeNode({
+                name: 'depBoxVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value-only Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const Box = 1;'],
+            });
+            const depBoxClass = makeNode({
+                name: 'depBoxClass',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting dual value+type class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export class Box { v = 5; }'],
+            });
+            const helperBoxNode = makeNode({
+                name: 'helperReadBox',
+                language: 'typescript',
+                intent: 'Helper using Box as both type annotation and constructor',
+                contract: '',
+                context: ['depBoxVal', 'depBoxClass'],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: [
+                    'export function helperReadBox(): number {',
+                    '    const b: Box = new Box();',
+                    '    return b.v;',
+                    '}',
+                ],
+            });
+            const dualBoxTarget = makeNode({
+                name: 'useDualBox',
+                language: 'typescript',
+                intent: 'Target using Box as both type annotation and constructor alongside helperReadBox',
+                contract: '',
+                context: ['depBoxVal', 'depBoxClass', 'helperReadBox'],
+                imports: [],
+                uses: ['helperReadBox'],
+                cases: undefined,
+                code: [
+                    'export function useDualBox(): number {',
+                    '    const b: Box = new Box();',
+                    '    return b.v + helperReadBox();',
+                    '}',
+                ],
+                check: [
+                    "test('selects dual class Box over earlier value-only Box across deps, target, and test', () => {",
+                    '    const b: Box = new Box();',
+                    '    expect(b.v).toBe(5);',
+                    '    expect(useDualBox()).toBe(10);',
+                    '});',
+                ],
+            });
+            const dualBoxRes = await runNodeVerification({
+                workspaceRoot,
+                node: dualBoxTarget,
+                nodeId: 'useDualBox',
+                dependencies: new Map([
+                    ['depBoxVal', depBoxVal],
+                    ['depBoxClass', depBoxClass],
+                    ['helperReadBox', helperBoxNode],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(dualBoxRes.state, dualBoxRes.traceback).toBe('passed');
+            expect(dualBoxRes.pydanticValid).toBe(true);
+        }, 40_000);
+
+        it('excludes locally shadowed parameters, variables, shorthand bindings, and type parameters from dep import selection', async () => {
+            const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-scope-'));
+            tempDirs.push(workspaceRoot);
+
+            const depClassBox = makeNode({
+                name: 'depClassBox',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting dual value+type class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export class Box { v = 5; }'],
+            });
+
+            // Test A (PR #51 P1 #discussion_r4663796585): Parameter `Box: number` satisfies local value reference
+            // in `return { a: Box }`, so earlier `interface Box` is selected over later `class Box`.
+            const depInterfaceBox = makeNode({
+                name: 'depInterfaceBox',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Box { a: number }',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Box { a: number; }'],
+            });
+            const paramShadowTarget = makeNode({
+                name: 'wrapParamBox',
+                language: 'typescript',
+                intent: 'Uses Box parameter in value position and outer interface Box as return type',
+                contract: '',
+                context: ['depInterfaceBox', 'depClassBox'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: [
+                    'export function wrapParamBox(Box: number): Box {',
+                    '    return { a: Box };',
+                    '}',
+                ],
+                check: [
+                    "test('local parameter Box selects interface Box rather than later class Box', () => {",
+                    '    expect(wrapParamBox(9)).toEqual({ a: 9 });',
+                    '});',
+                ],
+            });
+            const paramShadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: paramShadowTarget,
+                nodeId: 'wrapParamBox',
+                dependencies: new Map([
+                    ['depInterfaceBox', depInterfaceBox],
+                    ['depClassBox', depClassBox],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(paramShadowRes.state, paramShadowRes.traceback).toBe('passed');
+            expect(paramShadowRes.pydanticValid).toBe(true);
+
+            // Test B: Local `const Box` + shorthand property `{ Box }` must not register an outer value ref.
+            const depInterfaceBoxShorthand = makeNode({
+                name: 'depInterfaceBoxShorthand',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Box { Box: number }',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Box { Box: number; }'],
+            });
+            const shorthandLocalTarget = makeNode({
+                name: 'shorthandLocalBox',
+                language: 'typescript',
+                intent: 'Uses local const Box in shorthand object literal with outer interface Box return type',
+                contract: '',
+                context: ['depInterfaceBoxShorthand', 'depClassBox'],
+                imports: [],
+                uses: [],
+                cases: undefined,
+                code: [
+                    'export function shorthandLocalBox(n: number): Box {',
+                    '    const Box = n + 1;',
+                    '    return { Box };',
+                    '}',
+                ],
+                check: [
+                    "test('local shorthand binding selects interface Box rather than later class Box', () => {",
+                    '    expect(shorthandLocalBox(4)).toEqual({ Box: 5 });',
+                    '});',
+                ],
+            });
+            const shorthandLocalRes = await runNodeVerification({
+                workspaceRoot,
+                node: shorthandLocalTarget,
+                nodeId: 'shorthandLocalBox',
+                dependencies: new Map([
+                    ['depInterfaceBoxShorthand', depInterfaceBoxShorthand],
+                    ['depClassBox', depClassBox],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(shorthandLocalRes.state, shorthandLocalRes.traceback).toBe('passed');
+            expect(shorthandLocalRes.pydanticValid).toBe(true);
+
+            // Test C: Symmetric type-parameter `<Box>` shadowing leaves only outer value ref `Box` (`const Box = 7`),
+            // selecting value-only `depBoxVal` rather than later dual `depClassBox`.
+            const depBoxVal = makeNode({
+                name: 'depBoxVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value Box = 7',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const Box = 7;'],
+            });
+            const genericTypeShadowTarget = makeNode({
+                name: 'genericBoxValue',
+                language: 'typescript',
+                intent: 'Type parameter Box shadows outer type while body reads outer value Box',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export function genericBoxValue<Box>(x: Box): [Box, number] {',
+                    '    return [x, Box];',
+                    '}',
+                ],
+                check: [
+                    "test('type parameter Box shadows outer type so outer const Box is selected', () => {",
+                    "    expect(genericBoxValue('ok')).toEqual(['ok', 7]);",
+                    '});',
+                ],
+            });
+            const genericTypeShadowRes = await runNodeVerification({
+                workspaceRoot,
+                node: genericTypeShadowTarget,
+                nodeId: 'genericBoxValue',
+                dependencies: new Map([
+                    ['depBoxVal', depBoxVal],
+                    ['depClassBox', depClassBox],
+                ]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(genericTypeShadowRes.state, genericTypeShadowRes.traceback).toBe('passed');
+            expect(genericTypeShadowRes.pydanticValid).toBe(true);
+
+            // Test D: Parameter default initializer `x: number = Box` is NOT shadowed by body `const Box = 1`,
+            // so `depBoxVal` (`const Box = 7`) must still be imported.
+            const defaultParamOuterTarget = makeNode({
+                name: 'defaultParamOuterBox',
+                language: 'typescript',
+                intent: 'Reads outer Box in parameter default while shadowing Box in function body',
+                contract: '',
+                context: ['depBoxVal'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export function defaultParamOuterBox(x: number = Box): number {',
+                    '    const Box = 1;',
+                    '    return x + Box;',
+                    '}',
+                ],
+                check: [
+                    "test('parameter default reads outer Box before body shadow', () => {",
+                    '    expect(defaultParamOuterBox()).toBe(8);',
+                    '});',
+                ],
+            });
+            const defaultParamOuterRes = await runNodeVerification({
+                workspaceRoot,
+                node: defaultParamOuterTarget,
+                nodeId: 'defaultParamOuterBox',
+                dependencies: new Map([['depBoxVal', depBoxVal]]),
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(defaultParamOuterRes.state, defaultParamOuterRes.traceback).toBe('passed');
+            expect(defaultParamOuterRes.pydanticValid).toBe(true);
+        }, 40_000);
+
+        it('ignores named tuple labels and import() type qualifiers while importing element and argument types', async () => {
+            const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-tuple-import-'));
+            tempDirs.push(workspaceRoot);
+
+            const pkgDir = path.join(workspaceRoot, 'node_modules', 'slate-ext-pkg');
+            fs.mkdirSync(pkgDir, { recursive: true });
+            fs.writeFileSync(path.join(pkgDir, 'index.d.ts'), 'export type Box<T> = { wrapped: T };\n', 'utf8');
+
+            const depBoxVal = makeNode({
+                name: 'depBoxVal',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting value Box = 7',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export const Box = 7;'],
+            });
+            const depClassBox = makeNode({
+                name: 'depClassBox',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting dual value+type class Box',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export class Box { v = 5; }'],
+            });
+            const depItemType = makeNode({
+                name: 'depItemType',
+                language: 'typescript',
+                kind: 'prelude',
+                intent: 'Prelude exporting interface Item',
+                contract: '',
+                context: [],
+                imports: [],
+                uses: [],
+                check: undefined,
+                cases: undefined,
+                code: ['export interface Item { n: number; }'],
+            });
+
+            const deps = new Map([
+                ['depBoxVal', depBoxVal],
+                ['depClassBox', depClassBox],
+                ['depItemType', depItemType],
+            ]);
+
+            // Test 1: Named tuple label `Box:` does not count as a type ref (so depBoxVal is chosen over depClassBox),
+            // while element type `Item` is imported.
+            const tupleTarget = makeNode({
+                name: 'sumNamedTuple',
+                language: 'typescript',
+                intent: 'Sums tuple element Item.n, tuple number, and outer const Box with a Box tuple label',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox', 'depItemType'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export function sumNamedTuple(pair: [Box: Item, extra: number]): number {',
+                    '    return pair[0].n + pair[1] + Box;',
+                    '}',
+                ],
+                check: [
+                    "test('named tuple label Box does not trigger class Box while element type Item is imported', () => {",
+                    '    expect(sumNamedTuple([{ n: 3 }, 5])).toBe(15);',
+                    '});',
+                ],
+            });
+            const tupleRes = await runNodeVerification({
+                workspaceRoot,
+                node: tupleTarget,
+                nodeId: 'sumNamedTuple',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(tupleRes.state, tupleRes.traceback).toBe('passed');
+            expect(tupleRes.pydanticValid).toBe(true);
+
+            // Test 2: `import('slate-ext-pkg').Box<Item>` ignores qualifier `.Box` while importing `<Item>`,
+            // so `+ Box` still selects `depBoxVal` over `depClassBox`.
+            const importTypeTarget = makeNode({
+                name: 'unwrapImportType',
+                language: 'typescript',
+                intent: 'Unwraps import() type whose qualifier matches depClassBox while reading outer const Box',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox', 'depItemType'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    "export function unwrapImportType(x: import('slate-ext-pkg').Box<Item>): number {",
+                    '    return x.wrapped.n + Box;',
+                    '}',
+                ],
+                check: [
+                    "test('import() type qualifier Box does not trigger class Box while type argument Item is imported', () => {",
+                    '    expect(unwrapImportType({ wrapped: { n: 4 } })).toBe(11);',
+                    '});',
+                ],
+            });
+            const importTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: importTypeTarget,
+                nodeId: 'unwrapImportType',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(importTypeRes.state, importTypeRes.traceback).toBe('passed');
+            expect(importTypeRes.pydanticValid).toBe(true);
+
+            // Test 3: Function-type parameter label `(Box: number) => Item` stays ignored while external
+            // shorthand property `{ Box }` still imports `depBoxVal` (`const Box = 7`).
+            const shorthandFnTypeTarget = makeNode({
+                name: 'shorthandAndFnType',
+                language: 'typescript',
+                intent: 'Uses Box as function-type param name and external shorthand object property',
+                contract: '',
+                context: ['depBoxVal', 'depClassBox', 'depItemType'],
+                imports: [],
+                uses: ['depBoxVal'],
+                cases: undefined,
+                code: [
+                    'export type Mapper = (Box: number) => Item;',
+                    'export function shorthandAndFnType(fn: Mapper): { Box: number; n: number } {',
+                    '    return { Box, n: fn(Box).n };',
+                    '}',
+                ],
+                check: [
+                    "test('function type param label stays ignored and external shorthand imports const Box', () => {",
+                    '    expect(shorthandAndFnType((v) => ({ n: v + 1 }))).toEqual({ Box: 7, n: 8 });',
+                    '});',
+                ],
+            });
+            const shorthandFnTypeRes = await runNodeVerification({
+                workspaceRoot,
+                node: shorthandFnTypeTarget,
+                nodeId: 'shorthandAndFnType',
+                dependencies: deps,
+                isTrusted: true,
+                language: 'typescript',
+            });
+            expect(shorthandFnTypeRes.state, shorthandFnTypeRes.traceback).toBe('passed');
+            expect(shorthandFnTypeRes.pydanticValid).toBe(true);
         }, 40_000);
     });
 });
