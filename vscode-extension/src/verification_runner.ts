@@ -382,18 +382,45 @@ except Exception:
     const isPytestTestName = (name: string) => name.startsWith('test') || name.startsWith('Test');
     const safeTestImports = extraTestImports.filter(name => !isPytestTestName(name));
     const pytestCollidingImports = extraTestImports.filter(isPytestTestName);
-    const nonCollectedHelperLines = pytestCollidingImports.length > 0
-        ? [
-            `class _SlateNonTestClass:`,
+    const nextSafePyIdentifier = (base: string, reserved: Set<string>): string => {
+        if (!reserved.has(base)) {
+            reserved.add(base);
+            return base;
+        }
+        let suffix = 1;
+        while (reserved.has(`${base}_${suffix}`)) {
+            suffix += 1;
+        }
+        const chosen = `${base}_${suffix}`;
+        reserved.add(chosen);
+        return chosen;
+    };
+
+    let nonCollectedHelperLines: string[] = [];
+    if (pytestCollidingImports.length > 0) {
+        const reservedNames = new Set<string>([
+            'pytest',
+            node.name,
+            ...depExportNames,
+            ...checkTopBindings,
+        ]);
+        const userText = `${(node.check ?? []).join('\n')}\n${hasCases && node.cases ? JSON.stringify(node.cases) : ''}`;
+        for (const match of userText.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+            reservedNames.add(match[0]);
+        }
+        const helperClsName = nextSafePyIdentifier('_SlateNonTestClass', reservedNames);
+        const helperFnName = nextSafePyIdentifier('_slate_mark_helper', reservedNames);
+        nonCollectedHelperLines = [
+            `class ${helperClsName}:`,
             `    def __init__(self, target_cls, inherited=True):`,
             `        self._target_cls = target_cls`,
             `        self._inherited = inherited`,
             `    def __get__(self, obj, owner=None):`,
             `        return False if owner is self._target_cls else self._inherited`,
-            `def _slate_mark_helper(obj):`,
+            `def ${helperFnName}(obj):`,
             `    if isinstance(obj, type):`,
             `        try:`,
-            `            obj.__test__ = _SlateNonTestClass(obj, getattr(obj, '__test__', True))`,
+            `            obj.__test__ = ${helperClsName}(obj, getattr(obj, '__test__', True))`,
             `        except Exception:`,
             `            pass`,
             `        return obj`,
@@ -408,9 +435,10 @@ except Exception:
             `            return _wrapped`,
             `        return obj`,
             `from ${node.name}_impl import ${pytestCollidingImports.join(', ')}`,
-            ...pytestCollidingImports.map(name => `${name} = _slate_mark_helper(${name})`),
-        ]
-        : [];
+            ...pytestCollidingImports.map(name => `${name} = ${helperFnName}(${name})`),
+            `del ${helperClsName}, ${helperFnName}`,
+        ];
+    }
 
     const testParts: string[] = [
         '# Auto-generated pytest check file for Slate atomic node',

@@ -336,6 +336,44 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                     isTrusted: true,
                 });
                 expect(failRes.state).toBe('failed');
+
+                // User symbols literally named _slate_mark_helper or _SlateNonTestClass must not be overwritten (#55 PR #56)
+                const clashHelperClass = makeNode({
+                    name: '_SlateNonTestClass',
+                    kind: 'class',
+                    code: [
+                        'class _SlateNonTestClass:',
+                        '    value = 99',
+                    ],
+                });
+                const clashTarget = makeNode({
+                    name: '_slate_mark_helper',
+                    context: ['bits/test_bit', 'bits/_SlateNonTestClass'],
+                    check: [
+                        'def test_clash_safe():',
+                        '    assert _slate_mark_helper(3) == 102',
+                        '    assert _SlateNonTestClass.value == 99',
+                        '    assert test_bit(2) is False',
+                    ],
+                    cases: undefined,
+                    code: [
+                        'def _slate_mark_helper(value: int) -> int:',
+                        '    return _SlateNonTestClass.value + (3 if test_bit(value) else 0)',
+                    ],
+                });
+                const clashRes = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: clashTarget,
+                    nodeId: 'bits/_slate_mark_helper',
+                    dependencies: new Map([
+                        ['bits/test_bit', helperFn],
+                        ['bits/_SlateNonTestClass', clashHelperClass],
+                    ]),
+                    isTrusted: true,
+                });
+                expect(clashRes.state, clashRes.traceback).toBe('passed');
+                expect(clashRes.testsPassed).toBe(1);
+                expect(clashRes.testsTotal).toBe(1);
             } finally {
                 fs.rmSync(tmpWorkspace, { recursive: true, force: true });
             }
