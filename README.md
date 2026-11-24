@@ -34,7 +34,7 @@ Paste the instruction below into Claude Code, Cursor, Codex, Antigravity, or Gem
 ```text
 Set up Slate from https://github.com/range-et/slate.git for my workspace:
 1. Check prerequisites: Node.js >= 20, Python 3.10+ with `pytest` and `pydantic`, and the VS Code `code` CLI (for VSIX installation).
-2. Clone the repository into a local tools folder (for example ~/tools/slate) or pull `main` if already present, then run `npm ci` at root and `npm ci --prefix vscode-extension`.
+2. Clone the repository with submodules (`git clone --recurse-submodules https://github.com/range-et/slate.git`) into a local tools folder (for example ~/tools/slate), or pull `main` and run `git submodule update --init --recursive` if already present (required for `design-tokens/` CSS/JS build assets), then run `npm ci` at root and `npm ci --prefix vscode-extension`.
 3. Install the VS Code extension and verify everything:
    - Full verified VSIX install (runs the launch gate first; requires `npx playwright install chromium`):
      `npm run package-extension -- --install`
@@ -57,13 +57,14 @@ Set up Slate from https://github.com/range-et/slate.git for my workspace:
 - **Python `3.10+`** with `pytest` and `pydantic` (`pip install pytest pydantic`)
 - **VS Code `code` CLI** in `PATH` (for VSIX installation)
 - **Playwright Chromium** (`npx playwright install chromium`) if running `npm run verify:launch` or `npm run package-extension`
+- **Initialized `design-tokens` submodule** (included automatically by `--recurse-submodules`; for existing clones, run `git submodule update --init --recursive`)
 
 ### Option A: Verified VSIX Build and Install (VS Code Extension + MCP)
 
-`package-extension` runs the full `npm run verify:launch` suite before building and installing the VSIX:
+`package-extension` runs the full `npm run verify:launch` suite before building and installing the VSIX. If upgrading an existing checkout without submodules initialized, run `git submodule update --init --recursive` before installing dependencies:
 
 ```bash
-git clone https://github.com/range-et/slate.git
+git clone --recurse-submodules https://github.com/range-et/slate.git
 cd slate
 npm ci
 npm ci --prefix vscode-extension
@@ -85,7 +86,7 @@ After installation finishes, run **Developer: Reload Window** inside VS Code.
 If you only need the standalone MCP server bundle (`vscode-extension/out/mcp/slate_mcp_server.js`, which runs without `node_modules` at runtime) or want to package without running Playwright/Electron QA:
 
 ```bash
-git clone https://github.com/range-et/slate.git
+git clone --recurse-submodules https://github.com/range-et/slate.git
 cd slate
 npm ci
 npm ci --prefix vscode-extension

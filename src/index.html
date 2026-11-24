@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Slate — Visual Node Canvas for Software</title>
-  <meta name="description" content="Slate stores functions as small typed nodes and compiles wired flows deterministically. A frontier model defines stubs and wires over MCP; a local or HTTP model implements each bounded body." />
+  <meta name="description" content="Slate stores functions as small typed nodes and compiles wired flows deterministically. A frontier model defines stubs and wires over MCP. A local or HTTP model implements each bounded body." />
   <link rel="stylesheet" href="./monad.css" />
   <style>
     .slate-topbar {
@@ -19,11 +19,10 @@
       margin-inline: auto;
     }
     .slate-eyebrow {
-      font-family: var(--font-mono);
-      font-size: var(--type-xs);
-      color: var(--strata-interactive);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
+      font-family: var(--font-sans);
+      font-size: var(--type-sm);
+      font-weight: 500;
+      color: var(--strata-text-secondary);
       margin-bottom: var(--space-1);
     }
     .hero-title {
@@ -133,7 +132,7 @@
 <body>
 
   <header class="monad-header">
-    <button class="threshold-toggle" data-mn-threshold-toggle aria-label="Toggle navigation">
+    <button type="button" class="threshold-toggle" data-mn-threshold-toggle aria-label="Toggle navigation">
       <span class="threshold-toggle__bar"></span>
       <span class="threshold-toggle__bar"></span>
       <span class="threshold-toggle__bar"></span>
@@ -150,7 +149,7 @@
     </nav>
 
     <div class="monad-header__actions">
-      <button class="strata-toggle" data-mn-theme-toggle aria-label="Toggle theme">◑</button>
+      <button type="button" class="strata-toggle" data-mn-theme-toggle aria-label="Toggle theme">◑</button>
       <a href="https://github.com/range-et/slate" class="atomos-btn atomos-btn--ghost atomos-btn--sm" target="_blank" rel="noopener">GitHub</a>
     </div>
   </header>
@@ -158,7 +157,7 @@
   <main>
     <section class="slate-topbar">
       <div class="slate-topbar__inner">
-        <div class="slate-eyebrow">SLATE / VISUAL NODE CANVAS FOR SOFTWARE</div>
+        <div class="slate-eyebrow">Slate / Visual node canvas for software</div>
         <h1 class="hero-title">Small verified functions. Deterministic graphs.</h1>
         <p class="slate-lead">
           Slate separates software architecture from function implementation. You write small leaf functions or send bounded task packets to a local model, then compile wired graphs into standard source files.
@@ -172,25 +171,25 @@
 
         <div class="slate-stats">
           <div class="atomos-stat atomos-stat--signal">
-            <div class="atomos-stat__eyebrow">JPL-60 LIMIT</div>
+            <div class="atomos-stat__eyebrow">JPL-60 limit</div>
             <div class="atomos-stat__value">&lt;= 60 lines</div>
             <div class="atomos-stat__label">Maximum size for one atomic function node</div>
           </div>
 
           <div class="atomos-stat atomos-stat--signal">
-            <div class="atomos-stat__eyebrow">FORGE INPUT BUDGET</div>
+            <div class="atomos-stat__eyebrow">Forge input budget</div>
             <div class="atomos-stat__value">&lt;= 600 tokens</div>
             <div class="atomos-stat__label">Bounded prompt per atomic function task</div>
           </div>
 
           <div class="atomos-stat atomos-stat--success">
-            <div class="atomos-stat__eyebrow">FLOW COMPILATION</div>
+            <div class="atomos-stat__eyebrow">Flow compilation</div>
             <div class="atomos-stat__value">Deterministic</div>
             <div class="atomos-stat__label">No model writes module wiring or glue code</div>
           </div>
 
           <div class="atomos-stat atomos-stat--success">
-            <div class="atomos-stat__eyebrow">INFERENCE HOSTING</div>
+            <div class="atomos-stat__eyebrow">Inference hosting</div>
             <div class="atomos-stat__value">Unbundled</div>
             <div class="atomos-stat__label">Use llama.cpp, Ollama, LM Studio, or OpenRouter</div>
           </div>
@@ -200,7 +199,7 @@
 
     <section id="thinking" class="slate-section">
       <div class="slate-section__inner">
-        <div class="slate-eyebrow">01 / THINKING</div>
+        <div class="slate-eyebrow">01 / Thinking</div>
         <h2 class="slate-section__title">Language models do not have memory</h2>
         <p class="slate-section__desc">
           A language model takes input text and returns output text. Chat tools imitate memory with a sliding window or a summary of older messages. When conversations grow, earlier design rules drop out of context and large edits break unrelated code.
@@ -238,7 +237,7 @@
 
     <section id="structure" class="slate-section slate-section--alt">
       <div class="slate-section__inner">
-        <div class="slate-eyebrow">02 / STRUCTURE</div>
+        <div class="slate-eyebrow">02 / Structure</div>
         <h2 class="slate-section__title">Files inside a Slate project</h2>
         <p class="slate-section__desc">
           A Slate workspace keeps code units, flow wires, canvas layout, and project settings in separate JSON files. Editing layout positions does not modify code files.
@@ -298,7 +297,7 @@
 
     <section id="two-tier" class="slate-section">
       <div class="slate-section__inner">
-        <div class="slate-eyebrow">03 / TWO-TIER AI</div>
+        <div class="slate-eyebrow">03 / Two-tier AI</div>
         <h2 class="slate-section__title">Separate architecture from implementation</h2>
         <p class="slate-section__desc">
           Slate splits software work between a frontier architect model and a smaller coder model. The frontier model designs contracts and wiring without writing function implementations.
@@ -308,9 +307,9 @@
           <table class="atomos-table atomos-table--zebra">
             <thead>
               <tr>
-                <th>Attribute</th>
-                <th>Tier 1: Frontier Architect (MCP)</th>
-                <th>Tier 2: Component Forge (HTTP)</th>
+                <th scope="col">Attribute</th>
+                <th scope="col">Tier 1: Frontier Architect (MCP)</th>
+                <th scope="col">Tier 2: Component Forge (HTTP)</th>
               </tr>
             </thead>
             <tbody>
@@ -327,7 +326,7 @@
               <tr>
                 <td><strong>Code Restriction</strong></td>
                 <td>Zero function bodies (<code>slate_define_stub</code> rejects body code)</td>
-                <td>Single function scope; cannot import internal <code>slate.*</code> paths or redefine listed dependencies</td>
+                <td>Single function scope. Cannot import internal <code>slate.*</code> paths or redefine listed dependencies</td>
               </tr>
               <tr>
                 <td><strong>Context Budget</strong></td>
@@ -347,7 +346,7 @@
 
     <section id="languages" class="slate-section slate-section--alt">
       <div class="slate-section__inner">
-        <div class="slate-eyebrow">04 / SCOPE</div>
+        <div class="slate-eyebrow">04 / Scope</div>
         <h2 class="slate-section__title">Supported languages and unbundled runtimes</h2>
         <p class="slate-section__desc">
           Slate does not bundle a model server. Connect your own local inference binary or remote HTTP endpoint, then port, forge, or compile supported targets.
@@ -390,7 +389,7 @@
 
     <section id="install" class="slate-section">
       <div class="slate-section__inner">
-        <div class="slate-eyebrow">05 / INSTALL</div>
+        <div class="slate-eyebrow">05 / Install</div>
         <h2 class="slate-section__title">Install the extension or ask an agent</h2>
         <p class="slate-section__desc">
           Build and install the VS Code extension manually, or copy the setup instruction below for your AI coding agent. See <a href="https://github.com/range-et/slate/blob/main/README.md" target="_blank" rel="noopener">README.md</a> for full details.
@@ -404,8 +403,8 @@
                 <span class="atomos-tag atomos-tag--neutral">CLI</span>
               </div>
               <div class="atomos-card__body">
-                <p>Requires Node.js &gt;= 20, Python 3.10+ with <code>pytest</code> and <code>pydantic</code>, Playwright Chromium (for launch gate), and VS Code <code>code</code> CLI.</p>
-                <pre class="slate-pre"><code>git clone https://github.com/range-et/slate.git
+                <p>Requires Node.js &gt;= 20, Python 3.10+ with <code>pytest</code> and <code>pydantic</code>, Playwright Chromium (for launch gate), and VS Code <code>code</code> CLI. For an existing clone, run <code>git submodule update --init --recursive</code>.</p>
+                <pre class="slate-pre"><code>git clone --recurse-submodules https://github.com/range-et/slate.git
 cd slate
 npm ci
 npm ci --prefix vscode-extension
@@ -423,7 +422,7 @@ npm run package-extension -- --install</code></pre>
               </div>
               <div class="atomos-card__body">
                 <p>Give this instruction to Claude Code, Cursor, Codex, Antigravity, or Gemini CLI to install Slate and connect its MCP server to your workspace:</p>
-                <pre class="slate-pre"><code>Clone https://github.com/range-et/slate.git (or pull main if present), install root and vscode-extension npm dependencies, build the webview and extension (or run `npm run package-extension -- --install` to install the VSIX into VS Code), verify `node vscode-extension/out/mcp/slate_mcp_server.js --workspace . --list-tools`, and register that server command in my MCP config with `--workspace` pointing to my current project directory.</code></pre>
+                <pre class="slate-pre"><code>Clone https://github.com/range-et/slate.git with `--recurse-submodules` (or pull `main` and run `git submodule update --init --recursive` if already present), install root and vscode-extension npm dependencies, build the webview and extension (or run `npm run package-extension -- --install` to install the VSIX into VS Code), verify `node vscode-extension/out/mcp/slate_mcp_server.js --workspace . --list-tools`, and register that server command in my MCP config with `--workspace` pointing to my current project directory.</code></pre>
               </div>
             </div>
           </div>
@@ -437,7 +436,7 @@ npm run package-extension -- --install</code></pre>
       <div>
         <div style="color: var(--strata-text-primary); font-weight: 700;">Slate</div>
         <div>Visual node canvas for software.</div>
-        <div style="margin-top: var(--space-1); font-size: var(--type-xs); color: var(--strata-text-disabled);">
+        <div style="margin-top: var(--space-1); font-size: var(--type-xs); color: var(--strata-text-secondary);">
           Dual-licensed: <a href="https://github.com/range-et/slate/blob/main/LICENSE.md" target="_blank" rel="noopener">PolyForm Noncommercial 1.0.0</a> (code) and <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener">CC BY-NC 4.0</a> (media/docs).
         </div>
       </div>

@@ -4,7 +4,9 @@ import path from 'node:path';
 
 describe('Product landing page (src/index.html)', () => {
     const htmlPath = path.resolve(__dirname, '../src/index.html');
+    const readmePath = path.resolve(__dirname, '../README.md');
     const html = fs.readFileSync(htmlPath, 'utf8');
+    const readme = fs.readFileSync(readmePath, 'utf8');
 
     it('uses HTML5 doctype and loads only Monad runtime assets', () => {
         expect(html).toContain('<!doctype html>');
@@ -35,12 +37,16 @@ describe('Product landing page (src/index.html)', () => {
         expect(authoredCss).not.toMatch(/gradient\s*\(/i);
         expect(authoredCss).not.toMatch(/backdrop-filter\s*:/i);
         expect(authoredCss).not.toMatch(/translateY/i);
+        expect(authoredCss).not.toMatch(/text-transform\s*:\s*uppercase/i);
+        expect(authoredCss).not.toMatch(/letter-spacing\s*:/i);
         expect(html).toContain('class="monad-header"');
         expect(html).toContain('class="monad-grid');
         expect(html).toContain('class="atomos-table atomos-table--zebra"');
         expect(html).toContain('data-mn-theme-toggle');
         expect(html).toContain('data-mn-threshold-toggle');
         expect(html).toContain('data-mn-threshold-nav');
+        expect(html).toContain('type="button"');
+        expect(html).toContain('<th scope="col">');
     });
 
     it('presents Slate thinking, structure, Two-Tier AI, and agent install instructions in matter-of-fact STE', () => {
@@ -60,6 +66,10 @@ describe('Product landing page (src/index.html)', () => {
         expect(html).toContain('Ollama');
         expect(html).toContain('OpenRouter');
         expect(html).toContain('npm run package-extension -- --install');
+        expect(html).toContain('git clone --recurse-submodules https://github.com/range-et/slate.git');
+        expect(html).toContain('git submodule update --init --recursive');
+        expect(readme).toContain('git clone --recurse-submodules https://github.com/range-et/slate.git');
+        expect(readme).toContain('git submodule update --init --recursive');
         expect(html).toContain('https://github.com/range-et/slate');
         expect(html).toContain('docs/motivation.md');
         expect(html).toContain('README.md');
