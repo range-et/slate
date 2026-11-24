@@ -46,7 +46,7 @@ keep outstanding tasks on GitHub.
 | Occurrence-aware micro packets (S-700, Issue #12) | ✅ shipped |
 | Verified candidates & revision loop (S-701, Issue #13) | ✅ shipped |
 | Retire legacy notebook & product landing page (S-001, Issue #2) | ✅ shipped |
-| Interactive Monad micro-canvas explainer (S-002, Issue #47) | ✅ shipped |
+| Monad-strict STE product landing page (`src/index.html`) & AI-agent `README.md` | ✅ shipped (`src/explainer.ts` retired) |
 | Loops / zones (repeat, for-each, branch) (S-800, Issue #14, PR #49) | ✅ shipped |
 | Prose / Grant & Research mode (`language: "prose"`, S-850, Issue #27, PR #49) | ✅ shipped |
 | Project LLM provider config (`slate.json`) & stateless MCP batch forge (`slate_forge_batch`) | ✅ shipped (Python, TS/JS topological waves, benchmarked) |
@@ -342,7 +342,7 @@ Completed in [PR #1](https://github.com/range-et/slate/pull/1):
 - **Validation.** The local launch gate passed with 480 unit tests, 89 browser
   cases, 41 Extension Host cases and workbench QA. Regressions reproduced the
   defects before the fixes. See [verification evidence](test/VERIFICATION.md).
-- **Remaining testing target.** `src/harness/palette.ts` achieves a **100.00% Stryker mutation score** (`90/90` killed, `0` survived) in `test/harness_palette.test.ts`, and `test/coverage_hardening.test.ts` adds 13 high-value branch and boundary suites across `search.ts`, `slate_folder.ts`, `python_adapter.ts`, `llama_transport.ts`, and `explainer.ts` (2026-11-17, [issue #20](https://github.com/range-et/slate/issues/20)). Equivalent and parser-guaranteed survivors are audited in [test/VERIFICATION.md](test/VERIFICATION.md).
+- **Remaining testing target.** `src/harness/palette.ts` achieves a **100.00% Stryker mutation score** (`90/90` killed, `0` survived) in `test/harness_palette.test.ts`, and `test/coverage_hardening.test.ts` adds branch and boundary suites across `search.ts`, `slate_folder.ts`, `python_adapter.ts`, and `llama_transport.ts` (2026-11-17, [issue #20](https://github.com/range-et/slate/issues/20); `explainer.ts` was later retired on 2026-11-23). Equivalent and parser-guaranteed survivors are audited in [test/VERIFICATION.md](test/VERIFICATION.md).
 
 ## Shipped — one occurrence model (Phase 5, S-500, 2026-11-11)
 
@@ -551,14 +551,12 @@ Completed for [issue #5](https://github.com/range-et/slate/issues/5):
   elsewhere imports that node (harmless unless it forms a cycle).
 - **Retirement.** The legacy notebook (`legacy/`) has been completely removed (S-001, Issue #2). The extension, VSIX, web demo, and product landing page are all harness- and Monad-native.
 
-## Shipped — Product Landing Page & Web Showcase (S-001, S-002)
+## Shipped — Product Landing Page & Agent-Ready Documentation (2026-11-23)
 
-- **Monad Design System.** Built with Monad System design tokens (`monad.css`, `monad.js`, Strata semantic colors, Atomos components: cards, stats, buttons, tags).
-- **Interactive Explainer Micro-Studio (S-002, Issue #47).** Lightweight interactive dataflow canvas embedded directly into the Monad landing page (`src/explainer.ts`, `src/index.html`). Live input controls (`raw_score`) interactively propagate values through `clamp` → `normalize` → `evaluate_tier` with reactive port updates. Selecting nodes opens the 3-tab Monad Inspector: (1) Atomic JPL-60 implementation with type annotations and `mutmut` mutation checks, (2) Local LLM Forge micro-packet (≤600 tokens) with interactive simulation button, and (3) deterministic compiled Python (`score_pipeline`). A 4-step walkthrough stepper guides users through the core architecture without requiring VS Code.
-- **Theme Toggle.** Instant switching between Akasha dark (`data-strata="dark"`) and light (`data-strata="light"`) modes via `[data-mn-theme-toggle]`, persisted in `localStorage`.
-- **Architectural Storytelling.** Explains the mental model ("Grasshopper where you forge atomic components as you build software"), JPL-60 constraints (&le;60 lines, typed signatures, Pydantic contracts, pytest + mutmut), deterministic flow compilation, and two-tier AI division of labor.
-- **Unbundled Local LLM Architecture.** Prominently documents the bring-your-own model/server philosophy (llama.cpp, Ollama, LM Studio, vLLM) with zero server bloat.
-- **Live Showcase & Dual Artifacts.** Deploys both `dist/index.html` (product landing page with interactive micro-studio) and `dist/harness.html` (interactive web demo with `?demo` parameter) to GitHub Pages.
+- **Strict Monad System (`src/index.html`, `monad.css`, `monad.js`).** Uses only `--strata-*` tokens, orthogonal square corners (`0px`), flat fills, `monad-header`, `threshold-nav`, `monad-grid`, and `atomos-*` primitives across Akasha dark and light modes via `[data-mn-theme-toggle]`.
+- **Matter-of-Fact Simplified Technical English (STE).** Explains stateless language models vs. explicit `slate/` JSON storage, JPL-60 (`<= 60` lines) atomic units, deterministic flow compilation, Two-Tier AI (Frontier MCP vs. HTTP component forge), multi-language scope, and unbundled endpoints (`llama.cpp`, Ollama, LM Studio, OpenRouter) without embedded demo clutter or `harness.html?demo` links.
+- **Root Documentation & Agent Setup (`README.md`).** Adds AI-agent install instructions, prerequisites, verified VSIX packaging vs. fast headless MCP build steps, MCP server registration snippet (`slate_mcp_server.js`), Tier 2 endpoint examples, external-project workflow, and current limitations.
+- **Build Artifacts.** `dist/index.html` ships the standalone Monad documentation page; `dist/harness.html` continues to host the XYFlow canvas application and extension webview.
 
 ## Shipped — Branch, Foreach, and Repeat Control-Flow Regions (S-800, 2026-11-18)
 
@@ -627,6 +625,8 @@ Branch `feat/multi-lang-self-host` (converging PR #49 follow-ups, LLM batch forg
 - Automated per-node runtime test loops for C#, C++, and Arduino nodes (port/edit/compile are shipped; test-runner forge execution is Python and TS/JS only).
 
 ## Removed
+
+- 2026-11-23: Removed the interactive landing-page explainer (`src/explainer.ts`, `#micro-studio`) and `./harness.html?demo` promo links from `src/index.html`, replacing the page with a matter-of-fact STE specification overview strictly using Monad System tokens and components.
 
 - 2026-11-13 (S-001, Issue #2): Retired and deleted the legacy browser notebook (`legacy/`), its dependencies (`@codemirror/lang-markdown`, `@google/genai`, `d3`, `marked`, `openai`, `uuid`), and scripts (`legacy:dev`, `legacy:build`, `legacy:test`). Moved `calculator` and `tic_tac_toe` examples to `examples/` with direct Python port-compile round-trips. Moved philosophy document to `docs/motivation.md`. Replaced GitHub Pages deployment with a Monad-themed product landing page (`src/index.html`) and live web canvas demo (`harness.html?demo`).
 

@@ -1,120 +1,85 @@
 import { expect, test } from '@playwright/test';
 
-test.describe('Landing Page & Explainer Micro-Studio E2E', () => {
-    test('renders landing page with Monad theme toggle, stats, and demo navigation', async ({ page }) => {
+test.describe('Landing Page (src/index.html) Monad & STE E2E', () => {
+    test('renders core STE sections, dark/light Monad strata theme toggle, and zero demo links', async ({ page }) => {
         await page.goto('/index.html');
 
-        // Verify Hero Title
-        const heroTitle = page.locator('.hero-title');
-        await expect(heroTitle).toBeVisible();
-        await expect(heroTitle).toContainText('Forge atomic components');
-        await expect(heroTitle).toContainText('Compose verified software');
+        await expect(page.locator('.hero-title')).toHaveText('Small verified functions. Deterministic graphs.');
 
-        // Verify Monad Theme Toggle
-        const html = page.locator('html');
-        const initialTheme = await html.getAttribute('data-strata') ?? 'dark';
-        const nextTheme = initialTheme === 'dark' ? 'light' : 'dark';
-
-        const themeBtn = page.locator('[data-mn-theme-toggle]');
-        await expect(themeBtn).toBeVisible();
-        await themeBtn.click();
-        await expect(html).toHaveAttribute('data-strata', nextTheme);
-
-        await themeBtn.click();
-        await expect(html).toHaveAttribute('data-strata', initialTheme);
-
-        // Verify Hero Stats Strip
         const stats = page.locator('.atomos-stat');
         await expect(stats).toHaveCount(4);
-        await expect(stats.nth(0)).toContainText('≤ 60 Lines');
-        await expect(stats.nth(1)).toContainText('≤ 600 Tokens');
-        await expect(stats.nth(2)).toContainText('0 Guesswork');
-        await expect(stats.nth(3)).toContainText('100% Unbundled');
+        await expect(stats.nth(0)).toContainText('<= 60 lines');
+        await expect(stats.nth(1)).toContainText('<= 600 tokens');
+        await expect(stats.nth(2)).toContainText('Deterministic');
+        await expect(stats.nth(3)).toContainText('Unbundled');
 
-        // Verify Navigation Link to Demo Harness
-        const demoLink = page.getByRole('link', { name: 'Launch Demo' }).first();
-        await expect(demoLink).toBeVisible();
-        await expect(demoLink).toHaveAttribute('href', './harness.html?demo');
+        for (const id of ['thinking', 'structure', 'two-tier', 'languages', 'install']) {
+            await expect(page.locator(`#${id}`)).toBeVisible();
+        }
+        await expect(page.locator('.atomos-table')).toContainText('slate_mcp_server.js');
+        await expect(page.locator('#install')).toContainText('npm run package-extension -- --install');
+
+        // Confirm no demo embeds or harness?demo links exist on the product page
+        await expect(page.locator('#micro-studio')).toHaveCount(0);
+        await expect(page.locator('a[href*="harness.html?demo"]')).toHaveCount(0);
+
+        // Verify dark (#0F1113 -> rgb(15, 17, 19)) and light (#F2F4F7 -> rgb(242, 244, 247)) Monad strata toggle
+        const html = page.locator('html');
+        const body = page.locator('body');
+        const bgFor = (theme: string) => (theme === 'light' ? 'rgb(242, 244, 247)' : 'rgb(15, 17, 19)');
+        const initialTheme = (await html.getAttribute('data-strata')) ?? 'dark';
+        const nextTheme = initialTheme === 'dark' ? 'light' : 'dark';
+
+        await expect(body).toHaveCSS('background-color', bgFor(initialTheme));
+
+        await page.locator('[data-mn-theme-toggle]').click();
+        await expect(html).toHaveAttribute('data-strata', nextTheme);
+        await expect(body).toHaveCSS('background-color', bgFor(nextTheme));
+
+        await page.locator('[data-mn-theme-toggle]').click();
+        await expect(html).toHaveAttribute('data-strata', initialTheme);
+        await expect(body).toHaveCSS('background-color', bgFor(initialTheme));
     });
 
-    test('interactively propagates live dataflow through micro-canvas wires', async ({ page }) => {
+    test('enforces orthogonal flat Monad geometry and responsive threshold navigation', async ({ page }) => {
         await page.goto('/index.html');
 
-        const studio = page.locator('#micro-studio');
-        await expect(studio).toBeVisible();
+        const geometry = await page.evaluate(() => {
+            const selectors = ['.monad-header', '.atomos-stat', '.atomos-card', '.atomos-btn', '.atomos-table'];
+            return selectors.map(sel => {
+                const el = document.querySelector(sel);
+                if (!el) return { sel, missing: true };
+                const cs = getComputedStyle(el);
+                return {
+                    sel,
+                    missing: false,
+                    borderRadius: cs.borderRadius,
+                    boxShadow: cs.boxShadow,
+                    backgroundImage: cs.backgroundImage,
+                };
+            });
+        });
 
-        // Check initial state (score = 12.5 -> clamped 10.0 -> ratio 1.00 -> TIER_A)
-        const valInput = page.locator('#port-val-input');
-        const valClamped = page.locator('#port-val-clamped');
-        const valNorm = page.locator('#port-val-norm');
-        const valTier = page.locator('#port-val-tier');
+        for (const item of geometry) {
+            expect(item.missing, `${item.sel} should exist`).toBe(false);
+            expect(item.borderRadius, `${item.sel} borderRadius`).toBe('0px');
+            expect(item.boxShadow, `${item.sel} boxShadow`).toBe('none');
+            expect(item.backgroundImage, `${item.sel} backgroundImage`).toBe('none');
+        }
 
-        await expect(valInput).toHaveText('12.5');
-        await expect(valClamped).toHaveText('10.0');
-        await expect(valNorm).toHaveText('1.00');
-        await expect(valTier).toHaveText('TIER_A (Excellent)');
+        // Responsive threshold hamburger drawer at <= 1056px
+        await page.setViewportSize({ width: 800, height: 900 });
+        const toggle = page.locator('[data-mn-threshold-toggle]');
+        const nav = page.locator('[data-mn-threshold-nav]');
+        await expect(toggle).toBeVisible();
+        await expect(nav).toHaveAttribute('aria-hidden', 'true');
 
-        // Change slider to 7.0 via number input
-        const numInput = page.locator('#explainer-num');
-        await numInput.fill('7.0');
-        await numInput.dispatchEvent('input');
+        await toggle.click();
+        await expect(nav).toHaveClass(/is-open/);
+        await expect(nav).toHaveAttribute('aria-hidden', 'false');
 
-        await expect(valInput).toHaveText('7.0');
-        await expect(valClamped).toHaveText('7.0');
-        await expect(valNorm).toHaveText('0.70');
-        await expect(valTier).toHaveText('TIER_B (Proficient)');
-
-        // Change to negative value -3.0
-        await numInput.fill('-3.0');
-        await numInput.dispatchEvent('input');
-
-        await expect(valInput).toHaveText('-3.0');
-        await expect(valClamped).toHaveText('0.0');
-        await expect(valNorm).toHaveText('0.00');
-        await expect(valTier).toHaveText('TIER_C (Needs Review)');
-    });
-
-    test('interacts with node inspection, forge simulation, and walkthrough stepper', async ({ page }) => {
-        await page.goto('/index.html');
-
-        // Click normalize node
-        const normalizeCard = page.locator('[data-node-id="normalize"]');
-        await normalizeCard.click();
-
-        const inspectorTitle = page.locator('#inspector-title');
-        await expect(inspectorTitle).toHaveText('fn normalize');
-
-        // Switch to Forge Packet tab
-        const packetTab = page.locator('[data-inspector-tab="packet"]');
-        await packetTab.click();
-
-        const tokenCount = page.locator('#inspector-tokens');
-        await expect(tokenCount).toContainText('/ 600 tokens');
-
-        // Simulate local forge
-        const forgeBtn = page.locator('#sim-forge-btn');
-        await expect(forgeBtn).toBeVisible();
-        await forgeBtn.click();
-
-        const forgeStatus = page.locator('#forge-sim-status');
-        await expect(forgeStatus).toBeVisible();
-        await expect(forgeStatus).toContainText('Dispatching micro-packet');
-        await expect(forgeStatus).toContainText('mutmut: 0 survivors');
-
-        const acceptBtn = page.locator('#sim-accept-btn');
-        await expect(acceptBtn).toBeVisible();
-        await acceptBtn.click();
-        await expect(forgeStatus).toContainText('Candidate accepted into slate/nodes/normalize.json');
-
-        // Click walkthrough step 4: Python Output
-        const step4Btn = page.locator('[data-walkthrough-step="4"]');
-        await step4Btn.click();
-
-        const callout = page.locator('#walkthrough-callout');
-        await expect(callout).toContainText('Step 4: Deterministic Compilation');
-
-        const compiledCode = page.locator('#inspector-compiled');
-        await expect(compiledCode).toContainText('from nodes.clamp import clamp');
-        await expect(compiledCode).toContainText('def score_pipeline(raw_score: float) -> str:');
+        await page.keyboard.press('Escape');
+        await expect(nav).not.toHaveClass(/is-open/);
+        await expect(nav).toHaveAttribute('aria-hidden', 'true');
     });
 });

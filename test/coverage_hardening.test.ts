@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { computePipeline, EXPLAINER_NODES, generateCompiledPython, initExplainerStudio } from '../src/explainer';
 import { checkLlamaHealth, LlamaTransportError, streamLlamaCompletion } from '../vscode-extension/src/llama_transport';
 import {
     AdapterError, identifierNames, parseModule, PythonAdapter, splitImport, topLevelBindings,
@@ -456,107 +455,5 @@ describe('checkLlamaHealth and streamLlamaCompletion edge branches (vscode-exten
         expect(out).toBe('def f(): pass');
         const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
         expect(body.messages[0].content).toContain('constrained Python function implementation engine');
-    });
-});
-
-describe('Explainer interactive DOM studio and tier boundaries (src/explainer.ts)', () => {
-    it('evaluates exact tier boundaries at 0.85 and 0.60', () => {
-        expect(computePipeline(8.5).tier).toBe('TIER_A (Excellent)');
-        expect(computePipeline(8.49).tier).toBe('TIER_B (Proficient)');
-        expect(computePipeline(6.0).tier).toBe('TIER_B (Proficient)');
-        expect(computePipeline(5.99).tier).toBe('TIER_C (Needs Review)');
-        expect(generateCompiledPython(6.0)).toContain('score_pipeline(6) -> "TIER_B (Proficient)"');
-    });
-
-    it('mounts safely on an empty DOM and drives all interactive controls when present', () => {
-        // Empty DOM should not throw
-        expect(() => initExplainerStudio()).not.toThrow();
-
-        document.body.innerHTML = `
-            <input id="explainer-slider" type="range" value="12.5" />
-            <input id="explainer-num" type="number" value="12.5" />
-            <span id="port-val-input"></span>
-            <span id="port-val-clamped"></span>
-            <span id="port-val-norm"></span>
-            <span id="port-val-tier"></span>
-            <div id="inspector-title"></div>
-            <div id="inspector-sig"></div>
-            <div id="inspector-lines"></div>
-            <pre id="inspector-code"></pre>
-            <pre id="inspector-tests"></pre>
-            <pre id="inspector-packet"></pre>
-            <span id="inspector-tokens"></span>
-            <pre id="inspector-compiled"></pre>
-            <button data-inspector-tab="code"></button>
-            <button data-inspector-tab="packet"></button>
-            <button data-inspector-tab="compiled"></button>
-            <div data-tab-pane="code"></div>
-            <div data-tab-pane="packet"></div>
-            <div data-tab-pane="compiled"></div>
-            <div data-node-id="clamp"></div>
-            <div data-node-id="normalize"></div>
-            <div data-node-id="evaluate_tier"></div>
-            <div data-node-id="unknown_node"></div>
-            <button data-walkthrough-step="1"></button>
-            <button data-walkthrough-step="2"></button>
-            <button data-walkthrough-step="3"></button>
-            <button data-walkthrough-step="4"></button>
-            <button data-walkthrough-step="99"></button>
-            <div id="walkthrough-callout"></div>
-            <button id="sim-forge-btn"></button>
-            <div id="forge-sim-status"></div>
-        `;
-
-        initExplainerStudio();
-
-        const slider = document.getElementById('explainer-slider') as HTMLInputElement;
-        const numInput = document.getElementById('explainer-num') as HTMLInputElement;
-        const tierDisplay = document.getElementById('port-val-tier')!;
-        const inspectorTitle = document.getElementById('inspector-title')!;
-        const forgeStatus = document.getElementById('forge-sim-status')!;
-
-        expect(inspectorTitle.textContent).toBe('fn clamp');
-        expect(tierDisplay.textContent).toBe('TIER_A (Excellent)');
-
-        // Slider input updates numInput and pipeline
-        slider.value = '7.2';
-        slider.dispatchEvent(new Event('input'));
-        expect(numInput.value).toBe('7.2');
-        expect(tierDisplay.textContent).toBe('TIER_B (Proficient)');
-
-        // Number input updates slider and falls back to 0 when empty/NaN
-        numInput.value = '';
-        numInput.dispatchEvent(new Event('input'));
-        expect(slider.value).toBe('0');
-        expect(tierDisplay.textContent).toBe('TIER_C (Needs Review)');
-
-        // Clicking node cards switches inspector and ignores unknown node IDs
-        const normCard = document.querySelector<HTMLElement>('[data-node-id="normalize"]')!;
-        normCard.click();
-        expect(inspectorTitle.textContent).toBe('fn normalize');
-        document.querySelector<HTMLElement>('[data-node-id="unknown_node"]')!.click();
-        expect(inspectorTitle.textContent).toBe('fn normalize');
-
-        // Clicking tabs switches visible pane
-        const packetTabBtn = document.querySelector<HTMLButtonElement>('[data-inspector-tab="packet"]')!;
-        packetTabBtn.click();
-        expect(document.querySelector<HTMLElement>('[data-tab-pane="packet"]')!.style.display).toBe('block');
-        expect(document.querySelector<HTMLElement>('[data-tab-pane="code"]')!.style.display).toBe('none');
-
-        // Walkthrough steps 1..4 update node, tab, and callout; unknown step is ignored
-        for (const step of ['1', '2', '3', '4']) {
-            document.querySelector<HTMLButtonElement>(`[data-walkthrough-step="${step}"]`)!.click();
-            expect(document.getElementById('walkthrough-callout')!.innerHTML).toContain(`Step ${step}:`);
-        }
-        document.querySelector<HTMLButtonElement>('[data-walkthrough-step="99"]')!.click();
-        expect(document.getElementById('walkthrough-callout')!.innerHTML).toContain('Step 4:');
-
-        // Simulate local forge and accept candidate
-        document.getElementById('sim-forge-btn')!.click();
-        expect(forgeStatus.style.display).toBe('block');
-        expect(forgeStatus.innerHTML).toContain(String(EXPLAINER_NODES.evaluate_tier.packet.tokens));
-        const acceptBtn = document.getElementById('sim-accept-btn')!;
-        acceptBtn.click();
-        expect(forgeStatus.innerHTML).toContain('slate/nodes/evaluate_tier.json');
     });
 });
