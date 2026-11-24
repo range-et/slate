@@ -222,9 +222,6 @@ export function resolveLlmConfig(
     const rawTimeout = override?.timeoutSeconds ?? projectLlm?.timeoutSeconds ?? fallback?.timeoutSeconds ?? 120;
     const timeoutSeconds = Math.max(5, Math.trunc(Number.isFinite(rawTimeout) ? rawTimeout : 120));
 
-    const rawOutputTokens = override?.outputTokens ?? projectLlm?.outputTokens ?? fallback?.outputTokens ?? DEFAULT_OUTPUT_TOKENS;
-    const outputTokens = Math.max(64, Math.trunc(Number.isFinite(rawOutputTokens) ? rawOutputTokens : DEFAULT_OUTPUT_TOKENS));
-
     const rawContextWindow = override?.contextWindow
         ?? override?.contextWindowTokens
         ?? projectLlm?.contextWindow
@@ -232,6 +229,10 @@ export function resolveLlmConfig(
         ?? fallback?.contextWindowTokens
         ?? 4096;
     const contextWindowTokens = Math.max(1024, Math.trunc(Number.isFinite(rawContextWindow) ? rawContextWindow : 4096));
+
+    const defaultOutputTokens = Math.max(64, Math.min(DEFAULT_OUTPUT_TOKENS, Math.floor(contextWindowTokens / 2)));
+    const rawOutputTokens = override?.outputTokens ?? projectLlm?.outputTokens ?? fallback?.outputTokens ?? defaultOutputTokens;
+    const outputTokens = Math.max(64, Math.trunc(Number.isFinite(rawOutputTokens) ? rawOutputTokens : defaultOutputTokens));
 
     const apiKey = cleanString(override?.apiKey)
         ?? cleanString(fallback?.apiKey)

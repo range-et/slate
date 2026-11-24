@@ -467,15 +467,17 @@ async function forgeSingleTarget(
 
         const candidate = parseForgeCandidate(raw, target.language);
         const validation = validateForgeCandidate(target.unit, candidate, target.language);
+        if (finishReason === 'length') {
+            const detail = validation.valid
+                ? 'Response hit max_tokens before completing both Implementation and Unit Check.'
+                : validation.diagnostics.join('; ');
+            lastReason = `Output truncated at max_tokens=${llm.outputTokens} (finish_reason=length): ${detail}`;
+            retryFeedback = `Previous output was truncated at max_tokens=${llm.outputTokens} before finishing. Omit docstrings/comments and write compact, programmatic unit tests (e.g. comprehensions instead of large literal grids). ${validation.valid ? 'Ensure both sections finish cleanly.' : `Validation error: ${detail}`}`;
+            continue;
+        }
         if (!validation.valid) {
-            const diagText = validation.diagnostics.join('; ');
-            if (finishReason === 'length') {
-                lastReason = `Output truncated at max_tokens=${llm.outputTokens} (finish_reason=length): ${diagText}`;
-                retryFeedback = `Previous output was truncated at max_tokens=${llm.outputTokens} before finishing. Omit docstrings/comments and write compact, programmatic unit tests (e.g. comprehensions instead of large literal grids). Validation error: ${diagText}`;
-            } else {
-                lastReason = diagText;
-                retryFeedback = `Candidate validation failed:\n${diagText}`;
-            }
+            lastReason = validation.diagnostics.join('; ');
+            retryFeedback = `Candidate validation failed:\n${lastReason}`;
             continue;
         }
 

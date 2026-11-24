@@ -8,7 +8,6 @@ import { BoardNote, FlowExecutionSnapshot, FlowInstance, FlowRegion, HarnessDocu
 import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import {
     checkLlamaHealth,
-    DEFAULT_OUTPUT_TOKENS,
     evaluateProjectCredentialAccess,
     resolveLlmConfig,
     streamLlamaCompletion,
@@ -541,11 +540,15 @@ export class HarnessPanel implements vscode.Disposable {
     private fallbackLlmSettings(): LlmConfigInput {
         const config = vscode.workspace.getConfiguration('slate.llama');
         const apiKeyEnv = config.get<string>('apiKeyEnv', '').trim();
+        const inspectedOutput = typeof config.inspect === 'function' ? config.inspect<number>('outputTokens') : undefined;
+        const explicitOutputTokens = inspectedOutput?.workspaceFolderValue
+            ?? inspectedOutput?.workspaceValue
+            ?? inspectedOutput?.globalValue;
         return {
             endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
             model: config.get('model', 'local'),
             contextWindowTokens: config.get('contextWindow', 4096),
-            outputTokens: config.get('outputTokens', DEFAULT_OUTPUT_TOKENS),
+            ...(typeof explicitOutputTokens === 'number' ? { outputTokens: explicitOutputTokens } : {}),
             timeoutSeconds: config.get('timeoutSeconds', 120),
             ...(apiKeyEnv ? { apiKeyEnv } : {}),
         };
@@ -1155,15 +1158,15 @@ export class HarnessPanel implements vscode.Disposable {
 
                     const parsed = parseForgeCandidate(raw, nodeLang);
                     const target = this.resolveUnit(nodeId);
-                    if (target) {
-                        const validation = validateForgeCandidate(target.unit, parsed, nodeLang);
-                        if (!validation.valid) {
-                            const diagText = validation.diagnostics.join('; ');
-                            const prefix = finishReason === 'length'
-                                ? `Output truncated at max_tokens=${settings.outputTokens} (finish_reason=length): `
-                                : '';
-                            throw new Error(`${prefix}Candidate invalid: ${diagText}`);
-                        }
+                    const validation = target ? validateForgeCandidate(target.unit, parsed, nodeLang) : undefined;
+                    if (finishReason === 'length') {
+                        const detail = validation && !validation.valid
+                            ? validation.diagnostics.join('; ')
+                            : 'Response hit max_tokens before completing both Implementation and Unit Check.';
+                        throw new Error(`Output truncated at max_tokens=${settings.outputTokens} (finish_reason=length): ${detail}`);
+                    }
+                    if (validation && !validation.valid) {
+                        throw new Error(`Candidate invalid: ${validation.diagnostics.join('; ')}`);
                     }
 
                     return parsed;

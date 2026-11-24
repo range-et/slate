@@ -844,4 +844,82 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             await failServer.close();
         }
     }, 15_000);
+
+    it('rejects valid-looking replies without unit check when finish_reason=length and accepts on clean retry (#55 PR #56)', async () => {
+        const implOnlyTruncated = [
+            '### Implementation',
+            '```python',
+            'def square(x: int) -> int:',
+            '    return x * x',
+            '```',
+        ].join('\n');
+        const completeReply = [
+            '### Implementation',
+            '```python',
+            'def square(x: int) -> int:',
+            '    return x * x',
+            '```',
+            '### Unit Check',
+            '```python',
+            'def test_square():',
+            '    assert square(4) == 16',
+            '```',
+        ].join('\n');
+
+        const truncatedServer = await startFakeLlamaServer([implOnlyTruncated], { finishReason: 'length' });
+        try {
+            const failDir = path.join(tmpDir, 'truncated_valid_fail');
+            await writeProject(failDir, {
+                provider: 'openai-compatible',
+                endpoint: truncatedServer.url,
+                model: 'tiny-local',
+            }, {
+                square: makeStubNode('square', 'def square(x: int) -> int', 'Return x squared', [
+                    { name: 'four', input: { x: 4 }, expected: 16 },
+                ]),
+            });
+            const rejected = await batchForgeWorkspace({
+                workspaceRoot: failDir,
+                allStubs: true,
+                verify: false,
+                write: false,
+                maxRevisions: 1,
+            });
+            expect(rejected.ok).toBe(false);
+            expect(rejected.results[0].status).toBe('failed');
+            expect(rejected.results[0].reason).toContain('Output truncated at max_tokens=1536 (finish_reason=length):');
+        } finally {
+            await truncatedServer.close();
+        }
+
+        let attempt = 0;
+        const retryServer = await startFakeLlamaServer(
+            () => {
+                attempt += 1;
+                return [attempt === 1 ? implOnlyTruncated : completeReply];
+            },
+            { finishReason: (_req, idx) => (idx === 0 ? 'length' : 'stop') },
+        );
+        activeServer = retryServer;
+        await writeProject(tmpDir, {
+            provider: 'openai-compatible',
+            endpoint: retryServer.url,
+            model: 'tiny-local',
+        }, {
+            square: makeStubNode('square', 'def square(x: int) -> int', 'Return x squared', [
+                { name: 'four', input: { x: 4 }, expected: 16 },
+            ]),
+        });
+        const forged = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            allStubs: true,
+            verify: false,
+            write: true,
+            maxRevisions: 2,
+        });
+        expect(forged.ok).toBe(true);
+        expect(forged.results[0]).toMatchObject({ nodeId: 'square', status: 'forged', attempts: 2 });
+        const writtenNode = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'square.json'), 'utf8'));
+        expect(writtenNode.check?.join('\n')).toContain('def test_square():');
+    }, 15_000);
 });

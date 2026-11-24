@@ -249,4 +249,23 @@ describe('llama.cpp transport', () => {
         }, new AbortController().signal, () => {});
         expect(omittedReasons).toEqual([]);
     });
+
+    it('bounds default outputTokens by small contextWindow sizes while preserving explicit overrides (#55 PR #56)', () => {
+        expect(resolveLlmConfig({ contextWindow: 1024 }, undefined, {})).toMatchObject({
+            contextWindowTokens: 1024,
+            outputTokens: 512,
+        });
+        expect(resolveLlmConfig({ contextWindow: 2048 }, undefined, {})).toMatchObject({
+            contextWindowTokens: 2048,
+            outputTokens: 1024,
+        });
+        expect(resolveLlmConfig({ contextWindow: 4096 }, undefined, {})).toMatchObject({
+            contextWindowTokens: 4096,
+            outputTokens: 1536,
+        });
+        expect(resolveLlmConfig({ contextWindow: 1024, outputTokens: 700 }, undefined, {})).toMatchObject({
+            contextWindowTokens: 1024,
+            outputTokens: 700,
+        });
+    });
 });

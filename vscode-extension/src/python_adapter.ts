@@ -421,21 +421,29 @@ export function topLevelBindings(source: string): Set<string> {
     return names;
 }
 
-/** Return names of any nested functions or classes defined inside a function body. */
+/** Return names of nested functions or classes defined directly inside a function body (excluding methods inside local classes). */
 export function findNestedPythonDefinitions(source: string): string[] {
     const names: string[] = [];
-    const visit = (node: SyntaxNode, insideFunction: boolean) => {
-        if (node.name === 'FunctionDefinition' || node.name === 'ClassDefinition') {
-            if (insideFunction) {
+    const visit = (node: SyntaxNode, scope: 'module' | 'function' | 'class') => {
+        if (node.name === 'FunctionDefinition') {
+            if (scope === 'function') {
                 const name = firstDirect(node, 'VariableName');
                 if (name) names.push(source.slice(name.from, name.to));
             }
-            for (const child of directChildren(node)) visit(child, true);
+            for (const child of directChildren(node)) visit(child, 'function');
             return;
         }
-        for (const child of directChildren(node)) visit(child, insideFunction);
+        if (node.name === 'ClassDefinition') {
+            if (scope === 'function') {
+                const name = firstDirect(node, 'VariableName');
+                if (name) names.push(source.slice(name.from, name.to));
+            }
+            for (const child of directChildren(node)) visit(child, 'class');
+            return;
+        }
+        for (const child of directChildren(node)) visit(child, scope);
     };
-    visit(parser.parse(source).topNode, false);
+    visit(parser.parse(source).topNode, 'module');
     return names;
 }
 

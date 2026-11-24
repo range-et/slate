@@ -305,12 +305,29 @@ describe('bounded generation packet', () => {
                 'def solve(grid: list[list[int]]) -> int:',
                 '    # def find_best_empty(g): mention in comment is fine',
                 '    msg = "def find_best_empty(g): mention in string is fine"',
+                '    class Helper:',
+                '        def find_best_empty(self) -> int:',
+                '            return 1',
+                '        @staticmethod',
+                '        def static_m() -> int:',
+                '            return 2',
                 '    def _local_helper() -> int:',
-                '        return 1',
+                '        return Helper().find_best_empty()',
                 '    _ = (msg, find_best_empty)',
                 '    return _local_helper()',
             ].join('\n'),
         });
         expect(allowedHelperAndComments.valid).toBe(true);
+
+        const shadowedClass = validateForgeCandidate(unit, {
+            implementation: [
+                'def solve(grid: list[list[int]]) -> int:',
+                '    class find_best_empty:',
+                '        pass',
+                '    return 0',
+            ].join('\n'),
+        });
+        expect(shadowedClass.valid).toBe(false);
+        expect(shadowedClass.diagnostics.some(d => d.includes('find_best_empty'))).toBe(true);
     });
 });

@@ -379,12 +379,27 @@ except Exception:
     const extraTestImports = Array.from(depExportNames)
         .filter(name => name !== node.name && name !== 'pytest' && !checkTopBindings.has(name))
         .sort();
+    const isPytestTestName = (name: string) => name.startsWith('test') || name.startsWith('Test');
+    const safeTestImports = extraTestImports.filter(name => !isPytestTestName(name));
+    const pytestCollidingImports = extraTestImports.filter(isPytestTestName);
+    const nonCollectedHelperLines = pytestCollidingImports.flatMap(name => [
+        `from ${node.name}_impl import ${name}`,
+        `try:`,
+        `    ${name}.__test__ = False`,
+        `except Exception:`,
+        `    if callable(${name}):`,
+        `        _slate_dep_${name} = ${name}`,
+        `        def ${name}(*_args, **_kwargs):`,
+        `            return _slate_dep_${name}(*_args, **_kwargs)`,
+        `        ${name}.__test__ = False`,
+    ]);
 
     const testParts: string[] = [
         '# Auto-generated pytest check file for Slate atomic node',
         'import pytest',
         `from ${node.name}_impl import ${node.name}`,
-        ...(extraTestImports.length > 0 ? [`from ${node.name}_impl import ${extraTestImports.join(', ')}`] : []),
+        ...(safeTestImports.length > 0 ? [`from ${node.name}_impl import ${safeTestImports.join(', ')}`] : []),
+        ...nonCollectedHelperLines,
     ];
 
     if (hasCheck && node.check) {

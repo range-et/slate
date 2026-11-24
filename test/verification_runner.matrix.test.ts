@@ -257,6 +257,55 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpWorkspace, { recursive: true, force: true });
             }
         }, 20_000);
+
+        it('imports test_* and Test* dependency helpers without exposing them to pytest collection (#55 PR #56)', async () => {
+            const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-test-helper-dep-'));
+            try {
+                const helperFn = makeNode({
+                    name: 'test_bit',
+                    code: ['def test_bit(value: int) -> bool:', '    return (value & 1) == 1'],
+                });
+                const helperClass = makeNode({
+                    name: 'TestMask',
+                    kind: 'class',
+                    code: [
+                        'class TestMask:',
+                        '    def __init__(self, mask: int) -> None:',
+                        '        self.mask = mask',
+                    ],
+                });
+                const target = makeNode({
+                    name: 'has_bit',
+                    context: ['bits/test_bit', 'bits/TestMask'],
+                    check: [
+                        'def test_has_bit():',
+                        '    assert has_bit(3) is True',
+                        '    assert test_bit(2) is False',
+                        '    assert TestMask(5).mask == 5',
+                    ],
+                    cases: undefined,
+                    code: [
+                        'def has_bit(value: int) -> bool:',
+                        '    return test_bit(value)',
+                    ],
+                });
+                const res = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: target,
+                    nodeId: 'bits/has_bit',
+                    dependencies: new Map([
+                        ['bits/test_bit', helperFn],
+                        ['bits/TestMask', helperClass],
+                    ]),
+                    isTrusted: true,
+                });
+                expect(res.state, res.traceback).toBe('passed');
+                expect(res.testsPassed).toBe(1);
+                expect(res.testsTotal).toBe(1);
+            } finally {
+                fs.rmSync(tmpWorkspace, { recursive: true, force: true });
+            }
+        }, 20_000);
     });
 
     describe('runNodeVerification execution', () => {
