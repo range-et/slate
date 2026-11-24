@@ -258,7 +258,7 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             }
         }, 20_000);
 
-        it('imports test_* and Test* dependency helpers without exposing them to pytest collection (#55 PR #56)', async () => {
+        it('imports test_* and Test* dependency helpers without exposing them to pytest collection or blocking subclasses (#55 PR #56)', async () => {
             const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-test-helper-dep-'));
             try {
                 const helperFn = makeNode({
@@ -274,10 +274,23 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                         '        self.mask = mask',
                     ],
                 });
+                const baseClass = makeNode({
+                    name: 'TestBase',
+                    kind: 'class',
+                    code: [
+                        'class TestBase:',
+                        '    def expected_mask(self) -> int:',
+                        '        return 5',
+                    ],
+                });
                 const target = makeNode({
                     name: 'has_bit',
-                    context: ['bits/test_bit', 'bits/TestMask'],
+                    context: ['bits/test_bit', 'bits/TestMask', 'bits/TestBase'],
                     check: [
+                        'class TestSolver(TestBase):',
+                        '    def test_inherited_case(self):',
+                        '        assert self.expected_mask() == 5',
+                        '        assert has_bit(3) is True',
                         'def test_has_bit():',
                         '    assert has_bit(3) is True',
                         '    assert test_bit(2) is False',
@@ -296,12 +309,33 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                     dependencies: new Map([
                         ['bits/test_bit', helperFn],
                         ['bits/TestMask', helperClass],
+                        ['bits/TestBase', baseClass],
                     ]),
                     isTrusted: true,
                 });
                 expect(res.state, res.traceback).toBe('passed');
-                expect(res.testsPassed).toBe(1);
-                expect(res.testsTotal).toBe(1);
+                expect(res.testsPassed).toBe(2);
+                expect(res.testsTotal).toBe(2);
+
+                const failingInherited = makeNode({
+                    ...target,
+                    check: [
+                        'class TestFailing(TestBase):',
+                        '    def test_fails(self):',
+                        '        assert False',
+                    ],
+                });
+                const failRes = await runNodeVerification({
+                    workspaceRoot: tmpWorkspace,
+                    node: failingInherited,
+                    nodeId: 'bits/has_bit_fail',
+                    dependencies: new Map([
+                        ['bits/test_bit', helperFn],
+                        ['bits/TestBase', baseClass],
+                    ]),
+                    isTrusted: true,
+                });
+                expect(failRes.state).toBe('failed');
             } finally {
                 fs.rmSync(tmpWorkspace, { recursive: true, force: true });
             }

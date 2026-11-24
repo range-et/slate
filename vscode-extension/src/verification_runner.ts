@@ -382,17 +382,35 @@ except Exception:
     const isPytestTestName = (name: string) => name.startsWith('test') || name.startsWith('Test');
     const safeTestImports = extraTestImports.filter(name => !isPytestTestName(name));
     const pytestCollidingImports = extraTestImports.filter(isPytestTestName);
-    const nonCollectedHelperLines = pytestCollidingImports.flatMap(name => [
-        `from ${node.name}_impl import ${name}`,
-        `try:`,
-        `    ${name}.__test__ = False`,
-        `except Exception:`,
-        `    if callable(${name}):`,
-        `        _slate_dep_${name} = ${name}`,
-        `        def ${name}(*_args, **_kwargs):`,
-        `            return _slate_dep_${name}(*_args, **_kwargs)`,
-        `        ${name}.__test__ = False`,
-    ]);
+    const nonCollectedHelperLines = pytestCollidingImports.length > 0
+        ? [
+            `class _SlateNonTestClass:`,
+            `    def __init__(self, target_cls, inherited=True):`,
+            `        self._target_cls = target_cls`,
+            `        self._inherited = inherited`,
+            `    def __get__(self, obj, owner=None):`,
+            `        return False if owner is self._target_cls else self._inherited`,
+            `def _slate_mark_helper(obj):`,
+            `    if isinstance(obj, type):`,
+            `        try:`,
+            `            obj.__test__ = _SlateNonTestClass(obj, getattr(obj, '__test__', True))`,
+            `        except Exception:`,
+            `            pass`,
+            `        return obj`,
+            `    try:`,
+            `        obj.__test__ = False`,
+            `        return obj`,
+            `    except Exception:`,
+            `        if callable(obj):`,
+            `            def _wrapped(*_args, **_kwargs):`,
+            `                return obj(*_args, **_kwargs)`,
+            `            _wrapped.__test__ = False`,
+            `            return _wrapped`,
+            `        return obj`,
+            `from ${node.name}_impl import ${pytestCollidingImports.join(', ')}`,
+            ...pytestCollidingImports.map(name => `${name} = _slate_mark_helper(${name})`),
+        ]
+        : [];
 
     const testParts: string[] = [
         '# Auto-generated pytest check file for Slate atomic node',
