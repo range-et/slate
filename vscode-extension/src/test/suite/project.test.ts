@@ -471,4 +471,55 @@ suite('Slate native project commands', () => {
         }
     });
 
+    test('SlateFolderHost blocks path traversal (P0-7) and slate.compile rejects case-insensitive reserved outDir names (P0-8)', async () => {
+        const enc = (text: string) => new TextEncoder().encode(text);
+        const host = new SlateFolderHost(root);
+        assert.throws(() => host.uri('../escape.txt'), /Path traversal rejected|escapes workspace root/i);
+        assert.throws(() => host.uri('slate/../../outside.json'), /Path traversal rejected|escapes workspace root/i);
+        await assert.rejects(() => host.readNode('../bad_node'), /Path traversal rejected/i);
+        await assert.rejects(
+            () => host.createNode({
+                name: '../bad_node',
+                intent: '',
+                contract: '',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def bad_node() -> int:', '    return 1'],
+                extra: {},
+            }, { x: 0, y: 0 }),
+            /Invalid node name/i,
+        );
+
+        await vscode.workspace.fs.createDirectory(uri('nodes'));
+        await vscode.workspace.fs.createDirectory(uri('flows'));
+        await vscode.workspace.fs.writeFile(uri('layout.json'), enc('{\n  "positions": {},\n  "notes": []\n}\n'));
+        await vscode.workspace.fs.writeFile(uri('flows', 'main.json'), enc(JSON.stringify({
+            slate: 3, name: 'main', inputs: [], outputs: [], instances: [], wires: [],
+        }, null, 2) + '\n'));
+        await vscode.workspace.fs.writeFile(uri('nodes', 'hello.json'), enc(JSON.stringify({
+            slate: 3, name: 'hello', language: 'python', intent: 'Hello', contract: '', context: [],
+            locked: false, describedBy: 'human',
+            code: ['def hello() -> int:', '    return 1'],
+        }, null, 2) + '\n'));
+
+        const libDocs = await host.readLibrary({ slate: 3, name: 'lib_guard', language: 'python', library: ['../outside.py'] });
+        assert.equal(libDocs.length, 1);
+        assert.ok(libDocs[0].problem && /escapes|unsafe/i.test(libDocs[0].problem), JSON.stringify(libDocs));
+
+        for (const badOutDir of ['SLATE', 'SlAtE/nodes', '.GIT', '.VSCODE/build']) {
+            await vscode.workspace.fs.writeFile(uri('slate.json'), enc(JSON.stringify({
+                slate: 3, name: 'reserved_out_test', language: 'python', compile: { outDir: badOutDir },
+            }, null, 2) + '\n'));
+            let errMsg = '';
+            replace(vscode.window, 'showErrorMessage', async (m: string) => { errMsg = m; });
+            const res = await vscode.commands.executeCommand<{ files: string[]; diagnostics: Array<{ severity: string; message: string }> }>('slate.compile');
+            assert.deepEqual(res?.files, [], badOutDir);
+            assert.ok(res?.diagnostics.some(d => d.severity === 'error' && /Unsafe compile output directory/i.test(d.message)), `${badOutDir}: ${JSON.stringify(res)}`);
+            assert.ok(errMsg.includes('compile stopped'), `${badOutDir}: ${errMsg}`);
+        }
+    });
+
 });

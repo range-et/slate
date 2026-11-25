@@ -113,7 +113,8 @@ Add a stdio MCP server entry in your agent client (Claude Code, Cursor, Antigrav
       "args": [
         "/absolute/path/to/slate/vscode-extension/out/mcp/slate_mcp_server.js",
         "--workspace",
-        "/absolute/path/to/your/project"
+        "/absolute/path/to/your/project",
+        "--trust-workspace"
       ],
       "env": {
         "OPENROUTER_API_KEY": "optional-if-using-openrouter"
@@ -122,6 +123,9 @@ Add a stdio MCP server entry in your agent client (Claude Code, Cursor, Antigrav
   }
 }
 ```
+
+- **MCP trust and LLM pairing flags:** Pass `--trust-workspace` (or set `SLATE_TRUST_WORKSPACE=1`) for trusted workspaces so verification and configured LLM endpoints can execute (untrusted workspaces fail closed). To permit project-configured endpoints + credentials in headless CLI/MCP sessions, pass repeatable `--approve-llm-pairing "<normalized-endpoint>|<env:VAR|secret-storage>"` flags.
+- **Live camera bridge:** When the VS Code canvas panel is open, live `/focus` camera sync stores an authenticated, session-scoped bridge record in the user-private runtime directory (never inside the repository) using the `x-slate-bridge-token` header.
 
 ### Configure a Tier 2 Model
 

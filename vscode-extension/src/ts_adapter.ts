@@ -410,10 +410,12 @@ export function splitTsImport(statement: string): TsImport[] {
     if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) return [];
 
     const moduleSpec = stmt.moduleSpecifier.text;
+    if (/[\0-\x1f\x7f\r\n]/.test(moduleSpec)) return [];
+    const safeModuleSpec = JSON.stringify(moduleSpec);
     const clause = stmt.importClause;
     if (!clause) {
         return [{
-            line: `import "${moduleSpec}";`,
+            line: `import ${safeModuleSpec};`,
             binding: null,
             module: moduleSpec,
             name: null,
@@ -427,7 +429,7 @@ export function splitTsImport(statement: string): TsImport[] {
     if (clause.name) {
         const local = clause.name.text;
         results.push({
-            line: `import ${typePrefix}${local} from "${moduleSpec}";`,
+            line: `import ${typePrefix}${local} from ${safeModuleSpec};`,
             binding: local,
             module: moduleSpec,
             name: 'default',
@@ -439,7 +441,7 @@ export function splitTsImport(statement: string): TsImport[] {
         if (ts.isNamespaceImport(clause.namedBindings)) {
             const local = clause.namedBindings.name.text;
             results.push({
-                line: `import ${typePrefix}* as ${local} from "${moduleSpec}";`,
+                line: `import ${typePrefix}* as ${local} from ${safeModuleSpec};`,
                 binding: local,
                 module: moduleSpec,
                 name: '*',
@@ -452,7 +454,7 @@ export function splitTsImport(statement: string): TsImport[] {
                 const elType = isTypeOnly || element.isTypeOnly;
                 const spec = element.propertyName ? `${imported} as ${local}` : local;
                 results.push({
-                    line: `import ${elType ? 'type ' : ''}{ ${spec} } from "${moduleSpec}";`,
+                    line: `import ${elType ? 'type ' : ''}{ ${spec} } from ${safeModuleSpec};`,
                     binding: local,
                     module: moduleSpec,
                     name: imported,

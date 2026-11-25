@@ -400,13 +400,20 @@ export function parseProseContract(contractText: string, extra?: Record<string, 
     return spec;
 }
 
+export const CITATION_KEY_PATTERN = /^[A-Za-z0-9_:-]+$/;
+
+export function isValidCitationKey(raw: string): boolean {
+    return CITATION_KEY_PATTERN.test(raw.trim());
+}
+
 export function normalizeCitationKey(raw: string): string {
     const trimmed = raw.trim();
+    if (!trimmed) return '';
     const pandocMatch = trimmed.match(/^\[?@([A-Za-z0-9_:-]+)\]?$/);
     if (pandocMatch) return pandocMatch[1];
-    const latexMatch = trimmed.match(/^\\cite\{([A-Za-z0-9_:-]+)\}$/);
+    const latexMatch = trimmed.match(/^\\cite[a-zA-Z]*\{([A-Za-z0-9_:-]+)\}$/);
     if (latexMatch) return latexMatch[1];
-    return trimmed.replace(/^@/, '');
+    return CITATION_KEY_PATTERN.test(trimmed) ? trimmed : '';
 }
 
 /** Extract all citation keys referenced in prose text via `[@key]`, `@key` in brackets, or `\cite{key1,key2}`. */
@@ -424,7 +431,7 @@ export function extractCitations(text: string): string[] {
     // Match \cite{key1, key2} or \citet{...} or \citep{...}
     const latexRegex = /\\cite[a-zA-Z]*\{([^}]+)\}/g;
     for (const match of text.matchAll(latexRegex)) {
-        const keys = match[1].split(',').map(k => k.trim()).filter(Boolean);
+        const keys = match[1].split(',').map(k => k.trim()).filter(k => CITATION_KEY_PATTERN.test(k));
         for (const k of keys) {
             found.add(k);
         }

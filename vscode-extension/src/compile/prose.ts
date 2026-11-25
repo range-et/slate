@@ -1,7 +1,9 @@
 import { branchOutputsMatch, MAIN_FLOW, parseEndpoint, regionPorts, type Port, type RegionPorts } from '../flow';
 import type { FlowBranchRegion, FlowForeachRegion, FlowRepeatRegion, SlateFlow } from '../harness_protocol';
+import { isSlateGeneratedContent, normalizeCompileOutputPath, normalizeExistingFiles } from '../language_types';
 import {
     extractCitations,
+    isValidCitationKey,
     normalizeCitationKey,
     parseProseContract,
     parseProseNode,
@@ -73,6 +75,7 @@ export function parseCitationNode(node: SlateNode, fallbackKey?: string): ProseC
         try {
             const j = JSON.parse(candidateJson) as Record<string, unknown>;
             const key = normalizeCitationKey(String(j.key ?? citationObj.key ?? fallbackKey ?? node.name));
+            if (!key) return null;
             return {
                 key,
                 author: String(j.author ?? citationObj.author ?? 'Unknown Author'),
@@ -112,6 +115,7 @@ export function parseCitationNode(node: SlateNode, fallbackKey?: string): ProseC
         node.name,
     );
     const key = normalizeCitationKey(rawKey);
+    if (!key) return null;
     const author = String(citationObj.author ?? kvMap.get('author') ?? 'Unknown Author');
     const year = String(citationObj.year ?? kvMap.get('year') ?? '2024');
     const title = String(
@@ -154,7 +158,10 @@ function coerceProseValue(val: unknown): string {
     if (typeof val === 'object') {
         const rec = val as Record<string, unknown>;
         if (typeof rec.text === 'string') return rec.text;
-        if (typeof rec.key === 'string') return `[@${normalizeCitationKey(rec.key)}]`;
+        if (typeof rec.key === 'string') {
+            const norm = normalizeCitationKey(rec.key);
+            return norm ? `[@${norm}]` : '';
+        }
         return JSON.stringify(val);
     }
     return String(val);
@@ -244,7 +251,8 @@ export function evaluateProseNode(
                 if (val === undefined || val === null) return '';
                 const str = coerceProseValue(val).trim();
                 if (p.annotation === 'citation' && str && !str.includes('@') && !str.includes('\\cite')) {
-                    return `[@${normalizeCitationKey(str)}]`;
+                    const norm = normalizeCitationKey(str);
+                    return norm ? `[@${norm}]` : '';
                 }
                 return str;
             })
@@ -793,8 +801,9 @@ export function renderProseMarkdown(
         return `(${keys.map(formatKeyInline).join('; ')})`;
     });
 
-    mdBody = mdBody.replace(/\\cite[a-zA-Z]*\{([^}]+)\}/g, (_full, inner: string) => {
-        const keys = inner.split(',').map(k => k.trim()).filter(Boolean);
+    mdBody = mdBody.replace(/\\cite[a-zA-Z]*\{([^}]+)\}/g, (full, inner: string) => {
+        const keys = inner.split(',').map(k => k.trim()).filter(isValidCitationKey);
+        if (keys.length === 0) return full;
         return `(${keys.map(formatKeyInline).join('; ')})`;
     });
 
@@ -918,13 +927,16 @@ export function renderProseLatex(
     if (referencedKeys.length > 0) {
         lines.push(`\\begin{thebibliography}{${Math.max(9, referencedKeys.length)}}`);
         for (const key of referencedKeys) {
-            const entry = citations.get(key);
+            const safeKey = normalizeCitationKey(key);
+            if (!safeKey) continue;
+            const entry = citations.get(safeKey);
             if (entry) {
+                const entryKey = normalizeCitationKey(entry.key) || safeKey;
                 const venuePart = entry.venue ? ` \\textit{${escapeLatex(entry.venue)}}.` : '';
                 const doiPart = entry.doi ? ` DOI: ${escapeLatex(entry.doi)}.` : '';
-                lines.push(`\\bibitem{${entry.key}} ${escapeLatex(entry.author)} (${escapeLatex(entry.year)}). ${escapeLatex(entry.title)}.${venuePart}${doiPart}`);
+                lines.push(`\\bibitem{${entryKey}} ${escapeLatex(entry.author)} (${escapeLatex(entry.year)}). ${escapeLatex(entry.title)}.${venuePart}${doiPart}`);
             } else {
-                lines.push(`\\bibitem{${key}} Unresolved citation ${key}.`);
+                lines.push(`\\bibitem{${safeKey}} Unresolved citation ${escapeLatex(key)}.`);
             }
         }
         lines.push('\\end{thebibliography}', '');
@@ -945,20 +957,25 @@ export function compileProse(
     config: SlateConfig,
     flows: ReadonlyMap<string, SlateFlow> = new Map(),
     explicitCitations?: ReadonlyMap<string, ProseCitationEntry> | ProseCitationEntry[],
-    options?: { contractOverride?: Partial<ProseContractSpec> },
+    options?: {
+        contractOverride?: Partial<ProseContractSpec>;
+        existingFiles?: ReadonlyMap<string, string> | Record<string, string>;
+    },
 ): ProseCompileResult {
     const proseDiagnostics: ProseDiagnostic[] = [];
     const citations = new Map<string, ProseCitationEntry>();
+    const existingMap = normalizeExistingFiles(options?.existingFiles);
 
     if (explicitCitations) {
         if (Array.isArray(explicitCitations)) {
             for (const c of explicitCitations) {
-                citations.set(normalizeCitationKey(c.key), { ...c, key: normalizeCitationKey(c.key) });
+                const norm = normalizeCitationKey(c.key);
+                if (norm) citations.set(norm, { ...c, key: norm });
             }
         } else {
             for (const [k, c] of explicitCitations.entries()) {
                 const norm = normalizeCitationKey(k);
-                citations.set(norm, { ...c, key: norm });
+                if (norm) citations.set(norm, { ...c, key: norm });
             }
         }
     }
@@ -988,6 +1005,27 @@ export function compileProse(
     }
 
     const files = new Map<string, string>();
+    const emitProseFile = (rawPath: string, content: string): void => {
+        const outPath = normalizeCompileOutputPath(rawPath);
+        if (!outPath) {
+            proseDiagnostics.push({
+                code: 'prose-wire-error',
+                severity: 'error',
+                message: `Refusing unsafe prose output path "${rawPath}".`,
+            });
+            return;
+        }
+        const existingContent = existingMap.get(outPath);
+        if (existingContent !== undefined && !isSlateGeneratedContent(existingContent)) {
+            proseDiagnostics.push({
+                code: 'prose-wire-error',
+                severity: 'error',
+                message: `Refusing to overwrite existing non-generated file "${outPath}" (missing Slate generated header).`,
+            });
+            return;
+        }
+        files.set(outPath, content);
+    };
     const assembledFlows = new Map<string, string>();
     const allReferencedCitations = new Set<string>();
 
@@ -1092,8 +1130,8 @@ export function compileProse(
                     ? config.name
                     : flow.name;
 
-            files.set(`${slug}.md`, renderProseMarkdown(docTitle, body, citations, citedInFlow));
-            files.set(`${slug}.tex`, renderProseLatex(docTitle, body, citations, citedInFlow));
+            emitProseFile(`${slug}.md`, renderProseMarkdown(docTitle, body, citations, citedInFlow));
+            emitProseFile(`${slug}.tex`, renderProseLatex(docTitle, body, citations, citedInFlow));
         }
     } else if (proseNodes.size > 0) {
         // Fallback when no flows are wired: assemble standalone leaf prose nodes in order
@@ -1122,8 +1160,8 @@ export function compileProse(
         for (const cKey of cited) {
             allReferencedCitations.add(cKey);
         }
-        files.set(`${slug}.md`, renderProseMarkdown(config.name, combined, citations, cited));
-        files.set(`${slug}.tex`, renderProseLatex(config.name, combined, citations, cited));
+        emitProseFile(`${slug}.md`, renderProseMarkdown(config.name, combined, citations, cited));
+        emitProseFile(`${slug}.tex`, renderProseLatex(config.name, combined, citations, cited));
     }
 
     const diagnostics: CompileDiagnostic[] = proseDiagnostics.map(d => ({ severity: d.severity, message: d.message }));

@@ -3,14 +3,16 @@ import * as http from 'http';
 import * as path from 'path';
 import * as readline from 'readline';
 import { randomUUID } from 'crypto';
+import { parser as pythonParser } from '@lezer/python';
+import * as ts from 'typescript';
 
 import { batchForgeWorkspace, compactBatchForgeResult } from '../batch_forge';
 import {
-    connect, disconnect, emptyFlow, FLOWS_DIR, flowIdForPath, MAIN_FLOW,
+    assertSafeFlowId, connect, disconnect, emptyFlow, FLOWS_DIR, flowIdForPath, MAIN_FLOW,
     parseEndpoint, pathForFlowId, removeInstances, serializeFlow, parseFlow
 } from '../flow';
 import {
-    codeLines, CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR,
+    assertSafeNodeId, codeLines, CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR,
     nodeFromSignature, nodeIdForPath, parseConfig, parseLayout, parseNode,
     pathForNodeId, serializeConfig, serializeLayout, serializeNode,
     tsNodeFromSignature, validateNodeStub, validateStubBody, validateTsStubBody,
@@ -20,13 +22,21 @@ import {
 import type { BoardNote, FlowInstance, FlowPort, FlowWire, HarnessDocument, HarnessFlow, SlateFlow } from '../harness_protocol';
 import { compileProjectForLanguage } from '../language_adapter';
 import { isSlateGeneratedContent, normalizeCompileOutputPath, tryNormalizeLanguage } from '../language_types';
-import { checkLlamaHealth, resolveLlmConfig, type LlmConfigInput } from '../llama_transport';
+import { checkLlamaHealth, credentialPairingKey, evaluateProjectCredentialAccess, resolveLlmConfig, validateLlmEndpointUrl, type LlmConfigInput } from '../llama_transport';
+import { LIVE_BRIDGE_TOKEN_HEADER, readValidatedLiveBridgeRecord } from '../live_bridge';
+import { assertPathInsideRealDir, assertSafeCompileOutDir, caseCollisionKey } from '../path_safety';
 import { parseProseNode, proseStub } from '../prose_adapter';
-import { identifierNames, isForbiddenSlateModule, splitImport } from '../python_adapter';
-import { tsIdentifierNames } from '../ts_adapter';
+import { identifierNames, isForbiddenSlateModule, parseModule, splitImport } from '../python_adapter';
+import { splitTsImport, tsIdentifierNames } from '../ts_adapter';
 import { buildUsageIndex } from '../usage_index';
 
 export { validateStubBody, type StubValidationResult };
+
+export interface SlateMcpServerOptions {
+    isTrusted?: boolean;
+    approvedCredentialPairings?: ReadonlySet<string> | readonly string[];
+    bridgeDir?: string;
+}
 
 export interface SlateMcpBridge {
     focusCamera?(options: {
@@ -38,6 +48,8 @@ export interface SlateMcpBridge {
     onStubDefined?(nodeId: string): Promise<void>;
     onFlowWired?(flowId: string): Promise<void>;
     onNotesPlaced?(): Promise<void>;
+    isWorkspaceTrusted?(): boolean;
+    getApprovedCredentialPairings?(): ReadonlySet<string> | readonly string[];
     getLlamaConfig?(): LlmConfigInput & { endpoint: string; model: string; timeoutSeconds?: number };
     setLlamaConfig?(config: LlmConfigInput): Promise<void>;
 }
@@ -556,14 +568,40 @@ export const MCP_TOOLS = [
 export class SlateMcpServer {
     private rl?: readline.Interface;
     private bridge?: SlateMcpBridge;
+    private readonly options?: SlateMcpServerOptions;
     private mutationQueue: Promise<unknown> = Promise.resolve();
     private streamQueue: Promise<void> = Promise.resolve();
 
     constructor(
         public readonly workspaceRoot: string,
-        bridge?: SlateMcpBridge
+        bridge?: SlateMcpBridge,
+        options?: SlateMcpServerOptions,
     ) {
         this.bridge = bridge;
+        this.options = options;
+    }
+
+    private isWorkspaceTrusted(): boolean {
+        if (this.bridge?.isWorkspaceTrusted) {
+            return this.bridge.isWorkspaceTrusted() === true;
+        }
+        return this.options?.isTrusted === true;
+    }
+
+    private getApprovedCredentialPairings(): ReadonlySet<string> {
+        const merged = new Set<string>();
+        if (this.options?.approvedCredentialPairings) {
+            for (const entry of this.options.approvedCredentialPairings) {
+                merged.add(entry);
+            }
+        }
+        const bridgePairings = this.bridge?.getApprovedCredentialPairings?.();
+        if (bridgePairings) {
+            for (const entry of bridgePairings) {
+                merged.add(entry);
+            }
+        }
+        return merged;
     }
 
     private runSerialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -840,20 +878,24 @@ export class SlateMcpServer {
             };
         }
 
-        // 2. Check for live bridge file written by active HarnessPanel
-        const bridgeFile = this.absPath('.slate/live_bridge.json');
+        // 2. Check for live bridge file in user-private runtime directory
         try {
-            const data = JSON.parse(await fs.readFile(bridgeFile, 'utf8')) as { port: number };
-            if (data?.port) {
+            const record = await readValidatedLiveBridgeRecord(this.workspaceRoot, this.options?.bridgeDir);
+            if (record) {
                 const posted = await new Promise<boolean>(resolve => {
                     const req = http.request({
                         hostname: '127.0.0.1',
-                        port: data.port,
+                        port: record.port,
                         path: '/focus',
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: {
+                            'Content-Type': 'application/json',
+                            Host: `127.0.0.1:${record.port}`,
+                            [LIVE_BRIDGE_TOKEN_HEADER]: record.token,
+                        },
                         timeout: 1000,
                     }, res => {
+                        res.resume();
                         resolve(res.statusCode === 200);
                     });
                     req.on('error', () => resolve(false));
@@ -959,7 +1001,19 @@ export class SlateMcpServer {
             }
             const trimmed = entry.trim();
             if (!trimmed) continue;
+            if (language === 'prose') {
+                throw new Error(`Prose stub "${nodeId}" cannot declare code imports ("${trimmed}").`);
+            }
             if (language === 'python') {
+                if (/[\r\n]/.test(trimmed)) {
+                    throw new Error(`Invalid multi-line Python import "${trimmed}" in stub "${nodeId}".`);
+                }
+                const mod = parseModule(`${trimmed}\n`, '<stub-import>');
+                const tree = pythonParser.parse(`${trimmed}\n`);
+                const first = tree.topNode.firstChild;
+                if (!mod.valid || mod.units.length > 0 || !first || first.nextSibling !== null || first.name !== 'ImportStatement') {
+                    throw new Error(`Invalid Python import "${trimmed}" in stub "${nodeId}".`);
+                }
                 const parsed = splitImport(trimmed);
                 if (parsed.length === 0) {
                     throw new Error(`Invalid Python import "${trimmed}" in stub "${nodeId}".`);
@@ -970,11 +1024,186 @@ export class SlateMcpServer {
                     }
                     pushUnique(item.line);
                 }
+            } else if (language === 'typescript' || language === 'javascript') {
+                const parsed = splitTsImport(trimmed);
+                if (parsed.length === 0) {
+                    throw new Error(`Invalid ${language} import "${trimmed}" in stub "${nodeId}".`);
+                }
+                for (const item of parsed) {
+                    const normMod = item.module.replace(/\\/g, '/').trim();
+                    if (/(?:^|\/)slate\/(?:nodes|flows)(?:$|\/)/i.test(normMod) || normMod === 'slate' || normMod.startsWith('slate/')) {
+                        throw new Error(`Forbidden internal import "${trimmed}" in stub "${nodeId}": dependencies are imported automatically from context/uses.`);
+                    }
+                    pushUnique(item.line);
+                }
             } else {
                 pushUnique(trimmed);
             }
         }
         return result;
+    }
+
+    private validateStubCaseCode(rawCode: string, language: string, nodeId: string, singleLineOnly: boolean): void {
+        if (language === 'prose') {
+            throw new Error(`Prose stub "${nodeId}" cannot define executable case code.`);
+        }
+        if (singleLineOnly && /[\r\n]/.test(rawCode)) {
+            throw new Error(`Plain string case in stub "${nodeId}" must be single-line.`);
+        }
+        if (language === 'python') {
+            const tree = pythonParser.parse(`${rawCode}\n`);
+            type Node = typeof tree.topNode;
+            const target = nodeId.split('/').pop()!;
+            const functions = new Set([target, 'range', 'int', 'set', 'len', 'list', 'tuple', 'sorted', 'abs']);
+            const exceptions = new Set(['ValueError', 'TypeError', 'IndexError', 'KeyError', 'RuntimeError',
+                'ArithmeticError', 'ZeroDivisionError', 'AssertionError', 'OverflowError']);
+            const containers = new Set(['Script', 'StatementGroup', 'ExpressionStatement', 'AssertStatement',
+                'WithStatement', 'Body', 'ArgList', 'UnaryExpression', 'BinaryExpression', 'ParenthesizedExpression',
+                'TupleExpression', 'ArrayExpression', 'DictionaryExpression', 'SetExpression']);
+            const leaves = new Set(['Number', 'String', 'Boolean', 'None', 'ArithOp', 'CompareOp', 'BitOp',
+                'assert', 'with', 'is', 'in', 'and', 'or', 'not', '(', ')', '[', ']', '{', '}', ',', ':', ';', 'AssignOp']);
+            const value = (n: Node) => rawCode.slice(n.from, n.to);
+            const reject = (): never => { throw new Error(`Unsupported Python case form in stub "${nodeId}".`); };
+            const bind = (n: Node | null, locals: Set<string>) => {
+                if (!n || n.name !== 'VariableName' || !/^[A-Za-z][A-Za-z0-9_]*$|^_$/.test(value(n))
+                    || functions.has(value(n)) || exceptions.has(value(n)) || value(n) === 'pytest') return reject();
+                locals.add(value(n));
+            };
+            const visit = (n: Node, locals: Set<string>): void => {
+                if (n.type.isError) reject();
+                if (n.name === 'ImportStatement' && /^import[ \t]+pytest$/.test(value(n))) return;
+                if (n.name === 'AssignStatement') {
+                    const lhs = n.firstChild;
+                    const op = lhs?.nextSibling;
+                    const rhs = op?.nextSibling;
+                    if (!lhs || !op || value(op) !== '=' || !rhs || rhs.nextSibling) return reject();
+                    visit(rhs, locals);
+                    if (lhs.name === 'VariableName') bind(lhs, locals);
+                    else if (lhs.name === 'MemberExpression') visit(lhs, locals);
+                    else reject();
+                    return;
+                }
+                if (n.name === 'ArrayComprehensionExpression') {
+                    const expr = n.firstChild?.nextSibling;
+                    const clause = expr?.nextSibling;
+                    const variable = clause?.nextSibling;
+                    const iterable = variable?.nextSibling?.nextSibling;
+                    if (!expr || clause?.name !== 'for' || !variable || variable.nextSibling?.name !== 'in'
+                        || !iterable || iterable.nextSibling?.name !== ']') return reject();
+                    visit(iterable, locals);
+                    const inner = new Set(locals);
+                    bind(variable, inner);
+                    visit(expr, inner);
+                    return;
+                }
+                if (n.name === 'CallExpression') {
+                    const callee = n.firstChild;
+                    const args = callee?.nextSibling;
+                    if (!callee || args?.name !== 'ArgList' || args.nextSibling) return reject();
+                    if (value(callee) === 'pytest.raises') {
+                        const exception = args.firstChild?.nextSibling;
+                        if (n.parent?.name !== 'WithStatement' || exception?.name !== 'VariableName'
+                            || !exceptions.has(value(exception)) || exception.nextSibling?.name !== ')') reject();
+                    } else {
+                        if (!(callee.name === 'VariableName' && functions.has(value(callee))) && value(callee) !== 'pytest.approx') reject();
+                        visit(args, locals);
+                    }
+                    return;
+                }
+                if (n.name === 'WithStatement' && value(n.firstChild?.nextSibling?.firstChild ?? n) !== 'pytest.raises') reject();
+                if (n.name === 'VariableName') {
+                    if (!locals.has(value(n)) && !(n.parent?.name === 'ArgList' && n.nextSibling?.name === 'AssignOp')) reject();
+                    return;
+                }
+                if (leaves.has(n.name)) return;
+                if (n.name === 'MemberExpression' ? n.firstChild?.nextSibling?.name !== '[' : !containers.has(n.name)) reject();
+                for (let child = n.firstChild; child; child = child.nextSibling) visit(child, locals);
+            };
+            visit(tree.topNode, new Set());
+            return;
+        }
+        if (language === 'typescript' || language === 'javascript') {
+            const sf = ts.createSourceFile('<case>.tsx', rawCode, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+            const diags = (sf as unknown as { parseDiagnostics?: ts.DiagnosticWithLocation[] }).parseDiagnostics ?? [];
+            if (diags.length > 0) {
+                throw new Error(`Invalid ${language} syntax in case for stub "${nodeId}".`);
+            }
+            const forbiddenIds = new Set(['eval', 'Function', 'require', 'process', 'child_process', 'fs']);
+            const visit = (node: ts.Node): void => {
+                if (
+                    ts.isFunctionDeclaration(node)
+                    || ts.isClassDeclaration(node)
+                    || ts.isClassExpression(node)
+                    || ts.isImportDeclaration(node)
+                    || ts.isImportEqualsDeclaration(node)
+                ) {
+                    throw new Error(`Declarations and imports are forbidden in stub "${nodeId}" case code.`);
+                }
+                if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+                    throw new Error(`Dynamic import() is forbidden in stub "${nodeId}" case code.`);
+                }
+                if (ts.isIdentifier(node) && forbiddenIds.has(node.text)) {
+                    throw new Error(`Forbidden identifier "${node.text}" in stub "${nodeId}" case.`);
+                }
+                ts.forEachChild(node, visit);
+            };
+            ts.forEachChild(sf, visit);
+        }
+    }
+
+    private normalizeStubCases(rawCases: unknown, language: string, nodeId: string): unknown[] {
+        if (!Array.isArray(rawCases)) {
+            throw new Error(`Stub "${nodeId}" cases must be an array.`);
+        }
+        const identRe = language === 'typescript' || language === 'javascript'
+            ? /^[A-Za-z_$][A-Za-z0-9_$]*$/
+            : /^[A-Za-z_][A-Za-z0-9_]*$/;
+        const metaKeys = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx', 'inputs', 'input', 'args', 'params']);
+
+        for (const entry of rawCases) {
+            if (typeof entry === 'string') {
+                this.validateStubCaseCode(entry, language, nodeId, true);
+                continue;
+            }
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                throw new Error(`Each case in stub "${nodeId}" must be a case object or assertion string.`);
+            }
+            const obj = entry as Record<string, unknown>;
+            if (obj.code !== undefined) {
+                if (typeof obj.code !== 'string') {
+                    throw new Error(`Case "code" in stub "${nodeId}" must be a string.`);
+                }
+                this.validateStubCaseCode(obj.code, language, nodeId, false);
+                continue;
+            }
+            if (obj.approx !== undefined) {
+                if (typeof obj.approx !== 'boolean' && (typeof obj.approx !== 'number' || !Number.isFinite(obj.approx) || obj.approx < 0)) {
+                    throw new Error(`Case "approx" in stub "${nodeId}" must be a boolean or non-negative finite number.`);
+                }
+            }
+            for (const errKey of ['error', 'expectedError'] as const) {
+                if (obj[errKey] !== undefined) {
+                    if (typeof obj[errKey] !== 'string' || /[\r\n]/.test(obj[errKey] as string)) {
+                        throw new Error(`Case "${errKey}" in stub "${nodeId}" must be a single-line string.`);
+                    }
+                }
+            }
+            const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
+            if (inputs && typeof inputs === 'object' && !Array.isArray(inputs)) {
+                for (const key of Object.keys(inputs as Record<string, unknown>)) {
+                    if (!identRe.test(key)) {
+                        throw new Error(`Invalid parameter name "${key}" in stub "${nodeId}" case inputs.`);
+                    }
+                }
+            } else if (inputs === undefined) {
+                for (const key of Object.keys(obj)) {
+                    if (!metaKeys.has(key) && !identRe.test(key)) {
+                        throw new Error(`Invalid parameter name "${key}" in stub "${nodeId}" case.`);
+                    }
+                }
+            }
+        }
+        return rawCases;
     }
 
     private normalizeFlowPortsArg(rawPorts: unknown, label: 'inputs' | 'outputs'): FlowPort[] {
@@ -1064,20 +1293,19 @@ export class SlateMcpServer {
         const createdIds: string[] = [];
 
         for (const item of stubList) {
-            const name = item.name.trim();
-            if (!name) throw new Error('Stub "name" is required.');
+            const name = assertSafeNodeId(item.name);
             const nodeId = name;
             const nodeRelPath = pathForNodeId(nodeId);
             this.assertSafePath(nodeRelPath, NODES_DIR);
 
-            const rawItemLang = item.language ?? args.language;
+            // Check if node already exists before resolving language/metadata fallbacks
+            const existingNode = await this.readExistingNode(nodeRelPath);
+            const rawItemLang = item.language ?? args.language ?? existingNode?.language;
             const itemLanguage = rawItemLang ? tryNormalizeLanguage(rawItemLang) : projectLanguage;
             if (!itemLanguage || !['python', 'typescript', 'javascript', 'prose'].includes(itemLanguage)) {
                 throw new Error(`Unsupported stub language "${rawItemLang}"; expected python, typescript, javascript, or prose.`);
             }
 
-            // Check if node already exists
-            const existingNode = await this.readExistingNode(nodeRelPath);
             if (existingNode) {
                 if (existingNode.locked) {
                     throw new Error(`Node "${nodeId}" is locked and cannot be modified.`);
@@ -1096,13 +1324,15 @@ export class SlateMcpServer {
 
             const signature = item.signature.trim();
             const intent = item.intent.trim();
-            const contract = (item.contract ?? '').trim();
-            const context = item.context ?? [];
+            const contract = item.contract !== undefined ? item.contract.trim() : (existingNode?.contract ?? '');
+            const context = item.context !== undefined ? item.context : (existingNode?.context ?? []);
             const rawImports = item.imports !== undefined ? item.imports : (args.stubs?.length ? undefined : args.imports);
             const imports = rawImports !== undefined
                 ? this.normalizeStubImports(rawImports, itemLanguage, nodeId)
                 : (existingNode?.imports ?? []);
-            const cases = item.cases ?? [];
+            const cases = item.cases !== undefined
+                ? this.normalizeStubCases(item.cases, itemLanguage, nodeId)
+                : (existingNode?.cases ?? []);
 
             let initialNode: SlateNode;
             let code: string[];
@@ -1119,7 +1349,10 @@ export class SlateMcpServer {
                 code = initialNode.code;
             } else if (itemLanguage === 'typescript' || itemLanguage === 'javascript') {
                 const modPath = (item.modulePath ?? args.modulePath)?.trim();
-                const explicitExt = (item.extension ?? args.extension)?.trim();
+                const existingExt = typeof existingNode?.extra?.extension === 'string'
+                    ? existingNode.extra.extension.trim()
+                    : '';
+                const explicitExt = (item.extension ?? args.extension)?.trim() || existingExt;
                 const ext = explicitExt
                     || (modPath?.endsWith('.tsx') ? '.tsx'
                         : modPath?.endsWith('.jsx') ? '.jsx'
@@ -1140,10 +1373,11 @@ export class SlateMcpServer {
                 if (!rawBody) {
                     code = initialNode.code;
                 } else {
-                    const cleanSig = signature.replace(/[;{]\s*$/, '').trim();
-                    const block = stubBody.startsWith('{') && stubBody.endsWith('}')
-                        ? stubBody
-                        : `{\n${stubBody.split(/\r?\n/).map(l => `    ${l}`).join('\n')}\n}`;
+                    const cleanSig = signature.replace(/\r\n?/g, '\n').trim().replace(/[;{]\s*$/, '').trim();
+                    const normBody = stubBody.replace(/\r\n?/g, '\n');
+                    const block = normBody.startsWith('{') && normBody.endsWith('}')
+                        ? normBody
+                        : `{\n${normBody.split('\n').map(l => `    ${l}`).join('\n')}\n}`;
                     code = codeLines(`${cleanSig} ${block}`);
                 }
                 extra = {
@@ -1152,7 +1386,7 @@ export class SlateMcpServer {
                     ...(modPath ? { modulePath: modPath.replace(/\\/g, '/').replace(/^\.\//, '') } : {}),
                 };
             } else {
-                const stubBody = (item.body ?? 'raise NotImplementedError').trim();
+                const stubBody = (item.body ?? 'raise NotImplementedError').replace(/\r\n?/g, '\n').trim();
                 initialNode = nodeFromSignature(signature, intent);
                 if (initialNode.name !== name && name.split('/').pop() !== initialNode.name) {
                     throw new Error(`Signature function name "${initialNode.name}" does not match provided name "${name}".`);
@@ -1161,21 +1395,38 @@ export class SlateMcpServer {
                 if (!validation.valid) {
                     throw new Error(validation.reason);
                 }
-                const header = signature.replace(/:$/, '');
+                const header = signature.replace(/\r\n?/g, '\n').trim().replace(/:$/, '').trimEnd();
                 const bodyLines = stubBody.split('\n').map(l => l.startsWith('    ') ? l : `    ${l}`);
                 code = [`${header}:`, ...bodyLines];
             }
 
+            const inputsChanged = Boolean(existingNode) && (
+                JSON.stringify(existingNode!.code) !== JSON.stringify(code)
+                || existingNode!.contract !== contract
+                || JSON.stringify(existingNode!.context) !== JSON.stringify(context)
+                || JSON.stringify(existingNode!.cases ?? []) !== JSON.stringify(cases)
+                || JSON.stringify(existingNode!.imports) !== JSON.stringify(imports)
+            );
+            const verification = existingNode?.verification
+                ? (inputsChanged && existingNode.verification.state !== 'untested'
+                    ? { ...existingNode.verification, state: 'stale' as const }
+                    : existingNode.verification)
+                : undefined;
+
             const node: SlateNode = {
                 name: initialNode.name,
                 ...(itemLanguage !== 'python' ? { language: itemLanguage } : {}),
+                ...(existingNode?.kind !== undefined ? { kind: existingNode.kind } : {}),
                 intent,
                 contract,
                 context,
                 cases,
+                ...(existingNode?.check !== undefined ? { check: existingNode.check } : {}),
+                ...(verification !== undefined ? { verification } : {}),
                 examples: existingNode?.examples ?? [],
                 describedBy: existingNode?.describedBy ?? 'human',
                 locked: false,
+                ...(existingNode?.order !== undefined ? { order: existingNode.order } : {}),
                 imports,
                 uses: existingNode?.uses ?? [],
                 code,
@@ -1194,7 +1445,8 @@ export class SlateMcpServer {
 
         // If this was a split operation, update the original node's context or note if it exists
         if (args.splitFrom) {
-            const originalPath = pathForNodeId(args.splitFrom);
+            const safeSplitFrom = assertSafeNodeId(args.splitFrom);
+            const originalPath = pathForNodeId(safeSplitFrom);
             this.assertSafePath(originalPath, NODES_DIR);
             try {
                 const origText = await fs.readFile(this.absPath(originalPath), 'utf8');
@@ -1225,7 +1477,7 @@ export class SlateMcpServer {
         disconnect?: Array<{ from: string; to: string }>;
         removeInstances?: string[];
     }): Promise<Record<string, unknown>> {
-        const flowId = args.flow || MAIN_FLOW;
+        const flowId = assertSafeFlowId(args.flow || MAIN_FLOW);
         const flowRelPath = pathForFlowId(flowId);
         this.assertSafePath(flowRelPath, 'slate/flows');
         let flow: SlateFlow;
@@ -1367,7 +1619,9 @@ export class SlateMcpServer {
             }
         }
 
-        await this.writeJsonFile(flowRelPath, serializeFlow(flow));
+        const serializedFlow = serializeFlow(flow);
+        parseFlow(serializedFlow);
+        await this.writeJsonFile(flowRelPath, serializedFlow);
         if (layoutChanged) {
             await this.writeLayout(layout);
         }
@@ -1429,12 +1683,25 @@ export class SlateMcpServer {
     async toolLlmStatus(args: { endpoint?: string; timeoutMs?: number }): Promise<Record<string, unknown>> {
         const projectLlm = await this.readProjectLlm();
         const bridgeConfig = this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined;
-        const resolved = resolveLlmConfig(
+        const override = typeof args.endpoint === 'string' && args.endpoint.trim()
+            ? { endpoint: args.endpoint.trim() }
+            : undefined;
+        const resolved = resolveLlmConfig(projectLlm, bridgeConfig, process.env, override);
+        validateLlmEndpointUrl(resolved.endpoint);
+        const access = evaluateProjectCredentialAccess({
             projectLlm,
-            bridgeConfig,
-            process.env,
-            typeof args.endpoint === 'string' && args.endpoint.trim() ? { endpoint: args.endpoint.trim() } : undefined,
-        );
+            override,
+            fallback: bridgeConfig,
+            resolved,
+            isTrusted: this.isWorkspaceTrusted(),
+            approvedPairings: this.getApprovedCredentialPairings(),
+        });
+        if (!access.allowRequest) {
+            throw new Error(access.reason ?? 'Workspace is not trusted; refusing request to configured LLM endpoint.');
+        }
+        if (access.requiresApproval && !access.allowCredential) {
+            throw new Error(access.reason ?? 'Explicit approval required before sending credentials to configured LLM endpoint.');
+        }
         const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : 3000;
         const health = await checkLlamaHealth(
             resolved.endpoint,
@@ -1473,12 +1740,11 @@ export class SlateMcpServer {
         let endpoint: string;
         if (typeof args.endpoint === 'string' && args.endpoint.trim()) {
             const trimmed = args.endpoint.trim();
-            if (!/^https?:\/\//i.test(trimmed)) {
-                throw new Error('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
-            }
+            validateLlmEndpointUrl(trimmed);
             endpoint = trimmed;
         } else if (provider) {
             endpoint = resolveLlmConfig({ provider }).endpoint;
+            validateLlmEndpointUrl(endpoint);
         } else {
             throw new Error('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
         }
@@ -1489,8 +1755,51 @@ export class SlateMcpServer {
         const outputTokens = typeof args.outputTokens === 'number' ? args.outputTokens : undefined;
         const contextWindow = typeof args.contextWindow === 'number' ? args.contextWindow : undefined;
 
+        const existingProjectLlm = await this.readProjectLlm();
+        const bridgeConfig = this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined;
+        const callOverride: LlmConfigInput = {
+            ...(provider ? { provider } : {}),
+            endpoint,
+            model,
+            ...(typeof args.timeoutSeconds === 'number' ? { timeoutSeconds } : {}),
+            ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
+            ...(concurrency !== undefined ? { concurrency } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            ...(contextWindow !== undefined ? { contextWindow } : {}),
+        };
+        const candidateProjectLlm: SlateLlmConfig | undefined = args.writeToProject === true
+            ? {
+                ...(existingProjectLlm ?? {}),
+                ...(provider ? { provider } : {}),
+                endpoint,
+                model,
+                ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
+                ...(concurrency !== undefined ? { concurrency } : {}),
+                ...(outputTokens !== undefined ? { outputTokens } : {}),
+                ...(contextWindow !== undefined ? { contextWindow } : {}),
+                ...(typeof args.timeoutSeconds === 'number' ? { timeoutSeconds } : {}),
+            }
+            : existingProjectLlm;
+
+        const precheckResolved = resolveLlmConfig(candidateProjectLlm, bridgeConfig, process.env, callOverride);
+        validateLlmEndpointUrl(precheckResolved.endpoint);
+        const access = evaluateProjectCredentialAccess({
+            projectLlm: candidateProjectLlm,
+            override: callOverride,
+            fallback: bridgeConfig,
+            resolved: precheckResolved,
+            isTrusted: this.isWorkspaceTrusted(),
+            approvedPairings: this.getApprovedCredentialPairings(),
+        });
+        if (!access.allowRequest) {
+            throw new Error(access.reason ?? 'Workspace is not trusted; refusing request to configured LLM endpoint.');
+        }
+        if (access.requiresApproval && !access.allowCredential) {
+            throw new Error(access.reason ?? 'Explicit approval required before sending credentials to configured LLM endpoint.');
+        }
+
         let wroteToProject = false;
-        let projectLlm: SlateLlmConfig | undefined;
+        let projectLlm = existingProjectLlm;
         if (args.writeToProject === true) {
             const rawConfig = await this.readTextIfExists(CONFIG_PATH);
             if (rawConfig === null) {
@@ -1514,8 +1823,6 @@ export class SlateMcpServer {
             await this.writeJsonFile(CONFIG_PATH, serialized);
             projectLlm = nextLlm;
             wroteToProject = true;
-        } else {
-            projectLlm = await this.readProjectLlm();
         }
 
         if (this.bridge?.setLlamaConfig) {
@@ -1527,6 +1834,7 @@ export class SlateMcpServer {
                 ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
                 ...(concurrency !== undefined ? { concurrency } : {}),
                 ...(outputTokens !== undefined ? { outputTokens } : {}),
+                ...(contextWindow !== undefined ? { contextWindow } : {}),
             });
         }
 
@@ -1534,13 +1842,7 @@ export class SlateMcpServer {
             projectLlm,
             this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined,
             process.env,
-            {
-                ...(provider ? { provider } : {}),
-                endpoint,
-                model,
-                timeoutSeconds,
-                ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
-            },
+            callOverride,
         );
         const health = await checkLlamaHealth(
             resolved.endpoint,
@@ -1586,9 +1888,7 @@ export class SlateMcpServer {
         let endpoint: string | undefined;
         if (typeof args.endpoint === 'string' && args.endpoint.trim()) {
             const trimmed = args.endpoint.trim();
-            if (!/^https?:\/\//i.test(trimmed)) {
-                throw new Error('Batch override endpoint must be a valid HTTP/HTTPS URL.');
-            }
+            validateLlmEndpointUrl(trimmed);
             endpoint = trimmed;
         }
 
@@ -1616,6 +1916,8 @@ export class SlateMcpServer {
             verify: typeof args.verify === 'boolean' ? args.verify : undefined,
             write: typeof args.write === 'boolean' ? args.write : undefined,
             overwrite: typeof args.overwrite === 'boolean' ? args.overwrite : undefined,
+            isTrusted: this.isWorkspaceTrusted(),
+            approvedCredentialPairings: this.getApprovedCredentialPairings(),
             fallbackLlm: this.bridge?.getLlamaConfig ? this.bridge.getLlamaConfig() : undefined,
             llmOverride,
             onNodeForged: this.bridge?.onStubDefined
@@ -1772,7 +2074,8 @@ export class SlateMcpServer {
             for (const entry of entries) {
                 const full = path.join(current, entry);
                 try {
-                    const stat = await fs.stat(full);
+                    const stat = await fs.lstat(full);
+                    if (stat.isSymbolicLink()) continue;
                     if (stat.isDirectory()) {
                         await scan(full);
                     } else if (stat.isFile()) {
@@ -1797,19 +2100,7 @@ export class SlateMcpServer {
         const config: SlateConfig = parseConfig(configText);
 
         const targetRelRaw = (args.outDir ?? config.compile?.outDir ?? 'out').trim() || 'out';
-        const resolvedRoot = path.resolve(this.workspaceRoot);
-        const resolvedOut = path.resolve(resolvedRoot, targetRelRaw);
-        const relToRoot = path.relative(resolvedRoot, resolvedOut).replace(/\\/g, '/');
-        if (
-            !relToRoot
-            || relToRoot === '.'
-            || relToRoot.startsWith('..')
-            || path.isAbsolute(relToRoot)
-            || relToRoot === 'slate'
-            || relToRoot.startsWith('slate/')
-        ) {
-            throw new Error(`Unsafe compile output directory "${targetRelRaw}": must stay inside workspace and outside "slate/".`);
-        }
+        const { normalizedOutDir, resolvedOut, realOut } = await assertSafeCompileOutDir(this.workspaceRoot, targetRelRaw);
 
         const diagnostics: Array<{ severity: 'error' | 'warning'; message: string }> = [];
         const nodes = new Map<string, SlateNode>();
@@ -1847,12 +2138,13 @@ export class SlateMcpServer {
         diagnostics.push(...compiled.diagnostics);
 
         const normalizedFiles = new Map<string, string>();
+        const seenCaseKeys = new Map<string, string>();
         for (const [relFile, content] of compiled.files.entries()) {
             const normRel = normalizeCompileOutputPath(relFile);
             if (!normRel) {
                 diagnostics.push({
                     severity: 'error',
-                    message: `Refusing unsafe output path "${relFile}" outside "${relToRoot}".`,
+                    message: `Refusing unsafe output path "${relFile}" outside "${normalizedOutDir}".`,
                 });
                 continue;
             }
@@ -1863,12 +2155,31 @@ export class SlateMcpServer {
                 });
                 continue;
             }
+            const caseKey = caseCollisionKey(normRel);
+            const priorCase = seenCaseKeys.get(caseKey);
+            if (priorCase) {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing case-colliding output destination "${normRel}" (conflicts with "${priorCase}").`,
+                });
+                continue;
+            }
+            seenCaseKeys.set(caseKey, normRel);
             const absOut = path.resolve(resolvedOut, normRel);
             const relCheck = path.relative(resolvedOut, absOut);
             if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
                 diagnostics.push({
                     severity: 'error',
-                    message: `Refusing to write output path "${relFile}" outside "${relToRoot}".`,
+                    message: `Refusing to write output path "${relFile}" outside "${normalizedOutDir}".`,
+                });
+                continue;
+            }
+            try {
+                await assertPathInsideRealDir(realOut, absOut, false);
+            } catch {
+                diagnostics.push({
+                    severity: 'error',
+                    message: `Refusing output path "${relFile}" escaping "${normalizedOutDir}" via symlink.`,
                 });
                 continue;
             }
@@ -1906,11 +2217,13 @@ export class SlateMcpServer {
 
         if (!dryRun && !hasErrors) {
             await fs.mkdir(resolvedOut, { recursive: true });
+            const resolvedRealOut = await fs.realpath(resolvedOut);
             for (const [prevRel, prevContent] of existingFiles.entries()) {
-                if (!normalizedFiles.has(prevRel) && isSlateGeneratedContent(prevContent)) {
+                if (!seenCaseKeys.has(caseCollisionKey(prevRel)) && isSlateGeneratedContent(prevContent)) {
                     const prevAbs = path.resolve(resolvedOut, prevRel);
                     const prevRelCheck = path.relative(resolvedOut, prevAbs);
                     if (prevRelCheck && !prevRelCheck.startsWith('..') && !path.isAbsolute(prevRelCheck)) {
+                        await assertPathInsideRealDir(resolvedRealOut, prevAbs, false);
                         await fs.unlink(prevAbs);
                         removedFiles.push(prevRel);
                     }
@@ -1918,6 +2231,7 @@ export class SlateMcpServer {
             }
             for (const relFile of generatedPaths) {
                 const absOut = path.resolve(resolvedOut, relFile);
+                await assertPathInsideRealDir(resolvedRealOut, absOut, false);
                 await fs.mkdir(path.dirname(absOut), { recursive: true });
                 await fs.writeFile(absOut, normalizedFiles.get(relFile)!, 'utf8');
                 writtenFiles.push(relFile);
@@ -1927,7 +2241,7 @@ export class SlateMcpServer {
         return {
             ok: !hasErrors,
             language: config.language,
-            outDir: relToRoot,
+            outDir: normalizedOutDir,
             dryRun,
             fileCount: normalizedFiles.size,
             files: generatedPaths,
@@ -2138,15 +2452,17 @@ export interface SlateMcpCliIo {
 }
 
 const SLATE_MCP_CLI_HELP = [
-    'Usage: slate_mcp_server [--workspace <dir>] [--list-tools | --call <tool> [--args <json> | --args-file <path>]]',
+    'Usage: slate_mcp_server [--workspace <dir>] [--trust-workspace] [--approve-llm-pairing <endpoint|env:VAR>] [--list-tools | --call <tool> [--args <json> | --args-file <path>]]',
     '',
     'Options:',
-    '  --workspace <dir>   Workspace root directory (defaults to current working directory)',
-    '  --list-tools        Print available MCP tools as JSON and exit',
-    '  --call <tool>       Invoke a single MCP tool one-shot and print JSON result',
-    '  --args <json>       Inline JSON object of arguments for --call',
-    '  --args-file <path>  Path to JSON file containing arguments for --call',
-    '  -h, --help          Show this help message and exit',
+    '  --workspace <dir>                   Workspace root directory (defaults to current working directory)',
+    '  --trust-workspace                   Mark the target workspace trusted for executing forged checks and configured endpoints (or set SLATE_TRUST_WORKSPACE=1)',
+    '  --approve-llm-pairing <pairing>     Approve a specific <normalized-endpoint>|<env:VAR|secret-storage> pairing (repeatable)',
+    '  --list-tools                        Print available MCP tools as JSON and exit',
+    '  --call <tool>                       Invoke a single MCP tool one-shot and print JSON result',
+    '  --args <json>                       Inline JSON object of arguments for --call',
+    '  --args-file <path>                  Path to JSON file containing arguments for --call',
+    '  -h, --help                          Show this help message and exit',
     '',
     'With no action flag, starts the stdio JSON-RPC 2.0 MCP server.',
 ].join('\n');
@@ -2164,6 +2480,8 @@ export async function runSlateMcpCli(
     let workspaceDir = path.resolve(baseCwd);
     let showHelp = false;
     let listTools = false;
+    let trustWorkspace = process.env.SLATE_TRUST_WORKSPACE === '1';
+    const approvedPairings: string[] = [];
     let callToolName: string | undefined;
     let inlineArgsJson: string | undefined;
     let argsFilePath: string | undefined;
@@ -2174,6 +2492,23 @@ export async function runSlateMcpCli(
             showHelp = true;
         } else if (flag === '--list-tools') {
             listTools = true;
+        } else if (flag === '--trust-workspace') {
+            trustWorkspace = true;
+        } else if (flag === '--approve-llm-pairing') {
+            if (!argv[i + 1]) {
+                io.stderr('Error: --approve-llm-pairing requires an endpoint|credential pairing value.\n');
+                return 1;
+            }
+            const rawPairing = argv[++i];
+            const sepIdx = rawPairing.lastIndexOf('|');
+            if (sepIdx <= 0) {
+                io.stderr('Error: --approve-llm-pairing must be formatted as <endpoint>|<env:VAR|secret-storage>.\n');
+                return 1;
+            }
+            const ep = rawPairing.slice(0, sepIdx);
+            const cred = rawPairing.slice(sepIdx + 1);
+            const envName = cred.startsWith('env:') ? cred.slice(4) : undefined;
+            approvedPairings.push(credentialPairingKey(ep, envName));
         } else if (flag === '--workspace') {
             if (!argv[i + 1]) {
                 io.stderr('Error: --workspace requires a directory path.\n');
@@ -2243,7 +2578,10 @@ export async function runSlateMcpCli(
             }
         }
 
-        const server = new SlateMcpServer(workspaceDir);
+        const server = new SlateMcpServer(workspaceDir, undefined, {
+            isTrusted: trustWorkspace,
+            approvedCredentialPairings: approvedPairings,
+        });
         try {
             const response = await server.handleRequest({
                 jsonrpc: '2.0',
@@ -2272,7 +2610,10 @@ export async function runSlateMcpCli(
         }
     }
 
-    const server = new SlateMcpServer(workspaceDir);
+    const server = new SlateMcpServer(workspaceDir, undefined, {
+        isTrusted: trustWorkspace,
+        approvedCredentialPairings: approvedPairings,
+    });
     server.startStdio();
     return 0;
 }

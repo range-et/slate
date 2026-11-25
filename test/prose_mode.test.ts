@@ -814,5 +814,46 @@ describe('Phase 8.5 (S-850): Prose / Grant & Research Mode (`language: "prose"`)
             expect(texExistingHeadings).toContain('\\subsection*{Methods \\cite{knuth1984}}');
             expect(texExistingHeadings).not.toContain('\\textbackslash{}section');
         });
+
+        it('rejects invalid/LaTeX-unsafe citation keys (P0-13) and refuses overwriting non-generated prose files (P0-8)', () => {
+            for (const bad of ['bad\\key', 'bad{key}', 'bad}key', 'bad%key', 'bad$key', 'bad key', '   ', '@']) {
+                expect(normalizeCitationKey(bad), bad).toBe('');
+            }
+            expect(normalizeCitationKey('@knuth_1984:a-b')).toBe('knuth_1984:a-b');
+
+            // Only valid citation keys are extracted; injected LaTeX/whitespace tokens in \cite{} are ignored
+            expect(extractCitations('Valid [@knuth_1984] and \\cite{safe_1, bad\\write18{evil}, has space}.'))
+                .toEqual(['knuth_1984', 'safe_1']);
+
+            const tex = renderProseLatex(
+                'Safety',
+                'Cite [@missing_ref_2099] and \\cite{bad\\cmd{1}}.',
+                new Map(),
+                ['missing_ref_2099', 'bad\\cmd{1}', 'bad%comment'],
+            );
+            expect(tex).toContain('\\bibitem{missing_ref_2099} Unresolved citation missing\\_ref\\_2099.');
+            expect(tex).not.toContain('bad\\cmd');
+            expect(tex).not.toContain('bad%comment');
+
+            const md = renderProseMarkdown('Safety', 'Text \\cite{bad key}', new Map(), ['missing_ref_2099']);
+            expect(md).toContain('Text \\cite{bad key}');
+            expect(md).toContain('Unresolved citation key `missing_ref_2099`');
+
+            // P0-8: existingFiles without generated header refuses overwrite cleanly
+            const sec = makeProseNode({
+                name: 'intro',
+                intent: 'Intro section',
+                code: ['operator intro() -> passage:', '    Hello world.'],
+            });
+            const blocked = compileProse(
+                new Map([['intro', sec]]),
+                config,
+                new Map(),
+                undefined,
+                { existingFiles: { 'diagtest.tex': '% hand-edited TeX\n\\section{Keep}\n' } },
+            );
+            expect(blocked.files.size).toBe(0);
+            expect(blocked.proseDiagnostics.some(d => d.severity === 'error' && d.message.includes('Refusing to overwrite'))).toBe(true);
+        });
     });
 });

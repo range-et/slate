@@ -12,9 +12,17 @@ import {
     resolveLlmConfig,
     streamLlamaCompletion,
     stripDisallowedCredential,
+    validateLlmEndpointUrl,
     type LlmConfigInput,
     type ResolvedLlmConfig,
 } from './llama_transport';
+import {
+    generateBridgeToken,
+    LIVE_BRIDGE_TOKEN_HEADER,
+    removeLiveBridgeRecord,
+    verifyBridgeToken,
+    writeLiveBridgeRecord,
+} from './live_bridge';
 import { DESCRIBE_OUTPUT_TOKENS, DESCRIBE_SYSTEM, describeNodes } from './port/describe';
 import { compileSlateFolder, slateOutput } from './port_compile_host';
 import { getLanguageAdapter } from './language_adapter';
@@ -23,8 +31,8 @@ import { PythonAdapter, sourceHash } from './python_adapter';
 import { parseProseModule, proseStub, verifyProseNode } from './prose_adapter';
 import { searchUnits } from './search';
 import {
-    addRegion, connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, groupIntoRegion, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, parseFlow, parseValueLiteral, pathForFlowId,
-    regionPorts, removeInstances, removeNodeReferences, removeRegion, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, repairRegionCallerPorts, repeatStatePortNames, serializeFlow, uniqueName, unitSignature, type CallableSignature, type GroupRegionSpec, type Port,
+    addRegion, assertSafeFlowId, connect, deleteFlowPort, disconnect, emptyFlow, extractFlow, flowIdForPath, flowSignature, groupIntoRegion, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, parseFlow, parseValueLiteral, pathForFlowId,
+    regionPorts, removeInstances, removeNodeReferences, removeRegion, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename, repairRegionCallerPorts, repeatStatePortNames, serializeFlow, uniqueName, unitSignature, validateFlowValueForPython, type CallableSignature, type GroupRegionSpec, type Port,
 } from './flow';
 import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, parseConfig, pathForNodeId, serializeNode, type SlateConfig, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
@@ -105,6 +113,7 @@ export class HarnessPanel implements vscode.Disposable {
     private readonly testMessages: unknown[] | undefined;
     private bridgeServer: http.Server | undefined;
     private bridgePort: number | undefined;
+    private bridgeToken: string | undefined;
     private verifications = new Map<string, NodeVerificationResult>();
     private activeVerifications = new Map<string, AbortController>();
     private activeRunController: AbortController | undefined;
@@ -249,12 +258,28 @@ export class HarnessPanel implements vscode.Disposable {
             watcher.onDidDelete(() => { this.scheduleRefresh(); this.triggerLiveRerun('file deleted'); }, null, this.disposables);
             this.disposables.push(watcher);
         }
+        const configWatcher = vscode.workspace.createFileSystemWatcher(folder.configPattern());
+        configWatcher.onDidCreate(() => this.scheduleRefresh(), null, this.disposables);
+        configWatcher.onDidChange(() => this.scheduleRefresh(), null, this.disposables);
+        configWatcher.onDidDelete(() => this.scheduleRefresh(), null, this.disposables);
+        this.disposables.push(configWatcher);
+
+        const layoutWatcher = vscode.workspace.createFileSystemWatcher(folder.layoutPattern());
+        layoutWatcher.onDidCreate(() => { void this.refreshOnExternalLayoutChange(); }, null, this.disposables);
+        layoutWatcher.onDidChange(() => { void this.refreshOnExternalLayoutChange(); }, null, this.disposables);
+        layoutWatcher.onDidDelete(() => { void this.refreshOnExternalLayoutChange(); }, null, this.disposables);
+        this.disposables.push(layoutWatcher);
+
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument(event => {
                 const relative = this.folder.relative(event.document.uri);
                 if (this.folder.nodeId(event.document.uri) !== null || flowIdForPath(relative) !== null) {
                     this.scheduleRefresh();
                     this.triggerLiveRerun('text document change');
+                } else if (relative === CONFIG_PATH) {
+                    this.scheduleRefresh();
+                } else if (relative === LAYOUT_PATH) {
+                    void this.refreshOnExternalLayoutChange();
                 }
             }),
             vscode.window.onDidChangeTextEditorSelection(event => this.selectFromEditor(event.textEditor)),
@@ -264,6 +289,19 @@ export class HarnessPanel implements vscode.Disposable {
         );
         this.startBridgeServer();
         this.scheduleRefresh(0);
+    }
+
+    private async refreshOnExternalLayoutChange(): Promise<void> {
+        if (this.disposed) return;
+        if (await this.folder.hasExternalLayoutChange()) {
+            this.scheduleRefresh();
+        }
+    }
+
+    private enqueueMutation<T>(fn: () => Promise<T>): Promise<T> {
+        const next = this.mutations.then(fn, fn);
+        this.mutations = next.then(() => undefined, () => undefined);
+        return next;
     }
 
     scheduleRefresh(delay = 250): void {
@@ -465,16 +503,29 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'setLlamaConfig' && typeof value.endpoint === 'string') {
+            try {
+                validateLlmEndpointUrl(value.endpoint);
+            } catch (err) {
+                this.postCommandResult(false, err instanceof Error ? err.message : String(err));
+                return;
+            }
+            if (typeof value.apiKeyEnv === 'string') {
+                const trimmedEnv = value.apiKeyEnv.trim();
+                if (trimmedEnv && (/^(?:sk-|bearer\s+)/i.test(trimmedEnv) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedEnv))) {
+                    this.postCommandResult(false, 'apiKeyEnv must be an environment variable name (e.g. "OPENROUTER_API_KEY"), not a raw API key.');
+                    return;
+                }
+            }
             const config = vscode.workspace.getConfiguration('slate.llama');
-            await config.update('endpoint', value.endpoint, vscode.ConfigurationTarget.Global);
+            await config.update('endpoint', value.endpoint.trim(), vscode.ConfigurationTarget.Global);
             if (typeof value.model === 'string') {
                 await config.update('model', value.model, vscode.ConfigurationTarget.Global);
             }
             if (typeof value.apiKeyEnv === 'string') {
-                await config.update('apiKeyEnv', value.apiKeyEnv, vscode.ConfigurationTarget.Global);
+                await config.update('apiKeyEnv', value.apiKeyEnv.trim(), vscode.ConfigurationTarget.Global);
             }
             await this.checkAndBroadcastLlamaHealth(undefined, undefined, { interactive: true });
-            this.postCommandResult(true, `Updated local LLM configuration: ${value.endpoint}`);
+            this.postCommandResult(true, `Updated local LLM configuration: ${value.endpoint.trim()}`);
             return;
         }
         if (value.type === 'verifyCandidate' && typeof value.proposalId === 'string' && typeof value.candidate === 'string') {
@@ -539,17 +590,24 @@ export class HarnessPanel implements vscode.Disposable {
 
     private fallbackLlmSettings(): LlmConfigInput {
         const config = vscode.workspace.getConfiguration('slate.llama');
-        const apiKeyEnv = config.get<string>('apiKeyEnv', '').trim();
-        const inspectedOutput = typeof config.inspect === 'function' ? config.inspect<number>('outputTokens') : undefined;
-        const explicitOutputTokens = inspectedOutput?.workspaceFolderValue
-            ?? inspectedOutput?.workspaceValue
-            ?? inspectedOutput?.globalValue;
+        const hasInspect = typeof config.inspect === 'function';
+        const globalString = (key: string, def: string): string =>
+            hasInspect
+                ? (config.inspect<string>(key)?.globalValue ?? config.inspect<string>(key)?.defaultValue ?? def)
+                : config.get<string>(key, def);
+        const globalNumber = (key: string, def: number): number =>
+            hasInspect
+                ? (config.inspect<number>(key)?.globalValue ?? config.inspect<number>(key)?.defaultValue ?? def)
+                : config.get<number>(key, def);
+        const apiKeyEnv = globalString('apiKeyEnv', '').trim();
+        const inspectedOutput = hasInspect ? config.inspect<number>('outputTokens') : undefined;
+        const explicitOutputTokens = inspectedOutput?.globalValue;
         return {
-            endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
-            model: config.get('model', 'local'),
-            contextWindowTokens: config.get('contextWindow', 4096),
+            endpoint: globalString('endpoint', 'http://127.0.0.1:8080'),
+            model: globalString('model', 'local'),
+            contextWindowTokens: globalNumber('contextWindow', 4096),
             ...(typeof explicitOutputTokens === 'number' ? { outputTokens: explicitOutputTokens } : {}),
-            timeoutSeconds: config.get('timeoutSeconds', 120),
+            timeoutSeconds: globalNumber('timeoutSeconds', 120),
             ...(apiKeyEnv ? { apiKeyEnv } : {}),
         };
     }
@@ -620,10 +678,18 @@ export class HarnessPanel implements vscode.Disposable {
         const approved = this.loadApprovedPairings();
         const decision = evaluateProjectCredentialAccess({
             projectLlm,
+            override,
+            fallback,
             resolved,
             isTrusted: vscode.workspace.isTrusted,
             approvedPairings: approved,
         });
+        if (!decision.allowRequest) {
+            return {
+                settings: stripDisallowedCredential(resolved),
+                credentialBlockedReason: decision.reason ?? 'Workspace is not trusted; refusing request to configured LLM endpoint.',
+            };
+        }
         if (!decision.requiresApproval || decision.allowCredential) {
             return { settings: resolved };
         }
@@ -1052,22 +1118,55 @@ export class HarnessPanel implements vscode.Disposable {
             timestamp: Date.now(),
             sourceHash: '',
         };
-        await this.postMessage({ type: 'verificationStatus', result: runningResult });
+        let priorVerification = this.verifications.get(nodeId);
+
+        const restoreCancelledStatus = async (): Promise<void> => {
+            const active = this.activeVerifications.get(nodeId);
+            if (active && active !== controller) return;
+            if (priorVerification) {
+                this.verifications.set(nodeId, priorVerification);
+            } else {
+                this.verifications.delete(nodeId);
+            }
+            const fallbackStatus: NodeVerificationResult = priorVerification ?? {
+                nodeId,
+                state: 'untested',
+                timestamp: Date.now(),
+                sourceHash: runningResult.sourceHash,
+            };
+            await this.postMessage({ type: 'verificationStatus', result: fallbackStatus });
+        };
 
         try {
             const node = await this.folder.readNode(nodeId);
+            priorVerification ??= node.verification;
             runningResult.sourceHash = sourceHash(codeText(node));
-
-            const dependencies = new Map<string, SlateNode>();
-            for (const depId of node.context) {
-                try {
-                    const depNode = await this.folder.readNode(depId);
-                    dependencies.set(depId, depNode);
-                } catch {}
+            if (controller.signal.aborted) {
+                await restoreCancelledStatus();
+                return;
             }
 
-            const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
-            const language = node.language ?? parseConfig(await this.folder.readConfigText()).language;
+            const readInputs = async (target: SlateNode) => {
+                const dependencies = new Map<string, SlateNode>();
+                for (const depId of target.context) {
+                    try {
+                        dependencies.set(depId, await this.folder.readNode(depId));
+                    } catch { /* Missing dependencies are omitted by the verifier. */ }
+                }
+                const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                const language = target.language ?? parseConfig(await this.folder.readConfigText()).language;
+                const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.imports, n.context,
+                    n.uses, n.check, n.cases, n.extra, n.contract];
+                const fingerprint = JSON.stringify([language, pythonPath, inputs(target),
+                    [...dependencies].map(([id, dep]) => [id, inputs(dep)])]);
+                return { language, pythonPath, dependencies, fingerprint };
+            };
+            const { language, pythonPath, dependencies, fingerprint } = await readInputs(node);
+            if (controller.signal.aborted) {
+                await restoreCancelledStatus();
+                return;
+            }
+            await this.postMessage({ type: 'verificationStatus', result: runningResult });
             const proseCheck = language === 'prose' ? verifyProseNode(node, { nodeId }) : undefined;
             const result: NodeVerificationResult = proseCheck ? {
                 nodeId, state: proseCheck.valid ? 'passed' : 'failed', timestamp: Date.now(),
@@ -1084,20 +1183,48 @@ export class HarnessPanel implements vscode.Disposable {
                 language: this.canonicalForgeLanguage(language),
             });
 
-            this.verifications.set(nodeId, result);
-            node.verification = result;
-            await this.folder.writeNode(nodeId, node);
+            if (controller.signal.aborted) {
+                await restoreCancelledStatus();
+                return;
+            }
 
-            await this.postMessage({ type: 'verificationStatus', result });
+            const finalResult = await this.enqueueMutation(async (): Promise<NodeVerificationResult | null> => {
+                if (controller.signal.aborted) {
+                    return null;
+                }
+                const latest = await this.folder.readNode(nodeId);
+                const latestInputs = await readInputs(latest);
+                if (controller.signal.aborted) return null;
+                const resolved: NodeVerificationResult = latestInputs.fingerprint !== fingerprint
+                    ? { ...result, state: 'stale' }
+                    : result;
+                this.verifications.set(nodeId, resolved);
+                latest.verification = resolved;
+                await this.folder.writeNode(nodeId, latest);
+                return resolved;
+            });
+
+            if (!finalResult || controller.signal.aborted) {
+                await restoreCancelledStatus();
+                return;
+            }
+
+            await this.postMessage({ type: 'verificationStatus', result: finalResult });
             this.postCommandResult(
-                result.state === 'passed',
-                result.state === 'passed'
+                finalResult.state === 'passed',
+                finalResult.state === 'passed'
                     ? `Verification passed for ${nodeId}.`
-                    : result.state === 'mutant_survived'
-                        ? `Verification warning: ${result.survivingMutants} mutant(s) survived for ${nodeId}.`
-                        : `Verification failed for ${nodeId}.`,
+                    : finalResult.state === 'mutant_survived'
+                        ? `Verification warning: ${finalResult.survivingMutants} mutant(s) survived for ${nodeId}.`
+                        : finalResult.state === 'stale'
+                            ? `Verification completed on older source for ${nodeId}; marked stale.`
+                            : `Verification failed for ${nodeId}.`,
             );
         } catch (error) {
+            if (controller.signal.aborted) {
+                await restoreCancelledStatus();
+                return;
+            }
             const failResult: NodeVerificationResult = {
                 nodeId,
                 state: 'failed',
@@ -1109,7 +1236,9 @@ export class HarnessPanel implements vscode.Disposable {
             await this.postMessage({ type: 'verificationStatus', result: failResult });
             this.postCommandResult(false, `Verification error: ${failResult.diagnostics![0]}`);
         } finally {
-            this.activeVerifications.delete(nodeId);
+            if (this.activeVerifications.get(nodeId) === controller) {
+                this.activeVerifications.delete(nodeId);
+            }
         }
     }
 
@@ -1193,6 +1322,11 @@ export class HarnessPanel implements vscode.Disposable {
                 },
             });
 
+            if (controller.signal.aborted) {
+                this.postCommandResult(true, `Cancelled revision loop for ${nodeId}.`);
+                return;
+            }
+
             this.verifications.set(nodeId, loopResult.finalResult);
             await this.postMessage({ type: 'verificationStatus', result: loopResult.finalResult });
 
@@ -1263,7 +1397,9 @@ export class HarnessPanel implements vscode.Disposable {
         } catch (error) {
             this.postCommandResult(false, `Revision loop failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
-            this.activeVerifications.delete(nodeId);
+            if (this.activeVerifications.get(nodeId) === controller) {
+                this.activeVerifications.delete(nodeId);
+            }
         }
     }
 
@@ -1747,9 +1883,16 @@ export class HarnessPanel implements vscode.Disposable {
                 let finalVal: unknown = action.value;
                 if (typeof finalVal === 'string') {
                     const parsed = parseValueLiteral(finalVal);
-                    if (!parsed.error && parsed.type !== 'expr') {
+                    if (parsed.error) {
+                        throw new Error(`Invalid value literal: ${parsed.error}`);
+                    }
+                    if (parsed.type !== 'expr') {
                         finalVal = parsed.value;
                     }
+                }
+                const valueError = validateFlowValueForPython(finalVal);
+                if (valueError) {
+                    throw new Error(valueError);
                 }
                 await saveFlow(flowId, { ...flow, instances: flow.instances.map(instance =>
                     instance.id === action.id && instance.kind === 'value' ? { ...instance, value: finalVal } : instance) });
@@ -2305,7 +2448,7 @@ export class HarnessPanel implements vscode.Disposable {
                 return true;
             }
             case 'deleteFlow': {
-                const id = String(action.id);
+                const id = assertSafeFlowId(String(action.id ?? ''));
                 if ((this.snapshot?.flows ?? []).some(item => item.flow?.regions?.some(region => region.kind === 'branch'
                     ? region.thenFlow === id || region.elseFlow === id : region.bodyFlow === id))) {
                     throw new Error('Remove the regions that reference this flow before deleting it.');
@@ -2719,13 +2862,16 @@ export class HarnessPanel implements vscode.Disposable {
                     prompt, { ...settings, outputTokens: DESCRIBE_OUTPUT_TOKENS, system: DESCRIBE_SYSTEM }, signal, () => {},
                 ),
                 write: async (nodeId, described) => {
-                    const node = await folder.readNode(nodeId);
-                    if (node.intent.trim()) return; // Someone described it meanwhile; theirs wins.
-                    node.intent = described.intent;
-                    if (!node.contract.trim()) node.contract = described.contract;
-                    node.describedBy = 'llama';
-                    await folder.writeNode(nodeId, node);
-                    this.scheduleRefresh(0);
+                    await this.enqueueMutation(async () => {
+                        if (controller.signal.aborted) return;
+                        const node = await folder.readNode(nodeId);
+                        if (node.intent.trim()) return; // Someone described it meanwhile; theirs wins.
+                        node.intent = described.intent;
+                        if (!node.contract.trim()) node.contract = described.contract;
+                        node.describedBy = 'llama';
+                        await folder.writeNode(nodeId, node);
+                        this.scheduleRefresh(0);
+                    });
                 },
                 onProgress: message => this.postCommandResult(true, message),
                 signal: controller.signal,
@@ -2818,10 +2964,78 @@ export class HarnessPanel implements vscode.Disposable {
         })) ?? false;
     }
 
+    private validateFocusPayload(raw: unknown): {
+        target?: string;
+        region?: { x: number; y: number; width?: number; height?: number };
+        zoom?: number;
+        duration?: number;
+    } {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw new Error('Focus payload must be a JSON object.');
+        }
+        const rec = raw as Record<string, unknown>;
+        const out: {
+            target?: string;
+            region?: { x: number; y: number; width?: number; height?: number };
+            zoom?: number;
+            duration?: number;
+        } = {};
+        if (rec.target !== undefined) {
+            if (typeof rec.target !== 'string') throw new Error('Focus target must be a string.');
+            out.target = rec.target;
+        }
+        if (rec.region !== undefined) {
+            if (!rec.region || typeof rec.region !== 'object' || Array.isArray(rec.region)) {
+                throw new Error('Focus region must be an object.');
+            }
+            const r = rec.region as Record<string, unknown>;
+            if (typeof r.x !== 'number' || !Number.isFinite(r.x) || typeof r.y !== 'number' || !Number.isFinite(r.y)) {
+                throw new Error('Focus region requires finite numeric x and y.');
+            }
+            out.region = {
+                x: r.x,
+                y: r.y,
+                ...(typeof r.width === 'number' && Number.isFinite(r.width) ? { width: r.width } : {}),
+                ...(typeof r.height === 'number' && Number.isFinite(r.height) ? { height: r.height } : {}),
+            };
+        }
+        if (rec.zoom !== undefined) {
+            if (typeof rec.zoom !== 'number' || !Number.isFinite(rec.zoom)) throw new Error('Focus zoom must be a finite number.');
+            out.zoom = rec.zoom;
+        }
+        if (rec.duration !== undefined) {
+            if (typeof rec.duration !== 'number' || !Number.isFinite(rec.duration)) throw new Error('Focus duration must be a finite number.');
+            out.duration = rec.duration;
+        }
+        return out;
+    }
+
     private startBridgeServer(): void {
         try {
+            const bridgeToken = generateBridgeToken();
+            this.bridgeToken = bridgeToken;
             const server = http.createServer((req, res) => {
                 if (req.method === 'POST' && req.url === '/focus') {
+                    const expectedHost = this.bridgePort ? `127.0.0.1:${this.bridgePort}` : '';
+                    if (req.headers.origin || (expectedHost && req.headers.host !== expectedHost)) {
+                        req.resume();
+                        res.writeHead(403, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'Forbidden host or origin' }));
+                        return;
+                    }
+                    if (!verifyBridgeToken(req.headers[LIVE_BRIDGE_TOKEN_HEADER], bridgeToken)) {
+                        req.resume();
+                        res.writeHead(401, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'Unauthorized live bridge request' }));
+                        return;
+                    }
+                    const contentType = String(req.headers['content-type'] ?? '').toLowerCase();
+                    if (!contentType.startsWith('application/json')) {
+                        req.resume();
+                        res.writeHead(415, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: false, error: 'Content-Type must be application/json' }));
+                        return;
+                    }
                     let body = '';
                     let bodyLength = 0;
                     const MAX_BODY_BYTES = 64 * 1024; // 64KB
@@ -2838,8 +3052,8 @@ export class HarnessPanel implements vscode.Disposable {
                     req.on('end', async () => {
                         if (bodyLength > MAX_BODY_BYTES) return;
                         try {
-                            const parsed = JSON.parse(body || '{}');
-                            await this.focusCamera(parsed);
+                            const payload = this.validateFocusPayload(JSON.parse(body || '{}'));
+                            await this.focusCamera(payload);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ ok: true }));
                         } catch (err) {
@@ -2856,19 +3070,19 @@ export class HarnessPanel implements vscode.Disposable {
                 const addr = server.address();
                 if (addr && typeof addr === 'object') {
                     this.bridgePort = addr.port;
-                    const bridgeFile = vscode.Uri.joinPath(this.folder.root, '.slate', 'live_bridge.json');
-                    const info = JSON.stringify({ port: this.bridgePort, pid: process.pid });
-                    void vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.folder.root, '.slate'))
-                        .then(() => vscode.workspace.fs.writeFile(bridgeFile, new TextEncoder().encode(info)))
-                        .then(undefined, () => {});
+                    if (this.folder.root.scheme === 'file') {
+                        void writeLiveBridgeRecord(this.folder.root.fsPath, this.bridgePort, bridgeToken).catch(() => {});
+                    }
                 }
             });
             server.on('error', () => {
                 this.bridgeServer = undefined;
+                this.bridgeToken = undefined;
             });
             this.bridgeServer = server;
         } catch {
             this.bridgeServer = undefined;
+            this.bridgeToken = undefined;
         }
     }
 
@@ -2880,8 +3094,10 @@ export class HarnessPanel implements vscode.Disposable {
         if (this.bridgeServer) {
             this.bridgeServer.close();
             this.bridgeServer = undefined;
-            const bridgeFile = vscode.Uri.joinPath(this.folder.root, '.slate', 'live_bridge.json');
-            void vscode.workspace.fs.delete(bridgeFile).then(undefined, () => {});
+            if (this.bridgeToken && this.folder.root.scheme === 'file') {
+                void removeLiveBridgeRecord(this.folder.root.fsPath, this.bridgeToken);
+            }
+            this.bridgeToken = undefined;
         }
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         if (this.liveDebounceTimer) {

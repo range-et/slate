@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -7,10 +8,12 @@ import {
     DEFAULT_OUTPUT_TOKENS,
     evaluateProjectCredentialAccess,
     inferProviderFromEndpoint,
+    isLoopbackHost,
     LlamaTransportError,
     resolveLlmConfig,
     streamLlamaCompletion,
     stripDisallowedCredential,
+    validateLlmEndpointUrl,
 } from '../vscode-extension/src/llama_transport';
 import { startFakeLlamaServer, type FakeLlamaServer } from './support/fake_llama_server';
 
@@ -203,6 +206,12 @@ describe('llama.cpp transport', () => {
         expect(userOnly.allowCredential).toBe(true);
         expect(userOnly.requiresApproval).toBe(false);
 
+        for (const fallback of [resolved, stripDisallowedCredential(resolved)]) {
+            expect(evaluateProjectCredentialAccess({ resolved: fallback, isTrusted: false })).toMatchObject({
+                allowRequest: false, allowCredential: false, requiresApproval: false, pairingKey: null,
+            });
+        }
+
         // Requests with no resolved API key need no credential approval
         const noCred = evaluateProjectCredentialAccess({
             projectLlm,
@@ -267,5 +276,78 @@ describe('llama.cpp transport', () => {
             contextWindowTokens: 1024,
             outputTokens: 700,
         });
+    });
+
+    it('blocks unsafe SSRF endpoints, HTTP redirects, untrusted requests, and ambient key leaks (P0-1)', async () => {
+        expect(isLoopbackHost('localhost')).toBe(true);
+        expect(isLoopbackHost('sub.localhost')).toBe(true);
+        expect(isLoopbackHost('127.0.0.1')).toBe(true);
+        expect(isLoopbackHost('[::1]')).toBe(true);
+        expect(isLoopbackHost('api.openrouter.ai')).toBe(false);
+
+        expect(validateLlmEndpointUrl('http://127.0.0.1:8080/v1').hostname).toBe('127.0.0.1');
+        expect(validateLlmEndpointUrl('https://openrouter.ai/api/v1').protocol).toBe('https:');
+
+        expect(() => validateLlmEndpointUrl('http://api.example.com/v1')).toThrow(/must use https:\/\//i);
+        expect(() => validateLlmEndpointUrl('https://user:pass@api.example.com/v1')).toThrow(/embedded credentials/i);
+        expect(() => validateLlmEndpointUrl('http://169.254.169.254/latest/meta-data')).toThrow(/restricted metadata/i);
+        expect(() => validateLlmEndpointUrl('https://169.254.169.254/v1')).toThrow(/restricted metadata/i);
+        expect(() => validateLlmEndpointUrl('https://[::ffff:169.254.169.254]/v1')).toThrow(/restricted metadata/i);
+        expect(() => validateLlmEndpointUrl('https://[::ffff:a9fe:a9fe]/v1')).toThrow(/restricted metadata/i);
+        expect(() => validateLlmEndpointUrl('http://[fe80::1]/v1')).toThrow(/restricted metadata/i);
+        expect(() => validateLlmEndpointUrl('https://metadata.google.internal/v1')).toThrow(/restricted metadata/i);
+
+        // Untrusted workspaces refuse even unauthenticated requests to project or override endpoints
+        const noKeyResolved = resolveLlmConfig(
+            { provider: 'openai-compatible', endpoint: 'https://proj.example/v1' },
+            undefined,
+            {},
+        );
+        const untrustedNoKey = evaluateProjectCredentialAccess({
+            projectLlm: { provider: 'openai-compatible', endpoint: 'https://proj.example/v1' },
+            resolved: noKeyResolved,
+            isTrusted: false,
+        });
+        expect(untrustedNoKey.allowRequest).toBe(false);
+        expect(untrustedNoKey.allowCredential).toBe(false);
+        expect(untrustedNoKey.reason).toContain('Workspace is not trusted');
+
+        // Ambient SLATE_LLM_API_KEY applies to loopback fallback, not foreign non-loopback project endpoints
+        const foreignAmbient = resolveLlmConfig(
+            { provider: 'openai-compatible', endpoint: 'https://foreign.example/v1', model: 'qwen' },
+            { endpoint: 'http://127.0.0.1:8080' },
+            { SLATE_LLM_API_KEY: 'ambient-secret' },
+        );
+        expect(foreignAmbient.apiKey).toBeUndefined();
+        expect(foreignAmbient.hasApiKey).toBe(false);
+
+        const localAmbient = resolveLlmConfig(
+            undefined,
+            { endpoint: 'http://127.0.0.1:8080' },
+            { SLATE_LLM_API_KEY: 'ambient-secret' },
+        );
+        expect(localAmbient.apiKey).toBe('ambient-secret');
+        expect(localAmbient.credentialSource).toBe('env:SLATE_LLM_API_KEY');
+
+        // Redirects (302) must fail closed rather than following Location targets
+        const redirectServer = createServer((_req, res) => {
+            res.writeHead(302, { Location: 'http://169.254.169.254/latest/meta-data' });
+            res.end();
+        });
+        await new Promise<void>(resolve => redirectServer.listen(0, '127.0.0.1', () => resolve()));
+        const addr = redirectServer.address() as { port: number };
+        const redirectUrl = `http://127.0.0.1:${addr.port}`;
+        try {
+            const health = await checkLlamaHealth(redirectUrl, 'local', 1000);
+            expect(health.ok).toBe(false);
+            await expect(streamLlamaCompletion('implement it', {
+                endpoint: redirectUrl,
+                model: 'local',
+                outputTokens: 32,
+                timeoutMs: 1000,
+            }, new AbortController().signal, () => {})).rejects.toThrow(LlamaTransportError);
+        } finally {
+            await new Promise<void>(resolve => redirectServer.close(() => resolve()));
+        }
     });
 });

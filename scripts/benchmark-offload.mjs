@@ -303,7 +303,41 @@ export async function runBenchmarkOffload(options = {}) {
         };
         await fsp.writeFile(path.join(slateDir, 'slate.json'), serializeConfig(config), 'utf8');
 
-        mcpServer = new SlateMcpServer(workspaceDir);
+        const effectiveEndpoint = endpoint
+            ?? (effectiveProvider === 'openrouter'
+                ? 'https://openrouter.ai/api/v1'
+                : effectiveProvider === 'ollama'
+                    ? 'http://127.0.0.1:11434/v1'
+                    : effectiveProvider === 'openai-compatible'
+                        ? 'http://127.0.0.1:8080/v1'
+                        : 'http://127.0.0.1:8080');
+        const effectiveApiKeyEnv = apiKeyEnv
+            ?? (effectiveProvider === 'openrouter'
+                ? 'OPENROUTER_API_KEY'
+                : effectiveProvider === 'openai-compatible'
+                    ? 'SLATE_LLM_API_KEY'
+                    : undefined);
+        const approvedPairings = [];
+        try {
+            const parsedEp = new URL(effectiveEndpoint.trim());
+            const normEp = `${parsedEp.protocol.toLowerCase()}//${parsedEp.host.toLowerCase()}${parsedEp.pathname.replace(/\/+$/, '')}`;
+            if (effectiveApiKeyEnv) {
+                approvedPairings.push(`${normEp}|env:${effectiveApiKeyEnv}`);
+            }
+            if (process.env.SLATE_LLM_API_KEY) {
+                approvedPairings.push(`${normEp}|env:SLATE_LLM_API_KEY`);
+            }
+            if (process.env.OPENROUTER_API_KEY) {
+                approvedPairings.push(`${normEp}|env:OPENROUTER_API_KEY`);
+            }
+        } catch {
+            // Invalid endpoint will be rejected by SlateMcpServer validation
+        }
+
+        mcpServer = new SlateMcpServer(workspaceDir, undefined, {
+            isTrusted: true,
+            approvedCredentialPairings: approvedPairings,
+        });
 
         let frontierSpecChars = 0;
         let mcpReplyChars = 0;

@@ -5,6 +5,7 @@ import * as ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { SlateMcpServer } from '../vscode-extension/src/mcp/slate_mcp_server';
+import { credentialPairingKey } from '../vscode-extension/src/llama_transport';
 import { portTsProject } from '../vscode-extension/src/port/ts_importer';
 import { emptyLayout, serializeLayout, serializeNode } from '../vscode-extension/src/slate_folder';
 import { startFakeLlamaServer } from './support/fake_llama_server';
@@ -14,12 +15,17 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 describe('Stage 1 TypeScript self-hosting gate', () => {
     let tmpDir: string;
     let server: SlateMcpServer;
+    let approvedPairings: Set<string>;
 
     beforeEach(async () => {
         tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'slate-stage1-selfhost-'));
         await fs.mkdir(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
         await fs.mkdir(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
-        server = new SlateMcpServer(tmpDir);
+        approvedPairings = new Set<string>();
+        server = new SlateMcpServer(tmpDir, undefined, {
+            isTrusted: true,
+            approvedCredentialPairings: approvedPairings,
+        });
     });
 
     afterEach(async () => {
@@ -204,6 +210,7 @@ describe('Stage 1 TypeScript self-hosting gate', () => {
                 '```',
             ].join('\n')];
         }, { requiredAuth: 'Bearer fake-stage1-key' });
+        approvedPairings.add(credentialPairingKey(fakeServer.url, 'SLATE_STAGE1_KEY'));
 
         const prevEnv = process.env.SLATE_STAGE1_KEY;
         process.env.SLATE_STAGE1_KEY = 'fake-stage1-key';

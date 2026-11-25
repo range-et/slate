@@ -60,6 +60,7 @@ interface ParsedUnitDetail {
 export interface CSharpParseDetails extends ParseModuleResult {
     namespace: string | null;
     usings: CSharpUsing[];
+    topLevelStatements: Array<{ from: number; to: number }>;
     offsets: Map<
         string,
         {
@@ -700,6 +701,7 @@ export function parseCSharpDetailed(
             ],
             namespace: null,
             usings: [],
+            topLevelStatements: [],
             offsets: new Map(),
             unitDetails: new Map(),
         };
@@ -709,6 +711,7 @@ export function parseCSharpDetailed(
     const nodeName = nodeId?.split('/').pop();
     const usings: CSharpUsing[] = [];
     const detailsList: ParsedUnitDetail[] = [];
+    const topLevelStatements: Array<{ from: number; to: number }> = [];
     let fileNamespace: string | null = null;
     type SyntaxErr = { message: string; from: number; to: number };
     let syntaxError: SyntaxErr | null = null as SyntaxErr | null;
@@ -731,6 +734,11 @@ export function parseCSharpDetailed(
         return { decorators, nextIdx: idx, wrapperFrom };
     };
 
+    const CONTROL_STMT_KEYWORDS = new Set([
+        'if', 'else', 'for', 'foreach', 'while', 'do', 'switch', 'try', 'catch', 'finally',
+        'lock', 'checked', 'unchecked', 'fixed', 'return', 'throw', 'yield', 'await', 'var',
+    ]);
+
     const parseDeclarations = (
         fromIdx: number,
         toIdx: number,
@@ -740,6 +748,74 @@ export function parseCSharpDetailed(
         currentClassModifiers: string | null,
         currentClassDeclaration: string | null = null,
     ): void => {
+        const captureTopLevelStatement = (stmtStartIdx: number): number | null => {
+            let k = stmtStartIdx;
+            let parenDepth = 0;
+            let bracketDepth = 0;
+            while (k < toIdx) {
+                const tk = tokens[k];
+                if (tk.kind === 'punct') {
+                    if (tk.text === '(') parenDepth++;
+                    else if (tk.text === ')') {
+                        if (parenDepth === 0) {
+                            syntaxError = { message: 'Unexpected ")" in C# top-level statement.', from: tk.from, to: tk.to };
+                            return null;
+                        }
+                        parenDepth--;
+                    } else if (tk.text === '[') bracketDepth++;
+                    else if (tk.text === ']') {
+                        if (bracketDepth === 0) {
+                            syntaxError = { message: 'Unexpected "]" in C# top-level statement.', from: tk.from, to: tk.to };
+                            return null;
+                        }
+                        bracketDepth--;
+                    } else if (tk.text === '{') {
+                        const closeB = findMatchingClose(tokens, k, '{', '}');
+                        if (closeB < 0 || closeB >= toIdx) {
+                            syntaxError = { message: 'Unclosed "{" in C# top-level statement.', from: tk.from, to: tokens[toIdx - 1].to };
+                            return null;
+                        }
+                        k = closeB;
+                        if (parenDepth === 0 && bracketDepth === 0) {
+                            const firstText = tokens[stmtStartIdx].text;
+                            const nextText = tokens[k + 1]?.text;
+                            if (
+                                nextText === 'else'
+                                || nextText === 'catch'
+                                || nextText === 'finally'
+                                || (firstText === 'do' && nextText === 'while')
+                            ) {
+                                k++;
+                                continue;
+                            }
+                            if (
+                                ['if', 'for', 'foreach', 'while', 'switch', 'try', 'lock', 'fixed'].includes(firstText)
+                                || (['checked', 'unchecked'].includes(firstText) && tokens[stmtStartIdx + 1]?.text === '{')
+                                || (firstText === 'using' && tokens[stmtStartIdx + 1]?.text === '(')
+                            ) {
+                                topLevelStatements.push({ from: tokens[stmtStartIdx].from, to: meaningfulEnd(source, tokens[k].to) });
+                                return k + 1;
+                            }
+                        }
+                    } else if (tk.text === ';' && parenDepth === 0 && bracketDepth === 0) {
+                        if (tokens[stmtStartIdx].text === 'if' && tokens[k + 1]?.text === 'else') {
+                            k++;
+                            continue;
+                        }
+                        topLevelStatements.push({ from: tokens[stmtStartIdx].from, to: meaningfulEnd(source, tk.to) });
+                        return k + 1;
+                    }
+                }
+                k++;
+            }
+            syntaxError = {
+                message: 'Unterminated C# top-level statement.',
+                from: tokens[stmtStartIdx].from,
+                to: tokens[toIdx - 1].to,
+            };
+            return null;
+        };
+
         let i = fromIdx;
         while (i < toIdx && !syntaxError) {
             const tok = tokens[i];
@@ -754,10 +830,10 @@ export function parseCSharpDetailed(
             i = attrRes.nextIdx;
             if (i >= toIdx) break;
 
-            // `using` directive at file or namespace scope
+            // `using` directive at file or namespace scope (skip `using var` / `using (...)` statements)
             if (
                 parent === null &&
-                ((tokens[i].kind === 'ident' && tokens[i].text === 'using') ||
+                ((tokens[i].kind === 'ident' && tokens[i].text === 'using' && tokens[i + 1]?.text !== 'var' && tokens[i + 1]?.text !== '(') ||
                     (tokens[i].kind === 'ident' && tokens[i].text === 'global' && tokens[i + 1]?.text === 'using'))
             ) {
                 const startOffset = tokens[i].from;
@@ -954,15 +1030,183 @@ export function parseCSharpDetailed(
                 continue;
             }
 
-            // Check for `enum` or `delegate`
-            if (tokens[i].kind === 'ident' && (tokens[i].text === 'enum' || tokens[i].text === 'delegate')) {
-                while (i < toIdx && tokens[i].text !== '{' && tokens[i].text !== ';') i++;
-                if (i < toIdx && tokens[i].text === '{') {
-                    const closeB = findMatchingClose(tokens, i, '{', '}');
-                    i = closeB >= 0 ? closeB + 1 : toIdx;
-                } else {
-                    i++;
+            // Check for `enum`
+            if (tokens[i].kind === 'ident' && tokens[i].text === 'enum') {
+                i++;
+                const nameTok = tokens[i];
+                if (!nameTok || nameTok.kind !== 'ident') {
+                    syntaxError = {
+                        message: 'Expected identifier after "enum".',
+                        from: tokens[modStartIdx].from,
+                        to: tokens[Math.min(i, toIdx - 1)].to,
+                    };
+                    return;
                 }
+                const enumName = nameTok.text.replace(/^@/, '');
+                i++;
+                while (i < toIdx && tokens[i].text !== '{' && tokens[i].text !== ';') i++;
+                if (i >= toIdx || tokens[i].text !== '{') {
+                    syntaxError = {
+                        message: `Expected "{" in enum "${enumName}".`,
+                        from: nameTok.from,
+                        to: tokens[Math.min(i, toIdx - 1)].to,
+                    };
+                    return;
+                }
+                const endTokIdx = findMatchingClose(tokens, i, '{', '}');
+                if (endTokIdx < 0) {
+                    syntaxError = {
+                        message: `Unclosed body in enum "${enumName}".`,
+                        from: nameTok.from,
+                        to: tokens[toIdx - 1].to,
+                    };
+                    return;
+                }
+                const codeFrom = tokens[modStartIdx].from;
+                const declFrom = wrapperFrom ?? codeFrom;
+                const declTo = meaningfulEnd(source, tokens[endTokIdx].to);
+                const kind: UnitKind = parent ? 'nested_class' : 'class';
+                const qualifiedName = parent ? `${parent.qualifiedName}.${enumName}` : enumName;
+                const isDurableNode = !parent && nodeName !== undefined && enumName === nodeName;
+                const unitId = isDurableNode ? nodeId! : stableId(documentPath, kind, qualifiedName);
+                const enumMods = modifiers.length > 0 ? modifiers.join(' ') : 'public';
+                detailsList.push({
+                    unit: {
+                        id: unitId,
+                        identity: isDurableNode ? 'durable' : 'provisional',
+                        kind,
+                        name: enumName,
+                        qualifiedName,
+                        parentId: parent?.id ?? null,
+                        ranges: {
+                            name: rangeAt(starts, nameTok.from, nameTok.to),
+                            declaration: rangeAt(starts, declFrom, declTo),
+                        },
+                        annotation: null,
+                        decorators: attrRes.decorators,
+                    },
+                    wrapperFrom: declFrom,
+                    codeFrom,
+                    codeTo: declTo,
+                    namespace: currentNamespace,
+                    className: enumName,
+                    classModifiers: enumMods,
+                    classDeclaration: `${enumMods} enum ${enumName}`,
+                });
+                i = endTokIdx + 1;
+                continue;
+            }
+
+            // Check for `delegate`
+            if (tokens[i].kind === 'ident' && tokens[i].text === 'delegate') {
+                i++;
+                let pOpen = i;
+                while (pOpen < toIdx && tokens[pOpen].text !== '(' && tokens[pOpen].text !== ';' && tokens[pOpen].text !== '{') {
+                    if (tokens[pOpen].text === '<') {
+                        const closeA = findMatchingAngleClose(tokens, pOpen);
+                        if (closeA > pOpen) {
+                            pOpen = closeA + 1;
+                            continue;
+                        }
+                    }
+                    pOpen++;
+                }
+                if (pOpen >= toIdx || tokens[pOpen].text !== '(') {
+                    syntaxError = {
+                        message: 'Expected "(" in delegate declaration.',
+                        from: tokens[modStartIdx].from,
+                        to: tokens[Math.min(pOpen, toIdx - 1)].to,
+                    };
+                    return;
+                }
+                let delNameTokIdx = pOpen - 1;
+                if (tokens[delNameTokIdx]?.text === '>') {
+                    let depth = 0;
+                    for (let k = delNameTokIdx; k >= i; k--) {
+                        if (tokens[k].text === '>') depth++;
+                        else if (tokens[k].text === '<') {
+                            depth--;
+                            if (depth === 0) {
+                                delNameTokIdx = k - 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                const nameTok = tokens[delNameTokIdx];
+                if (!nameTok || nameTok.kind !== 'ident') {
+                    syntaxError = {
+                        message: 'Invalid C# delegate declaration.',
+                        from: tokens[modStartIdx].from,
+                        to: tokens[pOpen].to,
+                    };
+                    return;
+                }
+                const delName = nameTok.text.replace(/^@/, '');
+                const pClose = findMatchingClose(tokens, pOpen, '(', ')');
+                if (pClose < 0) {
+                    syntaxError = {
+                        message: `Unclosed parameter list in delegate "${delName}".`,
+                        from: tokens[pOpen].from,
+                        to: tokens[toIdx - 1].to,
+                    };
+                    return;
+                }
+                let semiIdx = pClose + 1;
+                while (semiIdx < toIdx && tokens[semiIdx].text !== ';' && tokens[semiIdx].text !== '{') semiIdx++;
+                if (semiIdx >= toIdx || tokens[semiIdx].text !== ';') {
+                    syntaxError = {
+                        message: `Expected ";" after delegate "${delName}".`,
+                        from: nameTok.from,
+                        to: tokens[Math.min(semiIdx, toIdx - 1)].to,
+                    };
+                    return;
+                }
+                const codeFrom = tokens[modStartIdx].from;
+                const declFrom = wrapperFrom ?? codeFrom;
+                const declTo = meaningfulEnd(source, tokens[semiIdx].to);
+                const kind: UnitKind = parent ? 'nested_class' : 'class';
+                const qualifiedName = parent ? `${parent.qualifiedName}.${delName}` : delName;
+                const isDurableNode = !parent && nodeName !== undefined && delName === nodeName;
+                const unitId = isDurableNode ? nodeId! : stableId(documentPath, kind, qualifiedName);
+                const delMods = modifiers.length > 0 ? modifiers.join(' ') : 'public';
+                detailsList.push({
+                    unit: {
+                        id: unitId,
+                        identity: isDurableNode ? 'durable' : 'provisional',
+                        kind,
+                        name: delName,
+                        qualifiedName,
+                        parentId: parent?.id ?? null,
+                        ranges: {
+                            name: rangeAt(starts, nameTok.from, nameTok.to),
+                            declaration: rangeAt(starts, declFrom, declTo),
+                        },
+                        annotation: null,
+                        decorators: attrRes.decorators,
+                    },
+                    wrapperFrom: declFrom,
+                    codeFrom,
+                    codeTo: declTo,
+                    namespace: currentNamespace,
+                    className: delName,
+                    classModifiers: delMods,
+                    classDeclaration: `${delMods} delegate ${delName}`,
+                });
+                i = semiIdx + 1;
+                continue;
+            }
+
+            // C# 9+ top-level control/using/const statements outside any namespace or class
+            if (
+                parent === null &&
+                currentNamespace === null &&
+                modifiers.length === 0 &&
+                (CONTROL_STMT_KEYWORDS.has(tokens[i].text) || tokens[i].text === 'using' || tokens[i].text === 'const')
+            ) {
+                const nextI = captureTopLevelStatement(modStartIdx);
+                if (nextI === null) return;
+                i = nextI;
                 continue;
             }
 
@@ -1037,7 +1281,31 @@ export function parseCSharpDetailed(
                     returnAnnotation = source.slice(tokens[i].from, tokens[nameTokIdx - 1].to).trim();
                 }
 
-                // If at top-level with no modifiers and no return type (e.g. `Foo(1);` or `if (...)`), check for invalid statement
+                const parenCloseIdx = findMatchingClose(tokens, parenOpenIdx, '(', ')');
+                if (parenCloseIdx < 0) {
+                    syntaxError = {
+                        message: `Unclosed parameter list in "${methodName}".`,
+                        from: tokens[parenOpenIdx].from,
+                        to: tokens[toIdx - 1].to,
+                    };
+                    return;
+                }
+
+                // Dotted call or semicolon-terminated call at top level with no modifiers is a C# 9+ top-level statement.
+                if (
+                    parent === null &&
+                    currentNamespace === null &&
+                    modifiers.length === 0 &&
+                    (tokens[nameTokIdx - 1]?.text === '.' || (nameTokIdx === i && !isConstructor)) &&
+                    tokens[parenCloseIdx + 1]?.text === ';'
+                ) {
+                    const nextI = captureTopLevelStatement(modStartIdx);
+                    if (nextI === null) return;
+                    i = nextI;
+                    continue;
+                }
+
+                // If at top-level with no modifiers and no return type (e.g. `Compute(a) { ... }`), reject invalid method
                 if (
                     nameTokIdx === i &&
                     modifiers.length === 0 &&
@@ -1047,16 +1315,6 @@ export function parseCSharpDetailed(
                         message: `Method "${methodName}" is missing a C# return type or modifiers.`,
                         from: tokens[modStartIdx].from,
                         to: tokens[parenOpenIdx].to,
-                    };
-                    return;
-                }
-
-                const parenCloseIdx = findMatchingClose(tokens, parenOpenIdx, '(', ')');
-                if (parenCloseIdx < 0) {
-                    syntaxError = {
-                        message: `Unclosed parameter list in "${methodName}".`,
-                        from: tokens[parenOpenIdx].from,
-                        to: tokens[toIdx - 1].to,
                     };
                     return;
                 }
@@ -1190,7 +1448,13 @@ export function parseCSharpDetailed(
                 continue;
             }
 
-            // Top-level field/const declaration or invalid syntax
+            // Top-level field/const declaration or C# 9+ top-level statement
+            if (parent === null && currentNamespace === null && modifiers.length === 0) {
+                const nextI = captureTopLevelStatement(modStartIdx);
+                if (nextI === null) return;
+                i = nextI;
+                continue;
+            }
             if (modifiers.length > 0 || (tokens[i]?.kind === 'ident' && tokens[i + 1]?.kind === 'ident')) {
                 let semi = i;
                 while (semi < toIdx && tokens[semi].text !== ';' && tokens[semi].text !== '{') semi++;
@@ -1226,6 +1490,7 @@ export function parseCSharpDetailed(
             ],
             namespace: fileNamespace,
             usings,
+            topLevelStatements: [],
             offsets: new Map(),
             unitDetails: new Map(),
         };
@@ -1296,6 +1561,7 @@ export function parseCSharpDetailed(
         diagnostics: [],
         namespace: fileNamespace,
         usings,
+        topLevelStatements,
         offsets,
         unitDetails,
     };

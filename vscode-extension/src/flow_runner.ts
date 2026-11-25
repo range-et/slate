@@ -4,6 +4,8 @@ import { spawn, type ChildProcess } from 'child_process';
 import { MAIN_FLOW, type CallableSignature } from './flow';
 import type { SlateConfig, SlateNode } from './slate_folder';
 import type { FlowExecutionSnapshot, InstanceRunObservation, ObservedValue, RunStatus, SlateFlow } from './harness_protocol';
+import { normalizeCompileOutputPath } from './language_types';
+import { isPathInsideBase } from './path_safety';
 import { compilePython, flowTarget } from './compile/python';
 import { SLATE_RUN_PY } from './compile/slate_trace';
 import { resolvePythonPath } from './verification_runner';
@@ -19,7 +21,7 @@ export interface FlowRunRequest {
     timeoutMs?: number;
     maxOutputBytes?: number;
     inputs?: Record<string, unknown>;
-    isTrusted?: boolean;
+    isTrusted: boolean;
     signal?: AbortSignal;
 }
 
@@ -197,7 +199,7 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
     const startTime = Date.now();
     const flowId = request.flowId;
 
-    if (request.isTrusted === false) {
+    if (request.isTrusted !== true) {
         return {
             runId: '',
             flowId,
@@ -276,8 +278,22 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
     }
 
     // Write compiled Python files
+    const resolvedBuildDir = path.resolve(buildDir);
     for (const [relPath, content] of compileRes.files) {
-        const fullPath = path.join(buildDir, relPath);
+        const normRel = normalizeCompileOutputPath(relPath);
+        const fullPath = normRel ? path.resolve(resolvedBuildDir, normRel) : '';
+        if (!normRel || !isPathInsideBase(resolvedBuildDir, fullPath, false)) {
+            return {
+                runId,
+                flowId,
+                status: 'failed',
+                durationMs: Date.now() - startTime,
+                exitCode: null,
+                error: `Refusing unsafe compiled output path "${relPath}" outside build directory.`,
+                observations: [],
+                valuesByUse: {},
+            };
+        }
         fs.mkdirSync(path.dirname(fullPath), { recursive: true });
         fs.writeFileSync(fullPath, content, 'utf-8');
     }

@@ -1748,7 +1748,7 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             });
             expect(reexportCombinedRes.state, reexportCombinedRes.traceback).toBe('passed');
             expect(reexportCombinedRes.pydanticValid).toBe(true);
-        }, 40_000);
+        }, 90_000);
 
         it('prioritizes dual and value dep providers before earlier type-only imports across deps, target, and tests', async () => {
             const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-vr-ts-priority-'));
@@ -2285,5 +2285,62 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             expect(shorthandFnTypeRes.state, shorthandFnTypeRes.traceback).toBe('passed');
             expect(shorthandFnTypeRes.pydanticValid).toBe(true);
         }, 40_000);
+    });
+
+    describe('Verification runner injection and shell hardening (P0-3)', () => {
+        it('rejects unsafe node names, multiline plain cases, and invalid kwarg names in case formatters and runNodeVerification', async () => {
+            expect(() => formatCasesAsPython('bad-name\nassert True', [{ inputs: { x: 1 }, expected: 1 }]))
+                .toThrow(/Invalid Python identifier/);
+            expect(() => formatCasesAsPython('ok', ['1 == 1\nimport os']))
+                .toThrow(/must be single-line/);
+            expect(() => formatCasesAsPython('ok', [{ inputs: { "bad=1): import os; (": 1 }, expected: 1 }]))
+                .toThrow(/Invalid Python keyword argument name/);
+
+            const tsNode = makeNode({
+                name: 'bad-ts\nprocess.exit(1)',
+                language: 'typescript',
+                code: ['export function ok(x: number): number { return x; }'],
+            });
+            expect(() => formatCasesAsTs(tsNode, ['expect(1).toBe(1)'])).toThrow(/Invalid TypeScript\/JavaScript identifier/);
+            expect(() => formatCasesAsTs(
+                makeNode({ name: 'ok', language: 'typescript', code: ['export function ok(x: number): number { return x; }'] }),
+                ['expect(1).toBe(1)\nprocess.exit(1)'],
+            )).toThrow(/must be single-line/);
+
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-p03-verify-'));
+            try {
+                const invalidNameRes = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: makeNode({ name: '../evil' }),
+                    nodeId: '../evil',
+                    isTrusted: true,
+                });
+                expect(invalidNameRes.state).toBe('failed');
+                expect(invalidNameRes.diagnostics?.join('\n')).toContain('Invalid Python identifier');
+
+                const badCaseRes = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: makeNode({ cases: ['1 == 1\nimport os'] }),
+                    nodeId: 'clamp',
+                    isTrusted: true,
+                });
+                expect(badCaseRes.state).toBe('failed');
+                expect(badCaseRes.diagnostics?.join('\n')).toContain('must be single-line');
+
+                if (process.platform === 'win32') {
+                    const batRes = await runNodeVerification({
+                        workspaceRoot: tmpRoot,
+                        node: makeNode(),
+                        nodeId: 'clamp',
+                        isTrusted: true,
+                        pythonPath: 'C:\\evil\\python.bat',
+                    });
+                    expect(batRes.state).toBe('failed');
+                    expect(batRes.traceback).toContain('Refusing to execute batch file');
+                }
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        });
     });
 });

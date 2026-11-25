@@ -154,4 +154,29 @@ describe('port and compile matrix', () => {
         expect(py.match(/^import math$/gm)).toHaveLength(1);
         expect(py.indexOf('import math')).toBeLessThan(py.indexOf('def cos_deg'));
     });
+
+    it('rejects traversal node/flow IDs (P0-7) and refuses overwriting non-generated existingFiles (P0-8)', () => {
+        const goodNode = parseNode(JSON.stringify({
+            slate: 3,
+            name: 'ok',
+            code: ['def ok(x: int) -> int:', '    return x'],
+        }));
+        const badIds = compilePython(
+            new Map([['../evil', goodNode]]),
+            { slate: 3, name: 'demo', language: 'python' },
+            new Map([['../bad_flow', emptyFlow('bad_flow')]]),
+        );
+        expect(badIds.diagnostics.filter(d => d.severity === 'error')).toHaveLength(2);
+        expect(badIds.diagnostics.every(d => /Path traversal rejected/.test(d.message))).toBe(true);
+
+        const overwriteBlocked = compilePython(
+            new Map([['ok', goodNode]]),
+            { slate: 3, name: 'demo', language: 'python' },
+            new Map(),
+            new Map(),
+            { existingFiles: { 'demo.py': '# hand-written python\nx = 1\n' } },
+        );
+        expect(overwriteBlocked.files.has('demo.py')).toBe(false);
+        expect(overwriteBlocked.diagnostics.some(d => d.severity === 'error' && d.message.includes('Refusing to overwrite'))).toBe(true);
+    });
 });

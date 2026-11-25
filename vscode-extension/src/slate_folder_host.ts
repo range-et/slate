@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
@@ -5,9 +6,10 @@ import { FLOWS_DIR, flowIdForPath, MAIN_FLOW, migrateRootOccurrences, parseFlow,
 import type { CanvasRef, HarnessDocument, HarnessFlow, LibraryDocument, SlateFlow } from './harness_protocol';
 import { getLanguageAdapter } from './language_adapter';
 import { inferLanguageFromPath, tryNormalizeLanguage, type CanonicalLanguage } from './language_types';
+import { assertPathInsideRealDir, isPathInsideBase } from './path_safety';
 import { parseModule } from './python_adapter';
 import {
-    CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
+    assertSafeNodeId, CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR, nodeIdForPath, parseConfig, parseLayout, parseNode, pathForNodeId,
     serializeLayout, serializeNode, SlateConfig, SlateLayout, SlateNode,
 } from './slate_folder';
 
@@ -26,6 +28,8 @@ export class SlateFolderHost {
     private deferredRefs: CanvasRef[] = [];
     private pendingUnindexedRefs = false;
     private layoutVersion: number | null = null;
+    private lastLayoutText: string | null = null;
+    private observedDiskLayoutText: string | null | undefined = undefined;
     private readonly flowVersions = new Map<string, number | null>();
     private readonly lastGood = new Map<string, { document: HarnessDocument; code: string }>();
 
@@ -46,7 +50,22 @@ export class SlateFolderHost {
     }
 
     uri(relativePath: string): vscode.Uri {
-        return vscode.Uri.joinPath(this.root, ...relativePath.split('/'));
+        if (typeof relativePath !== 'string' || /[\0\r\n]/.test(relativePath)) {
+            throw new Error(`Path traversal rejected: invalid relative path "${String(relativePath)}".`);
+        }
+        const normalized = relativePath.trim().replace(/\\/g, '/');
+        if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) {
+            throw new Error(`Path traversal rejected: "${relativePath}" must be a relative workspace path.`);
+        }
+        const segments = normalized.split('/');
+        if (segments.some(seg => !seg || seg === '.' || seg === '..')) {
+            throw new Error(`Path traversal rejected: "${relativePath}" contains unsafe path segments.`);
+        }
+        const joined = vscode.Uri.joinPath(this.root, ...segments);
+        if (!isPathInsideBase(this.root.fsPath, joined.fsPath, false)) {
+            throw new Error(`Path traversal rejected: "${relativePath}" escapes workspace root.`);
+        }
+        return joined;
     }
 
     relative(uri: vscode.Uri): string {
@@ -64,6 +83,19 @@ export class SlateFolderHost {
 
     flowPattern(): vscode.RelativePattern {
         return new vscode.RelativePattern(this.root, `${FLOWS_DIR}/**/*.json`);
+    }
+
+    layoutPattern(): vscode.RelativePattern {
+        return new vscode.RelativePattern(this.root, LAYOUT_PATH);
+    }
+
+    configPattern(): vscode.RelativePattern {
+        return new vscode.RelativePattern(this.root, CONFIG_PATH);
+    }
+
+    async hasExternalLayoutChange(): Promise<boolean> {
+        const current = (await this.read(LAYOUT_PATH))?.text ?? null;
+        return current !== this.lastLayoutText;
     }
 
     /** Parsed flows by id; unreadable flow files are reported with a problem. */
@@ -144,6 +176,9 @@ export class SlateFolderHost {
                 throw new Error('Could not save ' + this.relative(uri) + '. The edits remain in the editor.');
             }
         }
+        if (includeLayout) {
+            this.lastLayoutText = replacements.get(LAYOUT_PATH) ?? this.lastLayoutText;
+        }
     }
 
     /** Library files from slate.json `library` (files or folders), with top-level ids `lib:<path>:<name>`. */
@@ -160,8 +195,24 @@ export class SlateFolderHost {
             }
             return fileLang === projectLang;
         };
+        const rootReal = this.root.scheme === 'file'
+            ? await fs.promises.realpath(this.root.fsPath).catch(() => path.resolve(this.root.fsPath))
+            : null;
         const visit = async (relativePath: string): Promise<void> => {
-            const uri = this.uri(relativePath);
+            let uri: vscode.Uri;
+            try {
+                uri = this.uri(relativePath);
+                if (rootReal !== null) {
+                    await assertPathInsideRealDir(rootReal, uri.fsPath, false);
+                }
+            } catch (error) {
+                documents.push({
+                    path: relativePath,
+                    units: [],
+                    problem: error instanceof Error ? error.message : String(error),
+                });
+                return;
+            }
             let type: vscode.FileType;
             try {
                 type = (await vscode.workspace.fs.stat(uri)).type;
@@ -191,7 +242,11 @@ export class SlateFolderHost {
                 problem: parsed.valid ? undefined : parsed.diagnostics[0]?.message,
             });
         };
-        for (const entry of config.library ?? []) await visit(entry.replace(/\\/g, '/'));
+        for (const entry of config.library ?? []) {
+            const cleaned = entry.replace(/\\/g, '/').trim();
+            const trimmed = cleaned.length > 1 ? cleaned.replace(/\/+$/, '') : cleaned;
+            await visit(trimmed);
+        }
         return documents.sort((left, right) => left.path.localeCompare(right.path));
     }
 
@@ -251,6 +306,7 @@ export class SlateFolderHost {
         try {
             const layoutFile = await this.read(LAYOUT_PATH);
             this.layoutVersion = layoutFile?.version ?? null;
+            this.lastLayoutText = layoutFile?.text ?? null;
             this.pendingUnindexedRefs = false;
             // In place, so actions holding `layout` keep writing the live object.
             Object.assign(this.layout, parseLayout(layoutFile?.text));
@@ -329,17 +385,25 @@ export class SlateFolderHost {
     }
 
     async syncDirtyLayout(): Promise<void> {
-        if (!this.isDirty(LAYOUT_PATH)) return;
+        const dirty = this.isDirty(LAYOUT_PATH);
         const file = await this.read(LAYOUT_PATH);
-        const latest = parseLayout(file?.text);
-        if (latest.refs.length > 0 && file?.version !== this.layoutVersion) {
+        this.observedDiskLayoutText = dirty ? undefined : (file?.text ?? null);
+        if (!file) return;
+        const latest = parseLayout(file.text);
+        if (latest.refs.length > 0 && file.version !== this.layoutVersion) {
             this.pendingUnindexedRefs = true;
         }
         this.deferredRefs = latest.refs;
+        const mergedFlowPositions: SlateLayout['flowPositions'] = { ...this.layout.flowPositions };
+        for (const [flowId, entries] of Object.entries(latest.flowPositions)) {
+            mergedFlowPositions[flowId] = { ...(mergedFlowPositions[flowId] ?? {}), ...entries };
+        }
         Object.assign(this.layout, {
             ...latest,
             refs: [],
             positions: { ...this.layout.positions, ...latest.positions },
+            mapPositions: { ...this.layout.mapPositions, ...latest.mapPositions },
+            flowPositions: mergedFlowPositions,
         });
     }
 
@@ -349,17 +413,31 @@ export class SlateFolderHost {
     }
 
     async writeLayout(): Promise<void> {
-        await this.writeText(this.uri(LAYOUT_PATH), this.layoutText());
+        const text = this.layoutText();
+        const prevLast = this.lastLayoutText;
+        const observedDiskText = this.observedDiskLayoutText;
+        this.observedDiskLayoutText = undefined;
+        this.lastLayoutText = text;
+        try {
+            await this.writeText(this.uri(LAYOUT_PATH), text, observedDiskText);
+        } catch (error) {
+            this.lastLayoutText = prevLast;
+            throw error;
+        }
     }
 
-    private async writeText(uri: vscode.Uri, text: string): Promise<void> {
+    private async writeText(uri: vscode.Uri, text: string, observedDiskText?: string | null): Promise<void> {
         const open = vscode.workspace.textDocuments.find(document => !document.isClosed && document.uri.toString() === uri.toString());
         if (open) {
             if (!open.isDirty && text === open.getText()) {
-                try {
-                    if (new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)) === text) return;
-                } catch {
-                    // Missing or unreadable on disk (e.g. replaced by a directory); fall through to fs.writeFile so disk is restored or the error surfaces.
+                if (observedDiskText !== undefined) {
+                    if (observedDiskText === text) return;
+                } else {
+                    try {
+                        if (new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)) === text) return;
+                    } catch {
+                        // Missing or unreadable on disk (e.g. replaced by a directory); fall through to fs.writeFile so disk is restored or the error surfaces.
+                    }
                 }
                 await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
                 return;
@@ -396,7 +474,10 @@ export class SlateFolderHost {
     }
 
     async createNode(node: SlateNode, position: { x: number; y: number }): Promise<string> {
-        const nodeId = node.name;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(node.name)) {
+            throw new Error(`Invalid node name "${node.name}": must be a valid identifier.`);
+        }
+        const nodeId = assertSafeNodeId(node.name);
         const uri = this.uri(pathForNodeId(nodeId));
         try {
             await vscode.workspace.fs.stat(uri);

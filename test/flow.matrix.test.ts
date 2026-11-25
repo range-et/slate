@@ -13,6 +13,8 @@ describe('flow validation matrix', () => {
         ['instances list', { instances: {} }, /list/],
         ['instance id', { instances: [{ id: 'a.b', node: 'f' }] }, /without dots/],
         ['empty id', { instances: [{ id: '', node: 'f' }] }, /without dots/],
+        ['unsafe instance id', { instances: [{ id: 'bad id\nimport os', node: 'f' }] }, /allowed characters/],
+        ['unsafe region id', { regions: [{ id: 'reg/bad', kind: 'branch', thenFlow: 'f' }] }, /allowed characters/],
         ['missing target', { instances: [{ id: 'a' }] }, /needs a node/],
         ['duplicate ids', { instances: [{ id: 'a', node: 'f' }, { id: 'a', kind: 'value', value: '1' }] }, /unique/],
         ['wires list', { wires: {} }, /wires/],

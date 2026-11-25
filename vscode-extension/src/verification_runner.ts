@@ -74,6 +74,35 @@ function toPythonLiteral(value: unknown): string {
 const CASE_METADATA_KEYS = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx']);
 
 const FLOAT_RETURN_RE = /^\s*(?:float|Optional\[float\]|float\s*\|\s*None|None\s*\|\s*float)\s*$/;
+const PY_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const TS_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+function indentMultilineCodeBlock(rawCode: string, indent = '    '): string[] {
+    const rawLines = rawCode.replace(/\r\n?/g, '\n').split('\n');
+    while (rawLines.length > 0 && rawLines[0].trim() === '') rawLines.shift();
+    while (rawLines.length > 0 && rawLines[rawLines.length - 1].trim() === '') rawLines.pop();
+    if (rawLines.length === 0) return [];
+    const indents = rawLines
+        .filter(line => line.trim().length > 0)
+        .map(line => line.match(/^[ \t]*/)?.[0].length ?? 0);
+    const minIndent = indents.length > 0 ? Math.min(...indents) : 0;
+    return rawLines.map(line => {
+        if (line.trim().length === 0) return '';
+        return `${indent}${line.slice(minIndent)}`;
+    });
+}
+
+function assertPathInsideDir(baseDir: string, targetPath: string, label: string): void {
+    const resolvedBase = path.resolve(baseDir);
+    const resolvedTarget = path.resolve(targetPath);
+    const rel = path.relative(
+        process.platform === 'win32' ? resolvedBase.toLowerCase() : resolvedBase,
+        process.platform === 'win32' ? resolvedTarget.toLowerCase() : resolvedTarget,
+    );
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        throw new Error(`Path traversal rejected: ${label} "${targetPath}" escapes "${baseDir}".`);
+    }
+}
 
 /** Formats structured cases into executable pytest test assertions. */
 export function formatCasesAsPython(
@@ -81,6 +110,9 @@ export function formatCasesAsPython(
     cases: unknown[],
     options?: { returnAnnotation?: string | null },
 ): string[] {
+    if (!PY_IDENTIFIER.test(nodeName)) {
+        throw new Error(`Invalid Python identifier for verification: "${nodeName}".`);
+    }
     const lines: string[] = [];
     lines.push(`def test_structured_cases_${nodeName}():`);
     if (cases.length === 0) {
@@ -89,16 +121,23 @@ export function formatCasesAsPython(
     }
 
     const isFloatReturn = Boolean(options?.returnAnnotation && FLOAT_RETURN_RE.test(options.returnAnnotation));
+    let emittedBodyLine = false;
 
     cases.forEach((item, index) => {
         if (!item || typeof item !== 'object') {
-            const str = String(item).trim();
+            const raw = String(item);
+            if (/[\r\n]/.test(raw)) {
+                throw new Error(`Plain string test case ${index + 1} must be single-line.`);
+            }
+            const str = raw.trim();
             if (str.startsWith('assert ')) {
                 lines.push(`    # Case ${index + 1}`);
                 lines.push(`    ${str}`);
+                emittedBodyLine = true;
             } else if (str.length > 0) {
                 lines.push(`    # Case ${index + 1}`);
                 lines.push(`    assert ${str}`);
+                emittedBodyLine = true;
             }
             return;
         }
@@ -106,7 +145,11 @@ export function formatCasesAsPython(
         const obj = item as Record<string, unknown>;
         lines.push(`    # Case ${index + 1}`);
         if (typeof obj.code === 'string') {
-            lines.push(`    ${obj.code.trim()}`);
+            const blockLines = indentMultilineCodeBlock(obj.code, '    ');
+            if (blockLines.length > 0) {
+                lines.push(...blockLines);
+                emittedBodyLine = true;
+            }
             return;
         }
 
@@ -119,7 +162,12 @@ export function formatCasesAsPython(
         let callExpr: string | null = null;
         if (inputs && typeof inputs === 'object' && !Array.isArray(inputs)) {
             const kwargs = Object.entries(inputs as Record<string, unknown>)
-                .map(([k, v]) => `${k}=${toPythonLiteral(v)}`)
+                .map(([k, v]) => {
+                    if (!PY_IDENTIFIER.test(k)) {
+                        throw new Error(`Invalid Python keyword argument name in test case: "${k}".`);
+                    }
+                    return `${k}=${toPythonLiteral(v)}`;
+                })
                 .join(', ');
             callExpr = `${nodeName}(${kwargs})`;
         } else if (Array.isArray(inputs)) {
@@ -128,7 +176,12 @@ export function formatCasesAsPython(
         } else {
             const keys = Object.keys(obj).filter(k => !CASE_METADATA_KEYS.has(k));
             if (keys.length > 0) {
-                const kwargs = keys.map(k => `${k}=${toPythonLiteral(obj[k])}`).join(', ');
+                const kwargs = keys.map(k => {
+                    if (!PY_IDENTIFIER.test(k)) {
+                        throw new Error(`Invalid Python keyword argument name in test case: "${k}".`);
+                    }
+                    return `${k}=${toPythonLiteral(obj[k])}`;
+                }).join(', ');
                 callExpr = `${nodeName}(${kwargs})`;
             }
         }
@@ -139,6 +192,7 @@ export function formatCasesAsPython(
             const excClass = /^[A-Za-z_][A-Za-z0-9_]*$/.test(expectedError) ? expectedError : 'Exception';
             lines.push(`    with pytest.raises(${excClass}):`);
             lines.push(`        ${callExpr}`);
+            emittedBodyLine = true;
         } else if (expected !== undefined) {
             const approxFlag = obj.approx;
             if (
@@ -160,10 +214,16 @@ export function formatCasesAsPython(
             } else {
                 lines.push(`    assert ${callExpr} == ${toPythonLiteral(expected)}`);
             }
+            emittedBodyLine = true;
         } else {
             lines.push(`    ${callExpr}`);
+            emittedBodyLine = true;
         }
     });
+
+    if (!emittedBodyLine) {
+        lines.push('    pass');
+    }
 
     return lines;
 }
@@ -182,6 +242,9 @@ function buildTsPositionalArgs(paramNames: readonly string[], rec: Record<string
 
 /** Formats structured cases into standalone TypeScript/JavaScript test() blocks. */
 export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'typescript' | 'javascript' = 'typescript'): string[] {
+    if (!TS_IDENTIFIER.test(node.name)) {
+        throw new Error(`Invalid TypeScript/JavaScript identifier for verification: "${node.name}".`);
+    }
     const extHint = typeof node.extra?.extension === 'string'
         ? node.extra.extension
         : (language === 'javascript' ? '.js' : '.ts');
@@ -192,7 +255,7 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
         || Boolean(targetUnit?.returnAnnotation && /^\s*Promise\s*</.test(targetUnit.returnAnnotation));
 
     const lines: string[] = [];
-    lines.push(`test('structured cases for ${node.name}', ${isAsync ? 'async ' : ''}() => {`);
+    lines.push(`test(${JSON.stringify(`structured cases for ${node.name}`)}, ${isAsync ? 'async ' : ''}() => {`);
     if (cases.length === 0) {
         lines.push('});');
         return lines;
@@ -200,7 +263,11 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
 
     cases.forEach((item, index) => {
         if (!item || typeof item !== 'object') {
-            const str = String(item).trim();
+            const raw = String(item);
+            if (/[\r\n]/.test(raw)) {
+                throw new Error(`Plain string test case ${index + 1} must be single-line.`);
+            }
+            const str = raw.trim();
             if (str.length > 0) {
                 lines.push(`    // Case ${index + 1}`);
                 lines.push(str.startsWith('expect(') ? `    ${str}` : `    expect(${str}).toBeTruthy();`);
@@ -211,7 +278,7 @@ export function formatCasesAsTs(node: SlateNode, cases: unknown[], language: 'ty
         const obj = item as Record<string, unknown>;
         lines.push(`    // Case ${index + 1}`);
         if (typeof obj.code === 'string') {
-            lines.push(`    ${obj.code.trim()}`);
+            lines.push(...indentMultilineCodeBlock(obj.code, '    '));
             return;
         }
 
@@ -307,6 +374,9 @@ export function generateVerificationFiles(
 
     if (!hasChecks) {
         return { moduleContent: '', testContent: '', hasChecks: false };
+    }
+    if (!PY_IDENTIFIER.test(node.name)) {
+        throw new Error(`Invalid Python identifier for verification: "${node.name}".`);
     }
 
     const futureImports: string[] = ['from __future__ import annotations'];
@@ -497,15 +567,24 @@ function defaultExecute(
             return;
         }
 
+        if (process.platform === 'win32' && /\.(?:bat|cmd)$/i.test(cmd.trim())) {
+            resolve({
+                code: -1,
+                stdout: '',
+                stderr: `Refusing to execute batch file "${cmd}" with shell disabled. Point slate.verification.pythonPath (or PYTHON_BIN) directly to python.exe.`,
+                timedOut: false,
+            });
+            return;
+        }
+
         const env: NodeJS.ProcessEnv = {
             ...process.env,
             PYTHONDONTWRITEBYTECODE: '1',
             ...(process.versions.electron && cmd === process.execPath ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
         };
-        const useShell = process.platform === 'win32' && cmd !== process.execPath && !cmd.toLowerCase().endsWith('.exe');
         const proc = child_process.spawn(cmd, args, {
             cwd,
-            shell: useShell,
+            shell: false,
             env,
         });
 
@@ -610,7 +689,29 @@ export async function runNodeVerification(options: VerificationOptions): Promise
         };
     }
 
-    const { moduleContent, testContent, hasChecks } = generateVerificationFiles(node, dependencies, nodeId);
+    if (!PY_IDENTIFIER.test(node.name)) {
+        return {
+            nodeId,
+            state: 'failed',
+            timestamp: Date.now(),
+            sourceHash: currentHash,
+            diagnostics: [`Invalid Python identifier "${node.name}".`],
+        };
+    }
+
+    let generated: GeneratedVerification;
+    try {
+        generated = generateVerificationFiles(node, dependencies, nodeId);
+    } catch (error) {
+        return {
+            nodeId,
+            state: 'failed',
+            timestamp: Date.now(),
+            sourceHash: currentHash,
+            diagnostics: [error instanceof Error ? error.message : String(error)],
+        };
+    }
+    const { moduleContent, testContent, hasChecks } = generated;
 
     if (!hasChecks) {
         return {
@@ -635,6 +736,8 @@ export async function runNodeVerification(options: VerificationOptions): Promise
 
     const moduleFile = path.join(buildDir, `${node.name}_impl.py`);
     const testFile = path.join(buildDir, `test_${node.name}.py`);
+    assertPathInsideDir(buildDir, moduleFile, 'moduleFile');
+    assertPathInsideDir(buildDir, testFile, 'testFile');
 
     await fs.promises.writeFile(moduleFile, moduleContent, 'utf8');
     await fs.promises.writeFile(testFile, testContent, 'utf8');
@@ -1549,6 +1652,16 @@ async function runTsNodeVerification(
         };
     }
 
+    if (!TS_IDENTIFIER.test(node.name)) {
+        return {
+            nodeId,
+            state: 'failed',
+            timestamp: Date.now(),
+            sourceHash: currentHash,
+            diagnostics: [`Invalid TypeScript/JavaScript identifier "${node.name}".`],
+        };
+    }
+
     const idHash = createHash('sha256').update(nodeId).digest('hex').slice(0, 12);
     const runNonce = randomUUID().slice(0, 8);
     const safeNodeDir = `${nodeId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${idHash}-${runNonce}`;
@@ -1562,7 +1675,7 @@ async function runTsNodeVerification(
         const combinedJsxSource = `${node.code.join('\n')}\n${node.check?.join('\n') ?? ''}`;
         const needsJsx = containsJsxSyntax(combinedJsxSource, extHint);
         const ext = language === 'javascript' ? (needsJsx ? '.jsx' : '.js') : (needsJsx ? '.tsx' : '.ts');
-        const safeBase = node.name.replace(/[^a-zA-Z0-9_$]/g, '_') || 'node';
+        const safeBase = node.name;
 
         // Prepare each dependency in its own isolated module so per-module imports never clash
         interface DepModuleSpec {
@@ -1799,6 +1912,8 @@ async function runTsNodeVerification(
         const implTsPath = path.join(buildDir, `${safeBase}_impl${ext}`);
         const testTsPath = path.join(buildDir, `${safeBase}_test${ext}`);
         const preludePath = path.join(buildDir, '__slate_prelude.d.ts');
+        assertPathInsideDir(buildDir, implTsPath, 'implTsPath');
+        assertPathInsideDir(buildDir, testTsPath, 'testTsPath');
 
         const anyNeedsJsx = needsJsx || depModules.some(d => d.needsJsx);
         const useStandaloneJsx = anyNeedsJsx && !hasWorkspaceReactTypes(workspaceRoot);
@@ -1872,6 +1987,8 @@ async function runTsNodeVerification(
         const implCjsPath = path.join(buildDir, `${safeBase}_impl.cjs`);
         const testCjsPath = path.join(buildDir, `${testBase}.cjs`);
         const harnessPath = path.join(buildDir, '__slate_harness.cjs');
+        assertPathInsideDir(buildDir, implCjsPath, 'implCjsPath');
+        assertPathInsideDir(buildDir, testCjsPath, 'testCjsPath');
 
         const escapedSafeBase = safeBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const rewriteLocalRequires = (jsCode: string): string =>
@@ -1945,6 +2062,15 @@ async function runTsNodeVerification(
         traceback: runRes.code === 0 ? undefined : fallbackMsg,
         diagnostics: runRes.code === 0 ? undefined : [fallbackMsg],
     };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+            nodeId,
+            state: 'failed',
+            timestamp: Date.now(),
+            sourceHash: currentHash,
+            diagnostics: [message],
+        };
     } finally {
         try {
             fs.rmSync(buildDir, { recursive: true, force: true });

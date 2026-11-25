@@ -670,4 +670,81 @@ describe('C++ & Arduino Importer & Compiler Round-Trips', () => {
         expect(fwdOut).toContain('template <typename T> T id(T v);');
         expect(fwdOut).toContain('int sum(int arr[4]);');
     });
+
+    it('keeps header modulePaths off root flows (P0-11), rejects targetNodeId collisions, and keeps expressions in C++ preludes while stripping real prototypes (P0-12)', () => {
+        // P0-11: header-only folder must not become root flow's modulePath, and flow colliding with targetNodeId errors
+        const headerOnlyNodes = new Map<string, SlateNode>([
+            ['hdr/add', {
+                name: 'add', language: 'cpp', intent: '', contract: '', context: [], examples: [],
+                locked: false, imports: [], uses: [], code: ['int add(int a, int b) { return a + b; }'],
+                extra: { modulePath: 'hdr/defs.hpp', extension: '.hpp' },
+            }],
+        ]);
+        const rootFlows = new Map<string, SlateFlow>([
+            ['pipeline', {
+                name: 'pipeline',
+                inputs: [{ name: 'x', annotation: 'int' }],
+                outputs: [{ name: 'out', annotation: 'int' }],
+                instances: [{ id: 'a1', node: 'hdr/add' }],
+                wires: [
+                    { from: 'input:x', to: 'a1.in:a' },
+                    { from: 'input:x', to: 'a1.in:b' },
+                    { from: 'a1.out', to: 'output:out' },
+                ],
+                extra: {},
+            }],
+        ]);
+        const hdrCompiled = compileCpp(headerOnlyNodes, { slate: 3, name: 'my_app', language: 'cpp' }, rootFlows);
+        expect(hdrCompiled.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+        expect(hdrCompiled.files.has('my_app.cpp')).toBe(true);
+        expect(hdrCompiled.files.get('my_app.cpp')).toContain('int pipeline(int x)');
+        expect(hdrCompiled.files.get('hdr/defs.hpp') ?? '').not.toContain('int pipeline(');
+
+        // Flow name colliding with existing node inside primary non-header folder must produce compile error
+        const cppFolderNodes = new Map<string, SlateNode>([
+            ['core/step', {
+                name: 'step', language: 'cpp', intent: '', contract: '', context: [], examples: [],
+                locked: false, imports: [], uses: [], code: ['int step(int x) { return x + 1; }'],
+                extra: { modulePath: 'core/mod.cpp' },
+            }],
+        ]);
+        const collidingFlows = new Map<string, SlateFlow>([
+            ['step', {
+                name: 'step',
+                inputs: [{ name: 'x', annotation: 'int' }],
+                outputs: [{ name: 'out', annotation: 'int' }],
+                instances: [{ id: 's1', node: 'core/step' }],
+                wires: [{ from: 'input:x', to: 's1.in:x' }, { from: 's1.out', to: 'output:out' }],
+                extra: {},
+            }],
+        ]);
+        const colRes = compileCpp(cppFolderNodes, { slate: 3, name: 'col_app', language: 'cpp' }, collidingFlows);
+        expect(colRes.diagnostics.some(d => d.severity === 'error' && d.message.includes('collides with existing node'))).toBe(true);
+
+        // P0-12: isForwardPrototypeOf strips real prototypes (incl. templates, extern "C", defaults, arrays)
+        // while keeping function-call / literal statements in prelude/epilogue
+        const portedExprs = portCppProject({
+            'init.cpp': [
+                'template <typename T> T id(T v);',
+                'extern "C" int helper(int x = 1);',
+                'int sum_arr(int arr[4]);',
+                'int g_flag = init_flags(1);',
+                'register_boot(42);',
+                'GetMgr().Run();',
+                'int helper(int x) { return x + 1; }',
+                'int sum_arr(int arr[4]) { return arr[0]; }',
+                'template <typename T> T id(T v) { return v; }',
+            ].join('\n'),
+        });
+        const preludeCode = [...portedExprs.nodes.values()]
+            .filter(n => n.kind === 'prelude' || n.kind === 'epilogue')
+            .map(n => n.code.join('\n'))
+            .join('\n');
+        expect(preludeCode).toContain('register_boot(42);');
+        expect(preludeCode).toContain('GetMgr().Run();');
+        expect(preludeCode).toContain('int g_flag = init_flags(1);');
+        expect(preludeCode).not.toContain('template <typename T> T id(T v);');
+        expect(preludeCode).not.toContain('extern "C" int helper');
+        expect(preludeCode).not.toContain('int sum_arr(int arr[4]);');
+    });
 });

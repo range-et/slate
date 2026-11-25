@@ -29,6 +29,8 @@ export interface LlmConfigInput extends SlateLlmConfig {
     apiKey?: string;
 }
 
+export type LlmCredentialSource = 'override' | 'secret-storage' | `env:${string}`;
+
 export interface ResolvedLlmConfig {
     provider: SlateLlmProvider;
     endpoint: string;
@@ -36,6 +38,7 @@ export interface ResolvedLlmConfig {
     apiKeyEnv?: string;
     apiKey?: string;
     hasApiKey: boolean;
+    credentialSource?: LlmCredentialSource;
     concurrency: number;
     timeoutSeconds: number;
     timeoutMs: number;
@@ -45,12 +48,15 @@ export interface ResolvedLlmConfig {
 
 export interface ProjectCredentialAccessInput {
     projectLlm?: SlateLlmConfig;
+    override?: LlmConfigInput;
+    fallback?: LlmConfigInput;
     resolved: ResolvedLlmConfig;
     isTrusted: boolean;
     approvedPairings?: ReadonlySet<string> | readonly string[];
 }
 
 export interface ProjectCredentialAccessDecision {
+    allowRequest: boolean;
     allowCredential: boolean;
     requiresApproval: boolean;
     pairingKey: string | null;
@@ -58,53 +64,254 @@ export interface ProjectCredentialAccessDecision {
     reason?: string;
 }
 
-export function credentialPairingKey(endpoint: string, apiKeyEnv?: string): string {
-    const raw = endpoint.trim();
-    let normalizedEndpoint = raw.replace(/\/+$/, '').toLowerCase();
+function normalizeEndpointForComparison(endpoint?: string): string {
+    const raw = cleanString(endpoint);
+    if (!raw) return '';
     try {
         const parsed = new URL(raw);
         const pathPart = parsed.pathname.replace(/\/+$/, '');
-        normalizedEndpoint = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${pathPart}`;
+        return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${pathPart}`;
     } catch {
-        // Keep trimmed lowercase fallback for unparseable URLs
+        return raw.replace(/\/+$/, '').toLowerCase();
     }
+}
+
+export function credentialPairingKey(endpoint: string, apiKeyEnv?: string): string {
+    const raw = endpoint.trim();
+    const normalizedEndpoint = normalizeEndpointForComparison(raw) || raw.replace(/\/+$/, '').toLowerCase();
     const credKey = cleanString(apiKeyEnv) ? `env:${cleanString(apiKeyEnv)}` : 'secret-storage';
     return `${normalizedEndpoint}|${credKey}`;
+}
+
+function expandIpv6Hextets(host: string): string[] | null {
+    if (!host.includes(':') || host.includes('%')) return null;
+    let work = host.toLowerCase();
+    const lastColon = work.lastIndexOf(':');
+    const tail = lastColon >= 0 ? work.slice(lastColon + 1) : '';
+    if (tail.includes('.')) {
+        const ipv4 = parseDottedIpv4(tail);
+        if (!ipv4) return null;
+        const hi = ((ipv4[0] << 8) | ipv4[1]).toString(16);
+        const lo = ((ipv4[2] << 8) | ipv4[3]).toString(16);
+        work = `${work.slice(0, lastColon)}:${hi}:${lo}`;
+    }
+    const parts = work.split('::');
+    if (parts.length > 2) return null;
+    const left = parts[0] ? parts[0].split(':') : [];
+    const right = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+    if (parts.length === 1 && left.length !== 8) return null;
+    const missing = 8 - (left.length + right.length);
+    if (parts.length === 2 && missing < 0) return null;
+    const full = [...left, ...Array(Math.max(0, missing)).fill('0'), ...right];
+    if (full.length !== 8) return null;
+    const out: string[] = [];
+    for (const seg of full) {
+        if (!/^[0-9a-f]{1,4}$/.test(seg)) return null;
+        out.push(seg.padStart(4, '0'));
+    }
+    return out;
+}
+
+function parseDottedIpv4(host: string): [number, number, number, number] | null {
+    const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!match) return null;
+    const nums = match.slice(1).map(n => Number.parseInt(n, 10));
+    if (nums.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    return [nums[0], nums[1], nums[2], nums[3]];
+}
+
+function extractIpv4FromHost(host: string): [number, number, number, number] | null {
+    const direct = parseDottedIpv4(host);
+    if (direct) return direct;
+    const hextets = expandIpv6Hextets(host);
+    if (!hextets) return null;
+    if (
+        hextets[0] === '0000'
+        && hextets[1] === '0000'
+        && hextets[2] === '0000'
+        && hextets[3] === '0000'
+        && hextets[4] === '0000'
+        && hextets[5] === 'ffff'
+    ) {
+        const hi = Number.parseInt(hextets[6], 16);
+        const lo = Number.parseInt(hextets[7], 16);
+        return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff];
+    }
+    return null;
+}
+
+function isBlockedMetadataOrLinkLocalHost(normalizedHost: string): boolean {
+    if (
+        normalizedHost === 'metadata'
+        || normalizedHost === 'metadata.google.internal'
+        || normalizedHost.endsWith('.metadata.google.internal')
+        || normalizedHost === 'metadata.goog'
+        || normalizedHost === 'instance-data'
+        || normalizedHost === 'metadata.azure.internal'
+    ) {
+        return true;
+    }
+
+    const ipv4 = extractIpv4FromHost(normalizedHost);
+    if (ipv4) {
+        const [a, b, c, d] = ipv4;
+        if (a === 169 && b === 254) return true;
+        if (a === 0) return true;
+        if (a === 100 && b === 100 && c === 100 && d === 200) return true;
+    }
+
+    const hextets = expandIpv6Hextets(normalizedHost);
+    if (hextets) {
+        if (hextets.every(h => h === '0000')) return true;
+        const firstHextet = Number.parseInt(hextets[0], 16);
+        if ((firstHextet & 0xffc0) === 0xfe80) return true;
+        if (
+            hextets[0] === 'fd00'
+            && hextets[1] === '0ec2'
+            && hextets[2] === '0000'
+            && hextets[3] === '0000'
+            && hextets[4] === '0000'
+            && hextets[5] === '0000'
+            && hextets[6] === '0000'
+            && hextets[7] === '0254'
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+export function isLoopbackHost(hostname: string): boolean {
+    const normalizedHost = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+    if (!normalizedHost) return false;
+    if (normalizedHost === 'localhost' || normalizedHost.endsWith('.localhost')) {
+        return true;
+    }
+    const ipv4 = extractIpv4FromHost(normalizedHost);
+    if (ipv4 && ipv4[0] === 127) {
+        return true;
+    }
+    const hextets = expandIpv6Hextets(normalizedHost);
+    if (
+        hextets
+        && hextets[0] === '0000'
+        && hextets[1] === '0000'
+        && hextets[2] === '0000'
+        && hextets[3] === '0000'
+        && hextets[4] === '0000'
+        && hextets[5] === '0000'
+        && hextets[6] === '0000'
+        && hextets[7] === '0001'
+    ) {
+        return true;
+    }
+    return false;
+}
+
+export function validateLlmEndpointUrl(endpoint: string): URL {
+    if (typeof endpoint !== 'string' || !endpoint.trim()) {
+        throw new LlamaTransportError('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
+    }
+    let parsed: URL;
+    try {
+        parsed = new URL(endpoint.trim());
+    } catch {
+        throw new LlamaTransportError(`A valid HTTP/HTTPS endpoint URL is required (received "${endpoint}").`);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new LlamaTransportError(`A valid HTTP/HTTPS endpoint URL is required (unsupported protocol "${parsed.protocol}").`);
+    }
+    if (parsed.username || parsed.password) {
+        throw new LlamaTransportError('LLM endpoint URLs must not contain embedded credentials.');
+    }
+    const normalizedHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+    if (!normalizedHost) {
+        throw new LlamaTransportError(`Invalid LLM endpoint hostname in "${endpoint}".`);
+    }
+    if (isBlockedMetadataOrLinkLocalHost(normalizedHost)) {
+        throw new LlamaTransportError(`Refusing restricted metadata or link-local LLM endpoint "${endpoint}".`);
+    }
+    if (!isLoopbackHost(normalizedHost) && parsed.protocol !== 'https:') {
+        throw new LlamaTransportError(`Non-loopback LLM endpoint "${endpoint}" must use https://.`);
+    }
+    return parsed;
 }
 
 export function evaluateProjectCredentialAccess(
     input: ProjectCredentialAccessInput,
 ): ProjectCredentialAccessDecision {
-    const { projectLlm, resolved, isTrusted, approvedPairings } = input;
-    if (!resolved.hasApiKey || !resolved.apiKey) {
-        return { allowCredential: false, requiresApproval: false, pairingKey: null };
-    }
+    const { projectLlm, override, fallback, resolved, isTrusted, approvedPairings } = input;
     const projectDirectsLlm = Boolean(
         cleanString(projectLlm?.endpoint)
         || cleanString(projectLlm?.apiKeyEnv)
         || projectLlm?.provider,
     );
-    if (!projectDirectsLlm) {
-        return { allowCredential: true, requiresApproval: false, pairingKey: null };
+
+    const baseNorm = normalizeEndpointForComparison(fallback?.endpoint ?? PROVIDER_DEFAULTS['llama.cpp'].endpoint);
+    const overrideEndpoint = cleanString(override?.endpoint);
+    const overrideProviderEndpoint = override?.provider ? PROVIDER_DEFAULTS[override.provider].endpoint : undefined;
+    const overrideChangesEndpoint = Boolean(
+        (overrideEndpoint && normalizeEndpointForComparison(overrideEndpoint) !== baseNorm)
+        || (overrideProviderEndpoint && normalizeEndpointForComparison(overrideProviderEndpoint) !== baseNorm),
+    );
+    const overrideEnv = cleanString(override?.apiKeyEnv);
+    const fallbackEnv = cleanString(fallback?.apiKeyEnv);
+    const overrideChangesCred = Boolean(overrideEnv && overrideEnv !== fallbackEnv);
+    const overrideDirectsLlm = overrideChangesEndpoint || overrideChangesCred;
+    const directedByProjectOrOverride = projectDirectsLlm || overrideDirectsLlm;
+
+    const effectiveCredEnv = resolved.credentialSource?.startsWith('env:')
+        ? resolved.credentialSource.slice(4)
+        : (resolved.credentialSource === 'secret-storage' || resolved.credentialSource === 'override')
+            ? undefined
+            : cleanString(resolved.apiKeyEnv);
+
+    const hasCredential = Boolean(resolved.hasApiKey && resolved.apiKey);
+    const source = effectiveCredEnv
+        ? `environment variable "${effectiveCredEnv}"`
+        : resolved.credentialSource === 'override'
+            ? 'explicit override API key'
+            : 'stored API key';
+    const pairingKey = hasCredential ? credentialPairingKey(resolved.endpoint, effectiveCredEnv) : null;
+
+    if (isTrusted !== true) {
+        return {
+            allowRequest: false,
+            allowCredential: false,
+            requiresApproval: directedByProjectOrOverride && hasCredential,
+            pairingKey: directedByProjectOrOverride ? pairingKey : null,
+            ...(hasCredential ? { credentialSource: source } : {}),
+            reason: hasCredential
+                ? `Workspace is not trusted; refusing to send ${source} to configured LLM endpoint "${resolved.endpoint}".`
+                : `Workspace is not trusted; refusing request to configured LLM endpoint "${resolved.endpoint}".`,
+        };
     }
 
-    const source = cleanString(resolved.apiKeyEnv) ? `environment variable "${resolved.apiKeyEnv}"` : 'stored API key';
-    const pairingKey = credentialPairingKey(resolved.endpoint, resolved.apiKeyEnv);
-    if (!isTrusted) {
+    if (!directedByProjectOrOverride) {
         return {
+            allowRequest: true,
+            allowCredential: Boolean(resolved.hasApiKey && resolved.apiKey),
+            requiresApproval: false,
+            pairingKey: null,
+        };
+    }
+
+    if (!hasCredential) {
+        return {
+            allowRequest: true,
             allowCredential: false,
-            requiresApproval: true,
-            pairingKey,
-            credentialSource: source,
-            reason: `Workspace is not trusted; refusing to send ${source} to project-configured LLM endpoint "${resolved.endpoint}".`,
+            requiresApproval: false,
+            pairingKey: null,
         };
     }
 
     const approvedSet = approvedPairings instanceof Set
         ? approvedPairings
         : new Set(approvedPairings ?? []);
-    if (approvedSet.has(pairingKey)) {
+    if (pairingKey && approvedSet.has(pairingKey)) {
         return {
+            allowRequest: true,
             allowCredential: true,
             requiresApproval: false,
             pairingKey,
@@ -113,6 +320,7 @@ export function evaluateProjectCredentialAccess(
     }
 
     return {
+        allowRequest: true,
         allowCredential: false,
         requiresApproval: true,
         pairingKey,
@@ -211,9 +419,10 @@ export function resolveLlmConfig(
         ?? cleanString(fallback?.model)
         ?? 'local';
 
-    const apiKeyEnv = cleanString(override?.apiKeyEnv)
+    const explicitApiKeyEnv = cleanString(override?.apiKeyEnv)
         ?? cleanString(projectLlm?.apiKeyEnv)
-        ?? cleanString(fallback?.apiKeyEnv)
+        ?? cleanString(fallback?.apiKeyEnv);
+    const apiKeyEnv = explicitApiKeyEnv
         ?? PROVIDER_DEFAULTS[provider].apiKeyEnv;
 
     const rawConcurrency = override?.concurrency ?? projectLlm?.concurrency ?? fallback?.concurrency ?? 3;
@@ -234,11 +443,48 @@ export function resolveLlmConfig(
     const rawOutputTokens = override?.outputTokens ?? projectLlm?.outputTokens ?? fallback?.outputTokens ?? defaultOutputTokens;
     const outputTokens = Math.max(64, Math.trunc(Number.isFinite(rawOutputTokens) ? rawOutputTokens : defaultOutputTokens));
 
-    const apiKey = cleanString(override?.apiKey)
-        ?? cleanString(fallback?.apiKey)
-        ?? (apiKeyEnv ? cleanString(env[apiKeyEnv]) : undefined)
-        ?? cleanString(env.SLATE_LLM_API_KEY)
-        ?? ((provider === 'openrouter' || isOpenRouterEndpoint(endpoint)) ? cleanString(env.OPENROUTER_API_KEY) : undefined);
+    const overrideKey = cleanString(override?.apiKey);
+    const fallbackKey = cleanString(fallback?.apiKey);
+    const baseFallbackEndpoint = normalizeEndpointForComparison(fallbackEndpoint ?? PROVIDER_DEFAULTS['llama.cpp'].endpoint);
+    const resolvedNormEndpoint = normalizeEndpointForComparison(endpoint);
+    let resolvedHost = '';
+    try {
+        resolvedHost = new URL(endpoint.trim()).hostname;
+    } catch {
+        // Ignore unparseable endpoints here; transport checks will reject before network calls.
+    }
+    const endpointDirectedExternally = Boolean(
+        (overrideEndpoint || override?.provider || projectEndpoint || projectLlm?.provider)
+        && resolvedNormEndpoint !== baseFallbackEndpoint
+        && !isLoopbackHost(resolvedHost),
+    );
+    const allowImplicitSlateKey = !endpointDirectedExternally || Boolean(explicitApiKeyEnv);
+    const explicitEnvKey = apiKeyEnv && (apiKeyEnv !== 'SLATE_LLM_API_KEY' || allowImplicitSlateKey)
+        ? cleanString(env[apiKeyEnv])
+        : undefined;
+    const ambientSlateKey = !endpointDirectedExternally ? cleanString(env.SLATE_LLM_API_KEY) : undefined;
+    const openRouterKey = (provider === 'openrouter' || isOpenRouterEndpoint(endpoint))
+        ? cleanString(env.OPENROUTER_API_KEY)
+        : undefined;
+
+    let apiKey: string | undefined;
+    let credentialSource: LlmCredentialSource | undefined;
+    if (overrideKey) {
+        apiKey = overrideKey;
+        credentialSource = 'override';
+    } else if (fallbackKey) {
+        apiKey = fallbackKey;
+        credentialSource = 'secret-storage';
+    } else if (explicitEnvKey && apiKeyEnv) {
+        apiKey = explicitEnvKey;
+        credentialSource = `env:${apiKeyEnv}`;
+    } else if (ambientSlateKey) {
+        apiKey = ambientSlateKey;
+        credentialSource = 'env:SLATE_LLM_API_KEY';
+    } else if (openRouterKey) {
+        apiKey = openRouterKey;
+        credentialSource = 'env:OPENROUTER_API_KEY';
+    }
 
     return {
         provider,
@@ -247,6 +493,7 @@ export function resolveLlmConfig(
         ...(apiKeyEnv ? { apiKeyEnv } : {}),
         ...(apiKey ? { apiKey } : {}),
         hasApiKey: Boolean(apiKey),
+        ...(credentialSource ? { credentialSource } : {}),
         concurrency,
         timeoutSeconds,
         timeoutMs: timeoutSeconds * 1000,
@@ -297,6 +544,7 @@ export async function checkLlamaHealth(
     const timer = setTimeout(() => timeout.abort(new Error('Connection timed out')), timeoutMs);
     try {
         const clean = endpoint.replace(/\/+$/, '');
+        validateLlmEndpointUrl(clean);
         const authHeaders = buildAuthHeaders(endpoint, options?.apiKey, options?.headers);
         let response: Response | null = null;
         let lastError: unknown = null;
@@ -306,6 +554,7 @@ export async function checkLlamaHealth(
             response = await fetch(modelsUrl(endpoint), {
                 method: 'GET',
                 headers: { accept: 'application/json', ...authHeaders },
+                redirect: 'error',
                 signal: timeout.signal,
             });
         } catch (error) {
@@ -338,6 +587,7 @@ export async function checkLlamaHealth(
                 response = await fetch(`${clean}/health`, {
                     method: 'GET',
                     ...(Object.keys(authHeaders).length > 0 ? { headers: authHeaders } : {}),
+                    redirect: 'error',
                     signal: timeout.signal,
                 });
             } catch (error) {
@@ -405,10 +655,12 @@ export async function streamLlamaCompletion(
     const timer = setTimeout(() => timeout.abort(new Error('llama.cpp request timed out')), options.timeoutMs);
     const combined = AbortSignal.any([signal, timeout.signal]);
     try {
+        validateLlmEndpointUrl(options.endpoint);
         const authHeaders = buildAuthHeaders(options.endpoint, options.apiKey, options.headers);
         const response = await fetch(completionUrl(options.endpoint), {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...authHeaders },
+            redirect: 'error',
             body: JSON.stringify({
                 model: options.model,
                 messages: [

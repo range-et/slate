@@ -330,14 +330,36 @@ export function serializeNode(node: SlateNode): string {
     return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+/** Validate a relative node ID (`clamp`, `math/double`) and reject traversal or control chars. */
+export function assertSafeNodeId(rawId: string): string {
+    if (typeof rawId !== 'string' || /[\0\r\n]/.test(rawId)) {
+        throw new SlateFormatError(`Path traversal rejected: "${String(rawId)}" is not a valid node ID.`);
+    }
+    const normalized = rawId.trim().replace(/\\/g, '/');
+    if (!normalized || normalized.startsWith('/') || normalized.endsWith('/') || /^[A-Za-z]:/.test(normalized)) {
+        throw new SlateFormatError(`Path traversal rejected: "${rawId}" is not a valid node ID.`);
+    }
+    const segments = normalized.split('/');
+    if (segments.some(seg => !seg || seg === '.' || seg === '..')) {
+        throw new SlateFormatError(`Path traversal rejected: "${rawId}" contains unsafe path segments.`);
+    }
+    return normalized;
+}
+
 export function nodeIdForPath(relativePath: string): string | null {
     const normalized = relativePath.replace(/\\/g, '/');
     if (!normalized.startsWith(`${NODES_DIR}/`) || !normalized.endsWith('.json')) return null;
-    return normalized.slice(NODES_DIR.length + 1, -'.json'.length);
+    const candidate = normalized.slice(NODES_DIR.length + 1, -'.json'.length);
+    if (candidate !== candidate.trim()) return null;
+    try {
+        return assertSafeNodeId(candidate);
+    } catch {
+        return null;
+    }
 }
 
 export function pathForNodeId(nodeId: string): string {
-    return `${NODES_DIR}/${nodeId}.json`;
+    return `${NODES_DIR}/${assertSafeNodeId(nodeId)}.json`;
 }
 
 /** Top-level Python statements other than the definition (imports belong in `imports`). */
@@ -604,11 +626,14 @@ export function tsNodeFromSignature(
     language: 'typescript' | 'javascript' = 'typescript',
     extension?: string,
 ): SlateNode {
-    const trimmed = signature.trim().replace(/[;{]\s*$/, '').trim();
-    const hasArrow = /=>\s*$/.test(trimmed);
+    const trimmed = signature.replace(/\r\n?/g, '\n').trim().replace(/[;{]\s*$/, '').trim();
     const body = '{\n    throw new Error("Not implemented");\n}';
-    const full = hasArrow ? `${trimmed} ${body}` : `${trimmed} ${body}`;
+    const full = `${trimmed} ${body}`;
     const ext = extension ?? (language === 'javascript' ? '.js' : '.ts');
+    const stubCheck = validateTsStubSource(`${full}\n`, ext, { minBodyStart: trimmed.length });
+    if (!stubCheck.valid) {
+        throw new SlateFormatError(stubCheck.reason ?? 'enter one TypeScript/JavaScript signature, e.g. export function clamp(value: number, lower: number, upper: number): number');
+    }
     const parsed = parseTsModule(`${full}\n`, `<new>${ext}`);
     const topLevel = parsed.units.filter(u => u.parentId === null);
     const unit = parsed.valid && topLevel.length === 1 ? topLevel[0] : null;
@@ -633,11 +658,13 @@ export function tsNodeFromSignature(
 
 /** A new node from a typed Python signature such as `def clamp(x: int) -> int`. */
 export function nodeFromSignature(signature: string, intent: string): SlateNode {
-    const header = signature.trim().replace(/:$/, '');
+    const header = signature.replace(/\r\n?/g, '\n').trim().replace(/:$/, '').trimEnd();
     const code = [`${header}:`, '    raise NotImplementedError'];
-    const parsed = parseModule(`${code.join('\n')}\n`, '<new node>');
+    const full = `${code.join('\n')}\n`;
+    const parsed = parseModule(full, '<new node>');
     const unit = parsed.valid && parsed.units.length === 1 ? parsed.units[0] : null;
-    if (!unit || unit.kind !== 'function' || extraPythonStatements(`${code.join('\n')}\n`) > 0) {
+    const stubCheck = validateStubSource(full, { expectedHeaderLength: header.length });
+    if (!unit || unit.kind !== 'function' || extraPythonStatements(full) > 0 || !stubCheck.valid) {
         throw new SlateFormatError('enter one function signature, e.g. def clamp(value: int, lower: int, upper: int) -> int');
     }
     return {
@@ -651,28 +678,158 @@ export interface StubValidationResult {
     reason?: string;
 }
 
-function validateStubSource(fullCode: string): StubValidationResult {
+function directNodeChildren(node: SyntaxNode): SyntaxNode[] {
+    const out: SyntaxNode[] = [];
+    for (let c = node.firstChild; c; c = c.nextSibling) out.push(c);
+    return out;
+}
+
+function hasSyntaxErrorOrForbiddenChild(node: SyntaxNode, forbiddenNames: ReadonlySet<string>): boolean {
+    const cursor = node.cursor();
+    const visit = (): boolean => {
+        if (cursor.type.isError || forbiddenNames.has(cursor.name)) return true;
+        if (cursor.firstChild()) {
+            do {
+                if (visit()) return true;
+            } while (cursor.nextSibling());
+            cursor.parent();
+        }
+        return false;
+    };
+    return visit();
+}
+
+const FORBIDDEN_PYTHON_TYPEDEF_NODES = new Set([
+    'CallExpression',
+    'LambdaExpression',
+    'FormatString',
+    'FormatReplacement',
+    'ArrayComprehensionExpression',
+    'SetComprehensionExpression',
+    'DictionaryComprehensionExpression',
+    'GeneratorExpression',
+    'YieldExpression',
+    'AwaitExpression',
+    'NamedExpression',
+]);
+
+function isPurePythonLiteralNode(node: SyntaxNode, source: string): boolean {
+    if (node.type.isError) return false;
+    switch (node.name) {
+        case 'Number':
+        case 'Boolean':
+        case 'None':
+        case 'Ellipsis':
+            return true;
+        case 'String':
+            return !hasSyntaxErrorOrForbiddenChild(node, new Set(['FormatString', 'FormatReplacement']));
+        case 'UnaryExpression': {
+            const kids = directNodeChildren(node).filter(c => c.name !== 'Comment');
+            if (kids.length !== 2 || kids[0].name !== 'ArithOp' || kids[1].name !== 'Number') return false;
+            const op = source.slice(kids[0].from, kids[0].to).trim();
+            return op === '+' || op === '-';
+        }
+        case 'ParenthesizedExpression':
+        case 'TupleExpression':
+        case 'ArrayExpression':
+        case 'SetExpression': {
+            const skip = new Set(['(', ')', '[', ']', '{', '}', ',', 'Comment']);
+            for (const child of directNodeChildren(node)) {
+                if (skip.has(child.name)) continue;
+                if (!isPurePythonLiteralNode(child, source)) return false;
+            }
+            return true;
+        }
+        case 'DictionaryExpression': {
+            const skip = new Set(['{', '}', ',', ':', 'Comment']);
+            for (const child of directNodeChildren(node)) {
+                if (skip.has(child.name)) continue;
+                if (!isPurePythonLiteralNode(child, source)) return false;
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+function validatePythonStubSignature(funcNode: SyntaxNode, source: string): StubValidationResult | null {
+    for (const child of directNodeChildren(funcNode)) {
+        if (child.name === 'TypeDef') {
+            if (hasSyntaxErrorOrForbiddenChild(child, FORBIDDEN_PYTHON_TYPEDEF_NODES)) {
+                return {
+                    valid: false,
+                    reason: `Arbitrary expressions are refused in stub type annotations: "${source.slice(child.from, child.to).trim()}".`,
+                };
+            }
+        } else if (child.name === 'ParamList') {
+            const paramChildren = directNodeChildren(child).filter(c => c.name !== '(' && c.name !== ')' && c.name !== 'Comment');
+            let group: SyntaxNode[] = [];
+            const validateGroup = (): StubValidationResult | null => {
+                for (const item of group) {
+                    if (item.name === 'TypeDef' && hasSyntaxErrorOrForbiddenChild(item, FORBIDDEN_PYTHON_TYPEDEF_NODES)) {
+                        return {
+                            valid: false,
+                            reason: `Arbitrary expressions are refused in stub parameter annotations: "${source.slice(item.from, item.to).trim()}".`,
+                        };
+                    }
+                }
+                const assignIdx = group.findIndex(item => item.name === 'AssignOp');
+                if (assignIdx >= 0) {
+                    const defaultExprs = group.slice(assignIdx + 1);
+                    if (defaultExprs.length !== 1 || !isPurePythonLiteralNode(defaultExprs[0], source)) {
+                        const snippet = defaultExprs.map(n => source.slice(n.from, n.to)).join(' ').trim();
+                        return {
+                            valid: false,
+                            reason: `Parameter default in stub must be a pure Python literal value (refused: "${snippet}").`,
+                        };
+                    }
+                }
+                group = [];
+                return null;
+            };
+            for (const item of paramChildren) {
+                if (item.name === ',') {
+                    const err = validateGroup();
+                    if (err) return err;
+                } else {
+                    group.push(item);
+                }
+            }
+            const tailErr = validateGroup();
+            if (tailErr) return tailErr;
+        }
+    }
+    return null;
+}
+
+function validateStubSource(fullCode: string, options?: { expectedHeaderLength?: number }): StubValidationResult {
     const tree = parser.parse(fullCode);
+    if (hasSyntaxErrorOrForbiddenChild(tree.topNode, new Set())) {
+        return { valid: false, reason: 'Invalid Python syntax in stub.' };
+    }
 
     let funcNode: SyntaxNode | null = null;
     for (let cur = tree.topNode.firstChild; cur; cur = cur.nextSibling) {
+        if (cur.name === 'Comment') continue;
         if (cur.name === 'FunctionDefinition') {
-            funcNode = cur;
-            break;
-        }
-        if (cur.name === 'DecoratedStatement') {
-            for (let inner = cur.firstChild; inner; inner = inner.nextSibling) {
-                if (inner.name === 'FunctionDefinition') {
-                    funcNode = inner;
-                    break;
-                }
+            if (funcNode) {
+                return { valid: false, reason: 'Stub must contain exactly one function definition.' };
             }
-            if (funcNode) break;
+            funcNode = cur;
+            continue;
         }
+        return {
+            valid: false,
+            reason: `Stub must contain only a single function definition (refused top-level ${cur.name}).`,
+        };
     }
     if (!funcNode) {
         return { valid: false, reason: 'No valid function definition found.' };
     }
+
+    const sigErr = validatePythonStubSignature(funcNode, fullCode);
+    if (sigErr) return sigErr;
 
     let bodyNode: SyntaxNode | null = null;
     for (let cur = funcNode.firstChild; cur; cur = cur.nextSibling) {
@@ -683,6 +840,9 @@ function validateStubSource(fullCode: string): StubValidationResult {
     }
     if (!bodyNode) {
         return { valid: false, reason: 'No function body found.' };
+    }
+    if (options?.expectedHeaderLength !== undefined && bodyNode.from !== options.expectedHeaderLength) {
+        return { valid: false, reason: 'Function signature contains unexpected trailing tokens or body.' };
     }
 
     let hasStubStatement = false;
@@ -791,14 +951,85 @@ function validateStubSource(fullCode: string): StubValidationResult {
  * Strictly refuses any arbitrary implementation statements (returns, math, loops, assignments).
  */
 export function validateStubBody(signature: string, bodyText: string): StubValidationResult {
-    const cleanSig = signature.trim().replace(/:$/, '');
-    const cleanLines = bodyText.replace(/\r\n/g, '\n').split('\n');
+    const cleanSig = signature.replace(/\r\n?/g, '\n').trim().replace(/:$/, '').trimEnd();
+    const cleanLines = bodyText.replace(/\r\n?/g, '\n').split('\n');
     const indentedBody = cleanLines.map(l => l.startsWith('    ') ? l : `    ${l}`).join('\n');
-    return validateStubSource(`${cleanSig}:\n${indentedBody}\n`);
+    return validateStubSource(`${cleanSig}:\n${indentedBody}\n`, { expectedHeaderLength: cleanSig.length });
+}
+
+function isPureTsLiteralExpr(expr: ts.Expression): boolean {
+    let cur = expr;
+    while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+    if (
+        ts.isNumericLiteral(cur)
+        || ts.isStringLiteral(cur)
+        || ts.isNoSubstitutionTemplateLiteral(cur)
+        || cur.kind === ts.SyntaxKind.TrueKeyword
+        || cur.kind === ts.SyntaxKind.FalseKeyword
+        || cur.kind === ts.SyntaxKind.NullKeyword
+        || (ts.isIdentifier(cur) && cur.text === 'undefined')
+    ) {
+        return true;
+    }
+    if (
+        ts.isPrefixUnaryExpression(cur)
+        && (cur.operator === ts.SyntaxKind.PlusToken || cur.operator === ts.SyntaxKind.MinusToken)
+        && ts.isNumericLiteral(cur.operand)
+    ) {
+        return true;
+    }
+    if (ts.isArrayLiteralExpression(cur)) {
+        return cur.elements.every(el => !ts.isSpreadElement(el) && isPureTsLiteralExpr(el));
+    }
+    if (ts.isObjectLiteralExpression(cur)) {
+        return cur.properties.every(prop =>
+            ts.isPropertyAssignment(prop)
+            && !ts.isComputedPropertyName(prop.name)
+            && isPureTsLiteralExpr(prop.initializer));
+    }
+    return false;
+}
+
+function validateTsBindingName(nameNode: ts.BindingName): StubValidationResult | null {
+    if (ts.isIdentifier(nameNode)) return null;
+    if (ts.isObjectBindingPattern(nameNode) || ts.isArrayBindingPattern(nameNode)) {
+        for (const el of nameNode.elements) {
+            if (ts.isOmittedExpression(el)) continue;
+            if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {
+                return { valid: false, reason: 'Computed property names are refused in stub parameters.' };
+            }
+            if (el.initializer && !isPureTsLiteralExpr(el.initializer)) {
+                return { valid: false, reason: 'Parameter default values in stubs must be pure literal values.' };
+            }
+            const nested = validateTsBindingName(el.name);
+            if (nested) return nested;
+        }
+        return null;
+    }
+    return { valid: false, reason: 'Unsupported binding pattern in stub parameter.' };
+}
+
+function validateTsStubParams(params: ts.NodeArray<ts.ParameterDeclaration>): StubValidationResult | null {
+    for (const param of params) {
+        const paramDecorators = ts.canHaveDecorators(param) ? ts.getDecorators(param) : undefined;
+        if (paramDecorators && paramDecorators.length > 0) {
+            return { valid: false, reason: 'Decorators are refused in atomic stub parameters.' };
+        }
+        if (param.initializer && !isPureTsLiteralExpr(param.initializer)) {
+            return { valid: false, reason: 'Parameter default values in stubs must be pure literal values.' };
+        }
+        const bindingErr = validateTsBindingName(param.name);
+        if (bindingErr) return bindingErr;
+    }
+    return null;
 }
 
 /** Validates that a TypeScript/JavaScript function stub body contains ONLY empty blocks or `throw new Error("...")`. */
-export function validateTsStubSource(fullCode: string, extension = '.tsx'): StubValidationResult {
+export function validateTsStubSource(
+    fullCode: string,
+    extension = '.tsx',
+    options?: { minBodyStart?: number },
+): StubValidationResult {
     const parsed = parseTsModule(fullCode, `<stub>${extension}`);
     if (!parsed.valid) {
         return { valid: false, reason: parsed.diagnostics[0]?.message ?? 'Invalid TypeScript/JavaScript stub syntax.' };
@@ -808,9 +1039,15 @@ export function validateTsStubSource(fullCode: string, extension = '.tsx'): Stub
         return { valid: false, reason: 'Stub must contain exactly one top-level declaration.' };
     }
     const stmt = sf.statements[0];
+    const stmtDecorators = ts.canHaveDecorators(stmt) ? ts.getDecorators(stmt) : undefined;
+    if (stmtDecorators && stmtDecorators.length > 0) {
+        return { valid: false, reason: 'Decorators are refused in atomic stubs.' };
+    }
     let bodyBlock: ts.Block | null = null;
+    let params: ts.NodeArray<ts.ParameterDeclaration> | null = null;
     if (ts.isFunctionDeclaration(stmt)) {
         bodyBlock = stmt.body ?? null;
+        params = stmt.parameters;
     } else if (ts.isVariableStatement(stmt) && stmt.declarationList.declarations.length === 1) {
         let init = stmt.declarationList.declarations[0].initializer;
         while (init && (ts.isAsExpression(init) || ts.isSatisfiesExpression(init) || ts.isParenthesizedExpression(init))) {
@@ -824,11 +1061,17 @@ export function validateTsStubSource(fullCode: string, extension = '.tsx'): Stub
                 };
             }
             bodyBlock = init.body;
+            params = init.parameters;
         }
     }
-    if (!bodyBlock) {
+    if (!bodyBlock || !params) {
         return { valid: false, reason: 'No function body block found in TypeScript/JavaScript stub.' };
     }
+    if (options?.minBodyStart !== undefined && bodyBlock.getStart(sf) < options.minBodyStart) {
+        return { valid: false, reason: 'TypeScript/JavaScript signature contains unexpected body tokens.' };
+    }
+    const paramErr = validateTsStubParams(params);
+    if (paramErr) return paramErr;
 
     for (const inner of bodyBlock.statements) {
         if (ts.isEmptyStatement(inner)) continue;
@@ -866,12 +1109,12 @@ export function validateTsStubSource(fullCode: string, extension = '.tsx'): Stub
 
 /** Validates a TypeScript/JavaScript signature + stub body combination. */
 export function validateTsStubBody(signature: string, bodyText: string, extension = '.tsx'): StubValidationResult {
-    const cleanSig = signature.trim().replace(/[;{]\s*$/, '').trim();
-    const trimmedBody = bodyText.trim();
+    const cleanSig = signature.replace(/\r\n?/g, '\n').trim().replace(/[;{]\s*$/, '').trim();
+    const trimmedBody = bodyText.replace(/\r\n?/g, '\n').trim();
     const block = trimmedBody.startsWith('{') && trimmedBody.endsWith('}')
         ? trimmedBody
-        : `{\n${trimmedBody.split(/\r?\n/).map(l => `    ${l}`).join('\n')}\n}`;
-    return validateTsStubSource(`${cleanSig} ${block}\n`, extension);
+        : `{\n${trimmedBody.split('\n').map(l => `    ${l}`).join('\n')}\n}`;
+    return validateTsStubSource(`${cleanSig} ${block}\n`, extension, { minBodyStart: cleanSig.length });
 }
 
 /** Validates whether an existing node's code is an unimplemented atomic stub. */

@@ -442,7 +442,7 @@ export function compileProjectForLanguage(
     const canonical = tryNormalizeLanguage(config.language) ?? 'python';
     switch (canonical) {
         case 'python':
-            return compilePython(nodes, config, flows, library);
+            return compilePython(nodes, config, flows, library, { existingFiles });
         case 'typescript':
         case 'javascript':
             return compileTypeScript(nodes, config, flows, library, existingFiles);
@@ -453,7 +453,7 @@ export function compileProjectForLanguage(
         case 'arduino':
             return compileArduino(nodes, config, flows, library, { existingFiles });
         case 'prose':
-            return compileProse(nodes, config, flows);
+            return compileProse(nodes, config, flows, undefined, { existingFiles });
     }
 }
 

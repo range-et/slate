@@ -11,13 +11,16 @@ import {
 } from './generation';
 import type { HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit } from './harness_protocol';
 import {
+    evaluateProjectCredentialAccess,
     resolveLlmConfig,
     streamLlamaCompletion,
+    validateLlmEndpointUrl,
     type LlmConfigInput,
 } from './llama_transport';
 import { tryNormalizeLanguage } from './language_types';
 import { sourceHash } from './python_adapter';
 import {
+    assertSafeNodeId as assertSafeRelativeNodeId,
     codeLines,
     codeText,
     CONFIG_PATH,
@@ -62,6 +65,8 @@ export interface BatchForgeOptions {
     env?: Readonly<Record<string, string | undefined>>;
     verifyTimeoutMs?: number;
     pythonPath?: string;
+    isTrusted?: boolean;
+    approvedCredentialPairings?: ReadonlySet<string> | readonly string[];
     executeCommand?: VerificationOptions['executeCommand'];
     signal?: AbortSignal;
     onNodeForged?: (nodeId: string) => Promise<void> | void;
@@ -322,10 +327,7 @@ function clampInt(value: number | undefined, min: number, max: number, fallback:
 }
 
 function assertSafeNodeId(workspaceRoot: string, rawId: string): { nodeId: string; relPath: string; fullPath: string } {
-    const normalized = rawId.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-    if (!normalized || normalized.split('/').includes('..') || path.isAbsolute(normalized)) {
-        throw new Error(`Path traversal rejected: "${rawId}" is not a valid node ID.`);
-    }
+    const normalized = assertSafeRelativeNodeId(rawId);
     const relPath = pathForNodeId(normalized);
     const nodesRoot = path.resolve(workspaceRoot, NODES_DIR);
     const fullPath = path.resolve(workspaceRoot, relPath);
@@ -498,7 +500,7 @@ async function forgeSingleTarget(
                 node: candidateNode,
                 nodeId: target.nodeId,
                 dependencies,
-                isTrusted: true,
+                isTrusted: options.isTrusted === true,
                 timeoutMs: options.verifyTimeoutMs ?? 30000,
                 pythonPath: options.pythonPath,
                 language: target.language,
@@ -662,6 +664,25 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
         options.env ?? process.env,
         options.llmOverride,
     );
+    validateLlmEndpointUrl(llm.endpoint);
+    const trusted = options.isTrusted === true;
+    const access = evaluateProjectCredentialAccess({
+        projectLlm: config.llm,
+        override: options.llmOverride,
+        fallback: options.fallbackLlm,
+        resolved: llm,
+        isTrusted: trusted,
+        approvedPairings: options.approvedCredentialPairings,
+    });
+    if (!access.allowRequest) {
+        throw new Error(access.reason ?? 'Workspace is not trusted; refusing request to configured LLM endpoint.');
+    }
+    if (access.requiresApproval && !access.allowCredential) {
+        throw new Error(access.reason ?? 'Explicit user approval required before sending credentials to configured LLM endpoint.');
+    }
+    if (options.verify !== false && !trusted) {
+        throw new Error('Workspace is not trusted; refusing to run batch forge verification in an untrusted workspace.');
+    }
 
     const concurrency = clampInt(options.concurrency, 1, 8, clampInt(llm.concurrency, 1, 8, 3));
     const maxRevisions = clampInt(options.maxRevisions, 1, 5, 3);

@@ -759,4 +759,13 @@ describe('TypeScript/JavaScript Importer & Compiler Round-Trips', () => {
         expect(recompiled.files.get('app.ts')).toContain('import helper from "./helper";');
         expect(recompiled.files.get('app.ts')).not.toContain('import { helper }');
     });
+
+    it('rejects control characters in splitTsImport module specifiers and serializes safely (P0-6)', () => {
+        expect(splitTsImport("import x from 'mod\nprocess.exit(1)';")).toEqual([]);
+        expect(splitTsImport("import x from 'mod\r\n';")).toEqual([]);
+        const valid = splitTsImport("import { readFile } from 'node:fs/promises';");
+        expect(valid).toHaveLength(1);
+        expect(valid[0].module).toBe('node:fs/promises');
+        expect(valid[0].line).toBe('import { readFile } from "node:fs/promises";');
+    });
 });

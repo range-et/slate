@@ -1,3 +1,4 @@
+import { parser as pythonParser } from '@lezer/python';
 import type {
     CanvasRef,
     FlowBranchRegion,
@@ -22,17 +23,41 @@ export const FLOWS_DIR = 'slate/flows';
 /** The root canvas's data wires live in this flow. */
 export const MAIN_FLOW = 'main';
 const FLOW_KEYS = ['slate', 'name', 'inputs', 'outputs', 'instances', 'wires', 'cases', 'regions'];
+const FLOW_INSTANCE_ID = /^[A-Za-z0-9_:/-]+$/;
+const FLOW_REGION_ID = /^[A-Za-z0-9_-]+$/;
 
 export class FlowFormatError extends Error {}
+
+/** Validate a relative flow ID (`main`, `pkg/run`) and reject path traversal or control chars. */
+export function assertSafeFlowId(rawId: string): string {
+    if (typeof rawId !== 'string' || /[\0\r\n]/.test(rawId)) {
+        throw new FlowFormatError(`Path traversal rejected: invalid flow id "${String(rawId)}".`);
+    }
+    const normalized = rawId.trim().replace(/\\/g, '/');
+    if (!normalized || normalized.startsWith('/') || normalized.endsWith('/') || /^[A-Za-z]:/.test(normalized)) {
+        throw new FlowFormatError(`Path traversal rejected: invalid flow id "${rawId}".`);
+    }
+    const segments = normalized.split('/');
+    if (segments.some(seg => !seg || seg === '.' || seg === '..')) {
+        throw new FlowFormatError(`Path traversal rejected: "${rawId}" contains unsafe path segments.`);
+    }
+    return normalized;
+}
 
 export function flowIdForPath(relativePath: string): string | null {
     const normalized = relativePath.replace(/\\/g, '/');
     if (!normalized.startsWith(`${FLOWS_DIR}/`) || !normalized.endsWith('.json')) return null;
-    return normalized.slice(FLOWS_DIR.length + 1, -'.json'.length);
+    const candidate = normalized.slice(FLOWS_DIR.length + 1, -'.json'.length);
+    if (candidate !== candidate.trim()) return null;
+    try {
+        return assertSafeFlowId(candidate);
+    } catch {
+        return null;
+    }
 }
 
 export function pathForFlowId(flowId: string): string {
-    return `${FLOWS_DIR}/${flowId}.json`;
+    return `${FLOWS_DIR}/${assertSafeFlowId(flowId)}.json`;
 }
 
 export function emptyFlow(name: string): SlateFlow {
@@ -64,7 +89,9 @@ export function parseFlow(text: string): SlateFlow {
     const instances = value.instances === undefined ? [] : value.instances;
     if (!Array.isArray(instances)) throw new FlowFormatError('instances must be a list');
     const parsedInstances = instances.map((item): FlowInstance => {
-        if (!isRecord(item) || typeof item.id !== 'string' || !item.id || item.id.includes('.')) throw new FlowFormatError('instances need an id without dots');
+        if (!isRecord(item) || typeof item.id !== 'string' || !FLOW_INSTANCE_ID.test(item.id)) {
+            throw new FlowFormatError('instances need an id without dots (allowed characters: letters, digits, _, :, /, -)');
+        }
         if (item.kind === 'value') return { id: item.id, kind: 'value', value: typeof item.value === 'string' ? item.value : JSON.stringify(item.value ?? null) };
         if (item.kind === 'viewer') return { id: item.id, kind: 'viewer', pinned: item.pinned !== false };
         if (typeof item.node !== 'string') throw new FlowFormatError(`instance ${item.id} needs a node`);
@@ -83,8 +110,8 @@ export function parseFlow(text: string): SlateFlow {
     if (rawRegions !== undefined) {
         if (!Array.isArray(rawRegions)) throw new FlowFormatError('regions must be a list');
         parsedRegions = rawRegions.map((item): FlowRegion => {
-            if (!isRecord(item) || typeof item.id !== 'string' || !item.id || item.id.includes('.')) {
-                throw new FlowFormatError('regions need an id without dots');
+            if (!isRecord(item) || typeof item.id !== 'string' || !FLOW_REGION_ID.test(item.id)) {
+                throw new FlowFormatError('regions need an id without dots (allowed characters: letters, digits, _, -)');
             }
             if (item.kind !== 'branch' && item.kind !== 'foreach' && item.kind !== 'repeat') {
                 throw new FlowFormatError(`region ${item.id} kind must be branch, foreach, or repeat`);
@@ -353,6 +380,92 @@ export function parseValueLiteral(raw: unknown): { type: ValueType; value: unkno
     return { type: 'string', value: String(raw), text: String(raw) };
 }
 
+/** Validate that `expr` parses as a single single-line Python expression without comments or yield/await. */
+export function isValidSingleLinePythonExpr(expr: string): boolean {
+    if (typeof expr !== 'string') return false;
+    const trimmed = expr.trim();
+    if (!trimmed || /[\r\n]/.test(trimmed) || trimmed.endsWith('\\')) return false;
+    const tree = pythonParser.parse(`${trimmed}\n`);
+    const top = tree.topNode;
+    const first = top.firstChild;
+    if (!first || first.nextSibling !== null || first.name !== 'ExpressionStatement') return false;
+    if (first.from !== 0 || first.to !== trimmed.length) return false;
+    const cursor = tree.cursor();
+    const visit = (): boolean => {
+        if (cursor.type.isError || cursor.name === 'Comment' || cursor.name === 'YieldExpression' || cursor.name === 'AwaitExpression') {
+            return false;
+        }
+        if (cursor.firstChild()) {
+            do {
+                if (!visit()) return false;
+            } while (cursor.nextSibling());
+            cursor.parent();
+        }
+        return true;
+    };
+    return visit();
+}
+
+function compileJsonLiteralToPython(val: unknown): string {
+    if (val === undefined || val === null) return 'None';
+    if (typeof val === 'boolean') return val ? 'True' : 'False';
+    if (typeof val === 'number') {
+        if (Number.isNaN(val)) return 'float("nan")';
+        if (val === Infinity) return 'float("inf")';
+        if (val === -Infinity) return 'float("-inf")';
+        return String(val);
+    }
+    if (typeof val === 'string') return JSON.stringify(val);
+    if (Array.isArray(val)) {
+        return `[${val.map(compileJsonLiteralToPython).join(', ')}]`;
+    }
+    if (typeof val === 'object') {
+        const entries = Object.entries(val as Record<string, unknown>)
+            .map(([k, v]) => `${JSON.stringify(k)}: ${compileJsonLiteralToPython(v)}`);
+        return `{${entries.join(', ')}}`;
+    }
+    return JSON.stringify(String(val));
+}
+
+/** Validate a flow value instance for Python codegen; returns null when safe or an error message. */
+export function validateFlowValueForPython(val: unknown): string | null {
+    if (val === undefined || val === null || typeof val === 'boolean' || typeof val === 'number') return null;
+    if (isRecord(val) && 'expr' in val) {
+        return typeof val.expr === 'string' && isValidSingleLinePythonExpr(val.expr)
+            ? null
+            : 'Value expression must be a valid single-line Python expression.';
+    }
+    if (typeof val !== 'string') return null;
+    const trimmed = val.trim();
+    if (trimmed === 'True' || trimmed === 'true' || trimmed === 'False' || trimmed === 'false' || trimmed === 'None' || trimmed === 'null') {
+        return null;
+    }
+    if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(trimmed)) return null;
+    if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            return typeof parsed === 'string' ? null : 'Quoted string value must be a JSON string.';
+        } catch {
+            return 'Malformed quoted string value literal.';
+        }
+    }
+    if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
+        return /[\r\n]/.test(trimmed) ? 'Quoted string value must not span multiple lines.' : null;
+    }
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+        try {
+            JSON.parse(trimmed);
+            return null;
+        } catch {
+            return 'Malformed JSON value literal.';
+        }
+    }
+    if (inferValueType(val) === 'expr' && !isValidSingleLinePythonExpr(trimmed)) {
+        return 'Value expression must be a valid single-line Python expression.';
+    }
+    return null;
+}
+
 export function compileValueToPython(val: unknown): string {
     if (val === undefined || val === null) return 'None';
     if (typeof val === 'boolean') return val ? 'True' : 'False';
@@ -373,8 +486,9 @@ export function compileValueToPython(val: unknown): string {
                 const parsed = JSON.parse(trimmed);
                 if (typeof parsed === 'string') return JSON.stringify(parsed);
             } catch {
-                return trimmed;
+                return JSON.stringify(val);
             }
+            return JSON.stringify(val);
         }
         if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
             return JSON.stringify(trimmed.slice(1, -1));
@@ -382,27 +496,23 @@ export function compileValueToPython(val: unknown): string {
         if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
             try {
                 const parsed = JSON.parse(trimmed);
-                return compileValueToPython(parsed);
+                return compileJsonLiteralToPython(parsed);
             } catch {
-                return trimmed;
+                return JSON.stringify(val);
             }
         }
         if (/[+\-*/%&|^<>=]/.test(trimmed) || /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\(.*\)$/.test(trimmed)) {
-            return trimmed;
+            return isValidSingleLinePythonExpr(trimmed) ? trimmed : JSON.stringify(val);
         }
         return JSON.stringify(val);
     }
     if (typeof val === 'object') {
         if (isRecord(val) && 'expr' in val && typeof val.expr === 'string') {
-            return val.expr;
+            return isValidSingleLinePythonExpr(val.expr) ? val.expr.trim() : JSON.stringify(val.expr);
         }
-        if (Array.isArray(val)) {
-            return `[${val.map(compileValueToPython).join(', ')}]`;
-        }
-        const entries = Object.entries(val).map(([k, v]) => `${JSON.stringify(k)}: ${compileValueToPython(v)}`);
-        return `{${entries.join(', ')}}`;
+        return compileJsonLiteralToPython(val);
     }
-    return String(val);
+    return JSON.stringify(String(val));
 }
 
 // Edits (pure; return new flows)
