@@ -75,16 +75,178 @@ function offsetFromPosition(source: string, line: number, character: number): nu
     return Math.min(source.length, idx + character);
 }
 
-function isForwardPrototypeOf(stmt: string, definedNames: Set<string>): boolean {
+const NON_TYPE_CPP_KEYWORDS = new Set([
+    'return', 'typedef', 'using', 'delete', 'throw', 'co_return', 'co_await', 'if', 'while', 'for', 'switch',
+    'else', 'case', 'default', 'goto', 'break', 'continue', 'new', 'sizeof', 'decltype', 'alignof',
+]);
+
+function stripLeadingTemplateAndExtern(stmt: string): string {
+    let cur = stmt.trim();
+    if (cur.startsWith('template')) {
+        const lt = cur.indexOf('<');
+        if (lt > 0 && /^template\s*$/.test(cur.slice(0, lt))) {
+            let depth = 0;
+            let inStr: string | null = null;
+            let end = -1;
+            for (let i = lt; i < cur.length; i++) {
+                const ch = cur[i];
+                if (inStr) {
+                    if (ch === '\\') { i++; continue; }
+                    if (ch === inStr) inStr = null;
+                } else if (ch === '"' || ch === "'") {
+                    inStr = ch;
+                } else if (ch === '<') {
+                    depth++;
+                } else if (ch === '>') {
+                    depth--;
+                    if (depth === 0) { end = i; break; }
+                }
+            }
+            if (end > lt) {
+                cur = cur.slice(end + 1).trim();
+            }
+        }
+    }
+    const externMatch = cur.match(/^extern\s+(?:"[^"]*"\s*)?([\s\S]+)$/);
+    if (externMatch) {
+        cur = externMatch[1].trim();
+    }
+    return cur;
+}
+
+function splitTopLevelCommas(text: string): string[] {
+    const parts: string[] = [];
+    let paren = 0;
+    let angle = 0;
+    let bracket = 0;
+    let brace = 0;
+    let inStr: string | null = null;
+    let start = 0;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inStr) {
+            if (ch === '\\') { i++; continue; }
+            if (ch === inStr) inStr = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inStr = ch; continue; }
+        if (ch === '(') paren++;
+        else if (ch === ')' && paren > 0) paren--;
+        else if (ch === '[') bracket++;
+        else if (ch === ']' && bracket > 0) bracket--;
+        else if (ch === '{') brace++;
+        else if (ch === '}' && brace > 0) brace--;
+        else if (ch === '<') angle++;
+        else if (ch === '>' && angle > 0) angle--;
+        else if (ch === ',' && paren === 0 && angle === 0 && bracket === 0 && brace === 0) {
+            parts.push(text.slice(start, i).trim());
+            start = i + 1;
+        }
+    }
+    parts.push(text.slice(start).trim());
+    return parts;
+}
+
+function hasTopLevelComma(text: string): boolean {
+    return splitTopLevelCommas(text).length > 1;
+}
+
+function isBareLiteralArg(beforeEq: string): boolean {
+    if (!beforeEq) return true;
+    if (/^(?:[0-9]|['"])/.test(beforeEq)) return true;
+    if (/^(?:true|false|nullptr|NULL)$/.test(beforeEq)) return true;
+    if (/^[+-]\s*[0-9]/.test(beforeEq)) return true;
+    return false;
+}
+
+function isForwardPrototypeOf(stmt: string, definedFunctionNames: Set<string>): boolean {
     const trimmed = stmt.trim();
     if (!trimmed.endsWith(';') || trimmed.includes('{') || trimmed.startsWith('#')) return false;
-    if (/^(?:typedef|using|const|constexpr|struct|class|enum)\b/.test(trimmed) && !trimmed.includes('(')) {
+    const cur = stripLeadingTemplateAndExtern(trimmed);
+    if (/^(?:typedef|using|struct|class|enum)\b/.test(cur)) return false;
+
+    // Find top-level '(' (not inside <...>) and matching ')'
+    let angle = 0;
+    let inStr: string | null = null;
+    let openParen = -1;
+    for (let i = 0; i < cur.length; i++) {
+        const ch = cur[i];
+        if (inStr) {
+            if (ch === '\\') { i++; continue; }
+            if (ch === inStr) inStr = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inStr = ch; continue; }
+        if (ch === '<') angle++;
+        else if (ch === '>' && angle > 0) angle--;
+        else if (ch === '(' && angle === 0) {
+            openParen = i;
+            break;
+        }
+    }
+    if (openParen <= 0) return false;
+
+    let parenDepth = 0;
+    inStr = null;
+    let closeParen = -1;
+    for (let i = openParen; i < cur.length; i++) {
+        const ch = cur[i];
+        if (inStr) {
+            if (ch === '\\') { i++; continue; }
+            if (ch === inStr) inStr = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inStr = ch; continue; }
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') {
+            parenDepth--;
+            if (parenDepth === 0) {
+                closeParen = i;
+                break;
+            }
+        }
+    }
+    if (closeParen < 0) return false;
+
+    const afterParen = cur.slice(closeParen + 1).trim();
+    if (!/^(?:(?:const|volatile|override|final)\b|noexcept(?:\s*\([^)]*\))?\b|&&?|->\s*[^;]+|\s)*;\s*$/.test(afterParen)) {
         return false;
     }
-    const match = trimmed.match(/([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?;\s*$/);
-    if (!match) return false;
-    const fnName = match[1];
-    return definedNames.has(fnName);
+
+    const beforeParen = cur.slice(0, openParen).trim();
+    if (
+        !beforeParen
+        || /[=."']|->|[+/%!?|^]|&&|\|\|/.test(beforeParen)
+        || hasTopLevelComma(beforeParen)
+        || /\boperator\b/.test(beforeParen)
+    ) {
+        return false;
+    }
+
+    const nameMatch = beforeParen.match(/^([\s\S]+?)(?:\s+|([*&]+)\s*)([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (!nameMatch) return false;
+    const returnPrefix = `${nameMatch[1]}${nameMatch[2] ?? ''}`.trim();
+    const fnName = nameMatch[3];
+    if (!returnPrefix) return false;
+
+    const prefixTokens = returnPrefix.split(/\s+/);
+    if (prefixTokens.some(tok => NON_TYPE_CPP_KEYWORDS.has(tok))) {
+        return false;
+    }
+    if (!definedFunctionNames.has(fnName)) return false;
+
+    const insideParen = cur.slice(openParen + 1, closeParen).trim();
+    if (insideParen && insideParen !== 'void') {
+        const params = splitTopLevelCommas(insideParen);
+        for (const param of params) {
+            if (!param) return false;
+            if (param === '...') continue;
+            const eqIdx = param.indexOf('=');
+            const beforeEq = (eqIdx >= 0 ? param.slice(0, eqIdx) : param).trim();
+            if (isBareLiteralArg(beforeEq)) return false;
+        }
+    }
+    return true;
 }
 
 function detectArduinoModule(
@@ -156,6 +318,7 @@ function scanCppModule(
 
     const definitions: CppDefinition[] = [];
     const definedNames = new Set<string>();
+    const definedFunctionNames = new Set<string>();
 
     for (const span of unitSpans) {
         const name = span.unit.name;
@@ -181,10 +344,11 @@ function scanCppModule(
         }
 
         const nodeIdName = overloadIndex ? `${name}__overload_${overloadIndex}` : name;
+        const unitKind = span.unit.kind === 'class' || span.unit.kind === 'nested_class' ? 'class' : 'function';
         definitions.push({
             name,
             nodeIdName,
-            kind: span.unit.kind === 'class' || span.unit.kind === 'nested_class' ? 'class' : 'function',
+            kind: unitKind,
             signature: span.unit.signature ?? name,
             code: source.slice(span.from, span.to).trim(),
             namespaceScopes: nsScopes,
@@ -192,6 +356,9 @@ function scanCppModule(
             ...(overloadIndex !== undefined ? { overloadIndex } : {}),
         });
         definedNames.add(name);
+        if (unitKind === 'function') {
+            definedFunctionNames.add(name);
+        }
     }
 
     // Collect gaps outside unitSpans AND outside `namespace ... {` / `}` wrappers to extract `#include`, prelude, and epilogue
@@ -281,7 +448,7 @@ function scanCppModule(
             }
 
             // Skip redundant forward function prototypes for functions defined in this module
-            if (isForwardPrototypeOf(trimmed, definedNames)) {
+            if (isForwardPrototypeOf(trimmed, definedFunctionNames)) {
                 idx++;
                 continue;
             }

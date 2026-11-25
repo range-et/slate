@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import { compilePython } from '../vscode-extension/src/compile/python';
 import {
-    connect, deleteFlowPort, extractFlow, inputPorts, migrateRootOccurrences, outputPorts, parseFlow,
+    assertSafeFlowId, compileValueToPython, connect, deleteFlowPort, extractFlow, inputPorts, migrateRootOccurrences, outputPorts, parseFlow,
     removeNodeReferences, renameFlowPort, repairCallerWiresOnPortDelete, repairCallerWiresOnPortRename,
-    serializeFlow, unitSignature, type Port,
+    serializeFlow, unitSignature, validateFlowValueForPython, type Port,
 } from '../vscode-extension/src/flow';
 import type { SlateFlow } from '../vscode-extension/src/harness_protocol';
 import { parseModule } from '../vscode-extension/src/python_adapter';
@@ -354,5 +354,49 @@ describe('one occurrence model and root migration', () => {
             '        return 1',
             '    return n * factorial_copy(n - 1)',
         ]);
+    });
+
+    it('neutralizes flow codegen injection, CR comments, JSON expr smuggling, and unsafe flow/region IDs (P0-4, P0-7)', () => {
+        expect(() => assertSafeFlowId('../evil')).toThrow(/Path traversal rejected/);
+        expect(() => assertSafeFlowId('bad\nid')).toThrow(/Path traversal rejected/);
+        expect(() => assertSafeFlowId('C:/win/flow')).toThrow(/Path traversal rejected/);
+
+        expect(validateFlowValueForPython('x + 1')).toBeNull();
+        expect(validateFlowValueForPython({ expr: 'len(xs)' })).toBeNull();
+        expect(validateFlowValueForPython({ expr: '1\nimport os' })).toMatch(/single-line Python expression/);
+        expect(validateFlowValueForPython('"bad\\"')).toMatch(/Malformed quoted string/);
+        expect(validateFlowValueForPython('{not json')).toMatch(/Malformed JSON/);
+        expect(validateFlowValueForPython('1 + (')).toMatch(/single-line Python expression/);
+
+        // Nested {"expr": ...} inside a JSON literal string must serialize as a dict with string key/value, not raw codegen
+        const smuggledJson = compileValueToPython('{"expr": "__import__(\'os\').system(\'id\')"}');
+        expect(smuggledJson).toBe('{"expr": "__import__(\'os\').system(\'id\')"}');
+        expect(compileValueToPython({ expr: '1\n__import__("os")' })).toBe('"1\\n__import__(\\"os\\")"');
+        expect(() => compileValueToPython('{malformed')).not.toThrow();
+
+        // CR line break in node intent/contract must never break Python comments
+        const crNodes = new Map([
+            ...nodes,
+            ['commented', { ...node('commented', ['def commented() -> int:', '    return 1']), intent: 'line1\rimport os' }],
+        ]);
+        const compiled = compilePython(crNodes, config, new Map([
+            ['injected', flow({
+                name: 'injected',
+                outputs: [{ name: 'out', annotation: 'int' }],
+                instances: [
+                    { id: 'v', kind: 'value', value: '7' },
+                    { id: 'dbl', node: 'math/double' },
+                ],
+                wires: [
+                    { from: 'v.out', to: 'dbl.in:x' },
+                    { from: 'dbl.out', to: 'output:out' },
+                ],
+            })],
+        ]));
+        expect(compiled.diagnostics).toEqual([]);
+        const rootPy = compiled.files.get('demo.py')!;
+        expect(rootPy).toContain('# intent: line1\n#   import os');
+        expect(rootPy).not.toMatch(/\rimport os/);
+        expect(parseModule(rootPy, 'demo.py').valid).toBe(true);
     });
 });

@@ -372,5 +372,18 @@ describe('Trusted Flow Runner & Trace Compiler Matrix (S-600)', () => {
             expect(res.status).toBe('stopped');
             expect(res.error).toContain('Execution was stopped');
         });
+
+        it('fails closed when isTrusted is omitted (P0-5)', async () => {
+            const res = await runFlow({
+                workspaceRoot: tmpDir,
+                flowId: 'run_math',
+                documents: new Map([['multiply', multiplyNode]]),
+                flows: new Map([['run_math', flow]]),
+                config,
+            } as unknown as Parameters<typeof runFlow>[0]);
+
+            expect(res.status).toBe('failed');
+            expect(res.error).toContain('Workspace is not trusted');
+        });
     });
 });

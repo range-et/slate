@@ -7,11 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     SlateMcpServer, validateStubBody, MCP_TOOLS, runSlateMcpCli
 } from '../vscode-extension/src/mcp/slate_mcp_server';
+import { credentialPairingKey } from '../vscode-extension/src/llama_transport';
 import { startFakeLlamaServer } from './support/fake_llama_server';
 
 describe('Frontier Architect MCP Server (S-510)', () => {
     let tmpDir: string;
     let server: SlateMcpServer;
+    let approvedPairings: Set<string>;
 
     beforeEach(async () => {
         tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'slate-mcp-test-'));
@@ -56,7 +58,11 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             'utf8',
         );
 
-        server = new SlateMcpServer(tmpDir);
+        approvedPairings = new Set<string>();
+        server = new SlateMcpServer(tmpDir, undefined, {
+            isTrusted: true,
+            approvedCredentialPairings: approvedPairings,
+        });
     });
 
     afterEach(async () => {
@@ -917,6 +923,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             server.setBridge({
                 setLlamaConfig: async cfg => { configured = cfg; },
                 getLlamaConfig: () => configured ?? { endpoint: 'http://127.0.0.1:8080', model: 'local' },
+                isWorkspaceTrusted: () => true,
             });
 
             const invalidResult = await server.callTool('slate_configure_llm', { endpoint: 'invalid-url' });
@@ -960,6 +967,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(rejectSkEnv.content[0].text).toContain('not a raw API key');
 
             const fakeServer = await startFakeLlamaServer(undefined, { requiredAuth: 'Bearer fake-mcp-auth' });
+            approvedPairings.add(credentialPairingKey(fakeServer.url, 'SLATE_MCP_TEST_KEY'));
             const prevEnv = process.env.SLATE_MCP_TEST_KEY;
             process.env.SLATE_MCP_TEST_KEY = 'fake-mcp-auth';
             try {
@@ -1012,6 +1020,8 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             const notified: string[] = [];
             server.setBridge({
                 onStubDefined: async id => { notified.push(id); },
+                isWorkspaceTrusted: () => true,
+                getApprovedCredentialPairings: () => approvedPairings,
             });
 
             const stubRes = await server.callTool('slate_define_stub', {
@@ -1042,6 +1052,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
                 }
                 return ['### Implementation\n```python\ndef dec(x: int) -> int:\n    return x - 1\n```\n\n### Unit Check\n```python\ndef test_dec():\n    assert dec(4) == 3\n```'];
             }, { requiredAuth: 'Bearer fake-batch-mcp' });
+            approvedPairings.add(credentialPairingKey(fakeServer.url, 'SLATE_MCP_BATCH_KEY'));
 
             const prevEnv = process.env.SLATE_MCP_BATCH_KEY;
             process.env.SLATE_MCP_BATCH_KEY = 'fake-batch-mcp';
@@ -1289,6 +1300,207 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(escapeParsed.ok).toBe(false);
             expect(escapeParsed.diagnostics.some((d: any) => /unsafe/i.test(String(d.message)))).toBe(true);
             await expect(fs.stat(path.join(tmpDir, 'outside.ts'))).rejects.toThrow();
+        });
+    });
+
+    describe('MCP security hardening and stub updates (P0-5, P0-6, P0-8, P0-9)', () => {
+        it('fails closed when SlateMcpServer workspace trust is omitted (P0-5)', async () => {
+            const untrustedServer = new SlateMcpServer(tmpDir);
+            try {
+                for (const [tool, args] of [
+                    ['slate_llm_status', { endpoint: 'https://api.example/v1' }],
+                    ['slate_forge_batch', { allStubs: true }],
+                    ['slate_configure_llm', { endpoint: 'https://api.example/v1' }],
+                ] as const) {
+                    const res = await untrustedServer.callTool(tool, args as Record<string, unknown>);
+                    expect(res.isError, tool).toBe(true);
+                    expect(res.content[0].text, tool).toContain('Workspace is not trusted');
+                }
+            } finally {
+                untrustedServer.close();
+            }
+        });
+
+        it('rejects smuggled TS/Prose imports and executable cases while preserving valid pytest.raises cases (P0-6)', async () => {
+            // Forbidden TS internal import
+            const tsInternal = await server.callTool('slate_define_stub', {
+                name: 'ts_bad_imp',
+                language: 'typescript',
+                signature: 'export function ts_bad_imp(x: number): number',
+                intent: 'bad',
+                imports: ["import { calc } from 'slate/nodes/calc';"],
+            });
+            expect(tsInternal.isError).toBe(true);
+            expect(tsInternal.content[0].text).toContain('Forbidden internal import');
+
+            // Prose imports forbidden
+            const proseImp = await server.callTool('slate_define_stub', {
+                name: 'prose_bad_imp',
+                language: 'prose',
+                signature: 'def prose_bad_imp(topic: section) -> passage',
+                intent: 'bad prose',
+                imports: ['import math'],
+            });
+            expect(proseImp.isError).toBe(true);
+            expect(proseImp.content[0].text).toContain('cannot declare code imports');
+
+            // Python case smuggling: def / non-pytest import / eval
+            for (const badCase of [
+                { code: 'def evil():\n    pass' },
+                { code: 'import os\nassert calc(1) == 2' },
+                { code: 'assert eval("1 + 1") == 2' },
+                '1 == 1\nimport os',
+            ]) {
+                const res = await server.callTool('slate_define_stub', {
+                    name: 'py_bad_case',
+                    signature: 'def py_bad_case(x: int) -> int',
+                    intent: 'bad case',
+                    cases: [badCase],
+                });
+                expect(res.isError).toBe(true);
+            }
+
+            // Valid sudoku-style import pytest + with pytest.raises(...) must still pass
+            const validPytest = await server.callTool('slate_define_stub', {
+                name: 'py_good_case',
+                signature: 'def py_good_case(x: int) -> int',
+                intent: 'valid pytest case',
+                cases: [
+                    { code: 'import pytest\nwith pytest.raises(ValueError):\n    py_good_case(-1)' },
+                ],
+            });
+            expect(validPytest.isError).toBe(false);
+
+            // TS case smuggling: eval / require / function
+            for (const badTsCase of [
+                { code: 'eval("1 + 1");' },
+                { code: 'const fsMod = require("fs");' },
+                { code: 'function evil() { return 1; }' },
+            ]) {
+                const res = await server.callTool('slate_define_stub', {
+                    name: 'ts_bad_case',
+                    language: 'typescript',
+                    signature: 'export function ts_bad_case(x: number): number',
+                    intent: 'bad ts case',
+                    cases: [badTsCase],
+                });
+                expect(res.isError).toBe(true);
+            }
+        });
+
+        it('rejects case-insensitive reserved outDirs, symlinked outDir escapes, and case collisions on compile (P0-8)', async () => {
+            for (const reserved of ['SLATE', 'SlAtE/nodes', '.GIT', '.VSCODE/out']) {
+                const res = await server.callTool('slate_compile', { outDir: reserved });
+                expect(res.isError, reserved).toBe(true);
+                expect(res.content[0].text, reserved).toMatch(/Unsafe compile output directory/i);
+            }
+
+            // Symlinked outDir escaping workspace must fail closed when symlink creation is permitted
+            const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'slate-symlink-outside-'));
+            const linkPath = path.join(tmpDir, 'sym_out');
+            let createdSymlink = false;
+            try {
+                await fs.symlink(outsideDir, linkPath, 'dir');
+                createdSymlink = true;
+            } catch {
+                // Windows without Developer Mode / admin privileges cannot create symlinks; skip safely.
+            }
+            try {
+                if (createdSymlink) {
+                    const symRes = await server.callTool('slate_compile', { outDir: 'sym_out' });
+                    expect(symRes.isError).toBe(true);
+                    expect(symRes.content[0].text).toMatch(/Path traversal rejected|Unsafe compile/i);
+                }
+            } finally {
+                await fs.rm(outsideDir, { recursive: true, force: true });
+            }
+
+            if (process.platform === 'win32' || process.platform === 'darwin') {
+                await fs.rm(path.join(tmpDir, 'slate', 'nodes', 'calc.json'), { force: true });
+                await fs.writeFile(
+                    path.join(tmpDir, 'slate', 'slate.json'),
+                    JSON.stringify({ slate: 3, name: 'case_col', language: 'typescript', compile: { outDir: 'built-case' } }, null, 2),
+                    'utf8',
+                );
+                await fs.writeFile(
+                    path.join(tmpDir, 'slate', 'nodes', 'upper.json'),
+                    JSON.stringify({
+                        slate: 3, name: 'upper', language: 'typescript', intent: 'upper',
+                        modulePath: 'Dup.ts', extension: '.ts', code: ['export function upper(): number { return 1; }'],
+                    }, null, 2),
+                    'utf8',
+                );
+                await fs.writeFile(
+                    path.join(tmpDir, 'slate', 'nodes', 'lower.json'),
+                    JSON.stringify({
+                        slate: 3, name: 'lower', language: 'typescript', intent: 'lower',
+                        modulePath: 'dup.ts', extension: '.ts', code: ['export function lower(): number { return 2; }'],
+                    }, null, 2),
+                    'utf8',
+                );
+                const colRes = await server.callTool('slate_compile', {});
+                expect(colRes.isError).toBe(false);
+                const colParsed = JSON.parse(colRes.content[0].text);
+                expect(colParsed.ok).toBe(false);
+                expect(colParsed.diagnostics.some((d: { message: string }) => d.message.includes('Refusing case-colliding output destination'))).toBe(true);
+            }
+        });
+
+        it('preserves omitted metadata fields and marks verification stale on existing stub updates (P0-9)', async () => {
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'existing_stub.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'existing_stub',
+                    language: 'typescript',
+                    intent: 'Original intent',
+                    contract: 'Original contract',
+                    context: ['calc'],
+                    cases: [{ id: 'c1', inputs: { x: 2 }, expected: 4 }],
+                    check: ["test('ok', () => { expect(existing_stub(2)).toBe(4); });"],
+                    examples: ['existing_stub(2) -> 4'],
+                    describedBy: 'llama',
+                    order: 7,
+                    imports: ['import type { Foo } from "./foo"'],
+                    uses: ['calc'],
+                    locked: false,
+                    extension: '.tsx',
+                    verification: {
+                        nodeId: 'existing_stub',
+                        state: 'passed',
+                        timestamp: 12345,
+                        sourceHash: 'abc',
+                    },
+                    code: [
+                        'export function existing_stub(x: number): number {',
+                        '    throw new Error("Not implemented");',
+                        '}',
+                    ],
+                }, null, 2),
+                'utf8',
+            );
+
+            // Update ONLY intent + signature parameter name (omit language, contract, context, cases, imports, extension)
+            const upd = await server.callTool('slate_define_stub', {
+                name: 'existing_stub',
+                signature: 'export function existing_stub(value: number): number',
+                intent: 'Updated intent',
+            });
+            expect(upd.isError).toBe(false);
+
+            const after = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'existing_stub.json'), 'utf8'));
+            expect(after.language).toBe('typescript');
+            expect(after.contract).toBe('Original contract');
+            expect(after.context).toEqual(['calc']);
+            expect(after.cases).toEqual([{ id: 'c1', inputs: { x: 2 }, expected: 4 }]);
+            expect(after.imports).toEqual(['import type { Foo } from "./foo"']);
+            expect(after.extension).toBe('.tsx');
+            expect(after.order).toBe(7);
+            expect(after.check).toEqual(["test('ok', () => { expect(existing_stub(2)).toBe(4); });"]);
+            expect(after.examples).toEqual(['existing_stub(2) -> 4']);
+            expect(after.uses).toEqual(['calc']);
+            expect(after.describedBy).toBe('llama');
+            expect(after.verification.state).toBe('stale');
         });
     });
 });

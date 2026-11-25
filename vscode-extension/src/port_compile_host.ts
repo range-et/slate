@@ -12,6 +12,7 @@ import {
     tryNormalizeLanguage,
 } from './language_adapter';
 import { normalizeCompileOutputPath } from './language_types';
+import { assertPathInsideRealDir, assertSafeCompileOutDir, caseCollisionKey } from './path_safety';
 import { formatPortReport } from './port/python_importer';
 import { CONFIG_PATH, emptyLayout, LAYOUT_PATH, NODES_DIR, pathForNodeId, serializeLayout, serializeNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
@@ -189,14 +190,17 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
         [...flows.keys()].filter(id => id !== MAIN_FLOW),
     );
     if (migrated.main) flows.set(MAIN_FLOW, migrated.main);
-    const outDir = (config.compile?.outDir ?? 'src').replace(/\\/g, '/').replace(/\/+$/, '');
-    const normalizedOutDir = normalizeCompileOutputPath(outDir);
+    const isFileRoot = root.scheme === 'file';
+    const outDirRaw = config.compile?.outDir ?? 'src';
     const diagnostics: CompileDiagnostic[] = [
         ...errors.map(message => ({ severity: 'error' as const, message })),
         ...flowFiles.filter(item => item.problem).map(item => ({ severity: 'error' as const, message: `flows/${item.id}: ${item.problem}` })),
     ];
-    if (!normalizedOutDir || normalizedOutDir === 'slate' || normalizedOutDir.startsWith('slate/')) {
-        diagnostics.push({ severity: 'error', message: `compile.outDir "${outDir}" must be a relative folder outside slate/.` });
+    let safeOutDir: Awaited<ReturnType<typeof assertSafeCompileOutDir>>;
+    try {
+        safeOutDir = await assertSafeCompileOutDir(root.fsPath, outDirRaw, { checkRealpath: isFileRoot });
+    } catch (err) {
+        diagnostics.push({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
         const output = slateOutput();
         output.clear();
         for (const diagnostic of diagnostics) output.appendLine(`${diagnostic.severity}: ${diagnostic.message}`);
@@ -204,6 +208,7 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
         vscode.window.showErrorMessage(`Slate: compile stopped with ${diagnostics.length} error(s); nothing was written (see Output → Slate).`);
         return { files: [], diagnostics };
     }
+    const { normalizedOutDir, resolvedOut: resolvedOutRoot, realOut } = safeOutDir;
     const outRoot = vscode.Uri.joinPath(root, ...normalizedOutDir.split('/'));
     const existingFiles = await exists(outRoot) ? await readExistingOutFiles(outRoot) : undefined;
     const library = tryNormalizeLanguage(config.language) === 'prose'
@@ -212,8 +217,8 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
     const result = compileProjectForLanguage(nodes, config, flows, library, existingFiles);
     diagnostics.push(...result.diagnostics);
 
-    const resolvedOutRoot = path.resolve(outRoot.fsPath);
     const normalizedFiles = new Map<string, string>();
+    const seenCaseKeys = new Map<string, string>();
     for (const [relative, text] of result.files) {
         const normRel = normalizeCompileOutputPath(relative);
         if (!normRel) {
@@ -224,11 +229,26 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
             diagnostics.push({ severity: 'error', message: `Refusing duplicate output destination "${normRel}" from "${relative}".` });
             continue;
         }
+        const caseKey = caseCollisionKey(normRel);
+        const priorCase = seenCaseKeys.get(caseKey);
+        if (priorCase) {
+            diagnostics.push({ severity: 'error', message: `Refusing case-colliding output destination "${normRel}" (conflicts with "${priorCase}").` });
+            continue;
+        }
+        seenCaseKeys.set(caseKey, normRel);
         const destUri = vscode.Uri.joinPath(outRoot, ...normRel.split('/'));
         const relCheck = path.relative(resolvedOutRoot, path.resolve(destUri.fsPath));
         if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
             diagnostics.push({ severity: 'error', message: `Refusing output path "${relative}" escaping "${normalizedOutDir}".` });
             continue;
+        }
+        if (isFileRoot) {
+            try {
+                await assertPathInsideRealDir(realOut, destUri.fsPath, false);
+            } catch {
+                diagnostics.push({ severity: 'error', message: `Refusing output path "${relative}" escaping "${normalizedOutDir}" via symlink.` });
+                continue;
+            }
         }
         if (await exists(destUri)) {
             const existingDiskText = decoder.decode(await vscode.workspace.fs.readFile(destUri));
@@ -252,11 +272,21 @@ export async function compileSlateFolder(root: vscode.Uri): Promise<{ files: str
         return { files: [], diagnostics };
     }
     if (await exists(outRoot)) {
-        for (const stale of (await readGenerated(outRoot)).filter(relPath => !normalizedFiles.has(relPath))) {
-            await vscode.workspace.fs.delete(vscode.Uri.joinPath(outRoot, ...stale.split('/')));
+        for (const stale of (await readGenerated(outRoot)).filter(relPath => !seenCaseKeys.has(caseCollisionKey(relPath)))) {
+            const staleUri = vscode.Uri.joinPath(outRoot, ...stale.split('/'));
+            if (isFileRoot) {
+                await assertPathInsideRealDir(realOut, staleUri.fsPath, false);
+            }
+            await vscode.workspace.fs.delete(staleUri);
         }
     }
-    for (const [relative, text] of normalizedFiles) await writeText(vscode.Uri.joinPath(outRoot, ...relative.split('/')), text);
+    for (const [relative, text] of normalizedFiles) {
+        const destUri = vscode.Uri.joinPath(outRoot, ...relative.split('/'));
+        if (isFileRoot) {
+            await assertPathInsideRealDir(realOut, destUri.fsPath, false);
+        }
+        await writeText(destUri, text);
+    }
     output.appendLine(`Compiled ${normalizedFiles.size} file(s) into ${normalizedOutDir}/.`);
     vscode.window.showInformationMessage(`Slate: compiled ${normalizedFiles.size} file(s) into ${normalizedOutDir}/${diagnostics.length ? ` with ${diagnostics.length} warning(s)` : ''}.`);
     return { files: [...normalizedFiles.keys()], diagnostics };

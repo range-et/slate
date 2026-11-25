@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { buildGenerationPacket } from '../vscode-extension/src/generation';
 import {
-    checkJpl60, checkNodeCode, indexNode, nodeFromSignature, parseConfig, parseLayout, parseNode,
-    serializeConfig, serializeNode, SlateFormatError, tsNodeFromSignature, validateNodeStub, validateTsStubBody,
+    assertSafeNodeId, checkJpl60, checkNodeCode, indexNode, nodeFromSignature, parseConfig, parseLayout, parseNode,
+    serializeConfig, serializeNode, SlateFormatError, tsNodeFromSignature, validateNodeStub, validateStubBody, validateTsStubBody,
 } from '../vscode-extension/src/slate_folder';
 
 const normalize = {
@@ -255,5 +255,29 @@ describe('slate/ folder format', () => {
 
         const implemented = parseNode(json(clamp));
         expect(validateNodeStub(implemented).valid).toBe(false);
+    });
+
+    it('rejects traversal node IDs and AST-smuggled Python/TS stub signatures and defaults (P0-6, P0-7)', () => {
+        for (const badId of ['../evil', 'pkg/../evil', '/abs/id', 'C:/win/id', 'bad\nid', '', 'pkg//run']) {
+            expect(() => assertSafeNodeId(badId), badId).toThrow(/Path traversal rejected/);
+        }
+        expect(assertSafeNodeId('pkg\\run')).toBe('pkg/run');
+
+        // Python stub signature/default/annotation bypasses
+        expect(validateStubBody('@evil\ndef f(x: int) -> int', 'pass').valid).toBe(false);
+        expect(validateStubBody('def f(x: int = boom()) -> int', 'pass').valid).toBe(false);
+        expect(validateStubBody('def f(x: int = f"{os.getpid()}") -> int', 'pass').valid).toBe(false);
+        expect(validateStubBody('def f(x: __import__("os")) -> int', 'pass').valid).toBe(false);
+        expect(validateStubBody('def f(x: int) -> int:\n    import os', 'pass').valid).toBe(false);
+        expect(validateStubBody('def f(x: int = 1) -> int', 'raise NotImplementedError("todo")').valid).toBe(true);
+        expect(() => nodeFromSignature('def bad(x: int) -> int:\n    return x', 'nope')).toThrow(/enter one function signature/i);
+        expect(() => nodeFromSignature('def bad(x: int = boom()) -> int', 'nope')).toThrow(/enter one function signature/i);
+
+        // TS stub signature/default/arrow bypasses
+        expect(validateTsStubBody('export function f(x: number = evil()): number', 'throw new Error("Not implemented");').valid).toBe(false);
+        expect(validateTsStubBody('export function f(x: number = `hi ${x}`): number', 'throw new Error("Not implemented");').valid).toBe(false);
+        expect(validateTsStubBody('export function f(x: number): number { evil(); }', 'throw new Error("Not implemented");').valid).toBe(false);
+        expect(validateTsStubBody('export function f(x: number = 1): number', 'throw new Error("Not implemented");').valid).toBe(true);
+        expect(() => tsNodeFromSignature('export const f = (x: number): number => x * 2', 'nope')).toThrow();
     });
 });

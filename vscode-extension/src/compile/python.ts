@@ -1,7 +1,8 @@
-import { branchOutputsMatch, compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, repeatStatePortNames, unitSignature, type CallableSignature, type RegionPorts } from '../flow';
+import { assertSafeFlowId, branchOutputsMatch, compileValueToPython, flowSignature, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, repeatStatePortNames, unitSignature, validateFlowValueForPython, type CallableSignature, type RegionPorts } from '../flow';
 import type { FlowRegion, SlateFlow } from '../harness_protocol';
+import { isSlateGeneratedContent, normalizeCompileOutputPath, normalizeExistingFiles } from '../language_types';
 import { identifierNames, parseModule, splitImport, topLevelBindings } from '../python_adapter';
-import { checkJpl60, type SlateConfig, type SlateNode } from '../slate_folder';
+import { assertSafeNodeId, checkJpl60, type SlateConfig, type SlateNode } from '../slate_folder';
 import { SLATE_TRACE_PY } from './slate_trace';
 
 // Compile slate/ nodes into Python modules. Each node folder becomes one module
@@ -51,7 +52,7 @@ function mergeImports(lines: string[]): string[] {
 }
 
 function comment(label: string, text: string): string[] {
-    return text.trim() ? text.trim().split('\n').map((line, index) => `# ${index === 0 ? `${label}: ` : '  '}${line}`) : [];
+    return text.trim() ? text.trim().split(/\r\n?|\n/).map((line, index) => `# ${index === 0 ? `${label}: ` : '  '}${line}`) : [];
 }
 
 /** `lib:<path>:<name>` → `from <module> import <name>` (the library root must be importable). */
@@ -297,10 +298,11 @@ export function flowToNode(
                 const defaultRhs = outVars.length <= 1 ? 'None' : outVars.map(() => 'None').join(', ');
 
                 if (options?.trace) {
-                    body.push(`    with _slate_trace.scope("${id}"):`);
+                    const traceId = JSON.stringify(id);
+                    body.push(`    with _slate_trace.scope(${traceId}):`);
                     body.push(`        try:`);
                     for (const input of wiredInputs) {
-                        body.push(`            _slate_trace.trace_input("${id}", "in:${input.portName}", ${input.expr})`);
+                        body.push(`            _slate_trace.trace_input(${traceId}, ${JSON.stringify(`in:${input.portName}`)}, ${input.expr})`);
                     }
                     body.push(`            if ${condExpr}:`);
                     body.push(`                with _slate_trace.scope("then"):`);
@@ -313,10 +315,10 @@ export function flowToNode(
                         body.push(`                ${lhs ? `${lhs} = ${defaultRhs}` : 'pass'}`);
                     }
                     for (let i = 0; i < rPorts.outputs.length; i++) {
-                        body.push(`            _slate_trace.trace_output("${id}", "${rPorts.outputs[i].id}", ${outVars[i]})`);
+                        body.push(`            _slate_trace.trace_output(${traceId}, ${JSON.stringify(rPorts.outputs[i].id)}, ${outVars[i]})`);
                     }
                     body.push(`        except Exception as ${traceError}:`);
-                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
+                    body.push(`            _slate_trace.trace_error(${traceId}, f"{type(${traceError}).__name__}: {${traceError}}")`);
                     body.push(`            raise`);
                 } else {
                     body.push(`    if ${condExpr}:`);
@@ -377,10 +379,11 @@ export function flowToNode(
 
                 const itemVars = rPorts.outputs.map(port => allocate(outVars.length === 1 ? `_item_${slug}` : `_item_${slug}_${port.name}`));
                 if (options?.trace) {
-                    body.push(`    with _slate_trace.scope("${id}"):`);
+                    const traceId = JSON.stringify(id);
+                    body.push(`    with _slate_trace.scope(${traceId}):`);
                     body.push(`        try:`);
                     for (const input of wiredInputs) {
-                        body.push(`            _slate_trace.trace_input("${id}", "in:${input.portName}", ${input.expr})`);
+                        body.push(`            _slate_trace.trace_input(${traceId}, ${JSON.stringify(`in:${input.portName}`)}, ${input.expr})`);
                     }
                     for (const ov of outVars) {
                         body.push(`            ${ov} = []`);
@@ -391,7 +394,7 @@ export function flowToNode(
                         body.push(`                    break`);
                     }
                     body.push(`                with _slate_trace.scope(f"iter:{${indexVar}}"):`);
-                    body.push(`                    _slate_trace.trace_input("${id}", "in:${itemPort}", ${itemVar})`);
+                    body.push(`                    _slate_trace.trace_input(${traceId}, ${JSON.stringify(`in:${itemPort}`)}, ${itemVar})`);
                     if (outVars.length === 0) {
                         body.push(`                    ${bodyCall}`);
                     } else if (outVars.length === 1) {
@@ -404,10 +407,10 @@ export function flowToNode(
                         }
                     }
                     for (let i = 0; i < rPorts.outputs.length; i++) {
-                        body.push(`            _slate_trace.trace_output("${id}", "${rPorts.outputs[i].id}", ${outVars[i]})`);
+                        body.push(`            _slate_trace.trace_output(${traceId}, ${JSON.stringify(rPorts.outputs[i].id)}, ${outVars[i]})`);
                     }
                     body.push(`        except Exception as ${traceError}:`);
-                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
+                    body.push(`            _slate_trace.trace_error(${traceId}, f"{type(${traceError}).__name__}: {${traceError}}")`);
                     body.push(`            raise`);
                 } else {
                     for (const ov of outVars) {
@@ -512,10 +515,11 @@ export function flowToNode(
                     : null;
 
                 if (options?.trace) {
-                    body.push(`    with _slate_trace.scope("${id}"):`);
+                    const traceId = JSON.stringify(id);
+                    body.push(`    with _slate_trace.scope(${traceId}):`);
                     body.push(`        try:`);
                     for (const input of wiredInputs) {
-                        body.push(`            _slate_trace.trace_input("${id}", "in:${input.portName}", ${input.expr})`);
+                        body.push(`            _slate_trace.trace_input(${traceId}, ${JSON.stringify(`in:${input.portName}`)}, ${input.expr})`);
                     }
                     for (const line of initLines) {
                         body.push(`            ${line}`);
@@ -524,7 +528,7 @@ export function flowToNode(
                     body.push(`                with _slate_trace.scope(f"iter:{${iterationVar}}"):`);
                     body.push(`                    ${callLine}`);
                     for (const port of rPorts.outputs) {
-                        body.push(`                    _slate_trace.trace_output("${id}", "${port.id}", ${stateVarFor(port.name)})`);
+                        body.push(`                    _slate_trace.trace_output(${traceId}, ${JSON.stringify(port.id)}, ${stateVarFor(port.name)})`);
                     }
                     if (condCheckVar) {
                         body.push(`                if not ${condCheckVar}:`);
@@ -532,10 +536,10 @@ export function flowToNode(
                     }
                     for (const port of rPorts.outputs) {
                         const outVar = stateVarFor(port.name);
-                        body.push(`            _slate_trace.trace_output("${id}", "${port.id}", ${outVar})`);
+                        body.push(`            _slate_trace.trace_output(${traceId}, ${JSON.stringify(port.id)}, ${outVar})`);
                     }
                     body.push(`        except Exception as ${traceError}:`);
-                    body.push(`            _slate_trace.trace_error("${id}", f"{type(${traceError}).__name__}: {${traceError}}")`);
+                    body.push(`            _slate_trace.trace_error(${traceId}, f"{type(${traceError}).__name__}: {${traceError}}")`);
                     body.push(`            raise`);
                 } else {
                     for (const line of initLines) {
@@ -554,11 +558,16 @@ export function flowToNode(
 
         const instance = flow.instances.find(item => item.id === id)!;
         if (instance.kind === 'value') {
+            const valueError = validateFlowValueForPython(instance.value);
+            if (valueError) {
+                errors.push(`value instance ${id}: ${valueError}`);
+            }
             const pyVal = compileValueToPython(instance.value);
             if (options?.trace) {
-                body.push(`    with _slate_trace.scope("${id}"):`);
+                const traceId = JSON.stringify(id);
+                body.push(`    with _slate_trace.scope(${traceId}):`);
                 body.push(`        ${variable(id)} = ${pyVal}`);
-                body.push(`        _slate_trace.trace_output("${id}", "out", ${variable(id)})`);
+                body.push(`        _slate_trace.trace_output(${traceId}, "out", ${variable(id)})`);
             } else {
                 body.push(`    ${variable(id)} = ${pyVal}`);
             }
@@ -568,8 +577,9 @@ export function flowToNode(
             const source = incoming.get(`${id}.in`) ?? incoming.get(`${id}.in:in`);
             const sourceExpr = source ? expression(source) : 'None';
             if (options?.trace) {
-                body.push(`    with _slate_trace.scope("${id}"):`);
-                body.push(`        _slate_trace.trace_input("${id}", "in", ${sourceExpr})`);
+                const traceId = JSON.stringify(id);
+                body.push(`    with _slate_trace.scope(${traceId}):`);
+                body.push(`        _slate_trace.trace_input(${traceId}, "in", ${sourceExpr})`);
             }
             continue;
         }
@@ -597,25 +607,26 @@ export function flowToNode(
         const outputs = outputPorts(signature);
 
         if (options?.trace) {
-            body.push(`    with _slate_trace.scope("${id}"):`);
+            const traceId = JSON.stringify(id);
+            body.push(`    with _slate_trace.scope(${traceId}):`);
             body.push(`        try:`);
             for (const input of wiredInputs) {
-                body.push(`            _slate_trace.trace_input("${id}", "in:${input.paramName}", ${input.expr})`);
+                body.push(`            _slate_trace.trace_input(${traceId}, ${JSON.stringify(`in:${input.paramName}`)}, ${input.expr})`);
             }
             if (signature.outputs && signature.outputs.length === 0) {
                 body.push(`            ${call}`);
-                body.push(`            _slate_trace.trace_output("${id}", "out", None)`);
+                body.push(`            _slate_trace.trace_output(${traceId}, "out", None)`);
             } else if (signature.outputs && signature.outputs.length > 1) {
                 body.push(`            ${outputs.map(port => expression(`${id}.${port.id}`)).join(', ')} = ${call}`);
                 for (const port of outputs) {
-                    body.push(`            _slate_trace.trace_output("${id}", "${port.id}", ${expression(`${id}.${port.id}`)})`);
+                    body.push(`            _slate_trace.trace_output(${traceId}, ${JSON.stringify(port.id)}, ${expression(`${id}.${port.id}`)})`);
                 }
             } else {
                 body.push(`            ${variable(id)} = ${call}`);
-                body.push(`            _slate_trace.trace_output("${id}", "out", ${variable(id)})`);
+                body.push(`            _slate_trace.trace_output(${traceId}, "out", ${variable(id)})`);
             }
             body.push(`        except Exception as _slate_err:`);
-            body.push(`            _slate_trace.trace_error("${id}", f"{type(_slate_err).__name__}: {_slate_err}")`);
+            body.push(`            _slate_trace.trace_error(${traceId}, f"{type(_slate_err).__name__}: {_slate_err}")`);
             body.push(`            raise`);
         } else {
             if (signature.outputs && signature.outputs.length === 0) body.push(`    ${call}`);
@@ -639,7 +650,7 @@ export function flowToNode(
             const output = flow.outputs[i];
             const source = incoming.get(`output:${output.name}`);
             if (source) {
-                body.push(`    _slate_trace.trace_flow_output("${output.name}", ${results[i]})`);
+                body.push(`    _slate_trace.trace_flow_output(${JSON.stringify(output.name)}, ${results[i]})`);
             }
         }
     }
@@ -685,22 +696,38 @@ export function compilePython(
     config: SlateConfig,
     flows: ReadonlyMap<string, SlateFlow> = new Map(),
     library: ReadonlyMap<string, CallableSignature> = new Map(),
-    options?: { checkJpl60?: boolean; trace?: boolean },
+    options?: { checkJpl60?: boolean; trace?: boolean; existingFiles?: ReadonlyMap<string, string> | Record<string, string> },
 ): CompileResult {
     const diagnostics: CompileDiagnostic[] = [];
     const error = (message: string) => diagnostics.push({ severity: 'error', message });
-    const nodes = new Map(sourceNodes);
+    const safeSourceNodes = new Map<string, SlateNode>();
+    for (const [rawNodeId, node] of sourceNodes) {
+        try {
+            const safeNodeId = assertSafeNodeId(rawNodeId);
+            safeSourceNodes.set(safeNodeId, node);
+        } catch (err) {
+            error(err instanceof Error ? err.message : String(err));
+        }
+    }
+    const nodes = new Map<string, SlateNode>(safeSourceNodes);
     const resolve = (target: string) => {
         const clean = target.startsWith('flow:') ? target.slice('flow:'.length) : target;
-        const node = sourceNodes.get(clean);
+        const node = safeSourceNodes.get(clean);
         const flow = node ? undefined : flows.get(clean);
         if (flow) return { signature: flowSignature(flow), imports: [] };
         const signature = node ? nodeSignature(node) : library.get(target) ?? library.get(clean) ?? null;
         return signature ? { signature, imports: node?.imports ?? [] } : null;
     };
-    for (const [flowId, flow] of [...flows].sort(([left], [right]) => left.localeCompare(right))) {
+    for (const [rawFlowId, flow] of [...flows].sort(([left], [right]) => left.localeCompare(right))) {
+        let flowId: string;
+        try {
+            flowId = assertSafeFlowId(rawFlowId);
+        } catch (err) {
+            error(err instanceof Error ? err.message : String(err));
+            continue;
+        }
         if (flowId === MAIN_FLOW && flow.instances.length === 0 && (!flow.regions || flow.regions.length === 0)) continue;
-        if (sourceNodes.has(flowId)) { error(`flows/${flowId} has the same id as a node.`); continue; }
+        if (safeSourceNodes.has(flowId)) { error(`flows/${flowId} has the same id as a node.`); continue; }
         const node = flowToNode(flowId, flow, resolve, diagnostics, options);
         if (node) nodes.set(flowId, node);
     }
@@ -737,7 +764,21 @@ export function compilePython(
         else if (!node.kind) definitions.set(node.name, [...(definitions.get(node.name) ?? []), nodeId]);
     }
 
+    const existingMap = normalizeExistingFiles(options?.existingFiles);
     const files = new Map<string, string>();
+    const emitFile = (rawPath: string, content: string): void => {
+        const outPath = normalizeCompileOutputPath(rawPath);
+        if (!outPath) {
+            error(`Refusing unsafe output path "${rawPath}".`);
+            return;
+        }
+        const existingContent = existingMap.get(outPath);
+        if (existingContent !== undefined && !isSlateGeneratedContent(existingContent)) {
+            error(`Refusing to overwrite existing non-generated file "${outPath}" (missing "# Generated by Slate" header).`);
+            return;
+        }
+        files.set(outPath, content);
+    };
     const moduleEdges = new Map<string, Set<string>>();
     for (const folder of folders) {
         const members = [...valid].filter(([nodeId]) => folderOf(nodeId) === folder).sort(([leftId, left], [rightId, right]) =>
@@ -819,14 +860,14 @@ export function compilePython(
             ...comment('contract', node.contract),
             ...node.code,
         ].join('\n'));
-        files.set(modulePath(folder), `${[sections.join('\n\n'), ...blocks].join('\n\n\n')}\n`);
+        emitFile(modulePath(folder), `${[sections.join('\n\n'), ...blocks].join('\n\n\n')}\n`);
     }
 
     for (const folder of folders) {
         const parts = folder.split('/');
         for (let depth = 1; depth < parts.length; depth++) {
             const packagePath = `${parts.slice(0, depth).join('/')}/__init__.py`;
-            if (!files.has(packagePath)) files.set(packagePath, `${GENERATED_HEADER}; package marker.\n`);
+            if (!files.has(packagePath)) emitFile(packagePath, `${GENERATED_HEADER}; package marker.\n`);
         }
     }
 
@@ -850,7 +891,7 @@ export function compilePython(
     folders.forEach(visit);
 
     if (options?.trace) {
-        files.set('_slate_trace.py', SLATE_TRACE_PY);
+        emitFile('_slate_trace.py', SLATE_TRACE_PY);
     }
 
     return { files: new Map([...files].sort(([left], [right]) => left.localeCompare(right))), diagnostics };

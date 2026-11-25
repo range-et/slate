@@ -81,36 +81,45 @@
         "slate.llama.endpoint": {
           "type": "string",
           "default": "http://127.0.0.1:8080",
+          "scope": "application",
+          "restricted": true,
           "description": "llama.cpp server base URL. Slate calls its OpenAI-compatible /v1/chat/completions endpoint."
         },
         "slate.llama.model": {
           "type": "string",
           "default": "local",
+          "restricted": true,
           "description": "Model name sent to llama.cpp. A model picker and cloud fallback are intentionally not provided."
         },
         "slate.llama.contextWindow": {
           "type": "integer",
           "default": 4096,
-          "minimum": 1024
+          "minimum": 1024,
+          "restricted": true
         },
         "slate.llama.outputTokens": {
           "type": "integer",
           "default": 1536,
-          "minimum": 64
+          "minimum": 64,
+          "restricted": true
         },
         "slate.llama.timeoutSeconds": {
           "type": "integer",
           "default": 120,
-          "minimum": 5
+          "minimum": 5,
+          "restricted": true
         },
         "slate.llama.boundInputs": {
           "type": "boolean",
           "default": false,
+          "restricted": true,
           "description": "Bind proposal acceptance strictly to all packet inputs (code hash, imports/uses, intent, contract, lock, cases, neighbor signatures)."
         },
         "slate.llama.apiKeyEnv": {
           "type": "string",
           "default": "",
+          "scope": "application",
+          "restricted": true,
           "description": "Optional environment variable name containing a Bearer API key (e.g. OPENROUTER_API_KEY or SLATE_LLM_API_KEY). Never enter a raw API key here."
         }
       }

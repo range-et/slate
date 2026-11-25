@@ -984,28 +984,35 @@ export function compileCpp(
         return libSig ? { signature: libSig, imports: [] } : null;
     };
 
-    // Determine primary folder so root-level flows attach to the main sketch/module when present
+    const isHeaderPath = (value: unknown): boolean => typeof value === 'string' && /\.(?:h|hpp|hh|hxx)$/i.test(value.trim());
+
+    // Determine primary folder so root-level flows attach to the main non-header sketch/module when present
     const existingFolders = [...new Set([...sourceNodes.keys()].map(folderOf))];
-    const primaryFolder = existingFolders.length === 1 ? existingFolders[0] : '';
-    const primaryModulePath = primaryFolder
-        ? [...sourceNodes.entries()].find(([id]) => folderOf(id) === primaryFolder)?.[1].extra?.modulePath
+    const candidatePrimaryFolder = existingFolders.length === 1 ? existingFolders[0] : '';
+    const nonHeaderPrimaryNode = candidatePrimaryFolder
+        ? [...sourceNodes.entries()].find(([id, node]) =>
+            folderOf(id) === candidatePrimaryFolder
+            && !isHeaderPath(node.extra?.modulePath)
+            && !isHeaderPath(node.extra?.extension))?.[1]
+        : undefined;
+    const primaryFolder = nonHeaderPrimaryNode ? candidatePrimaryFolder : '';
+    const primaryModulePath = typeof nonHeaderPrimaryNode?.extra?.modulePath === 'string'
+        && !isHeaderPath(nonHeaderPrimaryNode.extra.modulePath)
+        ? nonHeaderPrimaryNode.extra.modulePath
         : undefined;
 
     for (const [flowId, flow] of [...flows].sort(([left], [right]) => left.localeCompare(right))) {
         if (flowId === MAIN_FLOW && flow.instances.length === 0 && (!flow.regions || flow.regions.length === 0)) {
             continue;
         }
-        if (sourceNodes.has(flowId)) {
-            error(`flows/${flowId} has the same id as a node.`);
+        const targetNodeId = !flowId.includes('/') && primaryFolder ? `${primaryFolder}/${flow.name}` : flowId;
+        if (sourceNodes.has(flowId) || nodes.has(targetNodeId)) {
+            error(`flows/${flowId} collides with existing node "${nodes.has(targetNodeId) ? targetNodeId : flowId}".`);
             continue;
         }
         const flowNode = cppFlowToNode(flowId, flow, resolve, diagnostics, { isArduino: projectIsArduino });
         if (flowNode) {
-            let targetNodeId = flowId;
-            if (!flowId.includes('/') && primaryFolder) {
-                targetNodeId = `${primaryFolder}/${flow.name}`;
-            }
-            if (typeof primaryModulePath === 'string' && !flowId.includes('/')) {
+            if (typeof primaryModulePath === 'string' && !isHeaderPath(primaryModulePath) && !flowId.includes('/')) {
                 flowNode.extra = { ...flowNode.extra, modulePath: primaryModulePath };
             }
             nodes.set(targetNodeId, flowNode);

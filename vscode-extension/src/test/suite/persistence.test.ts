@@ -1,8 +1,10 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as http from 'http';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import type { HarnessSnapshot } from '../../harness_protocol';
+import { LIVE_BRIDGE_TOKEN_HEADER, readValidatedLiveBridgeRecord } from '../../live_bridge';
 import { compileSlateFolder } from '../../port_compile_host';
 
 const candidate = 'def normalize(score: int, maximum: int) -> int:\n    return score * 100 // maximum';
@@ -2006,5 +2008,205 @@ suite('Slate native persistence and proposal QA', () => {
             else process.env.SLATE_TEST_GUARD_KEY = prevGuardEnv;
             await new Promise<void>(resolve => guardServer.close(() => resolve()));
         }
+    });
+
+    test('authenticates live bridge /focus requests from user-private storage and rejects deleteFlow traversal before confirmation (P0-2, P0-7)', async () => {
+        // Bridge record must never live inside <workspace>/.slate/live_bridge.json
+        assert.equal(fs.existsSync(path.join(root.fsPath, '.slate', 'live_bridge.json')), false);
+
+        await eventually(
+            async () => (await readValidatedLiveBridgeRecord(root.fsPath)) !== null,
+            'validated live bridge record available',
+        );
+        const activeBridge = await readValidatedLiveBridgeRecord(root.fsPath);
+        if (!activeBridge) throw new Error('Expected validated live bridge record');
+        assert.equal(fs.existsSync(path.join(root.fsPath, '.slate', 'live_bridge.json')), false);
+
+        const sendFocus = (headers: Record<string, string>, payload: unknown) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+            const rawBody = JSON.stringify(payload);
+            const req = http.request({
+                hostname: '127.0.0.1',
+                port: activeBridge.port,
+                path: '/focus',
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'content-length': Buffer.byteLength(rawBody).toString(),
+                    ...headers,
+                },
+            }, res => {
+                let text = '';
+                res.on('data', chunk => { text += chunk; });
+                res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+            });
+            req.on('error', reject);
+            req.write(rawBody);
+            req.end();
+        });
+
+        // Disallowed Origin header -> 403
+        const originResp = await sendFocus({
+            host: `127.0.0.1:${activeBridge.port}`,
+            origin: 'http://evil.example',
+            [LIVE_BRIDGE_TOKEN_HEADER]: activeBridge.token,
+        }, { query: 'clamp' });
+        assert.equal(originResp.status, 403);
+
+        // Missing or wrong token -> 401
+        const missingTokResp = await sendFocus({
+            host: `127.0.0.1:${activeBridge.port}`,
+        }, { query: 'clamp' });
+        assert.equal(missingTokResp.status, 401);
+
+        const badTokResp = await sendFocus({
+            host: `127.0.0.1:${activeBridge.port}`,
+            [LIVE_BRIDGE_TOKEN_HEADER]: '0'.repeat(64),
+        }, { query: 'clamp' });
+        assert.equal(badTokResp.status, 401);
+
+        // Valid Host + valid token + JSON payload -> 200
+        const okResp = await sendFocus({
+            host: `127.0.0.1:${activeBridge.port}`,
+            [LIVE_BRIDGE_TOKEN_HEADER]: activeBridge.token,
+        }, { nodeId: 'clamp', zoom: 1.25 });
+        assert.equal(okResp.status, 200);
+        assert.equal(JSON.parse(okResp.body).ok, true);
+
+        // deleteFlow with traversal ID must fail before showing confirmation dialog (P0-7)
+        let warnDialogCalls = 0;
+        replaceMethod(vscode.window, 'showWarningMessage', async () => {
+            warnDialogCalls += 1;
+            return undefined;
+        });
+        await messages();
+        await act({ kind: 'deleteFlow', id: '../evil_flow' });
+        const delMsgs = await messages();
+        assert.equal(warnDialogCalls, 0, 'deleteFlow must reject traversal before confirmation dialog');
+        assert.ok(delMsgs.some(m => m.type === 'commandResult' && m.ok === false && /Path traversal rejected/i.test(m.message ?? '')), JSON.stringify(delMsgs));
+    });
+
+    test('guards verifyNode concurrent edits/cancellation, serializes describe writes, and syncs external layout without live rerun (P0-10)', async () => {
+        const slowNode = {
+            slate: 3,
+            name: 'slow_verif',
+            intent: 'Slow check for race test',
+            contract: 'Returns x + 1',
+            context: [],
+            examples: [],
+            locked: false,
+            describedBy: 'human',
+            imports: [],
+            uses: [],
+            code: ['def slow_verif(x: int) -> int:', '    return x + 1'],
+            check: [
+                'import time',
+                'def test_slow_verif():',
+                '    time.sleep(0.4)',
+                '    assert slow_verif(2) == 3',
+            ],
+        };
+        await vscode.workspace.fs.writeFile(uri(...nodePath('slow_verif')), encode(slowNode));
+        await act({ kind: 'refreshIndex' });
+        await eventually(async () => (await snapshot()).documents.some(d => d.units[0]?.id === 'slow_verif'), 'slow_verif indexed');
+        await messages();
+
+        // 1. Concurrent edit during verifyNode: verification must mark stale and never clobber newer edit
+        const verifInFlight = post({ type: 'verifyNode', nodeId: 'slow_verif' });
+        await eventually(async () => {
+            const msgs = await messages();
+            return msgs.some(m => m.type === 'verificationStatus' && (m as any).result?.nodeId === 'slow_verif' && (m as any).result?.state === 'running');
+        }, 'slow_verif verification entered running state');
+
+        const doc = await editBuffer('slow_verif', item => {
+            item.intent = 'Concurrent user edit';
+            item.code = ['def slow_verif(x: int) -> int:', '    return x + 10'];
+        });
+        assert.ok(await doc.save(), 'saved concurrent slow_verif edit');
+        await verifInFlight;
+
+        const diskAfterDrift = await read(...nodePath('slow_verif'));
+        assert.equal(diskAfterDrift.intent, 'Concurrent user edit');
+        assert.deepEqual(diskAfterDrift.code, ['def slow_verif(x: int) -> int:', '    return x + 10']);
+        assert.equal(diskAfterDrift.verification?.state, 'stale', 'drifted verifyNode result must be marked stale');
+
+        // 2. Cancelling in-flight verifyNode restores prior state cleanly without clobbering source
+        await messages();
+        const cancelRun = post({ type: 'verifyNode', nodeId: 'slow_verif' });
+        await eventually(async () => {
+            const msgs = await messages();
+            return msgs.some(m => m.type === 'verificationStatus' && (m as any).result?.nodeId === 'slow_verif' && (m as any).result?.state === 'running');
+        }, 'second slow_verif verification started');
+        await post({ type: 'cancelVerification', nodeId: 'slow_verif' });
+        await cancelRun;
+
+        const diskAfterCancel = await read(...nodePath('slow_verif'));
+        assert.equal(diskAfterCancel.intent, 'Concurrent user edit');
+        assert.equal(diskAfterCancel.verification?.state, 'stale');
+
+        // 3. describeNodes queues LLM summary write cleanly without losing fields
+        const undesc = {
+            slate: 3,
+            name: 'undesc_node',
+            intent: '',
+            contract: '',
+            context: [],
+            examples: [],
+            locked: false,
+            imports: [],
+            uses: [],
+            code: ['def undesc_node(x: int) -> int:', '    return x'],
+        };
+        await vscode.workspace.fs.writeFile(uri(...nodePath('undesc_node')), encode(undesc));
+        await act({ kind: 'refreshIndex' });
+        await eventually(async () => (await snapshot()).documents.some(d => d.units[0]?.id === 'undesc_node'), 'undesc_node indexed');
+
+        serverResponseDelayMs = 150;
+        serverResponseContent = 'intent: Return x unchanged\ncontract: Returns integer x unchanged';
+        await messages();
+        await act({ kind: 'describeNodes' });
+        await eventually(async () => {
+            const disk = await read(...nodePath('undesc_node'));
+            return disk.intent === 'Return x unchanged' && disk.describedBy === 'llama';
+        }, 'describeNodes persisted intent via queued write');
+        serverResponseDelayMs = 0;
+
+        // 4. External layout.json update refreshes snapshot notes without triggering live rerun and preserves notes across canvas moves
+        await vscode.workspace.fs.writeFile(uri('slate', 'flows', 'main.json'), encode({
+            slate: 3,
+            name: 'main',
+            inputs: [],
+            outputs: [],
+            instances: [],
+            wires: [],
+        }));
+        await act({ kind: 'refreshIndex' });
+        // Let the file watcher for main.json settle before enabling live mode
+        await new Promise(resolve => setTimeout(resolve, 400));
+        await post({ type: 'setLiveMode', enabled: true, consented: true, flowId: 'main' });
+        await eventually(async () => Boolean((await snapshot()).liveMode?.enabled), 'liveMode enabled');
+        // Wait until the initial live run finishes (not just status: 'running') before draining messages
+        await eventually(async () => {
+            const msgs = await messages();
+            return msgs.some(m => m.type === 'executionStatus' && (m as any).execution?.status !== 'running');
+        }, 'initial live execution settled');
+        await new Promise(resolve => setTimeout(resolve, 150));
+        await messages();
+
+        await vscode.workspace.fs.writeFile(uri('slate', 'layout.json'), encode({
+            positions: { clamp: { x: 25, y: 35 } },
+            notes: [{ id: 'ext-note', title: 'External', body: 'Written from disk', attachedTo: null }],
+        }));
+        await eventually(async () => ((await snapshot()).notes ?? []).some(n => n.id === 'ext-note'), 'external layout note reflected in snapshot');
+        await new Promise(resolve => setTimeout(resolve, 450));
+        const idleMsgs = await messages();
+        assert.equal(idleMsgs.some(m => m.type === 'executionStatus'), false, 'external layout change must not trigger live rerun');
+
+        await post({ type: 'layout', positions: { clamp: { x: 420, y: 210 } } });
+        await eventually(async () => {
+            const diskLayout = await read('slate', 'layout.json');
+            return diskLayout.positions?.clamp?.x === 420 && diskLayout.notes?.some((n: any) => n.id === 'ext-note');
+        }, 'canvas layout write preserved external note alongside new position');
+
+        await post({ type: 'setLiveMode', enabled: false });
     });
 });

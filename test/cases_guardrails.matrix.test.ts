@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deepValueEqual, matchFlowOutputs, runFlowCase, runFlowGuardrails } from '../vscode-extension/src/guardrails_runner';
+import { deepValueEqual, matchFlowOutputs, runFlowCase, runFlowGuardrails, runNodeGuardrails } from '../vscode-extension/src/guardrails_runner';
 import { parseFlow, serializeFlow } from '../vscode-extension/src/flow';
 import type { FlowRunRequest } from '../vscode-extension/src/flow_runner';
 import type { SlateFlow, TestCase } from '../vscode-extension/src/harness_protocol';
@@ -164,6 +164,47 @@ describe('Cases & Guardrails Matrix (S-602)', () => {
 
             const caseResult = await runFlowCase(fakeBaseRequest as any, errorCase);
             expect(caseResult.passed).toBe(true);
+        });
+
+        it('fails closed in runNodeGuardrails when workspace is untrusted or isTrusted is omitted (P0-5)', async () => {
+            const sampleNode = {
+                name: 'double',
+                intent: 'Double input',
+                contract: '',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def double(x: int) -> int:', '    return x * 2'],
+                cases: [{ id: 'c1', inputs: { x: 2 }, expected: 4 }],
+                extra: {},
+            };
+            const fakeFolder = {
+                readNode: async () => sampleNode,
+                readNodes: async () => ({
+                    config: { slate: 3, name: 'demo', language: 'python' },
+                    nodes: new Map([['double', sampleNode]]),
+                }),
+                readFlows: async () => [],
+            };
+
+            const deniedFalse = await runNodeGuardrails({
+                nodeId: 'double',
+                folder: fakeFolder as any,
+                workspaceRoot: '/mock',
+                isTrusted: false,
+            });
+            expect(deniedFalse.passed).toBe(false);
+            expect(deniedFalse.nodeCases.failures.join('\n')).toContain('Workspace is not trusted');
+
+            const deniedOmitted = await runNodeGuardrails({
+                nodeId: 'double',
+                folder: fakeFolder as any,
+                workspaceRoot: '/mock',
+            } as any);
+            expect(deniedOmitted.passed).toBe(false);
+            expect(deniedOmitted.nodeCases.failures.join('\n')).toContain('Workspace is not trusted');
         });
     });
 });

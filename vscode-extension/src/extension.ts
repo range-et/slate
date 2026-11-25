@@ -41,13 +41,23 @@ export function activate(context: vscode.ExtensionContext): void {
                     onStubDefined: async () => { HarnessPanel.current?.scheduleRefresh(0); },
                     onFlowWired: async () => { HarnessPanel.current?.scheduleRefresh(0); },
                     onNotesPlaced: async () => { HarnessPanel.current?.scheduleRefresh(0); },
+                    isWorkspaceTrusted: () => vscode.workspace.isTrusted,
+                    getApprovedCredentialPairings: () => context.workspaceState?.get<string[]>('slate.llm.approvedCredentialPairings', []) ?? [],
                     getLlamaConfig: () => {
                         const config = vscode.workspace.getConfiguration('slate.llama');
-                        const apiKeyEnv = config.get<string>('apiKeyEnv', '').trim();
+                        const globalString = (key: string, def: string): string =>
+                            typeof config.inspect === 'function'
+                                ? (config.inspect<string>(key)?.globalValue ?? config.inspect<string>(key)?.defaultValue ?? def)
+                                : config.get<string>(key, def);
+                        const globalNumber = (key: string, def: number): number =>
+                            typeof config.inspect === 'function'
+                                ? (config.inspect<number>(key)?.globalValue ?? config.inspect<number>(key)?.defaultValue ?? def)
+                                : config.get<number>(key, def);
+                        const apiKeyEnv = globalString('apiKeyEnv', '').trim();
                         return {
-                            endpoint: config.get('endpoint', 'http://127.0.0.1:8080'),
-                            model: config.get('model', 'local'),
-                            timeoutSeconds: config.get('timeoutSeconds', 120),
+                            endpoint: globalString('endpoint', 'http://127.0.0.1:8080'),
+                            model: globalString('model', 'local'),
+                            timeoutSeconds: globalNumber('timeoutSeconds', 120),
                             ...(apiKeyEnv ? { apiKeyEnv } : {}),
                         };
                     },

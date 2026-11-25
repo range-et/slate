@@ -11,6 +11,7 @@ import {
     partitionTargetsIntoWaves,
     type BatchForgeResult,
 } from '../vscode-extension/src/batch_forge';
+import { credentialPairingKey } from '../vscode-extension/src/llama_transport';
 import { parseNode, serializeNode, type SlateNode } from '../vscode-extension/src/slate_folder';
 import { startFakeLlamaServer } from './support/fake_llama_server';
 
@@ -172,6 +173,8 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const result = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
+            approvedCredentialPairings: [credentialPairingKey(activeServer.url, 'SLATE_TEST_KEY')],
             llmOverride: { endpoint: activeServer.url },
             env: { SLATE_TEST_KEY: 'fake-batch-token' },
             executeCommand: mockExec,
@@ -226,6 +229,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const result = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             llmOverride: { endpoint: activeServer.url },
             maxRevisions: 3,
         });
@@ -267,12 +271,14 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         await expect(batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             nodeIds: ['../../evil'],
             llmOverride: { endpoint: activeServer.url },
         })).rejects.toThrow(/Path traversal rejected/);
 
         const dryRun = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             nodeIds: ['missing_node', 'locked_c', 'done_b', 'stub_a'],
             write: false,
             llmOverride: { endpoint: activeServer.url },
@@ -292,6 +298,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const overwritten = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             nodeIds: ['done_b'],
             overwrite: true,
             verify: false,
@@ -322,6 +329,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const raceResult = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             verify: false,
             llmOverride: { endpoint: activeServer.url },
         });
@@ -337,6 +345,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         ac.abort();
         const cancelled = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             nodeIds: ['race'],
             overwrite: true,
             signal: ac.signal,
@@ -375,6 +384,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const casesRace = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             nodeIds: ['target_cases'],
             verify: false,
             llmOverride: { endpoint: activeServer.url },
@@ -417,6 +427,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const depRace = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             nodeIds: ['target_dep'],
             verify: false,
             llmOverride: { endpoint: activeServer.url },
@@ -522,6 +533,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const res = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             concurrency: 2,
             llmOverride: { endpoint: activeServer.url },
         });
@@ -612,6 +624,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         // Dry-run wave propagation (write: false)
         const dryRes = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             concurrency: 3,
             write: false,
             llmOverride: { endpoint: activeServer.url },
@@ -625,6 +638,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         // Persisted single-batch multi-wave forge (write: true)
         const writeRes = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             concurrency: 3,
             write: true,
             llmOverride: { endpoint: activeServer.url },
@@ -670,6 +684,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const res = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             maxRevisions: 1,
             verify: false,
             llmOverride: { endpoint: activeServer.url },
@@ -808,6 +823,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
 
         const recovered = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             allStubs: true,
             verify: false,
             write: true,
@@ -832,6 +848,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             });
             const failed = await batchForgeWorkspace({
                 workspaceRoot: failDir,
+                isTrusted: true,
                 allStubs: true,
                 verify: false,
                 write: false,
@@ -880,6 +897,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             });
             const rejected = await batchForgeWorkspace({
                 workspaceRoot: failDir,
+                isTrusted: true,
                 allStubs: true,
                 verify: false,
                 write: false,
@@ -912,6 +930,7 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         });
         const forged = await batchForgeWorkspace({
             workspaceRoot: tmpDir,
+            isTrusted: true,
             allStubs: true,
             verify: false,
             write: true,
@@ -922,4 +941,34 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         const writtenNode = parseNode(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'square.json'), 'utf8'));
         expect(writtenNode.check?.join('\n')).toContain('def test_square():');
     }, 15_000);
+
+    it('fails closed when isTrusted is false or omitted before contacting project LLM endpoints or verifying (P0-5)', async () => {
+        await writeProject(
+            tmpDir,
+            {
+                provider: 'openai-compatible',
+                endpoint: 'https://untrusted-project.example/v1',
+                model: 'qwen',
+            },
+            {
+                calc: makeStubNode('calc', 'def calc(x: int) -> int', 'Double x', [
+                    { name: 'c1', input: { x: 2 }, expected: 4 },
+                ]),
+            },
+        );
+
+        await expect(batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: false,
+            verify: false,
+            write: false,
+        })).rejects.toThrow(/Workspace is not trusted/);
+
+        await expect(batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            verify: true,
+            write: false,
+            llmOverride: { endpoint: 'http://127.0.0.1:8080', model: 'local' },
+        } as any)).rejects.toThrow(/Workspace is not trusted/);
+    });
 });

@@ -181,7 +181,7 @@ export interface NodeGuardrailsOptions {
     workspaceRoot: string;
     nodeOverride?: SlateNode;
     pythonPath?: string;
-    isTrusted?: boolean;
+    isTrusted: boolean;
     timeoutMs?: number;
     signal?: AbortSignal;
 }
@@ -195,6 +195,7 @@ export interface NodeGuardrailsOptions {
  */
 export async function runNodeGuardrails(options: NodeGuardrailsOptions): Promise<NodeGuardrailsReport> {
     const { nodeId, folder, workspaceRoot, pythonPath, isTrusted, signal } = options;
+    const trusted = isTrusted === true;
 
     const node = options.nodeOverride ?? (await folder.readNode(nodeId));
     const { config, nodes } = await folder.readNodes();
@@ -223,7 +224,7 @@ export async function runNodeGuardrails(options: NodeGuardrailsOptions): Promise
         dependencies,
         workspaceRoot,
         pythonPath,
-        isTrusted: isTrusted !== false,
+        isTrusted: trusted,
         signal,
         language: node.language ?? config.language,
     });
@@ -254,7 +255,7 @@ export async function runNodeGuardrails(options: NodeGuardrailsOptions): Promise
         documents: nodes,
         flows: flowsMap,
         pythonPath,
-        isTrusted,
+        isTrusted: trusted,
         timeoutMs: options.timeoutMs ?? 15000,
         signal,
     };
