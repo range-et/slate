@@ -918,7 +918,9 @@ describe('C# flow and control-flow region compilation (branch, foreach, repeat)'
             'using System;',
             'Console.WriteLine("boot");',
             'var x = 40 + 2;',
-            'int Helper(int n) { return n + 1; }',
+            'var items = new[] { 1, 2 };',
+            'var read = () => { return x; };',
+            'int Helper(int n) { return n + x; }',
             'Console.WriteLine(Helper(x));',
         ].join('\n');
         const parsedTop = parseCSharpDetailed(topLevelCs, 'Program.cs');
@@ -933,6 +935,7 @@ describe('C# flow and control-flow region compilation (branch, foreach, repeat)'
         const topOut = recompiledTop.files.get('Program.cs')!;
         expect(topOut).toContain('Console.WriteLine("boot");');
         expect(topOut).toContain('var x = 40 + 2;');
-        expect(topOut).toContain('int Helper(int n)');
+        expect(topOut).toContain(topLevelCs.split('\n').slice(1).join('\n'));
+        expect(topOut.match(/int Helper\(/g)).toHaveLength(1);
     });
 });

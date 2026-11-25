@@ -1310,6 +1310,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
                 for (const [tool, args] of [
                     ['slate_llm_status', { endpoint: 'https://api.example/v1' }],
                     ['slate_forge_batch', { allStubs: true }],
+                    ['slate_forge_batch', { allStubs: true, verify: false }],
                     ['slate_configure_llm', { endpoint: 'https://api.example/v1' }],
                 ] as const) {
                     const res = await untrustedServer.callTool(tool, args as Record<string, unknown>);
@@ -1347,6 +1348,9 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             // Python case smuggling: def / non-pytest import / eval
             for (const badCase of [
                 { code: 'def evil():\n    pass' },
+                { code: 'alias = len\nassert alias([]) == 0' },
+                { code: 'value = unknown_fixture' },
+                { code: 'assert (9).bit_length() == 4' },
                 { code: 'import os\nassert calc(1) == 2' },
                 { code: 'assert eval("1 + 1") == 2' },
                 '1 == 1\nimport os',

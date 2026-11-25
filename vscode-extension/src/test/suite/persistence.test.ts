@@ -2129,6 +2129,25 @@ suite('Slate native persistence and proposal QA', () => {
         assert.deepEqual(diskAfterDrift.code, ['def slow_verif(x: int) -> int:', '    return x + 10']);
         assert.equal(diskAfterDrift.verification?.state, 'stale', 'drifted verifyNode result must be marked stale');
 
+        // Changing a check or dependency with identical target code invalidates the result.
+        const dependency = { ...slowNode, name: 'drift_dep', code: ['def drift_dep() -> int:', '    return 1'] };
+        await vscode.workspace.fs.writeFile(uri(...nodePath('drift_dep')), encode(dependency));
+        const withDependency = await editBuffer('slow_verif', item => { item.context = ['drift_dep']; });
+        await withDependency.save();
+        for (const editedId of ['slow_verif', 'drift_dep']) {
+            await messages();
+            const run = post({ type: 'verifyNode', nodeId: 'slow_verif' });
+            await eventually(async () => (await messages()).some(m => m.type === 'verificationStatus'
+                && (m as any).result?.state === 'running'), 'verification captured its inputs');
+            const edited = await editBuffer(editedId, item => {
+                if (editedId === 'slow_verif') item.cases = [{ inputs: [2], expected: 12 }];
+                else item.code = ['def drift_dep() -> int:', '    return 2'];
+            });
+            assert.ok(await edited.save());
+            await run;
+            assert.equal((await read(...nodePath('slow_verif'))).verification?.state, 'stale', editedId);
+        }
+
         // 2. Cancelling in-flight verifyNode restores prior state cleanly without clobbering source
         await messages();
         const cancelRun = post({ type: 'verifyNode', nodeId: 'slow_verif' });

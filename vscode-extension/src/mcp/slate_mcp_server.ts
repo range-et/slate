@@ -1052,66 +1052,74 @@ export class SlateMcpServer {
         }
         if (language === 'python') {
             const tree = pythonParser.parse(`${rawCode}\n`);
-            const forbiddenCalls = new Set(['eval', 'exec', '__import__', 'compile', 'open', 'getattr', 'setattr', 'delattr', 'globals', 'locals', 'vars', 'breakpoint']);
-            const forbiddenNames = new Set(['eval', 'exec', '__import__', 'compile', 'getattr', 'setattr', 'delattr', 'globals', 'locals', 'breakpoint']);
-            const forbiddenDunders = new Set(['__subclasses__', '__builtins__', '__globals__', '__class__', '__dict__']);
-            const cursor = tree.cursor();
-            const walk = (): void => {
-                if (cursor.type.isError) {
-                    throw new Error(`Invalid Python syntax in case for stub "${nodeId}".`);
-                }
-                if (cursor.name === 'FunctionDefinition' || cursor.name === 'ClassDefinition' || cursor.name === 'LambdaExpression') {
-                    throw new Error(`Function, class, and lambda definitions are forbidden in stub "${nodeId}" cases.`);
-                }
-                if (cursor.name === 'ImportStatement') {
-                    const impText = rawCode.slice(cursor.from, cursor.to);
-                    const parsed = splitImport(impText);
-                    if (parsed.length === 0 || parsed.some(item => item.module !== 'pytest')) {
-                        throw new Error(`Only pytest imports are permitted in stub "${nodeId}" case code (found "${impText.trim()}").`);
-                    }
-                }
-                if (cursor.name === 'CallExpression') {
-                    const node = cursor.node;
-                    let callee = node.firstChild;
-                    while (callee && callee.name === 'ParenthesizedExpression') {
-                        callee = callee.firstChild?.nextSibling ?? null;
-                    }
-                    if (callee?.name === 'VariableName') {
-                        const fn = rawCode.slice(callee.from, callee.to).trim();
-                        if (forbiddenCalls.has(fn)) {
-                            throw new Error(`Forbidden call "${fn}()" in stub "${nodeId}" case.`);
-                        }
-                    } else if (callee?.name === 'MemberExpression') {
-                        let last = callee.lastChild;
-                        while (last && last.name !== 'PropertyName') last = last.prevSibling;
-                        if (last) {
-                            const prop = rawCode.slice(last.from, last.to).trim();
-                            if (forbiddenCalls.has(prop)) {
-                                throw new Error(`Forbidden call ".${prop}()" in stub "${nodeId}" case.`);
-                            }
-                        }
-                    }
-                }
-                if (cursor.name === 'VariableName' || cursor.name === 'PropertyName') {
-                    const ident = rawCode.slice(cursor.from, cursor.to).trim();
-                    if (forbiddenDunders.has(ident)) {
-                        throw new Error(`Forbidden dunder attribute "${ident}" in stub "${nodeId}" case.`);
-                    }
-                    if (cursor.name === 'VariableName' && forbiddenNames.has(ident)) {
-                        const parent = cursor.node.parent;
-                        const nextSib = cursor.node.nextSibling;
-                        const isKwargName = parent?.name === 'ArgList' && nextSib?.name === 'AssignOp';
-                        if (!isKwargName) {
-                            throw new Error(`Forbidden builtin "${ident}" in stub "${nodeId}" case.`);
-                        }
-                    }
-                }
-                if (cursor.firstChild()) {
-                    do walk(); while (cursor.nextSibling());
-                    cursor.parent();
-                }
+            type Node = typeof tree.topNode;
+            const target = nodeId.split('/').pop()!;
+            const functions = new Set([target, 'range', 'int', 'set', 'len', 'list', 'tuple', 'sorted', 'abs']);
+            const exceptions = new Set(['ValueError', 'TypeError', 'IndexError', 'KeyError', 'RuntimeError',
+                'ArithmeticError', 'ZeroDivisionError', 'AssertionError', 'OverflowError']);
+            const containers = new Set(['Script', 'StatementGroup', 'ExpressionStatement', 'AssertStatement',
+                'WithStatement', 'Body', 'ArgList', 'UnaryExpression', 'BinaryExpression', 'ParenthesizedExpression',
+                'TupleExpression', 'ArrayExpression', 'DictionaryExpression', 'SetExpression']);
+            const leaves = new Set(['Number', 'String', 'Boolean', 'None', 'ArithOp', 'CompareOp', 'BitOp',
+                'assert', 'with', 'is', 'in', 'and', 'or', 'not', '(', ')', '[', ']', '{', '}', ',', ':', ';', 'AssignOp']);
+            const value = (n: Node) => rawCode.slice(n.from, n.to);
+            const reject = (): never => { throw new Error(`Unsupported Python case form in stub "${nodeId}".`); };
+            const bind = (n: Node | null, locals: Set<string>) => {
+                if (!n || n.name !== 'VariableName' || !/^[A-Za-z][A-Za-z0-9_]*$|^_$/.test(value(n))
+                    || functions.has(value(n)) || exceptions.has(value(n)) || value(n) === 'pytest') return reject();
+                locals.add(value(n));
             };
-            walk();
+            const visit = (n: Node, locals: Set<string>): void => {
+                if (n.type.isError) reject();
+                if (n.name === 'ImportStatement' && /^import[ \t]+pytest$/.test(value(n))) return;
+                if (n.name === 'AssignStatement') {
+                    const lhs = n.firstChild;
+                    const op = lhs?.nextSibling;
+                    const rhs = op?.nextSibling;
+                    if (!lhs || !op || value(op) !== '=' || !rhs || rhs.nextSibling) return reject();
+                    visit(rhs, locals);
+                    if (lhs.name === 'VariableName') bind(lhs, locals);
+                    else if (lhs.name === 'MemberExpression') visit(lhs, locals);
+                    else reject();
+                    return;
+                }
+                if (n.name === 'ArrayComprehensionExpression') {
+                    const expr = n.firstChild?.nextSibling;
+                    const clause = expr?.nextSibling;
+                    const variable = clause?.nextSibling;
+                    const iterable = variable?.nextSibling?.nextSibling;
+                    if (!expr || clause?.name !== 'for' || !variable || variable.nextSibling?.name !== 'in'
+                        || !iterable || iterable.nextSibling?.name !== ']') return reject();
+                    visit(iterable, locals);
+                    const inner = new Set(locals);
+                    bind(variable, inner);
+                    visit(expr, inner);
+                    return;
+                }
+                if (n.name === 'CallExpression') {
+                    const callee = n.firstChild;
+                    const args = callee?.nextSibling;
+                    if (!callee || args?.name !== 'ArgList' || args.nextSibling) return reject();
+                    if (value(callee) === 'pytest.raises') {
+                        const exception = args.firstChild?.nextSibling;
+                        if (n.parent?.name !== 'WithStatement' || exception?.name !== 'VariableName'
+                            || !exceptions.has(value(exception)) || exception.nextSibling?.name !== ')') reject();
+                    } else {
+                        if (!(callee.name === 'VariableName' && functions.has(value(callee))) && value(callee) !== 'pytest.approx') reject();
+                        visit(args, locals);
+                    }
+                    return;
+                }
+                if (n.name === 'WithStatement' && value(n.firstChild?.nextSibling?.firstChild ?? n) !== 'pytest.raises') reject();
+                if (n.name === 'VariableName') {
+                    if (!locals.has(value(n)) && !(n.parent?.name === 'ArgList' && n.nextSibling?.name === 'AssignOp')) reject();
+                    return;
+                }
+                if (leaves.has(n.name)) return;
+                if (n.name === 'MemberExpression' ? n.firstChild?.nextSibling?.name !== '[' : !containers.has(n.name)) reject();
+                for (let child = n.firstChild; child; child = child.nextSibling) visit(child, locals);
+            };
+            visit(tree.topNode, new Set());
             return;
         }
         if (language === 'typescript' || language === 'javascript') {

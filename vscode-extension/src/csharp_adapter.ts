@@ -789,8 +789,9 @@ export function parseCSharpDetailed(
                                 continue;
                             }
                             if (
-                                CONTROL_STMT_KEYWORDS.has(firstText)
-                                || firstText === 'using'
+                                ['if', 'for', 'foreach', 'while', 'switch', 'try', 'lock', 'fixed'].includes(firstText)
+                                || (['checked', 'unchecked'].includes(firstText) && tokens[stmtStartIdx + 1]?.text === '{')
+                                || (firstText === 'using' && tokens[stmtStartIdx + 1]?.text === '(')
                             ) {
                                 topLevelStatements.push({ from: tokens[stmtStartIdx].from, to: meaningfulEnd(source, tokens[k].to) });
                                 return k + 1;

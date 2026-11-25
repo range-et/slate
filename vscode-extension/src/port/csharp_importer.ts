@@ -218,16 +218,19 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
         ? (parsed.unitDetails.get(classUnits[0].id)?.classDeclaration ?? null)
         : null;
 
+    const topLevelSpans = [...parsed.topLevelStatements];
     for (const unit of methodUnits) {
         const offsets = parsed.offsets.get(unit.id);
         const details = parsed.unitDetails.get(unit.id);
         if (!offsets) continue;
-        if (unit.parentId) {
-            classesWithMethods.add(unit.parentId);
-            const list = memberRangesByClass.get(unit.parentId) ?? [];
-            list.push({ from: offsets.wrapper.from, to: offsets.code.to });
-            memberRangesByClass.set(unit.parentId, list);
+        if (!unit.parentId) {
+            topLevelSpans.push({ from: offsets.wrapper.from, to: offsets.code.to });
+            continue;
         }
+        classesWithMethods.add(unit.parentId);
+        const list = memberRangesByClass.get(unit.parentId) ?? [];
+        list.push({ from: offsets.wrapper.from, to: offsets.code.to });
+        memberRangesByClass.set(unit.parentId, list);
 
         if (unit.name === PRELUDE || unit.name === EPILOGUE) {
             warnings.push(`${normalizedPath}: ${unit.name} is a reserved node name; skipped.`);
@@ -346,8 +349,8 @@ function scanCSharpModule(filePath: string, source: string, warnings: string[]):
         });
     }
 
-    if (parsed.topLevelStatements.length > 0) {
-        const topCode = parsed.topLevelStatements
+    if (topLevelSpans.length > 0) {
+        const topCode = topLevelSpans.sort((a, b) => a.from - b.from)
             .map(span => unindentBlock(source.slice(span.from, span.to)))
             .filter(Boolean)
             .join('\n');

@@ -206,6 +206,12 @@ describe('llama.cpp transport', () => {
         expect(userOnly.allowCredential).toBe(true);
         expect(userOnly.requiresApproval).toBe(false);
 
+        for (const fallback of [resolved, stripDisallowedCredential(resolved)]) {
+            expect(evaluateProjectCredentialAccess({ resolved: fallback, isTrusted: false })).toMatchObject({
+                allowRequest: false, allowCredential: false, requiresApproval: false, pairingKey: null,
+            });
+        }
+
         // Requests with no resolved API key need no credential approval
         const noCred = evaluateProjectCredentialAccess({
             projectLlm,

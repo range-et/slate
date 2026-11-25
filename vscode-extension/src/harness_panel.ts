@@ -1119,7 +1119,6 @@ export class HarnessPanel implements vscode.Disposable {
             sourceHash: '',
         };
         let priorVerification = this.verifications.get(nodeId);
-        await this.postMessage({ type: 'verificationStatus', result: runningResult });
 
         const restoreCancelledStatus = async (): Promise<void> => {
             const active = this.activeVerifications.get(nodeId);
@@ -1147,16 +1146,27 @@ export class HarnessPanel implements vscode.Disposable {
                 return;
             }
 
-            const dependencies = new Map<string, SlateNode>();
-            for (const depId of node.context) {
-                try {
-                    const depNode = await this.folder.readNode(depId);
-                    dependencies.set(depId, depNode);
-                } catch {}
+            const readInputs = async (target: SlateNode) => {
+                const dependencies = new Map<string, SlateNode>();
+                for (const depId of target.context) {
+                    try {
+                        dependencies.set(depId, await this.folder.readNode(depId));
+                    } catch { /* Missing dependencies are omitted by the verifier. */ }
+                }
+                const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                const language = target.language ?? parseConfig(await this.folder.readConfigText()).language;
+                const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.imports, n.context,
+                    n.uses, n.check, n.cases, n.extra, n.contract];
+                const fingerprint = JSON.stringify([language, pythonPath, inputs(target),
+                    [...dependencies].map(([id, dep]) => [id, inputs(dep)])]);
+                return { language, pythonPath, dependencies, fingerprint };
+            };
+            const { language, pythonPath, dependencies, fingerprint } = await readInputs(node);
+            if (controller.signal.aborted) {
+                await restoreCancelledStatus();
+                return;
             }
-
-            const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
-            const language = node.language ?? parseConfig(await this.folder.readConfigText()).language;
+            await this.postMessage({ type: 'verificationStatus', result: runningResult });
             const proseCheck = language === 'prose' ? verifyProseNode(node, { nodeId }) : undefined;
             const result: NodeVerificationResult = proseCheck ? {
                 nodeId, state: proseCheck.valid ? 'passed' : 'failed', timestamp: Date.now(),
@@ -1183,8 +1193,9 @@ export class HarnessPanel implements vscode.Disposable {
                     return null;
                 }
                 const latest = await this.folder.readNode(nodeId);
-                const latestHash = sourceHash(codeText(latest));
-                const resolved: NodeVerificationResult = result.sourceHash && latestHash !== result.sourceHash
+                const latestInputs = await readInputs(latest);
+                if (controller.signal.aborted) return null;
+                const resolved: NodeVerificationResult = latestInputs.fingerprint !== fingerprint
                     ? { ...result, state: 'stale' }
                     : result;
                 this.verifications.set(nodeId, resolved);

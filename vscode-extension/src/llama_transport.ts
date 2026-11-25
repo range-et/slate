@@ -267,15 +267,6 @@ export function evaluateProjectCredentialAccess(
             ? undefined
             : cleanString(resolved.apiKeyEnv);
 
-    if (!directedByProjectOrOverride) {
-        return {
-            allowRequest: true,
-            allowCredential: Boolean(resolved.hasApiKey && resolved.apiKey),
-            requiresApproval: false,
-            pairingKey: null,
-        };
-    }
-
     const hasCredential = Boolean(resolved.hasApiKey && resolved.apiKey);
     const source = effectiveCredEnv
         ? `environment variable "${effectiveCredEnv}"`
@@ -284,16 +275,25 @@ export function evaluateProjectCredentialAccess(
             : 'stored API key';
     const pairingKey = hasCredential ? credentialPairingKey(resolved.endpoint, effectiveCredEnv) : null;
 
-    if (!isTrusted) {
+    if (isTrusted !== true) {
         return {
             allowRequest: false,
             allowCredential: false,
-            requiresApproval: hasCredential,
-            pairingKey,
+            requiresApproval: directedByProjectOrOverride && hasCredential,
+            pairingKey: directedByProjectOrOverride ? pairingKey : null,
             ...(hasCredential ? { credentialSource: source } : {}),
             reason: hasCredential
                 ? `Workspace is not trusted; refusing to send ${source} to configured LLM endpoint "${resolved.endpoint}".`
                 : `Workspace is not trusted; refusing request to configured LLM endpoint "${resolved.endpoint}".`,
+        };
+    }
+
+    if (!directedByProjectOrOverride) {
+        return {
+            allowRequest: true,
+            allowCredential: Boolean(resolved.hasApiKey && resolved.apiKey),
+            requiresApproval: false,
+            pairingKey: null,
         };
     }
 
