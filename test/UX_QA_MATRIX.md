@@ -266,7 +266,12 @@ readiness.
   `liveModeStatus` reflection, active indicators, status-bar badge, and disabling,
   and S-701 verified candidates, candidate review editing, scratch verification badge,
   regenerate with feedback, revision loop attempts banner, local LLM health indicator and
-  config modal, and wire drop stub creation.
+  config modal, wire drop stub creation, OpenRouter `qwen/qwen3-coder-next` modal preset
+  (`apiKeyEnv`, `concurrency`), concurrent multi-unit generation progress & per-unit
+  cancellation (`active-generations-badge`), and topbar `⚒ Forge Stubs` / `⏹ Stop Forge`
+  batch forge controls. Real Extension Host `persistence.test.ts` additionally verifies
+  concurrent multi-unit `generate` dispatch with independent proposals and `batchForge`
+  disk persistence.
 - S-800 Control-Flow Regions (`branch`, `foreach`, `repeat`, Issue #14) and S-850
   Prose Mode (`language: "prose"`, Issue #27): `test/flow_regions.test.ts` covers
   canvas region node rendering (`BRANCH`/`FOREACH`/`REPEAT` badges, child flow labels,

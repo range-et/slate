@@ -22,7 +22,7 @@ import {
 import type { BoardNote, FlowInstance, FlowPort, FlowWire, HarnessDocument, HarnessFlow, SlateFlow } from '../harness_protocol';
 import { compileProjectForLanguage } from '../language_adapter';
 import { isSlateGeneratedContent, normalizeCompileOutputPath, tryNormalizeLanguage } from '../language_types';
-import { checkLlamaHealth, credentialPairingKey, evaluateProjectCredentialAccess, resolveLlmConfig, validateLlmEndpointUrl, type LlmConfigInput } from '../llama_transport';
+import { checkLlamaHealth, credentialPairingKey, DEFAULT_OPENROUTER_MODEL, evaluateProjectCredentialAccess, inferProviderFromEndpoint, resolveLlmConfig, validateLlmEndpointUrl, type LlmConfigInput } from '../llama_transport';
 import { LIVE_BRIDGE_TOKEN_HEADER, readValidatedLiveBridgeRecord } from '../live_bridge';
 import { assertPathInsideRealDir, assertSafeCompileOutDir, caseCollisionKey } from '../path_safety';
 import { parseProseNode, proseStub } from '../prose_adapter';
@@ -445,7 +445,7 @@ export const MCP_TOOLS = [
                 },
                 model: {
                     type: 'string',
-                    description: 'Optional model identifier (e.g. "qwen/qwen3-coder-30b-a3b-instruct", "qwen2.5-coder:7b", or "local").',
+                    description: 'Optional model identifier (e.g. "qwen/qwen3-coder-next", "qwen/qwen3-coder-30b-a3b-instruct", "qwen2.5-coder:7b", or "local").',
                 },
                 apiKeyEnv: {
                     type: 'string',
@@ -491,7 +491,7 @@ export const MCP_TOOLS = [
                 },
                 concurrency: {
                     type: 'number',
-                    description: 'Optional parallel worker count (1-8, default from config or 3).',
+                    description: 'Optional parallel worker count (1-16, default from config or 3).',
                 },
                 maxRevisions: {
                     type: 'number',
@@ -1749,7 +1749,10 @@ export class SlateMcpServer {
             throw new Error('A valid HTTP/HTTPS endpoint URL is required (e.g. "http://127.0.0.1:8080").');
         }
 
-        const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : 'local';
+        const effectiveProvider = provider ?? inferProviderFromEndpoint(endpoint);
+        const model = typeof args.model === 'string' && args.model.trim()
+            ? args.model.trim()
+            : (effectiveProvider === 'openrouter' ? DEFAULT_OPENROUTER_MODEL : 'local');
         const timeoutSeconds = typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 120;
         const concurrency = typeof args.concurrency === 'number' ? args.concurrency : undefined;
         const outputTokens = typeof args.outputTokens === 'number' ? args.outputTokens : undefined;

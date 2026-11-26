@@ -24,8 +24,9 @@ import { demoSnapshot } from './demo';
 import { buildGraph, callables, nodeIdOf, ROOT_SCOPE, typeColor, typesMismatch, type CanvasScope, type SlateEdgeData, type SlateNodeData } from './graph';
 import { buildNodeHealthReport, diffNodeCode } from './health';
 import { compileValueToPython, inferValueType, inputPorts, outputPorts, parseValueLiteral, type Port } from '../../vscode-extension/src/flow';
+import { buildOpenRouterConfig, clampForgeConcurrency, formatConcurrencyBadge } from '../../vscode-extension/src/forge_concurrency';
 import { rankPalette, type Rankable } from './palette';
-import type { HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, PacketPreview, TestCase } from './types';
+import type { BatchForgeStatus, HarnessDocument, HarnessProposal, HarnessSearchResult, HarnessSnapshot, HarnessUnit, HostMessage, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, PacketPreview, TestCase } from './types';
 import './styles.css';
 
 interface VsCodeApi {
@@ -839,7 +840,7 @@ function Inspector({
                             )}
                         </>}
                     </section>
-                    {generation && <div className="generation-activity"><span className="spinner" />{generation}<button className="secondary" onClick={() => vscode?.postMessage({ type: 'cancelGeneration' })}>Cancel</button></div>}
+                    {generation && <div className="generation-activity"><span className="spinner" />{generation}<button className="secondary" onClick={() => vscode?.postMessage({ type: 'cancelGeneration', unitId: unit.id })}>Cancel</button></div>}
                     {proposal?.unitId === unit.id && <section className="proposal-review">
                         <h3>Confined proposal</h3>
                         {(proposal.retryCount !== undefined || proposal.maxRevisions !== undefined) && (
@@ -1655,15 +1656,17 @@ function HarnessApp() {
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState<HarnessSearchResult[]>([]);
     const latestSearch = useRef<string | null>(null);
-    const activeGeneration = useRef<string | null>(null);
     const [packets, setPackets] = useState<Record<string, { packet?: PacketPreview; error?: string }>>({});
-    const [generation, setGeneration] = useState<{ unitId: string; message: string } | null>(null);
-    const [proposal, setProposal] = useState<HarnessProposal | null>(null);
+    const [generationsByUnit, setGenerationsByUnit] = useState<Record<string, string>>({});
+    const [proposalsByUnit, setProposalsByUnit] = useState<Record<string, HarnessProposal>>({});
+    const [batchForge, setBatchForge] = useState<BatchForgeStatus>({ running: false });
     const [acceptedUnitId, setAcceptedUnitId] = useState<string | null>(null);
     const [llamaHealth, setLlamaHealth] = useState<LlamaHealthStatus | null>(null);
     const [llamaModalOpen, setLlamaModalOpen] = useState(false);
     const [llamaEndpointDraft, setLlamaEndpointDraft] = useState('');
     const [llamaModelDraft, setLlamaModelDraft] = useState('');
+    const [llamaApiKeyEnvDraft, setLlamaApiKeyEnvDraft] = useState('');
+    const [llamaConcurrencyDraft, setLlamaConcurrencyDraft] = useState('3');
     const [candidateVerification, setCandidateVerification] = useState<{ proposalId: string; passed: boolean; details?: string } | null>(null);
     const [boardMenu, setBoardMenu] = useState<BoardMenuState | null>(null);
     const [clipboard, setClipboard] = useState<Array<{ id: string; kind: string; node?: string; value?: string; x?: number; y?: number }> | null>(null);
@@ -1809,35 +1812,70 @@ function HarnessApp() {
                 }));
             }
             if (data.type === 'generationStarted') {
-                activeGeneration.current = data.unitId;
-                setProposal(null);
-                setAcceptedUnitId(null);
-                setGeneration({ unitId: data.unitId, message: data.message });
+                setGenerationsByUnit(current => ({ ...current, [data.unitId]: data.message }));
+                setProposalsByUnit(current => {
+                    if (!(data.unitId in current)) return current;
+                    const next = { ...current };
+                    delete next[data.unitId];
+                    return next;
+                });
+                setAcceptedUnitId(current => (current === data.unitId ? null : current));
             }
             if (data.type === 'generationProgress') {
-                setGeneration(current => current?.unitId === data.unitId
-                    ? { ...current, message: `Receiving candidate from llama.cpp… ${data.receivedCharacters} characters` }
-                    : current);
+                setGenerationsByUnit(current => {
+                    if (!(data.unitId in current)) return current;
+                    return {
+                        ...current,
+                        [data.unitId]: `Receiving candidate from llama.cpp… ${data.receivedCharacters} characters`,
+                    };
+                });
             }
             if (data.type === 'generationFailed') {
-                if (activeGeneration.current && data.unitId && data.unitId !== activeGeneration.current) return;
-                activeGeneration.current = null;
-                setGeneration(null);
+                setGenerationsByUnit(current => {
+                    if (!data.unitId) return Object.keys(current).length ? {} : current;
+                    if (!(data.unitId in current)) return current;
+                    const next = { ...current };
+                    delete next[data.unitId];
+                    return next;
+                });
                 setCommandResult(`Generate: ${data.message}`);
             }
             if (data.type === 'proposalReady') {
-                if (activeGeneration.current && data.proposal.unitId !== activeGeneration.current) return;
-                activeGeneration.current = null;
-                setGeneration(null); setProposal(data.proposal);
+                const unitId = data.proposal.unitId;
+                setGenerationsByUnit(current => {
+                    if (!(unitId in current)) return current;
+                    const next = { ...current };
+                    delete next[unitId];
+                    return next;
+                });
+                setProposalsByUnit(current => ({ ...current, [unitId]: data.proposal }));
             }
             if (data.type === 'proposalStale') {
-                setProposal(current => current?.id === data.proposalId ? { ...current, staleMessage: data.message } : current);
+                setProposalsByUnit(current => {
+                    let changed = false;
+                    const next: Record<string, HarnessProposal> = {};
+                    for (const [uid, prop] of Object.entries(current)) {
+                        if (prop.id === data.proposalId) {
+                            next[uid] = { ...prop, staleMessage: data.message };
+                            changed = true;
+                        } else {
+                            next[uid] = prop;
+                        }
+                    }
+                    return changed ? next : current;
+                });
             }
             if (data.type === 'proposalAccepted') {
-                setProposal(null);
+                setProposalsByUnit(current => {
+                    if (!(data.unitId in current)) return current;
+                    const next = { ...current };
+                    delete next[data.unitId];
+                    return next;
+                });
                 setAcceptedUnitId(data.unitId);
             }
             if (data.type === 'describeState') setDescribing(data.running);
+            if (data.type === 'batchForgeState') setBatchForge(data.state);
             if (data.type === 'verificationStatus') {
                 const res = data.result;
                 setSnapshot(current => {
@@ -1892,6 +1930,8 @@ function HarnessApp() {
                 setLlamaHealth(data.status);
                 setLlamaEndpointDraft(data.status.endpoint);
                 setLlamaModelDraft(data.status.model);
+                setLlamaApiKeyEnvDraft(data.status.apiKeyEnv ?? '');
+                setLlamaConcurrencyDraft(String(data.status.concurrency ?? 3));
             }
             if (data.type === 'candidateVerification') {
                 setCandidateVerification(data);
@@ -2327,6 +2367,10 @@ function HarnessApp() {
             ? { id: 'describe-stop', group: 'canvas', label: 'Stop describing', run: () => post({ kind: 'cancelDescribe' }) }
             : { id: 'describe', group: 'canvas', label: 'Describe nodes with llama.cpp', detail: 'Fills missing intents, leaves first',
                 run: () => post({ kind: 'describeNodes' }) });
+        items.push(batchForge.running
+            ? { id: 'batch-forge-stop', group: 'canvas', label: 'Stop batch forge', run: () => vscode?.postMessage({ type: 'cancelBatchForge' }) }
+            : { id: 'batch-forge', group: 'canvas', label: 'Forge all stubs', detail: 'Parallel dependency-wave forge across unlocked stubs',
+                run: () => vscode?.postMessage({ type: 'batchForge' }) });
         items.push({ id: 'compile', group: 'canvas', label: 'Compile project', detail: 'slate/ → Python modules',
             run: () => post({ kind: 'compile' }) });
         items.push({
@@ -2375,7 +2419,7 @@ function HarnessApp() {
         const text = paletteQuery.trim();
         if (text) items.push({ id: 'search', group: 'search', always: true, label: `Search code for “${text}”`, run: () => runSearch(text) });
         return items;
-    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, scope, view, libraryOpen, showAllContext, clipboard]);
+    }, [snapshot, selected?.data.unit, selected?.data.flowId, selected?.data.target, selectedNodes.length, paletteQuery, describing, batchForge.running, scope, view, libraryOpen, showAllContext, clipboard]);
 
     // Add-node search: every callable (minus the open flow), a literal value, and at the root a placeholder.
     const addItems = useMemo<PaletteEntry[]>(() => {
@@ -2502,12 +2546,44 @@ function HarnessApp() {
                         >
                             ⚡ Live
                         </button>
+                        {batchForge.running ? (
+                            <button
+                                type="button"
+                                className="harness-stop-button"
+                                data-testid="batch-forge-stop-button"
+                                title="Cancel running batch forge"
+                                onClick={() => vscode?.postMessage({ type: 'cancelBatchForge' })}
+                            >
+                                ⏹ Stop Forge
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                className="harness-forge-button"
+                                data-testid="batch-forge-button"
+                                title="Forge all unlocked stubs in parallel dependency waves"
+                                onClick={() => vscode?.postMessage({ type: 'batchForge' })}
+                            >
+                                ⚒ Forge Stubs
+                            </button>
+                        )}
                     </div>
                 </nav>
                 <div className="harness-status">
                     <span>{snapshot.documents.length} nodes</span>
                     {noteCount > 0 && <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>}
                     {selectedNodes.length > 0 && <span>{selectedNodes.length} selected</span>}
+                    {(() => {
+                        const badge = formatConcurrencyBadge(
+                            Object.keys(generationsByUnit).length,
+                            llamaHealth?.concurrency ?? 3,
+                        );
+                        return badge ? (
+                            <span className="status-forging" data-testid="active-generations-badge">
+                                {badge}
+                            </span>
+                        ) : null;
+                    })()}
                     {isLiveActive && (
                         <span
                             className="status-live status-live--active"
@@ -2746,11 +2822,22 @@ function HarnessApp() {
                         snapshot={snapshot}
                         packet={selected.data.unit ? ((occKey ? packets[occKey]?.packet : undefined) ?? packets[selected.data.unit.id]?.packet) : undefined}
                         packetError={selected.data.unit ? ((occKey ? packets[occKey]?.error : undefined) ?? packets[selected.data.unit.id]?.error) : undefined}
-                        generation={generation && generation.unitId === selected.data.unit?.id ? generation.message : null}
-                        proposal={proposal}
+                        generation={selected.data.unit ? (generationsByUnit[selected.data.unit.id] ?? null) : null}
+                        proposal={selected.data.unit ? (proposalsByUnit[selected.data.unit.id] ?? null) : null}
                         accepted={acceptedUnitId === selected.data.unit?.id}
                         candidateVerification={candidateVerification}
-                        onDiscardProposal={() => { setProposal(null); setCandidateVerification(null); }}
+                        onDiscardProposal={() => {
+                            const unitId = selected.data.unit?.id;
+                            if (unitId) {
+                                setProposalsByUnit(current => {
+                                    if (!(unitId in current)) return current;
+                                    const next = { ...current };
+                                    delete next[unitId];
+                                    return next;
+                                });
+                            }
+                            setCandidateVerification(null);
+                        }}
                     />
                 );
             })()}
@@ -2836,10 +2923,26 @@ function HarnessApp() {
             {llamaModalOpen && (
                 <div className="llama-modal-backdrop" data-testid="llama-modal-backdrop" onClick={() => setLlamaModalOpen(false)}>
                     <div className="llama-modal" data-testid="llama-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
-                        <h3>Local LLM Configuration</h3>
+                        <h3>LLM Configuration</h3>
                         <p className="muted" style={{ fontSize: '11px', margin: '0 0 10px' }}>
-                            Slate does not bundle an LLM binary. Connect to your local OpenAI-compatible endpoint (llama-server, Ollama, LM Studio, vLLM).
+                            Connect to a local OpenAI-compatible server (llama-server, Ollama, LM Studio, vLLM) or OpenRouter. Keys are read only from environment variables or SecretStorage.
                         </p>
+                        <div className="llama-modal__presets">
+                            <button
+                                type="button"
+                                className="secondary"
+                                data-testid="llama-preset-openrouter-btn"
+                                onClick={() => {
+                                    const preset = buildOpenRouterConfig();
+                                    setLlamaEndpointDraft(preset.endpoint);
+                                    setLlamaModelDraft(preset.model);
+                                    setLlamaApiKeyEnvDraft(preset.apiKeyEnv);
+                                    setLlamaConcurrencyDraft(String(preset.concurrency));
+                                }}
+                            >
+                                Use OpenRouter (Qwen3-Coder-Next)
+                            </button>
+                        </div>
                         <label htmlFor="llama-endpoint-input">Endpoint URL</label>
                         <input
                             id="llama-endpoint-input"
@@ -2855,6 +2958,24 @@ function HarnessApp() {
                             value={llamaModelDraft}
                             onChange={e => setLlamaModelDraft(e.target.value)}
                             placeholder="local"
+                        />
+                        <label htmlFor="llama-apikey-env-input">API Key Env Var (optional)</label>
+                        <input
+                            id="llama-apikey-env-input"
+                            data-testid="llama-apikey-env-input"
+                            value={llamaApiKeyEnvDraft}
+                            onChange={e => setLlamaApiKeyEnvDraft(e.target.value)}
+                            placeholder="OPENROUTER_API_KEY"
+                        />
+                        <label htmlFor="llama-concurrency-input">Max Concurrent Requests (1–16)</label>
+                        <input
+                            id="llama-concurrency-input"
+                            data-testid="llama-concurrency-input"
+                            type="number"
+                            min={1}
+                            max={16}
+                            value={llamaConcurrencyDraft}
+                            onChange={e => setLlamaConcurrencyDraft(e.target.value)}
                         />
                         <div className="llama-modal__status" data-testid="llama-modal-status">
                             Status: {llamaHealth?.statusText || 'Unknown'}
@@ -2880,10 +3001,13 @@ function HarnessApp() {
                                 className="primary"
                                 data-testid="llama-save-btn"
                                 onClick={() => {
+                                    const trimmedEnv = llamaApiKeyEnvDraft.trim();
                                     vscode?.postMessage({
                                         type: 'setLlamaConfig',
                                         endpoint: llamaEndpointDraft,
                                         model: llamaModelDraft,
+                                        ...(trimmedEnv ? { apiKeyEnv: trimmedEnv } : { apiKeyEnv: '' }),
+                                        concurrency: clampForgeConcurrency(Number(llamaConcurrencyDraft), 3),
                                     });
                                     setLlamaModalOpen(false);
                                 }}

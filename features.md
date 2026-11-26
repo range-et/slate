@@ -52,8 +52,8 @@ keep outstanding tasks on GitHub.
 | Project LLM provider config (`slate.json`) & stateless MCP batch forge (`slate_forge_batch`) | ✅ shipped (Python, TS/JS topological waves, benchmarked) |
 | Two-Tier offload reliability, strict contracts & benchmark harness (Issue #53) | ✅ shipped |
 | P0 Security, Trust, Race & Importer Hardening ([Issue #58](https://github.com/range-et/slate/issues/58)) | ✅ shipped |
+| Multi-request Canvas generation, Batch Forge UI & OpenRouter `qwen/qwen3-coder-next` default (`1`–`16` concurrency, HTTP 429 backoff) | ✅ shipped |
 | Ruff / Basedpyright / pytest validation of proposals | ❌ not started |
-| Queue / generate-all in the new harness | ❌ not started |
 
 ## Shipped — `slate/` folder (decoupled JSON workspace)
 
@@ -630,11 +630,17 @@ Branch `feat/multi-lang-self-host` (converging PR #49 follow-ups, LLM batch forg
 - **Concurrency, C#/C++ Importers & Prose Citation Hardening (`harness_panel.ts`, `slate_folder_host.ts`, `compile/cpp.ts`, `csharp_adapter.ts`, `port/csharp_importer.ts`, `port/cpp_importer.ts`, `prose_adapter.ts`, `compile/prose.ts`).** Serializes `verifyNode` and `describe` writes through `enqueueMutation()` with source-drift staleness checks and clean cancellation recovery, syncs external `layout.json` changes without triggering live reruns, keeps `.hpp` header paths off root C++ flows and detects remapped flow collisions, ports C# `enum`/`delegate`/top-level statements/data-only types with per-class preludes cleanly, distinguishes C++ forward prototypes from runtime call expressions, and filters/escapes unsafe LaTeX citation keys (`CITATION_KEY_PATTERN`).
 - **Verification:** Covered by Vitest unit/regression suites across all 13 P0 items (including `test/live_bridge.test.ts`), VS Code Extension Host persistence & project suites (`vscode-extension/src/test/suite/persistence.test.ts`, `project.test.ts`), `test/UNIT_TEST_MATRIX.md`, and full `npm run verify:launch`.
 
+## Shipped — Multi-Request Forge, Batch UI & OpenRouter `qwen/qwen3-coder-next` (2026-11-26)
+
+- **Qwen-Forged Concurrency & Config Helpers (`vscode-extension/src/forge_concurrency.ts`).** Forged via Slate's Two-Tier TypeScript orchestration (`slate_define_stub` -> `slate_forge_batch` -> `slate_compile`) against `openrouter` (`qwen/qwen3-coder-next`, `2` topological waves, `5/5` verified stubs): `clampForgeConcurrency` (`1..16`, default `3`), `checkGenerationSlot`, `buildOpenRouterConfig` (defaulting to `qwen/qwen3-coder-next`, `https://openrouter.ai/api/v1`, `OPENROUTER_API_KEY`, `concurrency: 4`), `summarizeBatchForge`, and `formatConcurrencyBadge`.
+- **OpenRouter Default & HTTP 429 Backoff (`vscode-extension/src/llama_transport.ts`, `vscode-extension/src/batch_forge.ts`, `vscode-extension/src/mcp/slate_mcp_server.ts`, `vscode-extension/package.json`).** Defaults `openrouter` provider model to `qwen/qwen3-coder-next` when omitted, raises batch forge concurrency ceiling from `8` to `16` (adding `slate.llama.concurrency` setting), and adds abort-aware exponential / `Retry-After` backoff for transient HTTP `429` rate limits without polluting `retryFeedback`.
+- **Multi-Request Canvas & Batch Forge UI (`vscode-extension/src/harness_panel.ts`, `vscode-extension/src/harness_protocol.ts`, `src/harness/main.tsx`, `src/harness/styles.css`).** Tracks concurrent per-unit `generate` requests and `pendingProposals` in parallel up to `settings.concurrency` (while still rejecting duplicate requests for the same in-flight unit), supports per-unit `cancelGeneration`, adds topbar active-generations badge and **⚒ Forge Stubs** / **⏹ Stop Forge** controls (`batchForge` / `cancelBatchForge`) + palette commands, and extends the LLM modal with a **Use OpenRouter (Qwen3-Coder-Next)** preset, `apiKeyEnv`, and `concurrency` (`1–16`).
+- **Verification:** Live `sci_calc` benchmark on OpenRouter `qwen/qwen3-coder-next` (`concurrency: 6`, `9/9` forged in `2` waves, `14 passed` pytest, `0` Frontier LOC), live Two-Tier TS forge of `forge_concurrency.ts` (`5/5` forged), Vitest (`forge_concurrency`, `llama_transport`, `batch_forge`), Playwright (`qa_matrix.playwright.ts`), Extension Host (`persistence.test.ts`), and `npm run verify:launch`.
+
 ## Not started
 
 - Inline code on nodes.
 - Ruff, Basedpyright, targeted pytest validation of candidates.
-- Harness UI queue / generate-all button for interactive canvas workflows ([Issue #17](https://github.com/range-et/slate/issues/17); headless `batchForgeWorkspace` wave ordering shipped in Issue #53).
 - Clean-profile VSIX install/update/restart test.
 - Automated per-node runtime test loops for C#, C++, and Arduino nodes (port/edit/compile are shipped; test-runner forge execution is Python and TS/JS only).
 

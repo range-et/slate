@@ -350,4 +350,84 @@ describe('llama.cpp transport', () => {
             await new Promise<void>(resolve => redirectServer.close(() => resolve()));
         }
     });
+
+    it('defaults OpenRouter model to qwen/qwen3-coder-next and supports concurrency 1..16', () => {
+        const openrouterDefault = resolveLlmConfig(
+            { provider: 'openrouter' },
+            { endpoint: 'http://127.0.0.1:8080', model: 'local', concurrency: 6 },
+            { OPENROUTER_API_KEY: 'or-key' },
+        );
+        expect(openrouterDefault).toMatchObject({
+            provider: 'openrouter',
+            endpoint: 'https://openrouter.ai/api/v1',
+            model: 'qwen/qwen3-coder-next',
+            apiKeyEnv: 'OPENROUTER_API_KEY',
+            hasApiKey: true,
+            concurrency: 6,
+        });
+
+        const capped = resolveLlmConfig(
+            { provider: 'openrouter', concurrency: 24 },
+            undefined,
+            {},
+        );
+        expect(capped.model).toBe('qwen/qwen3-coder-next');
+        expect(capped.concurrency).toBe(16);
+    });
+
+    it('retries HTTP 429 rate limits with backoff/Retry-After, surfaces exhaustion, and honors abort', async () => {
+        let attempts = 0;
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            attempts += 1;
+            if (attempts === 1) {
+                return new Response('rate limited', { status: 429, headers: { 'retry-after': '0' } });
+            }
+            if (attempts === 2) {
+                return new Response('still rate limited', { status: 429 });
+            }
+            return new Response(
+                'data: {"choices":[{"delta":{"content":"def f() -> int:\\n    return 1"}}]}\n\ndata: [DONE]\n\n',
+                { status: 200, headers: { 'content-type': 'text/event-stream' } },
+            );
+        }));
+
+        const ok = await streamLlamaCompletion('implement f', {
+            endpoint: 'http://127.0.0.1:8080',
+            model: 'local',
+            outputTokens: 64,
+            timeoutMs: 2000,
+            maxRateLimitRetries: 3,
+            rateLimitBaseDelayMs: 5,
+        }, new AbortController().signal, () => {});
+        expect(ok).toContain('return 1');
+        expect(attempts).toBe(3);
+
+        // Exhausting 429 retries throws HTTP 429 error
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('too many requests', { status: 429 })));
+        await expect(streamLlamaCompletion('implement f', {
+            endpoint: 'http://127.0.0.1:8080',
+            model: 'local',
+            outputTokens: 64,
+            timeoutMs: 2000,
+            maxRateLimitRetries: 1,
+            rateLimitBaseDelayMs: 2,
+        }, new AbortController().signal, () => {})).rejects.toThrow(/HTTP 429/);
+
+        // Aborting during backoff cancels cleanly
+        const controller = new AbortController();
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            setTimeout(() => controller.abort(), 10);
+            return new Response('rate limited', { status: 429 });
+        }));
+        await expect(streamLlamaCompletion('implement f', {
+            endpoint: 'http://127.0.0.1:8080',
+            model: 'local',
+            outputTokens: 64,
+            timeoutMs: 5000,
+            maxRateLimitRetries: 2,
+            rateLimitBaseDelayMs: 200,
+        }, controller.signal, () => {})).rejects.toThrow(/Generation cancelled/);
+
+        vi.unstubAllGlobals();
+    });
 });

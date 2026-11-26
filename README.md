@@ -138,7 +138,7 @@ Slate does not ship a bundled model binary. Configure an endpoint in VS Code Set
   ```
 
 - **Local Ollama:** endpoint `http://127.0.0.1:11434/v1`, provider `ollama`.
-- **OpenRouter (or remote OpenAI-compatible HTTP):** set `provider: "openrouter"`, `apiKeyEnv: "OPENROUTER_API_KEY"`, and a `model` such as `qwen/qwen3-coder-30b-a3b-instruct` or `google/gemma-4-26b-a4b-it`. Slate rejects raw secrets inside `slate/slate.json` and reads keys only from process environment variables or VS Code `SecretStorage`.
+- **OpenRouter (or remote OpenAI-compatible HTTP):** set `provider: "openrouter"`, `apiKeyEnv: "OPENROUTER_API_KEY"`, and a `model` such as `qwen/qwen3-coder-next` (default OpenRouter preset in the Canvas LLM modal), `qwen/qwen3-coder-30b-a3b-instruct`, or `google/gemma-4-26b-a4b-it`. Slate rejects raw secrets inside `slate/slate.json` and reads keys only from process environment variables or VS Code `SecretStorage`.
 
 Example `slate/slate.json` snippet:
 
@@ -168,7 +168,7 @@ Example `slate/slate.json` snippet:
 
 ### Current Practical Limits to Know
 
-- Canvas UI currently triggers single-node generation interactively; multi-wave dependency batch forging runs through MCP (`slate_forge_batch`, see [Issue #17](https://github.com/range-et/slate/issues/17)).
+- Canvas UI supports concurrent per-unit generation and topbar **⚒ Forge Stubs** (`1`–`16` parallel requests) alongside MCP `slate_forge_batch`; multi-wave verification loops continue to require a trusted workspace.
 - Class methods stay inside class units rather than splitting into individual method nodes ([Issue #16](https://github.com/range-et/slate/issues/16)).
 - Per-node runtime test verification is shipped for Python and TypeScript/JavaScript; C# and C++/Arduino support porting, checks, and compiling only.
 - On native Windows, `mutmut` mutation testing is skipped with an explicit diagnostic (requires Linux or WSL).

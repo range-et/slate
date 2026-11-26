@@ -971,4 +971,82 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
             llmOverride: { endpoint: 'http://127.0.0.1:8080', model: 'local' },
         } as any)).rejects.toThrow(/Workspace is not trusted/);
     });
+
+    it('supports concurrency up to 16 and recovers from transient HTTP 429 without polluting retryFeedback', async () => {
+        const nodes: Record<string, SlateNode> = {};
+        for (let i = 1; i <= 12; i++) {
+            const name = `fn_${i}`;
+            nodes[name] = makeStubNode(name, `def ${name}(x: int) -> int`, `Return x + ${i}`);
+        }
+        await writeProject(
+            tmpDir,
+            {
+                provider: 'openai-compatible',
+                model: 'qwen/qwen3-coder-next',
+                concurrency: 12,
+            },
+            nodes,
+        );
+
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const rateLimitedOnce = new Set<string>();
+        const observedPrompts: string[] = [];
+
+        const server: Server = createServer((req, res) => {
+            if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+                res.writeHead(404).end();
+                return;
+            }
+            let raw = '';
+            req.setEncoding('utf8');
+            req.on('data', chunk => { raw += chunk; });
+            req.on('end', async () => {
+                const parsed = JSON.parse(raw) as { messages?: Array<{ content?: string }> };
+                const prompt = String(parsed.messages?.[1]?.content ?? '');
+                observedPrompts.push(prompt);
+                const match = prompt.match(/def (fn_\d+)\(/);
+                const fnName = match?.[1] ?? 'fn_1';
+
+                if (fnName === 'fn_1' && !rateLimitedOnce.has(fnName)) {
+                    rateLimitedOnce.add(fnName);
+                    res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0' });
+                    res.end(JSON.stringify({ error: { message: 'Rate limited' } }));
+                    return;
+                }
+
+                inFlight += 1;
+                maxInFlight = Math.max(maxInFlight, inFlight);
+                await new Promise(resolve => setTimeout(resolve, 60));
+                inFlight -= 1;
+
+                const num = fnName.replace('fn_', '');
+                const reply = `### Implementation\n\`\`\`python\ndef ${fnName}(x: int) -> int:\n    return x + ${num}\n\`\`\`\n\n### Unit Check\n\`\`\`python\ndef test_${fnName}():\n    assert ${fnName}(1) == ${1 + Number(num)}\n\`\`\``;
+                res.writeHead(200, { 'content-type': 'text/event-stream' });
+                res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply } }] })}\n\n`);
+                res.end('data: [DONE]\n\n');
+            });
+        });
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+        const addr = server.address() as { port: number };
+        activeServer = {
+            url: `http://127.0.0.1:${addr.port}`,
+            close: () => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }),
+        };
+
+        const result = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: true,
+            allStubs: true,
+            concurrency: 20,
+            verify: false,
+            write: true,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(result.ok).toBe(true);
+        expect(result.concurrency).toBe(16);
+        expect(result.forgedCount).toBe(12);
+        expect(maxInFlight).toBeGreaterThanOrEqual(8);
+        expect(observedPrompts.every(p => !p.includes('HTTP 429'))).toBe(true);
+    });
 });

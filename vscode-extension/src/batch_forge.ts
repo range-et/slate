@@ -11,6 +11,9 @@ import {
 } from './generation';
 import type { HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit } from './harness_protocol';
 import {
+    clampForgeConcurrency,
+} from './forge_concurrency';
+import {
     evaluateProjectCredentialAccess,
     resolveLlmConfig,
     streamLlamaCompletion,
@@ -463,7 +466,6 @@ async function forgeSingleTarget(
         } catch (error) {
             lastReason = error instanceof Error ? error.message : String(error);
             if (options.signal?.aborted) break;
-            retryFeedback = lastReason;
             continue;
         }
 
@@ -684,7 +686,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
         throw new Error('Workspace is not trusted; refusing to run batch forge verification in an untrusted workspace.');
     }
 
-    const concurrency = clampInt(options.concurrency, 1, 8, clampInt(llm.concurrency, 1, 8, 3));
+    const concurrency = clampForgeConcurrency(options.concurrency, clampForgeConcurrency(llm.concurrency, 3));
     const maxRevisions = clampInt(options.maxRevisions, 1, 5, 3);
 
     const requestedIds = Array.isArray(options.nodeIds)

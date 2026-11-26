@@ -373,6 +373,19 @@ export interface LlamaHealthStatus {
     model: string;
     statusText: string;
     models?: string[];
+    provider?: string;
+    apiKeyEnv?: string;
+    concurrency?: number;
+}
+
+export interface BatchForgeStatus {
+    running: boolean;
+    concurrency?: number;
+    forgedCount?: number;
+    failedCount?: number;
+    skippedCount?: number;
+    total?: number;
+    message?: string;
 }
 
 export interface HarnessProposal {
@@ -409,4 +422,5 @@ export type HostMessage =
     | { type: 'guardrailsStatus'; report: NodeGuardrailsReport }
     | { type: 'liveModeStatus'; liveMode: LiveModeState }
     | { type: 'llamaHealth'; status: LlamaHealthStatus }
+    | { type: 'batchForgeState'; state: BatchForgeStatus }
     | { type: 'candidateVerification'; proposalId: string; passed: boolean; details?: string; report?: NodeGuardrailsReport };
