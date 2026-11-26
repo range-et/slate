@@ -1049,4 +1049,43 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         expect(maxInFlight).toBeGreaterThanOrEqual(8);
         expect(observedPrompts.every(p => !p.includes('HTTP 429'))).toBe(true);
     });
+
+    it('resolves slate.json pythonPath relative to workspaceRoot during batch forge verification', async () => {
+        await writeProject(
+            tmpDir,
+            {
+                provider: 'openai-compatible',
+                model: 'tiny-local',
+            },
+            {
+                inc: makeStubNode('inc', 'def inc(x: int) -> int', 'Increment x', [
+                    { name: 'c1', input: { x: 2 }, expected: 3 },
+                ]),
+            },
+        );
+        const cfgPath = path.join(tmpDir, 'slate', 'slate.json');
+        const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8'));
+        cfg.pythonPath = '.venv/bin/python';
+        await fs.writeFile(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
+
+        activeServer = await startCustomSseServer(
+            () => '### Implementation\n```python\ndef inc(x: int) -> int:\n    return x + 1\n```\n\n### Unit Check\n```python\ndef test_inc():\n    assert inc(2) == 3\n```',
+        );
+        const observedCmds: string[] = [];
+        const mockExec = vi.fn(async (cmd: string, args: string[]) => {
+            observedCmds.push(cmd);
+            if (args.includes('mutmut')) return { code: 1, stdout: '', stderr: 'not installed' };
+            return { code: 0, stdout: '2 passed in 0.01s', stderr: '' };
+        });
+
+        const result = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: true,
+            allStubs: true,
+            llmOverride: { endpoint: activeServer.url },
+            executeCommand: mockExec,
+        });
+        expect(result.ok).toBe(true);
+        expect(observedCmds[0]).toBe(path.resolve(tmpDir, '.venv/bin/python'));
+    });
 });

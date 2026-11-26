@@ -112,7 +112,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
         });
 
-        it('tools/list enumerates all 10 required frontier architect tools', async () => {
+        it('tools/list enumerates all 11 required frontier architect tools', async () => {
             const resp = await server.handleRequest({
                 jsonrpc: '2.0',
                 id: 3,
@@ -120,7 +120,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
             expect(resp).not.toBeNull();
             const tools = (resp as any).result.tools;
-            expect(tools).toHaveLength(10);
+            expect(tools).toHaveLength(11);
             const toolNames = tools.map((t: any) => t.name);
             expect(toolNames).toEqual([
                 'slate_find',
@@ -133,6 +133,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
                 'slate_forge_batch',
                 'slate_references',
                 'slate_compile',
+                'slate_verify_ci',
             ]);
             for (const tool of tools) {
                 expect(tool.description).toBeTruthy();
@@ -1505,6 +1506,48 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(after.uses).toEqual(['calc']);
             expect(after.describedBy).toBe('llama');
             expect(after.verification.state).toBe('stale');
+        });
+
+        it('slate_verify_ci executes 4-pillar verification scoped to srcRoots/testRoots and rejects traversal paths', async () => {
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'slate.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'ci_mcp_demo',
+                    language: 'python',
+                    compile: { outDir: 'src' },
+                    ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+                }, null, 2),
+                'utf8',
+            );
+            // Update calc node so it has full intent, contract, cases, and strict typing
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'calc.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'calc',
+                    intent: 'Double input integer',
+                    contract: 'Returns x * 2',
+                    cases: [{ name: 'c1', inputs: { x: 3 }, expected: 6 }],
+                    code: ['def calc(x: int) -> int:', '    return x * 2'],
+                }, null, 2),
+                'utf8',
+            );
+            await server.callTool('slate_compile', {});
+
+            const passRes = await server.callTool('slate_verify_ci', {});
+            expect(passRes.isError).toBe(false);
+            const passReport = JSON.parse(passRes.content[0].text);
+            expect(passReport.valid).toBe(true);
+            expect(passReport.pillars.schema.valid).toBe(true);
+            expect(passReport.pillars.stub.valid).toBe(true);
+            expect(passReport.pillars.code.valid).toBe(true);
+            expect(passReport.pillars.test.valid).toBe(true);
+
+            // Traversal srcRoots must be rejected
+            const badRoots = await server.callTool('slate_verify_ci', { srcRoots: ['../outside'] });
+            expect(badRoots.isError).toBe(true);
+            expect(badRoots.content[0].text).toMatch(/Unsafe srcRoots path/i);
         });
     });
 });

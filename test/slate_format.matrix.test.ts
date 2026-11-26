@@ -90,6 +90,42 @@ describe('config, layout, and path matrix', () => {
             .toEqual({ slate: 3, name: 'demo', language: 'python', compile: { outDir: 'src' }, library: ['lib.py'] });
         expect(() => parseConfig('{')).toThrow(SlateFormatError);
     });
+    it('round-trips valid pythonPath and ci configuration and rejects unsafe/malformed values', () => {
+        const parsed = parseConfig(JSON.stringify({
+            slate: 3,
+            name: 'hawa_cfd',
+            language: 'python',
+            compile: { outDir: 'hawa' },
+            pythonPath: '  .venv/bin/python  ',
+            ci: {
+                srcRoots: ['hawa', 'solvers\\flux/'],
+                testRoots: ['tests'],
+                requireTests: true,
+            },
+        }));
+        expect(parsed.pythonPath).toBe('.venv/bin/python');
+        expect(parsed.ci).toEqual({
+            srcRoots: ['hawa', 'solvers/flux'],
+            testRoots: ['tests'],
+            requireTests: true,
+        });
+        expect(parseConfig(
+            `{"slate":3,"name":"hawa_cfd","language":"python","compile":{"outDir":"hawa"},"pythonPath":".venv/bin/python","ci":{"srcRoots":["hawa","solvers/flux"],"testRoots":["tests"],"requireTests":true}}`,
+        )).toEqual(parsed);
+
+        for (const bad of [
+            { slate: 3, name: 'x', pythonPath: '' },
+            { slate: 3, name: 'x', pythonPath: 'python\n--version' },
+            { slate: 3, name: 'x', pythonPath: 42 },
+            { slate: 3, name: 'x', ci: 'bad' },
+            { slate: 3, name: 'x', ci: { srcRoots: ['../escape'] } },
+            { slate: 3, name: 'x', ci: { srcRoots: ['/abs/path'] } },
+            { slate: 3, name: 'x', ci: { testRoots: ['C:\\abs'] } },
+            { slate: 3, name: 'x', ci: { requireTests: 'yes' } },
+        ]) {
+            expect(() => parseConfig(JSON.stringify(bad))).toThrow(SlateFormatError);
+        }
+    });
     it.each([undefined, '', '  ', '{}'])('defaults empty layout %j', text => {
         expect(parseLayout(text)).toEqual(emptyLayout());
     });

@@ -17,9 +17,13 @@ export interface GeneratedVerification {
 }
 
 /** Resolves the Python binary to use, checking explicit config, environment variables, and platform paths. */
-export function resolvePythonPath(configuredPath?: string): string {
+export function resolvePythonPath(configuredPath?: string, workspaceRoot?: string): string {
     if (configuredPath && configuredPath.trim().length > 0) {
-        return configuredPath.trim();
+        const trimmed = configuredPath.trim();
+        if (workspaceRoot && !path.isAbsolute(trimmed) && (trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.'))) {
+            return path.resolve(workspaceRoot, trimmed);
+        }
+        return trimmed;
     }
     if (process.env.PYTHON_BIN && process.env.PYTHON_BIN.trim().length > 0) {
         return process.env.PYTHON_BIN.trim();
@@ -438,7 +442,7 @@ export function generateVerificationFiles(
 # Pydantic contract validation (S-513)
 try:
     from pydantic import ConfigDict, validate_call
-    ${node.name} = validate_call(config=ConfigDict(strict=True), validate_return=True)(${node.name})
+    ${node.name} = validate_call(config=ConfigDict(strict=True, arbitrary_types_allowed=True), validate_return=True)(${node.name})
 except Exception:
     pass
 `);
@@ -723,7 +727,7 @@ export async function runNodeVerification(options: VerificationOptions): Promise
         };
     }
 
-    const pythonPath = resolvePythonPath(rawPythonPath);
+    const pythonPath = resolvePythonPath(rawPythonPath, workspaceRoot);
     const normNodeRel = normalizeCompileOutputPath(nodeId);
     const pyRelSegments = normNodeRel
         ? normNodeRel.split('/')

@@ -46,6 +46,12 @@ export interface SlateLlmConfig {
     contextWindow?: number;
 }
 
+export interface SlateCiConfig {
+    srcRoots?: string[];
+    testRoots?: string[];
+    requireTests?: boolean;
+}
+
 export interface SlateConfig {
     slate: 3;
     name: string;
@@ -53,6 +59,10 @@ export interface SlateConfig {
     compile?: { outDir: string };
     /** Read-only library files (relative to the project root), callable from flows and refs. */
     library?: string[];
+    /** Optional Python interpreter path (e.g. ".venv/bin/python" or ".venv/Scripts/python.exe"). */
+    pythonPath?: string;
+    /** Optional 4-pillar CI/CD scoping configuration. */
+    ci?: SlateCiConfig;
     /** Non-secret LLM provider/endpoint settings for local or remote OpenAI-compatible servers. */
     llm?: SlateLlmConfig;
 }
@@ -184,6 +194,52 @@ function parseLlmConfig(value: unknown): SlateLlmConfig {
     return llm;
 }
 
+function parseRootList(value: unknown, label: string): string[] {
+    const items = stringList(value, label);
+    return items.map(raw => {
+        if (/[\0\r\n]/.test(raw)) {
+            throw new SlateFormatError(`${label} entries must not contain control characters`);
+        }
+        const norm = raw.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+        if (!norm) {
+            throw new SlateFormatError(`${label} entries must be non-empty relative paths`);
+        }
+        if (norm.startsWith('/') || /^[A-Za-z]:/.test(norm)) {
+            throw new SlateFormatError(`${label} entries must be relative paths (got "${raw}")`);
+        }
+        const segments = norm.split('/');
+        if (segments.some(seg => seg === '..' || seg === '.')) {
+            throw new SlateFormatError(`${label} entries must not contain "." or ".." path segments (got "${raw}")`);
+        }
+        return norm;
+    });
+}
+
+function parseCiConfig(value: unknown): SlateCiConfig {
+    if (!isRecord(value)) throw new SlateFormatError('slate.json ci must be an object');
+    const ci: SlateCiConfig = {};
+    if (value.srcRoots !== undefined) {
+        ci.srcRoots = parseRootList(value.srcRoots, 'slate.json ci.srcRoots');
+    }
+    if (value.testRoots !== undefined) {
+        ci.testRoots = parseRootList(value.testRoots, 'slate.json ci.testRoots');
+    }
+    if (value.requireTests !== undefined) {
+        if (typeof value.requireTests !== 'boolean') {
+            throw new SlateFormatError('slate.json ci.requireTests must be true or false');
+        }
+        ci.requireTests = value.requireTests;
+    }
+    return ci;
+}
+
+function parsePythonPath(value: unknown): string {
+    if (typeof value !== 'string' || /[\0\r\n]/.test(value) || !value.trim()) {
+        throw new SlateFormatError('slate.json pythonPath must be a non-empty string');
+    }
+    return value.trim();
+}
+
 export function parseConfig(text: string): SlateConfig {
     let value: unknown;
     try {
@@ -204,6 +260,8 @@ export function parseConfig(text: string): SlateConfig {
         config.compile = { outDir: value.compile.outDir };
     }
     if (value.library !== undefined) config.library = stringList(value.library, 'slate.json library');
+    if (value.pythonPath !== undefined) config.pythonPath = parsePythonPath(value.pythonPath);
+    if (value.ci !== undefined) config.ci = parseCiConfig(value.ci);
     if (value.llm !== undefined) config.llm = parseLlmConfig(value.llm);
     return config;
 }
@@ -216,6 +274,8 @@ export function serializeConfig(config: SlateConfig): string {
     };
     if (config.compile !== undefined) value.compile = { outDir: config.compile.outDir };
     if (config.library !== undefined) value.library = config.library;
+    if (config.pythonPath !== undefined) value.pythonPath = parsePythonPath(config.pythonPath);
+    if (config.ci !== undefined) value.ci = parseCiConfig(config.ci);
     if (config.llm !== undefined) value.llm = parseLlmConfig(config.llm);
     return `${JSON.stringify(value, null, 2)}\n`;
 }

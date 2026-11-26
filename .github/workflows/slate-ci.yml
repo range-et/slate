@@ -1,0 +1,136 @@
+# Reusable Slate 4-Pillar CI Verification Workflow
+#
+# External repositories (e.g. hawa-cfd) can call this workflow directly:
+#
+#   name: Slate CI
+#   on: [push, pull_request]
+#   jobs:
+#     slate:
+#       uses: range-et/slate/.github/workflows/slate-ci.yml@main
+#       with:
+#         project_dir: '.'
+#         require_tests: 'true'
+#         run_pytest: true
+
+name: Slate 4-Pillar CI
+
+on:
+  workflow_call:
+    inputs:
+      project_dir:
+        description: 'Relative path to the Slate project root containing slate/slate.json'
+        required: false
+        type: string
+        default: '.'
+      slate_ref:
+        description: 'Git ref of range-et/slate to run the verifier from'
+        required: false
+        type: string
+        default: 'main'
+      src_roots:
+        description: 'Optional comma-separated srcRoots override for code parity'
+        required: false
+        type: string
+        default: ''
+      test_roots:
+        description: 'Optional comma-separated testRoots override for test coverage'
+        required: false
+        type: string
+        default: ''
+      require_tests:
+        description: 'Optional boolean string ("true" or "false") overriding slate.json ci.requireTests'
+        required: false
+        type: string
+        default: ''
+      node_version:
+        description: 'Node.js version used to compile and execute the standalone Slate CI CLI'
+        required: false
+        type: string
+        default: '22'
+      python_version:
+        description: 'Python version for optional pytest execution'
+        required: false
+        type: string
+        default: '3.12'
+      run_pytest:
+        description: 'Whether to also run pytest inside project_dir after 4-pillar verification'
+        required: false
+        type: boolean
+        default: false
+      pytest_args:
+        description: 'Additional arguments passed to python -m pytest'
+        required: false
+        type: string
+        default: '-q'
+  workflow_dispatch:
+    inputs:
+      project_dir:
+        description: 'Relative path to the Slate project root containing slate/slate.json'
+        required: false
+        type: string
+        default: 'examples/flow_demo'
+      require_tests:
+        description: 'Optional boolean string ("true" or "false")'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  slate-4-pillar:
+    name: Slate 4-Pillar CI Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v7
+
+      - name: Checkout Slate verifier
+        uses: actions/checkout@v7
+        with:
+          repository: range-et/slate
+          ref: ${{ inputs.slate_ref || 'main' }}
+          path: .slate-ci-tool
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version || '22' }}
+
+      - name: Build Slate CI CLI
+        working-directory: .slate-ci-tool
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix vscode-extension --ignore-scripts
+          npm --prefix vscode-extension run compile
+
+      - name: Run Slate 4-Pillar CI Gate (Schema, Stub, Code, Test)
+        env:
+          PROJECT_DIR: ${{ inputs.project_dir || '.' }}
+          SRC_ROOTS: ${{ inputs.src_roots || '' }}
+          TEST_ROOTS: ${{ inputs.test_roots || '' }}
+          REQUIRE_TESTS: ${{ inputs.require_tests || '' }}
+        run: |
+          ARGS=(--workspace "$PROJECT_DIR")
+          if [ -n "$SRC_ROOTS" ]; then
+            ARGS+=(--src-roots "$SRC_ROOTS")
+          fi
+          if [ -n "$TEST_ROOTS" ]; then
+            ARGS+=(--test-roots "$TEST_ROOTS")
+          fi
+          if [ "$REQUIRE_TESTS" = "true" ]; then
+            ARGS+=(--require-tests)
+          elif [ "$REQUIRE_TESTS" = "false" ]; then
+            ARGS+=(--no-require-tests)
+          fi
+          node .slate-ci-tool/vscode-extension/out/cli/slate_verify_ci.js "${ARGS[@]}"
+
+      - name: Setup Python (optional pytest)
+        if: inputs.run_pytest == true
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python_version || '3.12' }}
+
+      - name: Run pytest (optional)
+        if: inputs.run_pytest == true
+        working-directory: ${{ inputs.project_dir || '.' }}
+        run: python -m pytest ${{ inputs.pytest_args || '-q' }}

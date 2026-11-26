@@ -7,6 +7,7 @@ import {
     formatCasesAsTs,
     generateVerificationFiles,
     isVerificationStale,
+    resolvePythonPath,
     runNodeVerification,
     runRevisionLoop,
 } from '../vscode-extension/src/verification_runner';
@@ -123,7 +124,7 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             const { moduleContent, testContent, hasChecks } = generateVerificationFiles(node);
             expect(hasChecks).toBe(true);
             expect(moduleContent).toContain('from pydantic import ConfigDict, validate_call');
-            expect(moduleContent).toContain('clamp = validate_call(config=ConfigDict(strict=True), validate_return=True)(clamp)');
+            expect(moduleContent).toContain('clamp = validate_call(config=ConfigDict(strict=True, arbitrary_types_allowed=True), validate_return=True)(clamp)');
             expect(moduleContent).toContain('def clamp(value: int, lower: int, upper: int) -> int:');
 
             expect(testContent).toContain('import pytest');
@@ -2342,5 +2343,62 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }
         });
+    });
+
+    describe('Scientific / PyTorch arbitrary types & relative venv pythonPath', () => {
+        it('resolves relative venv pythonPath against workspaceRoot while leaving bare commands intact', () => {
+            const ws = path.resolve(os.tmpdir(), 'sample-ws');
+            expect(resolvePythonPath('.venv/bin/python', ws)).toBe(path.resolve(ws, '.venv/bin/python'));
+            expect(resolvePythonPath('.venv\\Scripts\\python.exe', ws)).toBe(path.resolve(ws, '.venv\\Scripts\\python.exe'));
+            expect(resolvePythonPath('python3', ws)).toBe('python3');
+            const absBin = path.resolve(ws, 'custom', 'python');
+            expect(resolvePythonPath(absBin, ws)).toBe(absBin);
+        });
+
+        it('permits arbitrary scientific types (e.g. Tensor/ndarray-like classes) under Pydantic strict mode', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-arbitrary-types-'));
+            try {
+                const helperDep = makeNode({
+                    name: 'TensorLike',
+                    code: [
+                        'class TensorLike:',
+                        '    def __init__(self, shape: tuple[int, ...]) -> None:',
+                        '        self.shape = shape',
+                    ],
+                });
+                const scaleNode = makeNode({
+                    name: 'scale_tensor',
+                    context: ['TensorLike'],
+                    uses: ['TensorLike'],
+                    cases: undefined,
+                    code: [
+                        'def scale_tensor(t: TensorLike, factor: int) -> TensorLike:',
+                        '    return TensorLike((t.shape[0] * factor,))',
+                    ],
+                    check: [
+                        'import pytest',
+                        'from pydantic import ValidationError',
+                        'def test_scale_tensor():',
+                        '    out = scale_tensor(TensorLike((3,)), 2)',
+                        '    assert isinstance(out, TensorLike) and out.shape == (6,)',
+                        '    with pytest.raises(ValidationError):',
+                        '        scale_tensor(TensorLike((3,)), True)',
+                    ],
+                });
+                const deps = new Map<string, SlateNode>([['TensorLike', helperDep]]);
+                const result = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: scaleNode,
+                    nodeId: 'scale_tensor',
+                    dependencies: deps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(result.state, result.traceback).toBe('passed');
+                expect(result.pydanticValid).toBe(true);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
     });
 });

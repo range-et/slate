@@ -22,9 +22,10 @@ const common = {
     sourcemap: true,
 };
 
-// The extension host bundle plus the standalone stdio MCP server. The server is bundled so the
-// installed VSIX (which excludes node_modules) can launch out/mcp/slate_mcp_server.js directly.
+// The extension host bundle, standalone stdio MCP server, and standalone CI verifier CLI.
+// Bundled so installed VSIX or external CI checkouts run without node_modules.
 Promise.all([
     esbuild.build({ ...common, entryPoints: ['src/extension.ts'], outfile: 'out/extension.js' }),
     esbuild.build({ ...common, entryPoints: ['src/mcp/slate_mcp_server.ts'], outfile: 'out/mcp/slate_mcp_server.js' }),
+    esbuild.build({ ...common, entryPoints: ['src/cli/slate_verify_ci.ts'], outfile: 'out/cli/slate_verify_ci.js' }),
 ]).catch(error => { console.error(error); process.exitCode = 1; });

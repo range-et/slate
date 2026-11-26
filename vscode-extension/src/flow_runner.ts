@@ -310,7 +310,10 @@ export async function runFlow(request: FlowRunRequest): Promise<FlowExecutionSna
 
     const traceFilePath = path.join(buildDir, 'trace.jsonl');
     const target = flowTarget(flowId, request.config.name);
-    const pythonBin = resolvePythonPath(request.pythonPath);
+    const pythonBin = resolvePythonPath(
+        request.pythonPath ?? (request.isTrusted ? request.config.pythonPath : undefined),
+        request.workspaceRoot,
+    );
     const timeoutMs = request.timeoutMs ?? 15000;
     const maxOutputBytes = request.maxOutputBytes ?? 1024 * 1024;
 

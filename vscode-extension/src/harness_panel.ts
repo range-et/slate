@@ -649,6 +649,15 @@ export class HarnessPanel implements vscode.Disposable {
         return resolveLlmConfig(this.projectConfig?.llm, this.fallbackLlmSettings(), process.env);
     }
 
+    private resolveProjectPythonPath(configOverride?: SlateConfig): string {
+        const projectPython = vscode.workspace.isTrusted
+            ? (configOverride?.pythonPath ?? this.projectConfig?.pythonPath)
+            : undefined;
+        const settingPython = vscode.workspace.getConfiguration('slate.python').get<string>('path');
+        const workspaceRoot = this.folder.root.scheme === 'file' ? this.folder.root.fsPath : undefined;
+        return resolvePythonPath(projectPython ?? settingPython, workspaceRoot);
+    }
+
     private canonicalForgeLanguage(language?: string): 'python' | 'typescript' | 'javascript' {
         const canonical = tryNormalizeLanguage(language ?? this.projectConfig?.language);
         if (canonical === 'typescript' || canonical === 'javascript') return canonical;
@@ -997,7 +1006,7 @@ export class HarnessPanel implements vscode.Disposable {
                 return;
             }
 
-            const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+            const pythonPath = this.resolveProjectPythonPath();
             const report = await runNodeGuardrails({
                 nodeId,
                 folder: this.folder,
@@ -1120,7 +1129,7 @@ export class HarnessPanel implements vscode.Disposable {
             node.check = codeLines(pending.check);
         }
 
-        const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+        const pythonPath = this.resolveProjectPythonPath();
         const guardrailReport = await runNodeGuardrails({
             nodeId,
             folder: this.folder,
@@ -1214,7 +1223,7 @@ export class HarnessPanel implements vscode.Disposable {
                         dependencies.set(depId, await this.folder.readNode(depId));
                     } catch { /* Missing dependencies are omitted by the verifier. */ }
                 }
-                const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                const pythonPath = this.resolveProjectPythonPath();
                 const language = target.language ?? parseConfig(await this.folder.readConfigText()).language;
                 const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.imports, n.context,
                     n.uses, n.check, n.cases, n.extra, n.contract];
@@ -1368,7 +1377,7 @@ export class HarnessPanel implements vscode.Disposable {
                             deps.set(depId, await this.folder.readNode(depId));
                         } catch {}
                     }
-                    const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                    const pythonPath = this.resolveProjectPythonPath();
                     return runNodeVerification({
                         workspaceRoot: this.folder.root.fsPath,
                         node: candidateNode,
@@ -1465,7 +1474,7 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private async runGuardrails(nodeId: string): Promise<NodeGuardrailsReport> {
-        const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+        const pythonPath = this.resolveProjectPythonPath();
         const report = await runNodeGuardrails({
             nodeId,
             folder: this.folder,
@@ -1529,7 +1538,7 @@ export class HarnessPanel implements vscode.Disposable {
                 }
             }
 
-            const configuredPython = vscode.workspace.getConfiguration('slate.python').get<string>('path');
+            const configuredPython = this.resolveProjectPythonPath(config);
 
             const result = await runFlow({
                 workspaceRoot: this.folder.root.fsPath,
@@ -2888,7 +2897,7 @@ export class HarnessPanel implements vscode.Disposable {
                 checkNodeCode(node, nodeId, action.code, { language: effectiveLanguage });
                 const candidateNode: SlateNode = { ...node, code: codeLines(action.code) };
                 if (action.force !== true && (node.cases?.length || node.check?.length)) {
-                    const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                    const pythonPath = this.resolveProjectPythonPath();
                     const guardrailReport = await runNodeGuardrails({
                         nodeId,
                         folder: this.folder,

@@ -35,6 +35,7 @@ import {
     pathForNodeId,
     serializeNode,
     validateNodeStub,
+    type SlateConfig,
     type SlateLlmProvider,
     type SlateNode,
 } from './slate_folder';
@@ -409,6 +410,7 @@ async function forgeSingleTarget(
     sources: ReadonlyMap<string, string>,
     nodesById: ReadonlyMap<string, SlateNode>,
     llm: ReturnType<typeof resolveLlmConfig>,
+    config: SlateConfig,
     options: BatchForgeOptions,
     maxRevisions: number,
 ): Promise<BatchForgeNodeResult> {
@@ -504,7 +506,7 @@ async function forgeSingleTarget(
                 dependencies,
                 isTrusted: options.isTrusted === true,
                 timeoutMs: options.verifyTimeoutMs ?? 30000,
-                pythonPath: options.pythonPath,
+                pythonPath: options.pythonPath ?? config.pythonPath,
                 language: target.language,
                 executeCommand: options.executeCommand,
                 signal: options.signal,
@@ -946,6 +948,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     sources,
                     nodesById,
                     llm,
+                    config,
                     options,
                     maxRevisions,
                 );

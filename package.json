@@ -17,6 +17,7 @@
     "test:qa": "npm run test:webview && npm run test:electron && npm run test:workbench",
     "test:harness": "npm test && npm run test:qa",
     "verify:contracts": "node scripts/verify-contracts.mjs",
+    "verify:ci": "node vscode-extension/out/cli/slate_verify_ci.js",
     "verify:baseline": "bash scripts/verify-baseline.sh",
     "verify:launch": "npm run verify:baseline && npm run test:qa",
     "package-extension": "node scripts/package-extension.js",

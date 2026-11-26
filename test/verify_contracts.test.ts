@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import {
     validateNodeSchema,
@@ -7,9 +9,14 @@ import {
     validateNodeAst,
     checkProjectParity,
     checkProjectDrift,
+    checkProjectTests,
+    resolveCiConfig,
+    verifyProjectCi,
     validateProjectContracts,
     verifyAll,
 } from '../scripts/verify-contracts.mjs';
+import { EMBEDDED_FLOW_SCHEMA, EMBEDDED_NODE_SCHEMA } from '../vscode-extension/src/contract_schemas';
+import { runSlateVerifyCiCli } from '../vscode-extension/src/cli/slate_verify_ci';
 
 const validNode = {
     slate: 3,
@@ -507,5 +514,159 @@ describe('Workspace-wide contract verification (verifyAll)', () => {
         expect(result.errors).toEqual([]);
         expect(result.stats.projectsCount).toBeGreaterThanOrEqual(2);
         expect(result.stats.nodesCount).toBeGreaterThanOrEqual(5);
+    });
+});
+
+describe('4-Pillar CI gate (ci_verifier & standalone CLI)', () => {
+    it('keeps embedded node and flow schemas identical to contracts/*.schema.json', () => {
+        const diskNode = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'contracts', 'slate-node.schema.json'), 'utf8'));
+        const diskFlow = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'contracts', 'slate-flow.schema.json'), 'utf8'));
+        expect(EMBEDDED_NODE_SCHEMA).toEqual(diskNode);
+        expect(EMBEDDED_FLOW_SCHEMA).toEqual(diskFlow);
+    });
+
+    it('resolves ci defaults and overrides cleanly', () => {
+        expect(resolveCiConfig({ slate: 3, name: 'p', language: 'python' })).toEqual({
+            srcRoots: ['src'],
+            testRoots: ['tests', 'test'],
+            requireTests: false,
+        });
+        expect(resolveCiConfig({
+            slate: 3,
+            name: 'p',
+            language: 'python',
+            compile: { outDir: 'pkg/cfd' },
+            ci: { srcRoots: ['pkg/cfd', 'custom'], testRoots: ['unit_tests'], requireTests: true },
+        })).toEqual({
+            srcRoots: ['pkg/cfd', 'custom'],
+            testRoots: ['unit_tests'],
+            requireTests: true,
+        });
+    });
+
+    it('scopes parity strictly to srcRoots without scanning unrelated repo scripts, and verifies Pillar 4 test coverage', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-4pillar-ci-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'cfd_src'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'scripts'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'my_tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'hawa_demo',
+                language: 'python',
+                compile: { outDir: 'cfd_src' },
+                ci: {
+                    srcRoots: ['cfd_src'],
+                    testRoots: ['my_tests'],
+                    requireTests: true,
+                },
+            }, null, 2));
+
+            // 1 node covered via node.cases, 1 via external test file, 1 missing coverage, plus 1 prelude
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', '_prelude.json'), JSON.stringify({
+                slate: 3,
+                name: '_prelude',
+                kind: 'prelude',
+                intent: 'Constants',
+                contract: 'Defines GAMMA',
+                code: ['GAMMA = 1.4'],
+            }));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'step_flux.json'), JSON.stringify({
+                slate: 3,
+                name: 'step_flux',
+                intent: 'Compute flux',
+                contract: 'Returns x * 2.0',
+                cases: [{ name: 'c1', inputs: { x: 2.0 }, expected: 4.0 }],
+                code: ['def step_flux(x: float) -> float:', '    return x * 2.0'],
+            }));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'calc_cfl.json'), JSON.stringify({
+                slate: 3,
+                name: 'calc_cfl',
+                intent: 'Compute CFL',
+                contract: 'Returns dt',
+                code: ['def calc_cfl(dx: float) -> float:', '    return dx * 0.5'],
+            }));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'untested_fn.json'), JSON.stringify({
+                slate: 3,
+                name: 'untested_fn',
+                intent: 'Untested helper',
+                contract: 'Returns x',
+                code: ['def untested_fn(x: float) -> float:', '    return x'],
+            }));
+
+            // Unrelated repo script outside srcRoots has an arbitrary unmapped function (must NOT be scanned)
+            fs.writeFileSync(path.join(tmpDir, 'scripts', 'train_cfd.py'), [
+                'def ad_hoc_plot(data):',
+                '    return data',
+            ].join('\n'));
+
+            // External tests: one covering calc_cfl, one orphan unmapped test
+            fs.writeFileSync(path.join(tmpDir, 'my_tests', 'test_cfl.py'), [
+                'def test_cfl_basic():',
+                '    assert calc_cfl(2.0) == 1.0',
+            ].join('\n'));
+            fs.writeFileSync(path.join(tmpDir, 'my_tests', 'test_orphan.py'), [
+                'def test_nothing():',
+                '    assert True',
+            ].join('\n'));
+
+            // Compiled output in cfd_src (initially skip compile drift by matching compiler output)
+            const initial = verifyProjectCi(tmpDir);
+            expect(initial.pillars.schema.valid).toBe(true);
+            expect(initial.pillars.stub.valid).toBe(true);
+            // Only drift error so far because cfd_src/hawa_demo.py not written yet; parity ignored scripts/train_cfd.py
+            expect(initial.pillars.code.parityFilesChecked).toEqual([]);
+            expect(initial.pillars.test.valid).toBe(false);
+            expect(initial.pillars.test.coveredNodes).toEqual(['calc_cfl', 'step_flux']);
+            expect(initial.pillars.test.missingNodes).toEqual(['untested_fn']);
+            expect(initial.pillars.test.unmappedTestFiles).toEqual(['my_tests/test_orphan.py']);
+            expect(initial.pillars.test.errors).toHaveLength(1);
+            expect(initial.pillars.test.errors[0]).toContain('[MISSING_TEST] Atomic node "untested_fn"');
+
+            // With requireTests: false override, test pillar succeeds with clean warnings
+            const relaxedTests = checkProjectTests(tmpDir, { requireTests: false });
+            expect(relaxedTests.valid).toBe(true);
+            expect(relaxedTests.warnings.some(w => w.includes('[MISSING_TEST]'))).toBe(true);
+            expect(relaxedTests.warnings.some(w => w.includes('[UNMAPPED_TEST]'))).toBe(true);
+
+            // Adding a rogue function inside srcRoots fails Pillar 3 parity
+            fs.writeFileSync(path.join(tmpDir, 'cfd_src', 'rogue.py'), 'def rogue_cfd(x: int) -> int:\n    return x\n');
+            const parity = checkProjectParity(tmpDir);
+            expect(parity.valid).toBe(false);
+            expect(parity.errors[0]).toContain('[ROGUE_FUNCTION] Undocumented function "rogue_cfd"');
+
+            // Standalone CLI helper reports failure exit code 1 with JSON output
+            let stdout = '';
+            let stderr = '';
+            const code = runSlateVerifyCiCli(['--workspace', tmpDir, '--json'], {
+                stdout: s => { stdout += s; },
+                stderr: s => { stderr += s; },
+            });
+            expect(code).toBe(1);
+            expect(stderr).toBe('');
+            const parsedJson = JSON.parse(stdout);
+            expect(parsedJson.valid).toBe(false);
+            expect(parsedJson.pillars.test.missingNodes).toEqual(['untested_fn']);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('runs the bundled standalone out/cli/slate_verify_ci.js CLI cleanly against examples/flow_demo', () => {
+        const cliBundle = path.resolve(__dirname, '..', 'vscode-extension', 'out', 'cli', 'slate_verify_ci.js');
+        const flowDemo = path.resolve(__dirname, '..', 'examples', 'flow_demo');
+        const out = execFileSync(process.execPath, [cliBundle, '--workspace', flowDemo, '--json'], {
+            encoding: 'utf8',
+            timeout: 15000,
+        });
+        const report = JSON.parse(out);
+        expect(report.valid).toBe(true);
+        expect(report.pillars.schema.valid).toBe(true);
+        expect(report.pillars.stub.valid).toBe(true);
+        expect(report.pillars.code.valid).toBe(true);
+        expect(report.pillars.test.valid).toBe(true);
     });
 });

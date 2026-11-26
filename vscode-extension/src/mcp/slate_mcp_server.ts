@@ -7,6 +7,7 @@ import { parser as pythonParser } from '@lezer/python';
 import * as ts from 'typescript';
 
 import { batchForgeWorkspace, compactBatchForgeResult } from '../batch_forge';
+import { verifyProjectCi } from '../ci_verifier';
 import {
     assertSafeFlowId, connect, disconnect, emptyFlow, FLOWS_DIR, flowIdForPath, MAIN_FLOW,
     parseEndpoint, pathForFlowId, removeInstances, serializeFlow, parseFlow
@@ -559,6 +560,29 @@ export const MCP_TOOLS = [
                 dryRun: {
                     type: 'boolean',
                     description: 'If true, compile in memory and return planned files and diagnostics without writing disk files.',
+                },
+            },
+        },
+    },
+    {
+        name: 'slate_verify_ci',
+        description: 'Run Slate 4-pillar CI verification (Schema, Stub JPL-60/typing, Code parity/drift scoped to srcRoots, and Test coverage across testRoots + node.cases/node.check).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                srcRoots: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional relative source root directories to scan for code parity (defaults to slate.json ci.srcRoots or [compile.outDir ?? "src"]).',
+                },
+                testRoots: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional relative test root directories to scan for test coverage (defaults to slate.json ci.testRoots or ["tests", "test"]).',
+                },
+                requireTests: {
+                    type: 'boolean',
+                    description: 'Fail if any atomic function node lacks node.cases, node.check, or mapped executable test coverage (defaults to slate.json ci.requireTests or false).',
                 },
             },
         },
@@ -2254,6 +2278,36 @@ export class SlateMcpServer {
         };
     }
 
+    /** Tool: slate_verify_ci */
+    async toolVerifyCi(args: Record<string, unknown> & {
+        srcRoots?: unknown;
+        testRoots?: unknown;
+        requireTests?: unknown;
+    }): Promise<Record<string, unknown>> {
+        const parseRootsArg = (raw: unknown, label: string): string[] | undefined => {
+            if (raw === undefined) return undefined;
+            if (!Array.isArray(raw) || !raw.every((item): item is string => typeof item === 'string')) {
+                throw new Error(`${label} must be an array of relative path strings.`);
+            }
+            return raw;
+        };
+        const srcRoots = parseRootsArg(args.srcRoots, 'srcRoots');
+        const testRoots = parseRootsArg(args.testRoots, 'testRoots');
+        let requireTests: boolean | undefined;
+        if (args.requireTests !== undefined) {
+            if (typeof args.requireTests !== 'boolean') {
+                throw new Error('requireTests must be a boolean.');
+            }
+            requireTests = args.requireTests;
+        }
+        const report = verifyProjectCi(this.workspaceRoot, {
+            ...(srcRoots ? { srcRoots } : {}),
+            ...(testRoots ? { testRoots } : {}),
+            ...(requireTests !== undefined ? { requireTests } : {}),
+        });
+        return report as unknown as Record<string, unknown>;
+    }
+
     /** Call a tool directly by name and arguments */
     async callTool(name: string, args: Record<string, unknown>): Promise<McpToolCallResult> {
         try {
@@ -2288,6 +2342,9 @@ export class SlateMcpServer {
                     break;
                 case 'slate_compile':
                     result = await this.runSerialized(() => this.toolCompile(args as any));
+                    break;
+                case 'slate_verify_ci':
+                    result = await this.toolVerifyCi(args);
                     break;
                 default:
                     return {
