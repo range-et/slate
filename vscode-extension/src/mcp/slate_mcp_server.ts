@@ -13,7 +13,7 @@ import {
     parseEndpoint, pathForFlowId, removeInstances, serializeFlow, parseFlow
 } from '../flow';
 import {
-    assertSafeNodeId, codeLines, CONFIG_PATH, emptyLayout, indexNode, LAYOUT_PATH, NODES_DIR,
+    assertSafeNodeId, classFrameFromHeader, codeLines, CONFIG_PATH, emptyLayout, extractClassFrameMetadata, indexNode, LAYOUT_PATH, NODES_DIR,
     nodeFromSignature, nodeIdForPath, parseConfig, parseLayout, parseNode,
     pathForNodeId, serializeConfig, serializeLayout, serializeNode,
     tsNodeFromSignature, validateNodeStub, validateStubBody, validateTsStubBody,
@@ -266,6 +266,14 @@ export const MCP_TOOLS = [
                     type: 'string',
                     description: 'Optional stub body (Python: "pass", "...", or "raise NotImplementedError(...)"; TS/JS: empty or "throw new Error(...)"). Non-stub implementation code is strictly rejected.',
                 },
+                classOwner: {
+                    type: 'string',
+                    description: 'Optional owning class frame node ID (from slate_define_class) when defining an owned method node.',
+                },
+                owner: {
+                    type: 'string',
+                    description: 'Alias for classOwner.',
+                },
                 position: {
                     type: 'object',
                     properties: { x: { type: 'number' }, y: { type: 'number' } },
@@ -291,6 +299,8 @@ export const MCP_TOOLS = [
                             contract: { type: 'string' },
                             context: { type: 'array', items: { type: 'string' } },
                             imports: { type: 'array', items: { type: 'string' } },
+                            classOwner: { type: 'string' },
+                            owner: { type: 'string' },
                             cases: {
                                 type: 'array',
                                 items: {
@@ -324,6 +334,58 @@ export const MCP_TOOLS = [
                     },
                 },
             },
+        },
+    },
+    {
+        name: 'slate_define_class',
+        description: 'Define a class frame container node (kind: "class") holding the class header, decorators, bases, and typed fields/properties in slate/nodes/**/*.json (no methods allowed inside the frame; methods live in owned method nodes via slate_define_stub with owner).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                name: {
+                    type: 'string',
+                    description: 'Class node ID (e.g. "ConvBlock" or "models/ConvBlock").',
+                },
+                signature: {
+                    type: 'string',
+                    description: 'Class header (e.g. "class ConvBlock(nn.Module)").',
+                },
+                intent: {
+                    type: 'string',
+                    description: 'High-level intent describing the class responsibility.',
+                },
+                contract: {
+                    type: 'string',
+                    description: 'Optional class invariants and behavioral contract.',
+                },
+                decorators: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional class decorators (e.g. ["@dataclass"]).',
+                },
+                fields: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional class/struct property declarations (e.g. ["dim: int", "scale: float = 1.0"]).',
+                },
+                imports: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional external imports needed by the class header or field annotations.',
+                },
+                context: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional context dependency node IDs.',
+                },
+                position: {
+                    type: 'object',
+                    properties: { x: { type: 'number' }, y: { type: 'number' } },
+                    required: ['x', 'y'],
+                    description: 'Canvas position for the class frame.',
+                },
+            },
+            required: ['name', 'signature', 'intent'],
         },
     },
     {
@@ -1067,7 +1129,13 @@ export class SlateMcpServer {
         return result;
     }
 
-    private validateStubCaseCode(rawCode: string, language: string, nodeId: string, singleLineOnly: boolean): void {
+    private validateStubCaseCode(
+        rawCode: string,
+        language: string,
+        nodeId: string,
+        singleLineOnly: boolean,
+        allowedCallables: readonly string[] = [],
+    ): void {
         if (language === 'prose') {
             throw new Error(`Prose stub "${nodeId}" cannot define executable case code.`);
         }
@@ -1078,7 +1146,7 @@ export class SlateMcpServer {
             const tree = pythonParser.parse(`${rawCode}\n`);
             type Node = typeof tree.topNode;
             const target = nodeId.split('/').pop()!;
-            const functions = new Set([target, 'range', 'int', 'set', 'len', 'list', 'tuple', 'sorted', 'abs']);
+            const functions = new Set([target, ...allowedCallables, 'range', 'int', 'set', 'len', 'list', 'tuple', 'sorted', 'abs']);
             const exceptions = new Set(['ValueError', 'TypeError', 'IndexError', 'KeyError', 'RuntimeError',
                 'ArithmeticError', 'ZeroDivisionError', 'AssertionError', 'OverflowError']);
             const containers = new Set(['Script', 'StatementGroup', 'ExpressionStatement', 'AssertStatement',
@@ -1175,18 +1243,18 @@ export class SlateMcpServer {
         }
     }
 
-    private normalizeStubCases(rawCases: unknown, language: string, nodeId: string): unknown[] {
+    private normalizeStubCases(rawCases: unknown, language: string, nodeId: string, allowedCallables: readonly string[] = []): unknown[] {
         if (!Array.isArray(rawCases)) {
             throw new Error(`Stub "${nodeId}" cases must be an array.`);
         }
         const identRe = language === 'typescript' || language === 'javascript'
             ? /^[A-Za-z_$][A-Za-z0-9_$]*$/
             : /^[A-Za-z_][A-Za-z0-9_]*$/;
-        const metaKeys = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx', 'inputs', 'input', 'args', 'params']);
+        const metaKeys = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx', 'inputs', 'input', 'args', 'params', 'init']);
 
         for (const entry of rawCases) {
             if (typeof entry === 'string') {
-                this.validateStubCaseCode(entry, language, nodeId, true);
+                this.validateStubCaseCode(entry, language, nodeId, true, allowedCallables);
                 continue;
             }
             if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -1197,7 +1265,7 @@ export class SlateMcpServer {
                 if (typeof obj.code !== 'string') {
                     throw new Error(`Case "code" in stub "${nodeId}" must be a string.`);
                 }
-                this.validateStubCaseCode(obj.code, language, nodeId, false);
+                this.validateStubCaseCode(obj.code, language, nodeId, false, allowedCallables);
                 continue;
             }
             if (obj.approx !== undefined) {
@@ -1272,6 +1340,8 @@ export class SlateMcpServer {
         imports?: string[];
         cases?: unknown[];
         body?: string;
+        classOwner?: string;
+        owner?: string;
         position?: { x: number; y: number };
         splitFrom?: string;
         stubs?: Array<{
@@ -1286,6 +1356,8 @@ export class SlateMcpServer {
             imports?: string[];
             cases?: unknown[];
             body?: string;
+            classOwner?: string;
+            owner?: string;
             position?: { x: number; y: number };
         }>;
     }): Promise<Record<string, unknown>> {
@@ -1303,6 +1375,7 @@ export class SlateMcpServer {
                 imports: args.imports,
                 cases: args.cases,
                 body: args.body,
+                classOwner: args.classOwner ?? args.owner,
                 position: args.position,
             }] : []);
 
@@ -1324,6 +1397,20 @@ export class SlateMcpServer {
 
             // Check if node already exists before resolving language/metadata fallbacks
             const existingNode = await this.readExistingNode(nodeRelPath);
+            const itemOwner = item.classOwner ?? item.owner;
+            const argOwner = args.classOwner ?? args.owner;
+            const rawOwner = itemOwner !== undefined ? itemOwner : (args.stubs?.length ? existingNode?.classOwner : (argOwner ?? existingNode?.classOwner));
+            let ownerId: string | undefined;
+            let ownerNode: SlateNode | null = null;
+            if (rawOwner !== undefined) {
+                ownerId = assertSafeNodeId(rawOwner);
+                const ownerRelPath = pathForNodeId(ownerId);
+                this.assertSafePath(ownerRelPath, NODES_DIR);
+                ownerNode = await this.readExistingNode(ownerRelPath);
+                if (!ownerNode || ownerNode.kind !== 'class') {
+                    throw new Error(`Owner "${ownerId}" for stub "${nodeId}" does not exist or is not a class frame (define it first with slate_define_class).`);
+                }
+            }
             const rawItemLang = item.language ?? args.language ?? existingNode?.language;
             const itemLanguage = rawItemLang ? tryNormalizeLanguage(rawItemLang) : projectLanguage;
             if (!itemLanguage || !['python', 'typescript', 'javascript', 'prose'].includes(itemLanguage)) {
@@ -1354,8 +1441,9 @@ export class SlateMcpServer {
             const imports = rawImports !== undefined
                 ? this.normalizeStubImports(rawImports, itemLanguage, nodeId)
                 : (existingNode?.imports ?? []);
+            const allowedCaseCallables = ownerNode ? [ownerNode.name] : [];
             const cases = item.cases !== undefined
-                ? this.normalizeStubCases(item.cases, itemLanguage, nodeId)
+                ? this.normalizeStubCases(item.cases, itemLanguage, nodeId, allowedCaseCallables)
                 : (existingNode?.cases ?? []);
 
             let initialNode: SlateNode;
@@ -1441,6 +1529,7 @@ export class SlateMcpServer {
                 name: initialNode.name,
                 ...(itemLanguage !== 'python' ? { language: itemLanguage } : {}),
                 ...(existingNode?.kind !== undefined ? { kind: existingNode.kind } : {}),
+                ...(ownerId !== undefined ? { classOwner: ownerId } : {}),
                 intent,
                 contract,
                 context,
@@ -1488,6 +1577,93 @@ export class SlateMcpServer {
             ok: true,
             created: createdIds,
             splitFrom: args.splitFrom ?? null,
+        };
+    }
+
+    /** Tool: slate_define_class */
+    async toolDefineClass(args: {
+        name?: string;
+        signature?: string;
+        intent?: string;
+        contract?: string;
+        decorators?: unknown;
+        fields?: unknown;
+        imports?: unknown;
+        context?: unknown;
+        position?: { x: number; y: number };
+    }): Promise<Record<string, unknown>> {
+        if (!args.name || !args.signature || !args.intent) {
+            throw new Error('Must provide name, signature, and intent to define a class frame.');
+        }
+        const nodeId = assertSafeNodeId(args.name);
+        const nodeRelPath = pathForNodeId(nodeId);
+        this.assertSafePath(nodeRelPath, NODES_DIR);
+        const existingNode = await this.readExistingNode(nodeRelPath);
+        if (existingNode?.locked) {
+            throw new Error(`Node "${nodeId}" is locked and cannot be modified.`);
+        }
+        if (existingNode && existingNode.kind !== 'class') {
+            throw new Error(`Node "${nodeId}" already exists and is not a class frame.`);
+        }
+        const decorators = args.decorators !== undefined
+            ? (Array.isArray(args.decorators) && args.decorators.every(d => typeof d === 'string')
+                ? args.decorators
+                : (() => { throw new Error(`Class "${nodeId}" decorators must be an array of strings.`); })())
+            : [];
+        const fields = args.fields !== undefined
+            ? (Array.isArray(args.fields) && args.fields.every(f => typeof f === 'string')
+                ? args.fields
+                : (() => { throw new Error(`Class "${nodeId}" fields must be an array of strings.`); })())
+            : [];
+        const frame = classFrameFromHeader(
+            args.signature,
+            args.intent,
+            fields,
+            decorators,
+            args.contract ?? existingNode?.contract ?? '',
+        );
+        const leafName = nodeId.split('/').pop() ?? nodeId;
+        if (frame.name !== leafName) {
+            throw new Error(`Class signature name "${frame.name}" does not match provided node name "${nodeId}".`);
+        }
+        const imports = args.imports !== undefined
+            ? this.normalizeStubImports(args.imports, 'python', nodeId)
+            : (existingNode?.imports ?? []);
+        const context = args.context !== undefined
+            ? (Array.isArray(args.context) && args.context.every(c => typeof c === 'string')
+                ? args.context
+                : (() => { throw new Error(`Class "${nodeId}" context must be an array of node IDs.`); })())
+            : (existingNode?.context ?? []);
+
+        const node: SlateNode = {
+            ...frame,
+            context,
+            examples: existingNode?.examples ?? [],
+            describedBy: existingNode?.describedBy ?? 'human',
+            locked: false,
+            ...(existingNode?.order !== undefined ? { order: existingNode.order } : {}),
+            imports,
+            uses: existingNode?.uses ?? [],
+            extra: { ...(existingNode?.extra ?? {}) },
+        };
+
+        await this.writeJsonFile(nodeRelPath, serializeNode(node));
+
+        if (args.position && Number.isFinite(args.position.x) && Number.isFinite(args.position.y)) {
+            const layout = await this.readLayout();
+            layout.positions[nodeId] = { x: args.position.x, y: args.position.y };
+            await this.writeLayout(layout);
+        }
+        if (this.bridge?.onStubDefined) await this.bridge.onStubDefined(nodeId);
+
+        const meta = extractClassFrameMetadata(node.code);
+        return {
+            ok: true,
+            nodeId,
+            kind: 'class',
+            bases: meta.bases,
+            decorators: meta.decorators,
+            fields: meta.fields,
         };
     }
 
@@ -2324,6 +2500,9 @@ export class SlateMcpServer {
                     break;
                 case 'slate_define_stub':
                     result = await this.runSerialized(() => this.toolDefineStub(args));
+                    break;
+                case 'slate_define_class':
+                    result = await this.runSerialized(() => this.toolDefineClass(args as any));
                     break;
                 case 'slate_wire_flow':
                     result = await this.runSerialized(() => this.toolWireFlow(args));

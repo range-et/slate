@@ -169,7 +169,7 @@ Example `slate/slate.json` snippet:
 ### Current Practical Limits to Know
 
 - Canvas UI supports concurrent per-unit generation and topbar **⚒ Forge Stubs** (`1`–`16` parallel requests) alongside MCP `slate_forge_batch`; multi-wave verification loops continue to require a trusted workspace.
-- Class methods stay inside class units rather than splitting into individual method nodes ([Issue #16](https://github.com/range-et/slate/issues/16)).
+- Class-as-Frame (`kind: "class"` frames + `classOwner` owned method nodes) is shipped for Python (including MCP `slate_define_class`, per-method Two-Tier forging & Pydantic+pytest verification, 4-pillar CI parity/drift/coverage, and canvas class frames); multi-language class frame splitting (TS/C#/C++) remains future work ([Issue #16](https://github.com/range-et/slate/issues/16)).
 - Per-node runtime test verification is shipped for Python and TypeScript/JavaScript; C# and C++/Arduino support porting, checks, and compiling only.
 - On native Windows, `mutmut` mutation testing is skipped with an explicit diagnostic (requires Linux or WSL).
 

@@ -20,7 +20,19 @@ export interface PortReport {
 export const PRELUDE = '_prelude';
 export const EPILOGUE = '_epilogue';
 
-interface Definition { name: string; code: string; globals: string[] }
+interface SplitMethod {
+    name: string;
+    code: string;
+    globals: string[];
+}
+
+interface Definition {
+    name: string;
+    code: string;
+    globals: string[];
+    kind?: NodeKind;
+    methods?: SplitMethod[];
+}
 interface ModuleScan {
     path: string;
     folder: string;
@@ -52,6 +64,12 @@ function contains(node: SyntaxNode, names: string[]): SyntaxNode[] {
     return found.filter(item => item.from >= node.from && item.to <= node.to);
 }
 
+function directChildren(node: SyntaxNode): SyntaxNode[] {
+    const out: SyntaxNode[] = [];
+    for (let child = node.firstChild; child; child = child.nextSibling) out.push(child);
+    return out;
+}
+
 function definitionName(node: SyntaxNode, source: string): string | null {
     const definition = node.name === 'DecoratedStatement'
         ? node.getChild('FunctionDefinition') ?? node.getChild('ClassDefinition')
@@ -60,7 +78,130 @@ function definitionName(node: SyntaxNode, source: string): string | null {
     return name ? source.slice(name.from, name.to) : null;
 }
 
-function scanModule(path: string, source: string, warnings: string[]): ModuleScan {
+function isClassNode(node: SyntaxNode): boolean {
+    return node.name === 'ClassDefinition'
+        || (node.name === 'DecoratedStatement' && directChildren(node).some(c => c.name === 'ClassDefinition'));
+}
+
+function dedentBlock(raw: string, baseIndentLen: number): string {
+    return raw.replace(/\r\n?/g, '\n').split('\n').map(line => {
+        if (!line.trim()) return '';
+        let cut = 0;
+        while (cut < baseIndentLen && cut < line.length && (line[cut] === ' ' || line[cut] === '\t')) {
+            cut++;
+        }
+        return line.slice(cut);
+    }).join('\n');
+}
+
+function splitClassNode(
+    wrapper: SyntaxNode,
+    classFrom: number,
+    className: string,
+    source: string,
+    filePath: string,
+    warnings: string[],
+): { frameCode: string; frameGlobals: string[]; methods: SplitMethod[] } | null {
+    const classNode = wrapper.name === 'DecoratedStatement'
+        ? directChildren(wrapper).find(c => c.name === 'ClassDefinition') ?? null
+        : wrapper;
+    const bodyNode = classNode ? directChildren(classNode).find(c => c.name === 'Body') ?? null : null;
+    if (!classNode || !bodyNode) return null;
+
+    const rawMethods: Array<{ name: string; from: number; defStart: number; to: number; globals: string[] }> = [];
+    let commentFrom: number | null = null;
+    let hasNestedClass = false;
+    let hasNonMethodBody = false;
+
+    for (const stmt of directChildren(bodyNode)) {
+        if (stmt.name === ':') continue;
+        if (stmt.name === 'Comment') {
+            commentFrom ??= stmt.from;
+            continue;
+        }
+        const stmtFrom = commentFrom ?? stmt.from;
+        commentFrom = null;
+
+        const isMethod = stmt.name === 'FunctionDefinition'
+            || (stmt.name === 'DecoratedStatement' && directChildren(stmt).some(c => c.name === 'FunctionDefinition'));
+        if (isMethod) {
+            const methodName = definitionName(stmt, source);
+            if (!methodName) {
+                hasNonMethodBody = true;
+                continue;
+            }
+            const globals = contains(stmt, ['ScopeStatement'])
+                .filter(s => s.firstChild?.name === 'global')
+                .map(s => source.slice(s.from, s.to).replace(/^global\s+/, '').trim());
+            rawMethods.push({ name: methodName, from: stmtFrom, defStart: stmt.from, to: stmt.to, globals });
+            continue;
+        }
+
+        const isNestedCls = stmt.name === 'ClassDefinition'
+            || (stmt.name === 'DecoratedStatement' && directChildren(stmt).some(c => c.name === 'ClassDefinition'));
+        if (isNestedCls) {
+            hasNestedClass = true;
+        }
+        hasNonMethodBody = true;
+    }
+
+    if (rawMethods.length === 0) {
+        return {
+            frameCode: source.slice(classFrom, wrapper.to),
+            frameGlobals: contains(wrapper, ['ScopeStatement'])
+                .filter(s => s.firstChild?.name === 'global')
+                .map(s => source.slice(s.from, s.to).replace(/^global\s+/, '').trim()),
+            methods: [],
+        };
+    }
+
+    const methodNames = rawMethods.map(m => m.name);
+    const hasDuplicateMethods = new Set(methodNames).size !== methodNames.length;
+    if (hasNestedClass || hasDuplicateMethods) {
+        warnings.push(
+            `${filePath}: class ${className} kept monolithic (${hasNestedClass ? 'contains nested class' : 'defines duplicate method name'}).`,
+        );
+        return null;
+    }
+
+    const methods: SplitMethod[] = rawMethods.map(m => {
+        const lineStart = source.lastIndexOf('\n', m.defStart - 1) + 1;
+        const baseIndent = source.slice(lineStart, m.defStart).match(/^[ \t]*/)?.[0].length ?? 0;
+        const fromAtLineStart = source.lastIndexOf('\n', m.from - 1) + 1;
+        const rawSlice = source.slice(fromAtLineStart, m.to);
+        return {
+            name: m.name,
+            code: dedentBlock(rawSlice, baseIndent),
+            globals: m.globals,
+        };
+    });
+
+    const segments: string[] = [];
+    let cursor = classFrom;
+    for (const m of rawMethods) {
+        const cutFrom = source.lastIndexOf('\n', m.from - 1) + 1;
+        segments.push(source.slice(cursor, cutFrom));
+        cursor = m.to;
+        while (cursor < wrapper.to && (source[cursor] === ' ' || source[cursor] === '\t')) cursor++;
+        if (cursor < wrapper.to && source[cursor] === '\r') cursor++;
+        if (cursor < wrapper.to && source[cursor] === '\n') cursor++;
+    }
+    segments.push(source.slice(cursor, wrapper.to));
+    const frameLines = segments.join('').replace(/\r\n?/g, '\n').split('\n');
+    while (frameLines.length > 0 && frameLines[frameLines.length - 1].trim() === '') frameLines.pop();
+    if (!hasNonMethodBody) {
+        frameLines.push('    pass');
+    }
+
+    const frameCode = frameLines.join('\n');
+    const frameGlobals = contains(parser.parse(`${frameCode}\n`).topNode, ['ScopeStatement'])
+        .filter(s => s.firstChild?.name === 'global')
+        .map(s => `${frameCode}\n`.slice(s.from, s.to).replace(/^global\s+/, '').trim());
+
+    return { frameCode, frameGlobals, methods };
+}
+
+function scanModule(path: string, source: string, warnings: string[], splitClasses: boolean): ModuleScan {
     const top = parser.parse(source).topNode;
     const children: SyntaxNode[] = [];
     for (let child = top.firstChild; child; child = child.nextSibling) children.push(child);
@@ -105,6 +246,20 @@ function scanModule(path: string, source: string, warnings: string[]): ModuleSca
                 warnings.push(`${path}: ${name} is defined more than once; kept the last definition.`);
                 definitions.splice(existing, 1);
             }
+            if (splitClasses && isClassNode(child)) {
+                const split = splitClassNode(child, from, name, source, path, warnings);
+                if (split) {
+                    definitions.push({
+                        name,
+                        code: split.frameCode,
+                        globals: split.frameGlobals,
+                        kind: 'class',
+                        methods: split.methods,
+                    });
+                    defined.add(name);
+                    continue;
+                }
+            }
             const globals = contains(child, ['ScopeStatement'])
                 .filter(statement => statement.firstChild?.name === 'global')
                 .map(statement => source.slice(statement.from, statement.to).replace(/^global\s+/, '').trim());
@@ -131,7 +286,11 @@ function scanModule(path: string, source: string, warnings: string[]): ModuleSca
     };
 }
 
-export function portPythonProject(files: ReadonlyMap<string, string>): { nodes: Map<string, SlateNode>; report: PortReport } {
+export function portPythonProject(
+    files: ReadonlyMap<string, string>,
+    options?: { splitClasses?: boolean },
+): { nodes: Map<string, SlateNode>; report: PortReport } {
+    const splitClasses = options?.splitClasses !== false;
     const warnings: string[] = [];
     const scans: ModuleScan[] = [];
     for (const [path, source] of [...files].sort(([left], [right]) => left.localeCompare(right))) {
@@ -141,7 +300,7 @@ export function portPythonProject(files: ReadonlyMap<string, string>): { nodes: 
             continue;
         }
         if (path === '__init__.py') warnings.push(`${path}: root package definitions become root-level nodes.`);
-        scans.push(scanModule(path, source, warnings));
+        scans.push(scanModule(path, source, warnings, splitClasses));
     }
     const byFolder = new Map(scans.map(scan => [scan.folder, scan]));
     const preludeNames = new Map(scans.map(scan => [scan.folder, topLevelBindings(scan.prelude)]));
@@ -192,7 +351,13 @@ export function portPythonProject(files: ReadonlyMap<string, string>): { nodes: 
 
         const ownPrelude = preludeNames.get(scan.folder)!;
         const local = new Set(scan.definitions.map(definition => definition.name));
-        const makeNode = (name: string, code: string, kind?: NodeKind, order?: number): SlateNode => {
+        const makeNode = (
+            name: string,
+            code: string,
+            kind?: NodeKind,
+            order?: number,
+            classOwner?: string,
+        ): SlateNode => {
             const names = identifierNames(code);
             const uses = new Set<string>();
             for (const [binding, nodeId] of provided) if (names.has(binding)) uses.add(nodeId);
@@ -201,7 +366,11 @@ export function portPythonProject(files: ReadonlyMap<string, string>): { nodes: 
                 uses.add(join(scan.folder, PRELUDE));
             }
             return {
-                name, kind, order, intent: '', contract: '', context: [], examples: [], locked: false,
+                name,
+                ...(kind !== undefined ? { kind } : {}),
+                ...(classOwner !== undefined ? { classOwner } : {}),
+                ...(order !== undefined ? { order } : {}),
+                intent: '', contract: '', context: [], examples: [], locked: false,
                 imports: [...new Set(kept.filter(item => item.binding === null || names.has(item.binding)).map(item => item.line))],
                 uses: [...uses].sort(),
                 code: codeLines(code),
@@ -215,9 +384,16 @@ export function portPythonProject(files: ReadonlyMap<string, string>): { nodes: 
         }
         scan.definitions.forEach((definition, order) => {
             const nodeId = join(scan.folder, definition.name);
-            nodes.set(nodeId, makeNode(definition.name, definition.code, undefined, order));
+            nodes.set(nodeId, makeNode(definition.name, definition.code, definition.kind, order));
             for (const name of definition.globals) warnings.push(`${nodeId} uses global ${name}.`);
             if (ownPrelude.has(definition.name)) warnings.push(`${nodeId}: the prelude also binds ${definition.name}.`);
+            if (definition.methods && definition.methods.length > 0) {
+                definition.methods.forEach((method, methodOrder) => {
+                    const methodId = `${nodeId}/${method.name}`;
+                    nodes.set(methodId, makeNode(method.name, method.code, undefined, methodOrder, nodeId));
+                    for (const gName of method.globals) warnings.push(`${methodId} uses global ${gName}.`);
+                });
+            }
         });
         if (scan.epilogue.trim()) {
             nodes.set(join(scan.folder, EPILOGUE), makeNode(EPILOGUE, scan.epilogue, 'epilogue'));

@@ -291,7 +291,9 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
             {data.contextPorts && !data.container && <Handle type="target" position={Position.Top} id="ctx-in" className="slate-node__ctx" title="Context in" />}
             {plainHandles && <Handle type="source" position={Position.Right} className="slate-node__handle" />}
             {data.kind !== 'folder' && <div className="slate-node__kind">
-                <span data-testid={data.kind === 'region' && data.region ? `region-badge-${data.region.kind}` : undefined}>{kindLabel}</span>
+                <span data-testid={data.kind === 'region' && data.region ? `region-badge-${data.region.kind}` : undefined}>
+                    {data.kind === 'class' && data.container ? 'class frame' : kindLabel}
+                </span>
                 <span>
                     {data.problem && <span className="slate-node__problem" data-testid="node-problem-badge" title={data.problem}>!&nbsp;</span>}
                     {data.broken && <span className="slate-node__problem" title="The target no longer exists">BROKEN&nbsp;</span>}
@@ -337,7 +339,38 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
                     )}
                 </span>
             </div>}
-            <strong>{data.label}</strong>
+            <strong className="slate-node__title">
+                {data.label}
+                {data.kind === 'class' && data.container && data.classBases && data.classBases.length > 0 && (
+                    <span className="slate-class-frame__bases" title={`Inherits from ${data.classBases.join(', ')}`}>
+                        ({data.classBases.join(', ')})
+                    </span>
+                )}
+                {data.kind === 'class' && data.container && typeof data.methodCount === 'number' && (
+                    <span className="slate-class-frame__count" data-testid="class-frame-method-count">
+                        {data.methodCount} {data.methodCount === 1 ? 'method' : 'methods'}
+                    </span>
+                )}
+            </strong>
+            {data.kind === 'class' && data.container && data.classDecorators && data.classDecorators.length > 0 && (
+                <div className="slate-class-frame__decorators">
+                    {data.classDecorators.map(dec => <span key={dec} className="slate-class-frame__decorator">{dec}</span>)}
+                </div>
+            )}
+            {data.kind === 'class' && data.container && data.classFields && data.classFields.length > 0 && (
+                <div className="slate-class-frame__fields" data-testid="class-frame-fields">
+                    {data.classFields.slice(0, 4).map(field => (
+                        <div key={field.name} className="slate-class-frame__field" title={field.raw}>
+                            <span className="slate-class-frame__field-name">{field.name}</span>
+                            {field.annotation && <span className="slate-class-frame__field-type">: {field.annotation}</span>}
+                            {field.defaultValue && <span className="slate-class-frame__field-default"> = {field.defaultValue}</span>}
+                        </div>
+                    ))}
+                    {data.classFields.length > 4 && (
+                        <div className="slate-class-frame__field-more">+{data.classFields.length - 4} more…</div>
+                    )}
+                </div>
+            )}
             {!data.container && data.kind !== 'value' && data.kind !== 'viewer' && data.detail && <code>{data.detail}</code>}
             {data.kind === 'region' && data.childFlows && data.childFlows.length > 0 && (
                 <div className="slate-node__region-flows" data-testid="region-child-flows">
@@ -348,9 +381,9 @@ function SlateNode({ id, data, selected }: NodeProps<Node<SlateNodeData>>) {
             )}
             {data.kind === 'value' && <ValueEditor id={id} value={data.value ?? ''} />}
             {data.kind === 'viewer' && <ViewerNodeView id={id} data={data} />}
-            {data.editableIntent && data.unit && !data.container
+            {data.editableIntent && data.unit && (!data.container || data.classFields !== undefined)
                 ? <InlineIntent unitId={data.unit.id} intent={data.intent ?? ''} />
-                : data.intent && !data.container && <p className="slate-node__intent">{data.intent}</p>}
+                : data.intent && (!data.container || data.classFields !== undefined) && <p className="slate-node__intent">{data.intent}</p>}
             {!data.container && <PortRows inputs={data.inputs} outputs={data.outputs} />}
             {data.observedOutputs && Object.keys(data.observedOutputs).length > 0 && !data.container && (
                 <div className="slate-node__observed-values" data-testid="node-observed-values">

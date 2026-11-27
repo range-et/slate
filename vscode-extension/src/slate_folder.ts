@@ -4,7 +4,7 @@ import * as ts from 'typescript';
 
 import { checkCppNodeCode, parseCppModule } from './cpp_adapter';
 import { checkCSharpNodeCode, parseCSharpModule } from './csharp_adapter';
-import type { BoardNote, CanvasRef, HarnessDocument, NodeVerificationResult, ParseModuleResult, Placeholder, Point } from './harness_protocol';
+import type { BoardNote, CanvasRef, ClassFrameField, ClassFrameMeta, HarnessDocument, NodeVerificationResult, ParseModuleResult, Placeholder, Point } from './harness_protocol';
 import {
     codeLines,
     codeText,
@@ -88,8 +88,10 @@ export interface SlateNode {
     examples: string[];
     describedBy?: 'human' | 'llama';
     locked: boolean;
-    /** Module-level statements instead of one definition: `prelude` compiles before the nodes, `epilogue` after. */
+    /** Special node kind: `prelude`/`epilogue` module state, or `class` frame container (methods in owned nodes). */
     kind?: NodeKind;
+    /** Owning class frame node ID when this atomic node is a class method. */
+    classOwner?: string;
     /** Compile order within the output module (importer-assigned); otherwise node id order. */
     order?: number;
     imports: string[];
@@ -100,9 +102,9 @@ export interface SlateNode {
     extra: Record<string, unknown>;
 }
 
-export type NodeKind = 'prelude' | 'epilogue';
+export type NodeKind = 'prelude' | 'epilogue' | 'class';
 
-const NODE_KEYS = ['slate', 'name', 'language', 'kind', 'intent', 'contract', 'context', 'cases', 'check', 'verification', 'examples', 'describedBy', 'locked', 'order', 'imports', 'uses', 'code'];
+const NODE_KEYS = ['slate', 'name', 'language', 'kind', 'classOwner', 'intent', 'contract', 'context', 'cases', 'check', 'verification', 'examples', 'describedBy', 'locked', 'order', 'imports', 'uses', 'code'];
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ZERO_RANGE = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
 
@@ -342,8 +344,18 @@ export function parseNode(text: string): SlateNode {
         throw new SlateFormatError('describedBy must be "human" or "llama"');
     }
     if (value.locked !== undefined && typeof value.locked !== 'boolean') throw new SlateFormatError('locked must be true or false');
-    if (value.kind !== undefined && value.kind !== 'prelude' && value.kind !== 'epilogue') {
-        throw new SlateFormatError('kind must be "prelude" or "epilogue"');
+    if (value.kind !== undefined && value.kind !== 'prelude' && value.kind !== 'epilogue' && value.kind !== 'class') {
+        throw new SlateFormatError('kind must be "prelude", "epilogue", or "class"');
+    }
+    let classOwner: string | undefined;
+    if (value.classOwner !== undefined) {
+        if (typeof value.classOwner !== 'string' || !value.classOwner.trim()) {
+            throw new SlateFormatError('classOwner must be a non-empty class node ID');
+        }
+        classOwner = assertSafeNodeId(value.classOwner);
+        if (value.kind !== undefined) {
+            throw new SlateFormatError('a node cannot declare both "kind" and "classOwner"');
+        }
     }
     if (value.order !== undefined && !Number.isInteger(value.order)) throw new SlateFormatError('order must be an integer');
     const extra: Record<string, unknown> = {};
@@ -361,6 +373,7 @@ export function parseNode(text: string): SlateNode {
         describedBy: value.describedBy as SlateNode['describedBy'],
         locked: value.locked === true,
         kind: value.kind as NodeKind | undefined,
+        classOwner,
         order: value.order as number | undefined,
         imports: stringList(value.imports, 'imports'),
         uses: stringList(value.uses, 'uses'),
@@ -373,6 +386,7 @@ export function serializeNode(node: SlateNode): string {
     const value: Record<string, unknown> = { slate: FORMAT_VERSION, name: node.name };
     if (node.language) value.language = node.language;
     if (node.kind) value.kind = node.kind;
+    if (node.classOwner) value.classOwner = node.classOwner;
     if (node.intent) value.intent = node.intent;
     if (node.contract) value.contract = node.contract;
     if (node.context.length) value.context = node.context;
@@ -494,16 +508,23 @@ export function indexNode(
     }
 
     const diagnostics = [...parsed.diagnostics];
-    if (node.kind) {
+    if (node.kind === 'prelude' || node.kind === 'epilogue') {
         // Module state: any statements; conditional definitions inside it are not separate nodes.
         return { document: { ...parsed, ...base, source: code, nodeKind: node.kind, imports: node.imports, uses: node.uses, units: [], diagnostics }, node, code };
     }
+    const isClassFrame = node.kind === 'class';
+    const classMeta = isClassFrame && canonical === 'python'
+        ? extractClassFrameMetadata(code)
+        : undefined;
     if (parsed.valid) {
         const topLevel = parsed.units.filter(unit => unit.parentId === null);
         const definition = topLevel.find(unit => unit.id === nodeId);
         if (!definition) {
             diagnostics.push({ code: 'node-definition-missing', message: `code must define ${node.name}.`, range: ZERO_RANGE });
         } else {
+            if (node.classOwner && definition.kind === 'function') {
+                definition.kind = 'method';
+            }
             definition.annotation = {
                 intent: node.intent,
                 contract: node.contract,
@@ -515,7 +536,15 @@ export function indexNode(
                 examples: node.examples,
                 verification: node.verification,
                 locked: node.locked,
+                ...(node.classOwner ? { classOwner: node.classOwner } : {}),
             };
+        }
+        if (isClassFrame && canonical === 'python' && classMeta?.hasMethods) {
+            diagnostics.push({
+                code: 'class-frame-has-methods',
+                message: `Class frame "${node.name}" must contain only the class header and attributes/fields; move methods into owned method nodes.`,
+                range: ZERO_RANGE,
+            });
         }
         if (canonical === 'python' && (topLevel.length > 1 || extraPythonStatements(code) > 0)) {
             diagnostics.push({
@@ -537,34 +566,200 @@ export function indexNode(
         if (leafId !== node.name && !isOverloadId) {
             diagnostics.push({ code: 'node-name-mismatch', message: `File name must match name "${node.name}".`, range: ZERO_RANGE });
         }
-        if (options?.checkJpl60 && !node.kind) {
+        if (options?.checkJpl60) {
             let jpl: Jpl60CheckResult | null = null;
             if (canonical === 'python') {
                 jpl = checkJpl60(node, code);
-            } else if (canonical === 'typescript' || canonical === 'javascript') {
+            } else if (!node.kind && (canonical === 'typescript' || canonical === 'javascript')) {
                 jpl = checkTsNodeCode(code, node.name, { contract: node.contract, language: canonical });
-            } else if (canonical === 'csharp') {
+            } else if (!node.kind && canonical === 'csharp') {
                 jpl = checkCSharpNodeCode(node, nodeId, code, { contract: node.contract, requireContract: true });
-            } else if (canonical === 'cpp' || canonical === 'arduino') {
+            } else if (!node.kind && (canonical === 'cpp' || canonical === 'arduino')) {
                 jpl = checkCppNodeCode(node, nodeId, code, { contract: node.contract, requireContract: true });
             }
             if (jpl) {
                 for (const diag of jpl.diagnostics) {
-                    if (diag.code === 'node-definition-missing' || diag.code === 'node-extra-statements' || diag.code === 'node-name-mismatch') continue;
+                    if (diag.code === 'node-definition-missing' || diag.code === 'node-extra-statements' || diag.code === 'node-name-mismatch' || diag.code === 'class-frame-has-methods') continue;
                     diagnostics.push({ code: diag.code, message: diag.message, range: ZERO_RANGE });
                 }
             }
         }
     }
-    return { document: { ...parsed, ...base, source: code, imports: node.imports, uses: node.uses, verification: node.verification, cases: (node.cases as any), diagnostics }, node, code };
+    return {
+        document: {
+            ...parsed,
+            ...base,
+            source: code,
+            ...(isClassFrame ? { nodeKind: 'class' as const } : {}),
+            ...(node.classOwner ? { classOwner: node.classOwner } : {}),
+            ...(classMeta ? { classMeta } : {}),
+            imports: node.imports,
+            uses: node.uses,
+            verification: node.verification,
+            cases: (node.cases as any),
+            diagnostics,
+        },
+        node,
+        code,
+    };
 }
 
-/** Check JPL-60 rules: <=60 lines, explicit parameter & return type annotations, contract documentation. */
+/** Whether parameter `paramName` at `index` is an implicit `self`/`cls` receiver on an owned method (not `@staticmethod`). */
+export function isMethodReceiverParam(
+    paramName: string,
+    index: number,
+    decorators: readonly string[] = [],
+    isOwnedMethod = false,
+): boolean {
+    if (!isOwnedMethod || index !== 0) return false;
+    const isStatic = decorators.some(dec => {
+        const clean = dec.trim().replace(/^@/, '');
+        return clean === 'staticmethod' || clean.endsWith('.staticmethod');
+    });
+    if (isStatic) return false;
+    return paramName === 'self' || paramName === 'cls';
+}
+
+/** Extracts decorators, class name, base classes, attribute fields, and whether any method exists in Python class source. */
+export function extractClassFrameMetadata(
+    code: string | readonly string[],
+): ClassFrameMeta & { name: string } {
+    const source = `${typeof code === 'string' ? code.replace(/\r\n?/g, '\n') : codeLines(code.join('\n')).join('\n')}\n`;
+    const tree = parser.parse(source);
+    let hasSyntaxError = false;
+    const cursor = tree.cursor();
+    do {
+        if (cursor.type.isError) {
+            hasSyntaxError = true;
+            break;
+        }
+    } while (cursor.next());
+
+    if (hasSyntaxError) {
+        return { name: '', decorators: [], bases: [], fields: [], hasMethods: false };
+    }
+
+    let classNode: SyntaxNode | null = null;
+    const decorators: string[] = [];
+    for (let child = tree.topNode.firstChild; child; child = child.nextSibling) {
+        if (child.name === 'Comment') continue;
+        if (child.name === 'ClassDefinition') {
+            if (classNode) return { name: '', decorators: [], bases: [], fields: [], hasMethods: false };
+            classNode = child;
+        } else if (child.name === 'DecoratedStatement') {
+            const innerClass = directNodeChildren(child).find(c => c.name === 'ClassDefinition') ?? null;
+            if (!innerClass || classNode) return { name: '', decorators: [], bases: [], fields: [], hasMethods: false };
+            classNode = innerClass;
+            for (const dec of directNodeChildren(child).filter(c => c.name === 'Decorator')) {
+                const rawDec = source.slice(dec.from, dec.to).trim();
+                if (rawDec) decorators.push(rawDec);
+            }
+        } else {
+            return { name: '', decorators: [], bases: [], fields: [], hasMethods: false };
+        }
+    }
+
+    if (!classNode) {
+        return { name: '', decorators: [], bases: [], fields: [], hasMethods: false };
+    }
+
+    const nameNode = directNodeChildren(classNode).find(c => c.name === 'VariableName') ?? null;
+    const className = nameNode ? source.slice(nameNode.from, nameNode.to) : '';
+
+    const bases: string[] = [];
+    const argList = directNodeChildren(classNode).find(c => c.name === 'ArgList') ?? null;
+    if (argList) {
+        let segStart = argList.from + 1;
+        for (const item of directNodeChildren(argList)) {
+            if (item.name === ',') {
+                const baseText = source.slice(segStart, item.from).trim();
+                if (baseText) bases.push(baseText);
+                segStart = item.to;
+            }
+        }
+        const tailText = source.slice(segStart, argList.to - 1).trim();
+        if (tailText) bases.push(tailText);
+    }
+
+    const fields: ClassFrameField[] = [];
+    let hasMethods = false;
+    const bodyNode = directNodeChildren(classNode).find(c => c.name === 'Body') ?? null;
+    if (bodyNode) {
+        for (const stmt of directNodeChildren(bodyNode)) {
+            if (stmt.name === ':' || stmt.name === 'Comment') continue;
+            if (stmt.name === 'FunctionDefinition' || stmt.name === 'ClassDefinition' || stmt.name === 'DecoratedStatement') {
+                hasMethods = true;
+                continue;
+            }
+            if (stmt.name === 'AssignStatement') {
+                const parts = directNodeChildren(stmt);
+                const fieldVar = parts.find(p => p.name === 'VariableName');
+                if (!fieldVar) continue;
+                const typeDef = parts.find(p => p.name === 'TypeDef');
+                const assignOpIdx = parts.findIndex(p => p.name === 'AssignOp');
+                const fieldName = source.slice(fieldVar.from, fieldVar.to);
+                const annotation = typeDef ? source.slice(typeDef.from, typeDef.to).replace(/^\s*:\s*/, '').trim() : null;
+                const defaultValue = assignOpIdx >= 0 && parts[assignOpIdx + 1]
+                    ? source.slice(parts[assignOpIdx + 1].from, stmt.to).trim()
+                    : null;
+                fields.push({
+                    name: fieldName,
+                    annotation: annotation && annotation.length > 0 ? annotation : null,
+                    defaultValue: defaultValue && defaultValue.length > 0 ? defaultValue : null,
+                    raw: source.slice(stmt.from, stmt.to).trim(),
+                });
+            }
+        }
+    }
+
+    return { name: className, decorators, bases, fields, hasMethods };
+}
+
+/** Check JPL-60 rules: <=60 lines per function/method, explicit parameter & return type annotations, contract documentation. */
 export function checkJpl60(node: SlateNode, code?: string): Jpl60CheckResult {
     const rawLines = code !== undefined ? codeLines(code) : node.code;
     const lines = rawLines.flatMap(line => line.split(/\r?\n/));
     const executable = lines.filter(l => l.trim().length > 0 && !l.trim().startsWith('#')).length;
     const diagnostics: Array<{ code: string; message: string }> = [];
+
+    if (node.kind === 'class') {
+        const source = `${lines.join('\n')}\n`;
+        const parsed = parseModule(source, '<class-frame>', node.name);
+        if (!parsed.valid) {
+            diagnostics.push({
+                code: 'jpl60-class-syntax',
+                message: `Class frame "${node.name}" does not contain valid Python.`,
+            });
+        } else {
+            const topLevel = parsed.units.filter(u => u.parentId === null);
+            const classUnit = topLevel.find(u => u.kind === 'class' && u.name === node.name);
+            if (!classUnit || topLevel.length !== 1 || extraPythonStatements(source) > 0) {
+                diagnostics.push({
+                    code: 'jpl60-class-definition',
+                    message: `Class frame "${node.name}" must contain exactly one class named "${node.name}".`,
+                });
+            }
+            const meta = extractClassFrameMetadata(lines);
+            if (meta.hasMethods) {
+                diagnostics.push({
+                    code: 'class-frame-has-methods',
+                    message: `Class frame "${node.name}" must not embed methods; define methods as owned nodes instead.`,
+                });
+            }
+        }
+        if (!node.contract || !node.contract.trim()) {
+            diagnostics.push({
+                code: 'jpl60-contract-missing',
+                message: `Node "${node.name}" is missing contract documentation.`,
+            });
+        }
+        return {
+            valid: diagnostics.length === 0,
+            lineCount: lines.length,
+            executableLines: executable,
+            diagnostics,
+        };
+    }
 
     if (!node.kind && lines.length > 60) {
         diagnostics.push({
@@ -578,16 +773,27 @@ export function checkJpl60(node: SlateNode, code?: string): Jpl60CheckResult {
         const parsed = parseModule(source, '<node>', node.name);
         if (parsed.valid) {
             const def = parsed.units.find(u => u.parentId === null && u.name === node.name);
-            if (def && def.kind === 'function') {
+            if (def && (def.kind === 'function' || def.kind === 'method')) {
+                const isOwnedMethod = Boolean(node.classOwner);
+                if (isOwnedMethod && def.params) {
+                    const isStatic = def.decorators.some(d => d === 'staticmethod' || d.endsWith('.staticmethod'));
+                    if (!isStatic && (def.params.length === 0 || (def.params[0].name !== 'self' && def.params[0].name !== 'cls'))) {
+                        diagnostics.push({
+                            code: 'jpl60-method-receiver',
+                            message: `Owned method "${node.name}" must take "self" or "cls" as its first parameter unless decorated with @staticmethod.`,
+                        });
+                    }
+                }
                 if (def.params) {
-                    for (const p of def.params) {
+                    def.params.forEach((p, idx) => {
+                        if (isMethodReceiverParam(p.name, idx, def.decorators, isOwnedMethod)) return;
                         if (!p.annotation || !p.annotation.trim()) {
                             diagnostics.push({
                                 code: 'jpl60-param-annotation',
                                 message: `Parameter "${p.name}" in "${node.name}" is missing a type annotation.`,
                             });
                         }
-                    }
+                    });
                 }
                 if (!def.returnAnnotation || !def.returnAnnotation.trim()) {
                     diagnostics.push({
@@ -667,10 +873,22 @@ export function checkNodeCode(
     const source = `${codeLines(code).join('\n')}\n`;
     const parsed = parseModule(source, '<node>', nodeId);
     if (!parsed.valid) throw new SlateFormatError('code is not valid Python');
-    if (node.kind) return { valid: true, lineCount: codeLines(code).length, executableLines: codeLines(code).length, diagnostics: [] };
+    if (node.kind === 'prelude' || node.kind === 'epilogue') {
+        return { valid: true, lineCount: codeLines(code).length, executableLines: codeLines(code).length, diagnostics: [] };
+    }
     const topLevel = parsed.units.filter(unit => unit.parentId === null);
     if (topLevel.length !== 1 || topLevel[0].name !== node.name || extraPythonStatements(source) > 0) {
         throw new SlateFormatError(`code must contain exactly one definition named ${node.name} (put imports in "imports")`);
+    }
+    if (node.kind === 'class') {
+        if (topLevel[0].kind !== 'class') {
+            throw new SlateFormatError(`class frame "${node.name}" must contain a class definition.`);
+        }
+        if (extractClassFrameMetadata(code).hasMethods) {
+            throw new SlateFormatError(`Class frame "${node.name}" cannot contain method definitions; define methods as owned nodes instead.`);
+        }
+    } else if (node.classOwner && topLevel[0].kind !== 'function' && topLevel[0].kind !== 'method') {
+        throw new SlateFormatError(`owned method "${node.name}" must contain a function definition.`);
     }
     const result = checkJpl60(node, code);
     if (options?.enforceJpl60 && !result.valid) {
@@ -730,6 +948,94 @@ export function nodeFromSignature(signature: string, intent: string): SlateNode 
     return {
         name: unit.name, intent: intent.trim(), contract: '', context: [], examples: [],
         describedBy: 'human', locked: false, imports: [], uses: [], code, extra: {},
+    };
+}
+
+const ALLOWED_CLASS_FIELD_NODES = new Set([':', 'Comment', 'AssignStatement', 'ExpressionStatement']);
+
+/** A new class frame node (`kind: 'class'`) from a class header such as `class ConvBlock(nn.Module)`. */
+export function classFrameFromHeader(
+    signature: string,
+    intent: string,
+    fields: readonly string[] = [],
+    decorators: readonly string[] = [],
+    contract = '',
+): SlateNode {
+    const cleanHeader = signature.replace(/\r\n?/g, '\n').trim().replace(/:$/, '').trimEnd();
+    if (!cleanHeader || /\bdef\b/.test(cleanHeader.split(/\s+/)[0] ?? '')) {
+        throw new SlateFormatError('enter one class header, e.g. class ConvBlock(nn.Module)');
+    }
+    const decoratorLines = decorators
+        .map(d => d.replace(/\r\n?/g, '\n').trim())
+        .filter(Boolean)
+        .map(d => (d.startsWith('@') ? d : `@${d}`));
+    for (const dec of decoratorLines) {
+        if (/[\r\n]/.test(dec)) {
+            throw new SlateFormatError(`Decorator "${dec}" must be single-line.`);
+        }
+    }
+    const cleanFields = fields
+        .flatMap(f => f.replace(/\r\n?/g, '\n').split('\n'))
+        .map(line => line.trim())
+        .filter(Boolean);
+    const bodyLines = cleanFields.length > 0 ? cleanFields.map(f => `    ${f}`) : ['    pass'];
+    const code = [...decoratorLines, `${cleanHeader}:`, ...bodyLines];
+    const full = `${code.join('\n')}\n`;
+
+    const tree = parser.parse(full);
+    if (hasSyntaxErrorOrForbiddenChild(tree.topNode, new Set())) {
+        throw new SlateFormatError('Invalid Python syntax in class frame.');
+    }
+    const parsed = parseModule(full, '<new class>');
+    const topLevel = parsed.units.filter(u => u.parentId === null);
+    const unit = parsed.valid && topLevel.length === 1 ? topLevel[0] : null;
+    if (!unit || unit.kind !== 'class' || extraPythonStatements(full) > 0) {
+        throw new SlateFormatError('enter one class header, e.g. class ConvBlock(nn.Module)');
+    }
+
+    const topKids = directNodeChildren(tree.topNode).filter(c => c.name !== 'Comment');
+    const decOrClass = topKids.length === 1 ? topKids[0] : null;
+    const classNode = decOrClass?.name === 'DecoratedStatement'
+        ? directNodeChildren(decOrClass).find(c => c.name === 'ClassDefinition') ?? null
+        : decOrClass?.name === 'ClassDefinition'
+            ? decOrClass
+            : null;
+    const bodyNode = classNode ? directNodeChildren(classNode).find(c => c.name === 'Body') ?? null : null;
+    if (!bodyNode) {
+        throw new SlateFormatError('Class frame must have a valid body.');
+    }
+    for (const stmt of directNodeChildren(bodyNode)) {
+        if (!ALLOWED_CLASS_FIELD_NODES.has(stmt.name)) {
+            if (stmt.name === 'PassStatement' || (stmt.name === 'ExpressionStatement' && stmt.firstChild?.name === 'Ellipsis')) {
+                continue;
+            }
+            throw new SlateFormatError(
+                `Class frame body only allows typed attributes/fields or pass (refused ${stmt.name}: "${full.slice(stmt.from, stmt.to).trim()}"). Move methods into owned method nodes.`,
+            );
+        }
+        if (stmt.name === 'ExpressionStatement') {
+            const inner = stmt.firstChild;
+            if (!inner || (inner.name !== 'String' && inner.name !== 'Ellipsis')) {
+                throw new SlateFormatError(
+                    `Class frame body only allows docstrings, fields, or pass (refused expression "${full.slice(stmt.from, stmt.to).trim()}").`,
+                );
+            }
+        }
+    }
+
+    return {
+        name: unit.name,
+        kind: 'class',
+        intent: intent.trim(),
+        contract: contract.trim(),
+        context: [],
+        examples: [],
+        describedBy: 'human',
+        locked: false,
+        imports: [],
+        uses: [],
+        code,
+        extra: {},
     };
 }
 

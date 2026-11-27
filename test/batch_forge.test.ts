@@ -1088,4 +1088,118 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         expect(result.ok).toBe(true);
         expect(observedCmds[0]).toBe(path.resolve(tmpDir, '.venv/bin/python'));
     });
+
+    it('skips class frames and forges owned __init__ before dependent sibling methods across waves', async () => {
+        const frame: SlateNode = {
+            name: 'Counter',
+            kind: 'class',
+            intent: 'Bounded integer counter',
+            contract: 'Maintains total count',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            code: ['class Counter:', '    pass'],
+            extra: {},
+        };
+        const initStub: SlateNode = {
+            name: '__init__',
+            classOwner: 'Counter',
+            intent: 'Initialize Counter with start value',
+            contract: 'Stores self.total = start',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            cases: [{ name: 'init_ok', inputs: { start: 10 }, code: 'c = Counter(10)\nassert c.total == 10' }],
+            code: ['def __init__(self, start: int) -> None:', '    raise NotImplementedError'],
+            extra: {},
+        };
+        const stepStub: SlateNode = {
+            name: 'increment',
+            classOwner: 'Counter',
+            intent: 'Increment self.total by delta and return it',
+            contract: 'Updates and returns total',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            cases: [{ name: 'step_ok', init: { start: 10 }, inputs: { delta: 5 }, expected: 15 }],
+            code: ['def increment(self, delta: int) -> int:', '    raise NotImplementedError'],
+            extra: {},
+        };
+
+        await fs.mkdir(path.join(tmpDir, 'slate', 'nodes', 'Counter'), { recursive: true });
+        await fs.writeFile(
+            path.join(tmpDir, 'slate', 'slate.json'),
+            JSON.stringify({ slate: 3, name: 'counter_pkg', language: 'python', llm: { provider: 'openai-compatible', model: 'tiny' } }, null, 2),
+            'utf8',
+        );
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter.json'), serializeNode(frame), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', '__init__.json'), serializeNode(initStub), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', 'increment.json'), serializeNode(stepStub), 'utf8');
+
+        const callOrder: string[] = [];
+        activeServer = await startCustomSseServer(body => {
+            const prompt = String(body.messages?.[1]?.content ?? '');
+            if (prompt.includes('### Target stub: __init__')) {
+                callOrder.push('__init__');
+                return [
+                    '### Implementation',
+                    '```python',
+                    'def __init__(self, start: int) -> None:',
+                    '    self.total = start',
+                    '```',
+                    '### Unit Check',
+                    '```python',
+                    'def test___init__():',
+                    '    assert Counter(4).total == 4',
+                    '```',
+                ].join('\n');
+            }
+            callOrder.push('increment');
+            expect(prompt).toContain('Owning class frame: Counter');
+            return [
+                '### Implementation',
+                '```python',
+                'def increment(self, delta: int) -> int:',
+                '    self.total += delta',
+                '    return self.total',
+                '```',
+                '### Unit Check',
+                '```python',
+                'def test_increment():',
+                '    c = Counter(2)',
+                '    assert c.increment(3) == 5',
+                '```',
+            ].join('\n');
+        });
+
+        const res = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: true,
+            allStubs: true,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(res.ok, JSON.stringify(res.results)).toBe(true);
+        expect(res.waves).toBe(2);
+        expect(res.forgedCount).toBe(2);
+        expect(callOrder).toEqual(['__init__', 'increment']);
+
+        // Explicitly targeting class frame reports skipped cleanly
+        const frameSkip = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: true,
+            nodeIds: ['Counter'],
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(frameSkip.skippedCount).toBe(1);
+        expect(frameSkip.results[0].reason).toContain('Class frame node cannot be forged directly');
+    }, 25_000);
 });

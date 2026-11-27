@@ -28,8 +28,14 @@ export const EMBEDDED_NODE_SCHEMA = {
         },
         kind: {
             type: 'string',
-            enum: ['prelude', 'epilogue'],
-            description: 'Module-level statements instead of one function definition',
+            enum: ['prelude', 'epilogue', 'class'],
+            description: 'Special node kind: module state (`prelude`/`epilogue`) or class frame container (`class`)',
+        },
+        classOwner: {
+            type: 'string',
+            minLength: 1,
+            pattern: '\\S',
+            description: 'Owning class frame node ID when this atomic node represents a class method',
         },
         intent: {
             type: 'string',
@@ -159,11 +165,27 @@ export const EMBEDDED_NODE_SCHEMA = {
         },
         code: {
             type: 'array',
-            description: 'Python source lines bounded by JPL-60 (<=60 lines per atomic node)',
+            description: 'Python source lines bounded by JPL-60 (<=60 lines per atomic function/method node; class frames and module state are exempt)',
             items: {
                 type: 'string',
             },
-            maxItems: 60,
+        },
+    },
+    if: {
+        properties: {
+            kind: {
+                enum: ['class', 'prelude', 'epilogue'],
+            },
+        },
+        required: ['kind'],
+    },
+    then: {},
+    else: {
+        properties: {
+            code: {
+                type: 'array',
+                maxItems: 60,
+            },
         },
     },
     additionalProperties: true,

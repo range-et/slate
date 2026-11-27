@@ -8,7 +8,7 @@ import { parseFlow, unitSignature, type CallableSignature } from './flow';
 import type { ParsedUnit, SlateFlow } from './harness_protocol';
 import { compileProjectForLanguage, tryNormalizeLanguage } from './language_adapter';
 import { parseModule } from './python_adapter';
-import { parseConfig, parseNode, type SlateCiConfig, type SlateConfig, type SlateNode } from './slate_folder';
+import { extractClassFrameMetadata, isMethodReceiverParam, parseConfig, parseNode, type SlateCiConfig, type SlateConfig, type SlateNode } from './slate_folder';
 import { parseTsModule } from './ts_adapter';
 
 export interface ResolvedCiConfig {
@@ -218,7 +218,8 @@ export function validateNodeSchema(data: unknown, sourceLabel = '<node>'): Schem
     if (typeof record.contract === 'string' && record.contract.trim().length === 0) {
         errors.push(`${sourceLabel}: "contract" is required documentation and must be a non-empty string`);
     }
-    if (Array.isArray(record.code)) {
+    const isExemptLineLimit = record.kind === 'class' || record.kind === 'prelude' || record.kind === 'epilogue';
+    if (!isExemptLineLimit && Array.isArray(record.code)) {
         const flatLines = record.code.flatMap(line => (typeof line === 'string' ? line.split(/\r?\n/) : [line]));
         if (flatLines.length > 60) {
             errors.push(`${sourceLabel}: code exceeds JPL-60 limit of 60 lines (${flatLines.length} lines > 60)`);
@@ -280,6 +281,29 @@ export function validateNodeAst(
         return { valid: errors.length === 0, errors, warnings, unit: null };
     }
 
+    if (node.kind === 'class') {
+        const parsedClass = tsLang
+            ? parseTsModule(codeText, relativePath.replace(/\.json$/, tsLang === 'javascript' ? '.js' : '.ts'), nodeName)
+            : parseModule(codeText, relativePath, nodeName);
+        if (!parsedClass.valid) {
+            const label = tsLang ? 'TypeScript/JavaScript' : 'Python';
+            errors.push(`${relativePath}: ${label} syntax error in class frame "${nodeName}": ${parsedClass.diagnostics.map(d => d.message).join('; ')}`);
+            return { valid: false, errors, warnings, unit: null };
+        }
+        const topLevelClass = parsedClass.units.filter(u => u.parentId === null);
+        if (topLevelClass.length !== 1 || topLevelClass[0].name !== nodeName || topLevelClass[0].kind !== 'class') {
+            errors.push(`${relativePath}: class frame "${nodeName}" must contain exactly one class definition named "${nodeName}".`);
+            return { valid: false, errors, warnings, unit: null };
+        }
+        if (!tsLang) {
+            const classMeta = extractClassFrameMetadata(codeLines);
+            if (classMeta.hasMethods) {
+                errors.push(`${relativePath}: [CLASS_FRAME_METHOD] Class frame "${nodeName}" cannot embed methods; define methods as owned nodes instead.`);
+            }
+        }
+        return { valid: errors.length === 0, errors, warnings, unit: topLevelClass[0] };
+    }
+
     const parsed = tsLang
         ? parseTsModule(codeText, relativePath.replace(/\.json$/, tsLang === 'javascript' ? '.js' : '.ts'), nodeName)
         : parseModule(codeText, relativePath, nodeName);
@@ -297,16 +321,27 @@ export function validateNodeAst(
     }
 
     const definition = topLevel[0];
-    if (definition.kind !== 'function') {
+    const isOwnedMethod = typeof node.classOwner === 'string' && node.classOwner.trim().length > 0;
+    if (definition.kind !== 'function' && !(isOwnedMethod && definition.kind === 'method')) {
         errors.push(`${relativePath}: atomic unit "${nodeName}" must be a function, but is "${definition.kind}"`);
     }
 
+    if (isOwnedMethod && !tsLang && definition.params) {
+        const isStatic = definition.decorators.some(d => d === 'staticmethod' || d.endsWith('.staticmethod'));
+        if (!isStatic && (definition.params.length === 0 || (definition.params[0].name !== 'self' && definition.params[0].name !== 'cls'))) {
+            errors.push(`${relativePath}: [METHOD_RECEIVER] Owned method "${nodeName}" must accept "self" or "cls" as its first parameter unless decorated with @staticmethod`);
+        }
+    }
+
     if (definition.params) {
-        for (const param of definition.params) {
+        definition.params.forEach((param, idx) => {
+            if (!tsLang && isMethodReceiverParam(param.name, idx, definition.decorators, isOwnedMethod)) {
+                return;
+            }
             if (!param.annotation || param.annotation.trim().length === 0) {
                 errors.push(`${relativePath}: [STRICT_TYPING] Parameter "${param.name}" in function "${nodeName}" is missing a type annotation`);
             }
-        }
+        });
     }
 
     if (!definition.returnAnnotation || definition.returnAnnotation.trim().length === 0) {
@@ -418,14 +453,32 @@ export function checkProjectParity(projectDir: string, options?: { srcRoots?: st
     const nodesDir = path.join(projectDir, 'slate', 'nodes');
     const flowsDir = path.join(projectDir, 'slate', 'flows');
     const documentedUnits = new Set<string>();
+    const parsedNodes = new Map<string, SlateNode>();
+    const classFrameMethods = new Map<string, Set<string>>();
 
     for (const file of listJsonFiles(nodesDir)) {
         try {
+            const nodeId = file.slice(0, -'.json'.length);
             const node = parseNode(fs.readFileSync(path.join(nodesDir, file), 'utf8'));
-            documentedUnits.add(node.name);
-            documentedUnits.add(file.slice(0, -'.json'.length));
+            parsedNodes.set(nodeId, node);
+            if (!node.classOwner) {
+                documentedUnits.add(node.name);
+                documentedUnits.add(nodeId);
+            }
+            if (node.kind === 'class' && !classFrameMethods.has(node.name)) {
+                classFrameMethods.set(node.name, new Set<string>());
+            }
         } catch {
             // Node parse errors reported by schema/AST pillars
+        }
+    }
+    for (const [, node] of parsedNodes) {
+        if (!node.classOwner) continue;
+        const ownerNode = parsedNodes.get(node.classOwner);
+        if (ownerNode?.kind === 'class') {
+            const methods = classFrameMethods.get(ownerNode.name) ?? new Set<string>();
+            methods.add(node.name);
+            classFrameMethods.set(ownerNode.name, methods);
         }
     }
 
@@ -496,6 +549,23 @@ export function checkProjectParity(projectDir: string, options?: { srcRoots?: st
                     errors.push(
                         `[ROGUE_FUNCTION] Undocumented function "${unit.name}" found at ${relativePath}:${unit.ranges.name.start.line + 1}. Every defined function must originate from and map to a documented slate/nodes/ or slate/flows/ unit.`,
                     );
+                }
+            } else if (unit.parentId === null && unit.kind === 'class') {
+                if (!documentedUnits.has(unit.name)) {
+                    errors.push(
+                        `[ROGUE_CLASS] Undocumented class "${unit.name}" found at ${relativePath}:${unit.ranges.name.start.line + 1}. Every defined class must originate from and map to a documented slate/nodes/ class frame unit.`,
+                    );
+                } else {
+                    const frameMethods = classFrameMethods.get(unit.name);
+                    if (frameMethods && !libraryUnits.has(unit.name)) {
+                        for (const member of parsed.units) {
+                            if (member.parentId === unit.id && member.kind === 'method' && !frameMethods.has(member.name)) {
+                                errors.push(
+                                    `[ROGUE_METHOD] Undocumented method "${unit.name}.${member.name}" found at ${relativePath}:${member.ranges.name.start.line + 1}. Every method on class "${unit.name}" must map to an owned node under slate/nodes/.`,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -685,15 +755,25 @@ export function checkProjectTests(
     const resolvedCi = resolveCiConfig(config, options);
     const tsMode = isTsLikeLanguage(config.language) !== null;
 
-    const atomicNodes: Array<{ nodeId: string; node: SlateNode }> = [];
+    const nodesById = new Map<string, SlateNode>();
+    const atomicNodes: Array<{ nodeId: string; node: SlateNode; ownerClassName?: string }> = [];
+    const classNames = new Set<string>();
     for (const file of listJsonFiles(path.join(projectDir, 'slate', 'nodes'))) {
         try {
+            const nodeId = file.slice(0, -'.json'.length);
             const node = parseNode(fs.readFileSync(path.join(projectDir, 'slate', 'nodes', file), 'utf8'));
-            if (node.kind === 'prelude' || node.kind === 'epilogue') continue;
-            atomicNodes.push({ nodeId: file.slice(0, -'.json'.length), node });
+            nodesById.set(nodeId, node);
+            if (node.kind === 'class') {
+                classNames.add(node.name);
+            }
         } catch {
             // Node parse errors reported by schema/AST pillars
         }
+    }
+    for (const [nodeId, node] of nodesById) {
+        if (node.kind === 'prelude' || node.kind === 'epilogue' || node.kind === 'class') continue;
+        const ownerClassName = node.classOwner ? nodesById.get(node.classOwner)?.name : undefined;
+        atomicNodes.push({ nodeId, node, ownerClassName });
     }
 
     const flowNames = new Set<string>();
@@ -722,11 +802,29 @@ export function checkProjectTests(
             continue;
         }
         let mappedAny = false;
-        for (const { nodeId, node } of atomicNodes) {
+        for (const { nodeId, node, ownerClassName } of atomicNodes) {
             const namePattern = new RegExp(`\\b${escapeRegExp(node.name)}\\b`);
-            if (namePattern.test(testEntry.text)) {
+            const initMatch = Boolean(
+                ownerClassName
+                && node.name === '__init__'
+                && new RegExp(`\\b${escapeRegExp(ownerClassName)}\\s*\\(`).test(testEntry.text),
+            );
+            const methodOnClassMatch = Boolean(
+                ownerClassName
+                && new RegExp(`\\b${escapeRegExp(ownerClassName)}\\b`).test(testEntry.text)
+                && (node.name === '__init__' || namePattern.test(testEntry.text)),
+            );
+            if (namePattern.test(testEntry.text) || initMatch || methodOnClassMatch) {
                 coveredByExternalTests.add(nodeId);
                 mappedAny = true;
+            }
+        }
+        if (!mappedAny) {
+            for (const clsName of classNames) {
+                if (new RegExp(`\\b${escapeRegExp(clsName)}\\b`).test(testEntry.text)) {
+                    mappedAny = true;
+                    break;
+                }
             }
         }
         if (!mappedAny) {
@@ -805,8 +903,10 @@ export function verifyProjectCi(projectDir: string, options?: CiVerifyOptions): 
     let atomicNodesCount = 0;
 
     const nodesDir = path.join(resolvedProjectDir, 'slate', 'nodes');
+    const parsedNodeRecords = new Map<string, Record<string, unknown>>();
     for (const file of listJsonFiles(nodesDir)) {
         nodesCount++;
+        const nodeId = file.slice(0, -'.json'.length);
         const fullPath = path.join(nodesDir, file);
         let raw: string;
         try {
@@ -822,7 +922,8 @@ export function verifyProjectCi(projectDir: string, options?: CiVerifyOptions): 
             schemaErrors.push(`${file}: not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
             continue;
         }
-        if (data.kind !== 'prelude' && data.kind !== 'epilogue') {
+        parsedNodeRecords.set(nodeId, data);
+        if (data.kind !== 'prelude' && data.kind !== 'epilogue' && data.kind !== 'class') {
             atomicNodesCount++;
         }
 
@@ -836,6 +937,16 @@ export function verifyProjectCi(projectDir: string, options?: CiVerifyOptions): 
             stubErrors.push(...astRes.errors);
         }
         stubWarnings.push(...astRes.warnings);
+    }
+
+    for (const [nodeId, data] of parsedNodeRecords) {
+        if (typeof data.classOwner === 'string' && data.classOwner.trim()) {
+            const ownerId = data.classOwner.trim();
+            const ownerRec = parsedNodeRecords.get(ownerId);
+            if (!ownerRec || ownerRec.kind !== 'class') {
+                stubErrors.push(`${nodeId}.json: [ORPHAN_METHOD] Owned method references missing or non-class-frame classOwner "${ownerId}".`);
+            }
+        }
     }
 
     const flowsDir = path.join(resolvedProjectDir, 'slate', 'flows');

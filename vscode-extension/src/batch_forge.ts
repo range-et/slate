@@ -147,7 +147,17 @@ function collectTransitiveDependencies(
         dependencies.set(depId, depNode);
     };
 
-    for (const depId of [...rootNode.context, ...rootNode.uses]) {
+    const extraSeeds: string[] = [];
+    if (rootNode.classOwner) {
+        extraSeeds.push(rootNode.classOwner);
+        for (const [candidateId, candidateNode] of nodesById) {
+            if (candidateNode.classOwner === rootNode.classOwner && candidateId !== rootId) {
+                extraSeeds.push(candidateId);
+            }
+        }
+    }
+
+    for (const depId of [...rootNode.context, ...rootNode.uses, ...extraSeeds]) {
         visit(depId);
     }
     return { dependencies, missingDeps: Array.from(missingSet).sort() };
@@ -169,6 +179,12 @@ export function partitionTargetsIntoWaves<T extends { target: { nodeId: string; 
         byId.set(item.target.nodeId, item);
         lookupNodes.set(item.target.nodeId, item.target.node);
     }
+    const initTargetByOwner = new Map<string, string>();
+    for (const item of items) {
+        if (item.target.node.classOwner && item.target.node.name === '__init__') {
+            initTargetByOwner.set(item.target.node.classOwner, item.target.nodeId);
+        }
+    }
     const remaining = new Set<string>(byId.keys());
     const depsById = new Map<string, Set<string>>();
     for (const item of items) {
@@ -176,7 +192,22 @@ export function partitionTargetsIntoWaves<T extends { target: { nodeId: string; 
         const internalDeps = new Set<string>();
         for (const depId of transitive.dependencies.keys()) {
             if (depId !== item.target.nodeId && byId.has(depId)) {
+                const depNode = lookupNodes.get(depId);
+                // Sibling non-__init__ methods should not block each other or cycle; only __init__ runs in an earlier wave.
+                if (
+                    item.target.node.classOwner
+                    && depNode?.classOwner === item.target.node.classOwner
+                    && depNode.name !== '__init__'
+                ) {
+                    continue;
+                }
                 internalDeps.add(depId);
+            }
+        }
+        if (item.target.node.classOwner && item.target.node.name !== '__init__') {
+            const initId = initTargetByOwner.get(item.target.node.classOwner);
+            if (initId && initId !== item.target.nodeId) {
+                internalDeps.add(initId);
             }
         }
         depsById.set(item.target.nodeId, internalDeps);
@@ -310,6 +341,8 @@ function computeForgeInputFingerprint(
         ]);
     const payload = {
         language: node.language ?? null,
+        kind: node.kind ?? null,
+        classOwner: node.classOwner ?? null,
         intent: node.intent,
         contract: node.contract,
         cases: node.cases ?? [],
@@ -579,7 +612,16 @@ async function forgeSingleTarget(
                 diskVisited.add(depId);
                 currentDeps.set(depId, depNode);
             };
-            for (const depId of [...diskNode.context, ...diskNode.uses]) {
+            const diskExtraSeeds: string[] = [];
+            if (diskNode.classOwner) {
+                diskExtraSeeds.push(diskNode.classOwner);
+                for (const [candidateId, candidateNode] of nodesById) {
+                    if (candidateNode.classOwner === diskNode.classOwner && candidateId !== target.nodeId) {
+                        diskExtraSeeds.push(candidateId);
+                    }
+                }
+            }
+            for (const depId of [...diskNode.context, ...diskNode.uses, ...diskExtraSeeds]) {
                 await visitDiskDep(depId);
             }
             const currentHash = sourceHash(codeText(diskNode));
@@ -766,7 +808,9 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                 results.push({
                     nodeId: req.nodeId,
                     status: 'skipped',
-                    reason: `Module ${node.kind} node cannot be forged as an atomic function.`,
+                    reason: node.kind === 'class'
+                        ? 'Class frame node cannot be forged directly; forge its owned method nodes instead.'
+                        : `Module ${node.kind} node cannot be forged as an atomic function.`,
                     attempts: 0,
                     written: false,
                     durationMs: 0,

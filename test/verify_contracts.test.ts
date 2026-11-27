@@ -669,4 +669,129 @@ describe('4-Pillar CI gate (ci_verifier & standalone CLI)', () => {
         expect(report.pillars.code.valid).toBe(true);
         expect(report.pillars.test.valid).toBe(true);
     });
+
+    it('validates class frames + owned methods across all 4 CI pillars and catches rogue classes, rogue methods, and orphan methods', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ci-class-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'src', 'models'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'nn_app',
+                language: 'python',
+                compile: { outDir: 'src' },
+                ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+            }, null, 2));
+
+            // >60 line class frame of typed fields is exempt from JPL-60 line cap
+            const longFields = Array.from({ length: 65 }, (_, i) => `    param_${i}: int = ${i}`);
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock.json'), JSON.stringify({
+                slate: 3,
+                name: 'ConvBlock',
+                kind: 'class',
+                intent: 'Conv block container with configuration fields',
+                contract: 'Immutable field defaults',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['class ConvBlock:', ...longFields],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', '__init__.json'), JSON.stringify({
+                slate: 3,
+                name: '__init__',
+                classOwner: 'models/ConvBlock',
+                intent: 'Store scale',
+                contract: 'scale >= 0',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def __init__(self, scale: float = 1.0) -> None:', '    self.scale = scale'],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', 'forward.json'), JSON.stringify({
+                slate: 3,
+                name: 'forward',
+                classOwner: 'models/ConvBlock',
+                intent: 'Scale value by self.scale',
+                contract: 'Returns float',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                cases: [{ name: 'fwd', inputs: { x: 2.0 }, expected: 2.0 }],
+                code: ['def forward(self, x: float) -> float:', '    return x * self.scale'],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'tests', 'test_conv.py'), [
+                'def test_conv_init():',
+                '    b = ConvBlock(2.0)',
+                '    assert b.scale == 2.0',
+            ].join('\n'));
+
+            // Write matching compiled output so drift passes
+            const driftBefore = verifyProjectCi(tmpDir);
+            expect(driftBefore.pillars.schema.valid).toBe(true);
+            expect(driftBefore.pillars.stub.valid).toBe(true);
+            expect(driftBefore.pillars.test.valid).toBe(true);
+            expect(driftBefore.pillars.test.missingNodes).toEqual([]);
+
+            // Now simulate compiled models.py containing a rogue undocumented method and another file containing a rogue class
+            fs.writeFileSync(path.join(tmpDir, 'src', 'models.py'), [
+                'class ConvBlock:',
+                ...longFields,
+                '    def __init__(self, scale: float = 1.0) -> None:',
+                '        self.scale = scale',
+                '    def forward(self, x: float) -> float:',
+                '        return x * self.scale',
+                '    def rogue_method(self, x: float) -> float:',
+                '        return x',
+            ].join('\n'));
+            fs.writeFileSync(path.join(tmpDir, 'src', 'extra.py'), 'class RogueLayer:\n    pass\n');
+
+            const parity = checkProjectParity(tmpDir);
+            expect(parity.valid).toBe(false);
+            expect(parity.errors.some(e => e.includes('[ROGUE_METHOD] Undocumented method "ConvBlock.rogue_method"'))).toBe(true);
+            expect(parity.errors.some(e => e.includes('[ROGUE_CLASS] Undocumented class "RogueLayer"'))).toBe(true);
+
+            // Adding a method directly inside a class frame JSON triggers [CLASS_FRAME_METHOD]
+            const badFrame = validateNodeAst({
+                name: 'ConvBlock',
+                kind: 'class',
+                intent: 'Bad frame',
+                contract: 'Bad',
+                code: ['class ConvBlock:', '    def embedded(self) -> None:', '        pass'],
+            }, 'models/ConvBlock.json', 'python');
+            expect(badFrame.valid).toBe(false);
+            expect(badFrame.errors.some(e => e.includes('[CLASS_FRAME_METHOD]'))).toBe(true);
+
+            // An owned method pointing to a missing owner triggers [ORPHAN_METHOD]
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', 'orphan.json'), JSON.stringify({
+                slate: 3,
+                name: 'orphan',
+                classOwner: 'models/MissingClass',
+                intent: 'Orphan',
+                contract: 'None',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def orphan(self) -> None:', '    pass'],
+            }));
+            const orphanReport = verifyProjectCi(tmpDir);
+            expect(orphanReport.pillars.stub.valid).toBe(false);
+            expect(orphanReport.pillars.stub.errors.some(e => e.includes('[ORPHAN_METHOD]'))).toBe(true);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
 });

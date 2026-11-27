@@ -273,6 +273,32 @@ export function buildGenerationPacket(
     const targetUses = Array.isArray(target.unit.annotation.uses)
         ? (target.unit.annotation.uses as string[])
         : [];
+    const ownerId = target.document.classOwner
+        ?? (typeof target.unit.annotation.classOwner === 'string' && target.unit.annotation.classOwner.trim()
+            ? target.unit.annotation.classOwner.trim()
+            : undefined);
+    const ownerDoc = ownerId
+        ? snapshot.documents.find(doc => doc.path === `slate/nodes/${ownerId}.json` || doc.id === `node:${ownerId}`)
+        : undefined;
+    const ownerUnit = ownerDoc?.units.find(u => u.parentId === null);
+    const ownerSource = ownerDoc ? sources.get(ownerDoc.path) : undefined;
+    const siblingDocs = ownerId
+        ? snapshot.documents
+            .filter(doc => doc.classOwner === ownerId && doc.path !== target.document.path)
+            .sort((left, right) => {
+                const lName = left.units[0]?.name ?? '';
+                const rName = right.units[0]?.name ?? '';
+                if (lName === '__init__' && rName !== '__init__') return -1;
+                if (rName === '__init__' && lName !== '__init__') return 1;
+                return left.id.localeCompare(right.id);
+            })
+        : [];
+    const siblingSignatures = siblingDocs
+        .map(doc => {
+            const siblingUnit = doc.units.find(u => u.parentId === null);
+            return siblingUnit?.signature ?? (siblingUnit ? `def ${siblingUnit.name}(...)` : null);
+        })
+        .filter((sig): sig is string => Boolean(sig));
     const occurrenceNeighbors = options?.occurrence
         ? getOccurrenceNeighbors(snapshot, options.occurrence)
         : [];
@@ -330,11 +356,19 @@ export function buildGenerationPacket(
 
         const casesFormatted = cases && cases.length > 0 ? formatCases(cases) : '';
         const feedbackFormatted = retryFeedback ? `### Bounded Retry Feedback (revised code must fix these issues):\n${retryFeedback}` : '';
+        const ownerClassName = ownerUnit?.name ?? (ownerId ? ownerId.split('/').pop() : undefined);
+        const ownerFrameSection = ownerDoc && ownerSource
+            ? `### Owning class frame: ${ownerClassName ?? ownerDoc.id}\n\`\`\`python\n${cleanLines(ownerSource).join('\n')}\n\`\`\``
+            : '';
 
         const formatForgePrompt = (
             neighborList: readonly NeighborSignatureContext[],
             signatureOnlyList: readonly NeighborSignatureContext[] = [],
+            includeSiblingMethods = true,
         ): string => {
+            const siblingSection = includeSiblingMethods && siblingSignatures.length > 0
+                ? `### Sibling methods on ${ownerClassName ?? 'class'} (signatures only):\n${siblingSignatures.map(sig => `- ${sig}`).join('\n')}`
+                : '';
             const neighborSection = neighborList.length > 0
                 ? `### Reference neighbor signatures:\n${neighborList.map(n =>
                     `### Dependency: ${n.qualifiedName}\nSignature: ${n.signature}${n.intent ? `\nIntent: ${n.intent}` : ''}${n.contract ? `\nContract: ${n.contract}` : ''}`
@@ -347,7 +381,9 @@ export function buildGenerationPacket(
             const promptParts = langKind === 'python'
                 ? [
                     `You are a constrained local component forge engine. Follow JPL-60 rules strictly.`,
-                    `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
+                    ownerClassName
+                        ? `Implement exactly the Python method below for class ${ownerClassName} and forge its corresponding pytest unit check.`
+                        : `Implement exactly the Python function below and forge its corresponding pytest unit check.`,
                     `Intent: ${intent}`,
                     contract ? `Contract: ${contract}` : '',
                     targetImports.length > 0 ? `Pre-declared imports (already at module top): ${targetImports.join('; ')}` : '',
@@ -355,11 +391,20 @@ export function buildGenerationPacket(
                     feedbackFormatted,
                     [
                         `Rules:`,
-                        `- Preserve decorators, function name, signature, and parameter/return type annotations.`,
+                        `- Preserve decorators, ${ownerClassName ? 'method' : 'function'} name, signature, and parameter/return type annotations.`,
+                        ownerClassName
+                            ? `- Output ONLY the unindented \`def ${target.unit.name}(...):\` method definition (do NOT wrap it inside \`class ${ownerClassName}:\`).`
+                            : '',
                         `- The implementation MUST be <=60 lines, strictly typed, with bounded control flow (JPL-60).`,
-                        `- Listed dependencies are already in scope inside your function; ${target.unit.name} is already imported in the test file. NEVER import from slate.* or file paths, and NEVER redefine listed dependencies inside your function.`,
-                        `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases (use pytest.approx for float comparisons).`,
-                    ].join('\n'),
+                        ownerClassName
+                            ? `- Class ${ownerClassName} and listed dependencies are already imported in the test file. NEVER import from slate.* or file paths, and NEVER redefine listed dependencies inside your method.`
+                            : `- Listed dependencies are already in scope inside your function; ${target.unit.name} is already imported in the test file. NEVER import from slate.* or file paths, and NEVER redefine listed dependencies inside your function.`,
+                        ownerClassName
+                            ? `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) that constructs ${ownerClassName} and verifies the contract/cases (use pytest.approx for float comparisons).`
+                            : `- The unit check MUST be a pytest function (def test_${target.unit.name}(): ...) verifying the contract and cases (use pytest.approx for float comparisons).`,
+                    ].filter(Boolean).join('\n'),
+                    ownerFrameSection,
+                    siblingSection,
                     neighborSection,
                     signatureOnlySection,
                     `### Target stub: ${target.unit.qualifiedName}\n\`\`\`python\n${items[0].source}\n\`\`\``,
@@ -421,17 +466,29 @@ export function buildGenerationPacket(
             return promptParts.join('\n\n');
         };
 
-        const basePrompt = formatForgePrompt([]);
-        const coreTokens = Math.ceil(basePrompt.length / 4);
+        let includeSiblingsInPrompt = true;
+        let basePrompt = formatForgePrompt([], [], true);
+        let coreTokens = Math.ceil(basePrompt.length / 4);
+        if (coreTokens > inputBudgetTokens && siblingSignatures.length > 0) {
+            includeSiblingsInPrompt = false;
+            basePrompt = formatForgePrompt([], [], false);
+            coreTokens = Math.ceil(basePrompt.length / 4);
+        }
         if (coreTokens > inputBudgetTokens) {
             throw new PacketError(`Target stub, cases, and feedback require about ${coreTokens} tokens, which exceeds the micro-packet budget of ${inputBudgetTokens}. Refusing oversized target.`);
         }
 
         const allCandidates: NeighborSignatureContext[] = [];
         const neighborSignatures: Record<string, { signature: string; sourceHash: string }> = {};
+        if (ownerId && ownerDoc) {
+            neighborSignatures[ownerId] = {
+                signature: `class ${ownerClassName ?? ownerDoc.id}`,
+                sourceHash: ownerDoc.sourceHash,
+            };
+        }
 
         for (const dependencyId of dependencies) {
-            if (dependencyId === targetId) continue;
+            if (dependencyId === targetId || dependencyId === ownerId) continue;
             const dependency = findAnyUnit(snapshot, dependencyId);
             if (!dependency) continue;
             const depUnit = dependency.unit;
@@ -466,7 +523,8 @@ export function buildGenerationPacket(
         const fitsBudget = (
             neighborList: readonly NeighborSignatureContext[],
             sigOnlyList: readonly NeighborSignatureContext[] = [],
-        ): boolean => Math.ceil(formatForgePrompt(neighborList, sigOnlyList).length / 4) <= inputBudgetTokens;
+            withSiblings = includeSiblingsInPrompt,
+        ): boolean => Math.ceil(formatForgePrompt(neighborList, sigOnlyList, withSiblings).length / 4) <= inputBudgetTokens;
 
         let neighbors: NeighborSignatureContext[] = [];
         const signatureOnlyNeighbors: NeighborSignatureContext[] = [];
@@ -480,26 +538,31 @@ export function buildGenerationPacket(
                 if (fitsBudget(compactCandidates)) {
                     neighbors = compactCandidates;
                 } else {
-                    const omittedCandidates: NeighborSignatureContext[] = [];
-                    for (let i = 0; i < compactCandidates.length; i++) {
-                        const candidate = compactCandidates[i];
-                        if (fitsBudget([...neighbors, candidate], [...omittedCandidates, ...compactCandidates.slice(i + 1)])) {
-                            neighbors.push(candidate);
-                        } else {
-                            omittedCandidates.push(candidate);
-                            omittedNeighbors.push(candidate.qualifiedName);
+                    if (includeSiblingsInPrompt && fitsBudget(compactCandidates, [], false)) {
+                        includeSiblingsInPrompt = false;
+                        neighbors = compactCandidates;
+                    } else {
+                        const omittedCandidates: NeighborSignatureContext[] = [];
+                        for (let i = 0; i < compactCandidates.length; i++) {
+                            const candidate = compactCandidates[i];
+                            if (fitsBudget([...neighbors, candidate], [...omittedCandidates, ...compactCandidates.slice(i + 1)])) {
+                                neighbors.push(candidate);
+                            } else {
+                                omittedCandidates.push(candidate);
+                                omittedNeighbors.push(candidate.qualifiedName);
+                            }
                         }
-                    }
-                    for (const candidate of omittedCandidates) {
-                        if (fitsBudget(neighbors, [...signatureOnlyNeighbors, candidate])) {
-                            signatureOnlyNeighbors.push(candidate);
+                        for (const candidate of omittedCandidates) {
+                            if (fitsBudget(neighbors, [...signatureOnlyNeighbors, candidate])) {
+                                signatureOnlyNeighbors.push(candidate);
+                            }
                         }
                     }
                 }
             }
         }
 
-        const prompt = formatForgePrompt(neighbors, signatureOnlyNeighbors);
+        const prompt = formatForgePrompt(neighbors, signatureOnlyNeighbors, includeSiblingsInPrompt);
         const estimatedInputTokens = Math.ceil(prompt.length / 4);
 
         const fingerprint: TargetFingerprint = {

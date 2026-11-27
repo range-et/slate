@@ -1372,3 +1372,92 @@ test('QA OpenRouter Qwen3-Coder-Next preset, concurrent multi-unit generation, a
     await stopBtn.click();
     expect(await messages(page)).toContainEqual(expect.objectContaining({ type: 'cancelBatchForge' }));
 });
+
+test('renders Class Frame containers with bases, decorators, fields/properties, and nested owned method nodes', async ({ page }) => {
+    await host(page, null);
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 5,
+                projectName: 'class-frame-demo',
+                documents: [
+                    {
+                        id: 'node:models/ConvBlock',
+                        path: 'slate/nodes/models/ConvBlock.json',
+                        nodeKind: 'class',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:convblock',
+                        version: null,
+                        diagnostics: [],
+                        source: '@dataclass\nclass ConvBlock(nn.Module):\n    dim: int\n    scale: float = 1.0\n',
+                        classMeta: {
+                            decorators: ['@dataclass'],
+                            bases: ['nn.Module'],
+                            fields: [
+                                { name: 'dim', annotation: 'int', defaultValue: null, raw: 'dim: int' },
+                                { name: 'scale', annotation: 'float', defaultValue: '1.0', raw: 'scale: float = 1.0' },
+                            ],
+                            hasMethods: false,
+                        },
+                        units: [{
+                            id: 'models/ConvBlock',
+                            identity: 'durable',
+                            kind: 'class',
+                            name: 'ConvBlock',
+                            qualifiedName: 'ConvBlock',
+                            parentId: null,
+                            ranges: { name: { start: { line: 1, character: 6 }, end: { line: 1, character: 15 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 3, character: 22 } } },
+                            annotation: { intent: 'Residual conv block', contract: 'dim > 0', dependencies: [], examples: [], locked: false },
+                            decorators: ['dataclass'],
+                        }],
+                    },
+                    {
+                        id: 'node:models/ConvBlock/forward',
+                        path: 'slate/nodes/models/ConvBlock/forward.json',
+                        classOwner: 'models/ConvBlock',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:forward',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def forward(self, x: float) -> float:\n    return x * self.scale\n',
+                        units: [{
+                            id: 'models/ConvBlock/forward',
+                            identity: 'durable',
+                            kind: 'method',
+                            name: 'forward',
+                            qualifiedName: 'forward',
+                            parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 11 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 25 } } },
+                            annotation: { intent: 'Scale input by self.scale', contract: 'Returns float', classOwner: 'models/ConvBlock', dependencies: [], examples: [], locked: false },
+                            decorators: [],
+                            signature: 'def forward(self, x: float) -> float',
+                            parameters: 'self, x: float',
+                            returnAnnotation: 'float',
+                            params: [
+                                { name: 'self', annotation: null, default: null, kind: 'keyword' },
+                                { name: 'x', annotation: 'float', default: null, kind: 'keyword' },
+                            ],
+                        }],
+                    },
+                ],
+            },
+        }, '*');
+    });
+
+    const frameNode = page.locator('.react-flow__node[data-id="models/ConvBlock"]');
+    await expect(frameNode).toBeVisible();
+    await expect(frameNode).toContainText('class frame');
+    await expect(frameNode).toContainText('(nn.Module)');
+    await expect(frameNode.locator('[data-testid="class-frame-method-count"]')).toHaveText('1 method');
+    await expect(frameNode.locator('[data-testid="class-frame-fields"]')).toContainText('dim: int');
+    await expect(frameNode.locator('[data-testid="class-frame-fields"]')).toContainText('scale: float = 1.0');
+
+    const methodNode = page.locator('.react-flow__node[data-id="models/ConvBlock/forward"]');
+    await expect(methodNode).toBeVisible();
+    await expect(methodNode).toContainText('Scale input by self.scale');
+    await select(page, 'models/ConvBlock/forward');
+    await expect(page.locator('.harness-inspector')).toContainText('forward');
+});

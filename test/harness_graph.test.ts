@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { demoSnapshot } from '../src/harness/demo';
-import { buildGraph, typeColor, typesMismatch } from '../src/harness/graph';
+import { buildGraph, callables, nodeIdOf, typeColor, typesMismatch } from '../src/harness/graph';
 
 describe('Python harness graph', () => {
     it('creates one free node per node file; classes contain their methods; module state is a small node', () => {
@@ -283,4 +283,117 @@ it('marks type-mismatched data wires with warning metadata and styling without b
     expect(typesMismatch("Literal['a']", 'Literal["a", "b"]')).toBe(false);
     expect(typesMismatch('Literal["a"]', 'str')).toBe(false);
     expect(typesMismatch('Literal["a"]', 'int')).toBe(true);
+});
+
+it('renders class frames with fields/bases/decorators and nests owned method nodes inside the frame', () => {
+    const base = structuredClone(demoSnapshot.documents[0]);
+    const snapshot = {
+        revision: 1,
+        projectName: 'nn-demo',
+        documents: [
+            {
+                ...base,
+                id: 'node:models/ConvBlock',
+                path: 'slate/nodes/models/ConvBlock.json',
+                nodeKind: 'class' as const,
+                source: '@dataclass\nclass ConvBlock(nn.Module):\n    dim: int\n    scale: float = 1.0\n',
+                classMeta: {
+                    decorators: ['@dataclass'],
+                    bases: ['nn.Module'],
+                    fields: [
+                        { name: 'dim', annotation: 'int', defaultValue: null, raw: 'dim: int' },
+                        { name: 'scale', annotation: 'float', defaultValue: '1.0', raw: 'scale: float = 1.0' },
+                    ],
+                    hasMethods: false,
+                },
+                units: [{
+                    id: 'models/ConvBlock',
+                    identity: 'durable' as const,
+                    kind: 'class' as const,
+                    name: 'ConvBlock',
+                    qualifiedName: 'ConvBlock',
+                    parentId: null,
+                    ranges: base.units[0].ranges,
+                    annotation: { intent: 'Residual conv block', contract: 'dim > 0', dependencies: [], examples: [], locked: false },
+                    decorators: ['dataclass'],
+                }],
+            },
+            {
+                ...base,
+                id: 'node:models/ConvBlock/__init__',
+                path: 'slate/nodes/models/ConvBlock/__init__.json',
+                classOwner: 'models/ConvBlock',
+                source: 'def __init__(self, dim: int) -> None:\n    self.dim = dim\n',
+                units: [{
+                    id: 'models/ConvBlock/__init__',
+                    identity: 'durable' as const,
+                    kind: 'method' as const,
+                    name: '__init__',
+                    qualifiedName: '__init__',
+                    parentId: null,
+                    ranges: base.units[0].ranges,
+                    annotation: { intent: 'Initialize block', contract: 'Stores dim', dependencies: [], classOwner: 'models/ConvBlock', examples: [], locked: false },
+                    decorators: [],
+                    signature: 'def __init__(self, dim: int) -> None',
+                    parameters: 'self, dim: int',
+                    returnAnnotation: 'None',
+                    params: [
+                        { name: 'self', annotation: null, default: null, kind: 'keyword' as const },
+                        { name: 'dim', annotation: 'int', default: null, kind: 'keyword' as const },
+                    ],
+                }],
+            },
+            {
+                ...base,
+                id: 'node:models/ConvBlock/forward',
+                path: 'slate/nodes/models/ConvBlock/forward.json',
+                classOwner: 'models/ConvBlock',
+                source: 'def forward(self, x: int) -> int:\n    return x * self.dim\n',
+                units: [{
+                    id: 'models/ConvBlock/forward',
+                    identity: 'durable' as const,
+                    kind: 'method' as const,
+                    name: 'forward',
+                    qualifiedName: 'forward',
+                    parentId: null,
+                    ranges: base.units[0].ranges,
+                    annotation: { intent: 'Run forward pass', contract: 'Returns scaled int', dependencies: [], classOwner: 'models/ConvBlock', examples: [], locked: false },
+                    decorators: [],
+                    signature: 'def forward(self, x: int) -> int',
+                    parameters: 'self, x: int',
+                    returnAnnotation: 'int',
+                    params: [
+                        { name: 'self', annotation: null, default: null, kind: 'keyword' as const },
+                        { name: 'x', annotation: 'int', default: null, kind: 'keyword' as const },
+                    ],
+                }],
+            },
+        ],
+    };
+
+    const targetCallables = callables(snapshot);
+    expect(targetCallables.get('models/ConvBlock')?.signature).toEqual({
+        name: 'ConvBlock',
+        params: [{ name: 'dim', annotation: 'int', default: null, kind: 'keyword' }],
+        returns: 'ConvBlock',
+    });
+
+    const graph = buildGraph(snapshot);
+    const frameNode = graph.nodes.find(n => n.id === 'models/ConvBlock')!;
+    expect(frameNode).toBeDefined();
+    expect(frameNode.data).toMatchObject({
+        label: 'ConvBlock',
+        kind: 'class',
+        container: true,
+        classBases: ['nn.Module'],
+        classDecorators: ['@dataclass'],
+        methodCount: 2,
+    });
+    expect(frameNode.data.classFields).toHaveLength(2);
+
+    const initNode = graph.nodes.find(n => n.id === 'models/ConvBlock/__init__')!;
+    const forwardNode = graph.nodes.find(n => n.id === 'models/ConvBlock/forward')!;
+    expect(initNode).toMatchObject({ parentId: 'models/ConvBlock', extent: 'parent' });
+    expect(forwardNode).toMatchObject({ parentId: 'models/ConvBlock', extent: 'parent', data: { classOwner: 'models/ConvBlock', kind: 'method' } });
+    expect(initNode.position.y).toBeLessThan(forwardNode.position.y);
 });

@@ -112,7 +112,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
         });
 
-        it('tools/list enumerates all 11 required frontier architect tools', async () => {
+        it('tools/list enumerates all 12 required frontier architect tools', async () => {
             const resp = await server.handleRequest({
                 jsonrpc: '2.0',
                 id: 3,
@@ -120,13 +120,14 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
             expect(resp).not.toBeNull();
             const tools = (resp as any).result.tools;
-            expect(tools).toHaveLength(11);
+            expect(tools).toHaveLength(12);
             const toolNames = tools.map((t: any) => t.name);
             expect(toolNames).toEqual([
                 'slate_find',
                 'slate_focus',
                 'slate_place_notes',
                 'slate_define_stub',
+                'slate_define_class',
                 'slate_wire_flow',
                 'slate_llm_status',
                 'slate_configure_llm',
@@ -1548,6 +1549,61 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             const badRoots = await server.callTool('slate_verify_ci', { srcRoots: ['../outside'] });
             expect(badRoots.isError).toBe(true);
             expect(badRoots.content[0].text).toMatch(/Unsafe srcRoots path/i);
+        });
+
+        it('defines class frames via slate_define_class and attaches owned method stubs via slate_define_stub', async () => {
+            const clsRes = await server.callTool('slate_define_class', {
+                name: 'models/ConvBlock',
+                signature: 'class ConvBlock(nn.Module)',
+                intent: 'Residual convolution block',
+                contract: 'channels > 0',
+                decorators: ['@dataclass'],
+                fields: ['channels: int', 'scale: float = 1.0'],
+                imports: ['from dataclasses import dataclass'],
+                position: { x: 120, y: 180 },
+            });
+            expect(clsRes.isError).toBe(false);
+            const clsParsed = JSON.parse(clsRes.content[0].text);
+            expect(clsParsed).toMatchObject({
+                ok: true,
+                nodeId: 'models/ConvBlock',
+                kind: 'class',
+                bases: ['nn.Module'],
+                decorators: ['@dataclass'],
+            });
+            expect(clsParsed.fields).toHaveLength(2);
+
+            // Refuses methods inside slate_define_class
+            const badClsRes = await server.callTool('slate_define_class', {
+                name: 'models/BadClass',
+                signature: 'class BadClass',
+                intent: 'Invalid',
+                fields: ['def nope(self): pass'],
+            });
+            expect(badClsRes.isError).toBe(true);
+
+            // Create owned method stubs attached to models/ConvBlock
+            const methodRes = await server.callTool('slate_define_stub', {
+                name: 'models/ConvBlock/forward',
+                signature: 'def forward(self, x: float) -> float',
+                intent: 'Scale x by self.scale',
+                contract: 'Returns scaled float',
+                classOwner: 'models/ConvBlock',
+                cases: [{ name: 'c1', init: { scale: 2.0 }, inputs: { x: 3.0 }, expected: 6.0 }],
+            });
+            expect(methodRes.isError).toBe(false);
+            const methodNode = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', 'forward.json'), 'utf8'));
+            expect(methodNode.classOwner).toBe('models/ConvBlock');
+
+            // Refuses non-existent classOwner
+            const orphanRes = await server.callTool('slate_define_stub', {
+                name: 'models/Missing/run',
+                signature: 'def run(self) -> None',
+                intent: 'Orphan',
+                classOwner: 'models/Missing',
+            });
+            expect(orphanRes.isError).toBe(true);
+            expect(orphanRes.content[0].text).toContain('does not exist or is not a class frame');
         });
     });
 });

@@ -2400,5 +2400,73 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }
         }, 25_000);
+
+        it('assembles owning class frame and sibling methods when verifying an owned method in real pytest + Pydantic', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-class-frame-verify-'));
+            try {
+                const classFrame = makeNode({
+                    name: 'ScaledTensorOp',
+                    kind: 'class',
+                    intent: 'Tensor scaling block',
+                    contract: 'Applies scalar multiplier',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'class ScaledTensorOp:',
+                        '    default_factor: int = 2',
+                    ],
+                });
+                const initMethod = makeNode({
+                    name: '__init__',
+                    classOwner: 'ScaledTensorOp',
+                    intent: 'Store factor',
+                    contract: 'Stores integer factor',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'def __init__(self, factor: int = 2) -> None:',
+                        '    self.factor = factor',
+                    ],
+                });
+                const applyMethod = makeNode({
+                    name: 'apply',
+                    classOwner: 'ScaledTensorOp',
+                    intent: 'Multiply value by self.factor',
+                    contract: 'Strict int args',
+                    cases: [{ name: 'c1', init: { factor: 3 }, inputs: { x: 4 }, expected: 12 }],
+                    check: [
+                        'import pytest',
+                        'from pydantic import ValidationError',
+                        'def test_apply_strict():',
+                        '    op = ScaledTensorOp(5)',
+                        '    assert op.apply(2) == 10',
+                        '    with pytest.raises(ValidationError):',
+                        '        op.apply(True)',
+                    ],
+                    code: [
+                        'def apply(self, x: int) -> int:',
+                        '    return x * self.factor',
+                    ],
+                });
+
+                const deps = new Map<string, SlateNode>([
+                    ['ScaledTensorOp', classFrame],
+                    ['ScaledTensorOp/__init__', initMethod],
+                ]);
+                const result = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: applyMethod,
+                    nodeId: 'ScaledTensorOp/apply',
+                    dependencies: deps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(result.state, result.traceback).toBe('passed');
+                expect(result.pydanticValid).toBe(true);
+                expect(result.testsPassed).toBeGreaterThanOrEqual(2);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
     });
 });

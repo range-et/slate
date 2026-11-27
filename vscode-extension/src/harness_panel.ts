@@ -1216,16 +1216,33 @@ export class HarnessPanel implements vscode.Disposable {
                 return;
             }
 
-            const readInputs = async (target: SlateNode) => {
+            const collectVerificationDeps = async (target: SlateNode, targetNodeId: string): Promise<Map<string, SlateNode>> => {
                 const dependencies = new Map<string, SlateNode>();
                 for (const depId of target.context) {
                     try {
                         dependencies.set(depId, await this.folder.readNode(depId));
                     } catch { /* Missing dependencies are omitted by the verifier. */ }
                 }
+                if (target.classOwner) {
+                    try {
+                        dependencies.set(target.classOwner, await this.folder.readNode(target.classOwner));
+                    } catch {}
+                    for (const doc of this.snapshot?.documents ?? []) {
+                        const docId = nodeIdForPath(doc.path);
+                        if (docId && docId !== targetNodeId && doc.classOwner === target.classOwner) {
+                            try {
+                                dependencies.set(docId, await this.folder.readNode(docId));
+                            } catch {}
+                        }
+                    }
+                }
+                return dependencies;
+            };
+            const readInputs = async (target: SlateNode) => {
+                const dependencies = await collectVerificationDeps(target, nodeId);
                 const pythonPath = this.resolveProjectPythonPath();
                 const language = target.language ?? parseConfig(await this.folder.readConfigText()).language;
-                const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.imports, n.context,
+                const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.classOwner, n.imports, n.context,
                     n.uses, n.check, n.cases, n.extra, n.contract];
                 const fingerprint = JSON.stringify([language, pythonPath, inputs(target),
                     [...dependencies].map(([id, dep]) => [id, inputs(dep)])]);
@@ -1376,6 +1393,19 @@ export class HarnessPanel implements vscode.Disposable {
                         try {
                             deps.set(depId, await this.folder.readNode(depId));
                         } catch {}
+                    }
+                    if (candidateNode.classOwner) {
+                        try {
+                            deps.set(candidateNode.classOwner, await this.folder.readNode(candidateNode.classOwner));
+                        } catch {}
+                        for (const doc of this.snapshot?.documents ?? []) {
+                            const docId = nodeIdForPath(doc.path);
+                            if (docId && docId !== nodeId && doc.classOwner === candidateNode.classOwner) {
+                                try {
+                                    deps.set(docId, await this.folder.readNode(docId));
+                                } catch {}
+                            }
+                        }
                     }
                     const pythonPath = this.resolveProjectPythonPath();
                     return runNodeVerification({

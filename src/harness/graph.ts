@@ -3,7 +3,7 @@ import type { Edge, Node } from '@xyflow/react';
 import {
     flowSignature, inputPorts, MAIN_FLOW, outputPorts, parseEndpoint, regionPorts, unitSignature, type CallableSignature, type Port,
 } from '../../vscode-extension/src/flow';
-import type { BoardNote, FlowRegion, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeGuardrailsReport, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow, TestCase } from './types';
+import type { BoardNote, ClassFrameField, FlowRegion, HarnessDocument, HarnessSnapshot, HarnessUnit, InstanceRunObservation, NodeGuardrailsReport, NodeUsageInfo, NodeVerificationResult, ObservedValue, Placeholder, SlateFlow, TestCase } from './types';
 
 const GROUP_COLORS = ['#3ecff5', '#a78bfa', '#f59e72', '#5ee0a0'];
 
@@ -88,6 +88,16 @@ export type SlateNodeData = {
     regionBadge?: 'BRANCH' | 'FOREACH' | 'REPEAT';
     /** Referenced child flows for a control-flow region. */
     childFlows?: string[];
+    /** Class frame bases (inheritance list) for `kind: 'class'` containers. */
+    classBases?: string[];
+    /** Class frame decorators (e.g. `@dataclass`) for `kind: 'class'` containers. */
+    classDecorators?: string[];
+    /** Class frame properties / fields pinned at top of a `class` container. */
+    classFields?: ClassFrameField[];
+    /** Owning class frame node ID for an owned method node. */
+    classOwner?: string;
+    /** Number of owned method nodes inside this class frame. */
+    methodCount?: number;
 };
 
 function compactOutsideStrings(text: string): string {
@@ -325,12 +335,35 @@ function folderOf(nodeId: string): string {
 const flowOf = (snapshot: HarnessSnapshot, id: string): SlateFlow | null =>
     snapshot.flows?.find(item => item.id === id)?.flow ?? null;
 
-/** Every callable target: node definitions, library units, and flows (main excluded). */
+/** Every callable target: node definitions, class constructors, library units, and flows (main excluded). */
 export function callables(snapshot: HarnessSnapshot): Map<string, { signature: CallableSignature; unit?: HarnessUnit; detail: string; group: 'node' | 'flow' | 'library' }> {
     const result = new Map<string, { signature: CallableSignature; unit?: HarnessUnit; detail: string; group: 'node' | 'flow' | 'library' }>();
+    const ownedInitByOwner = new Map<string, HarnessUnit>();
     for (const document of snapshot.documents) {
+        if (!document.classOwner) continue;
         const top = document.units.find(unit => unit.parentId === null);
-        if (top && !document.nodeKind) result.set(top.id, { signature: unitSignature(top, document.units), unit: top, detail: top.signature ?? `class ${top.name}`, group: 'node' });
+        if (top && top.name === '__init__') {
+            ownedInitByOwner.set(document.classOwner, top);
+        }
+    }
+    for (const document of snapshot.documents) {
+        if (document.nodeKind === 'prelude' || document.nodeKind === 'epilogue') continue;
+        const top = document.units.find(unit => unit.parentId === null);
+        if (!top) continue;
+        if (document.nodeKind === 'class' || top.kind === 'class') {
+            const docNodeId = nodeIdOf(document.path);
+            const ownedInit = ownedInitByOwner.get(docNodeId);
+            const sig = ownedInit
+                ? {
+                    name: top.name,
+                    params: (ownedInit.params ?? []).filter((p, idx) => !(idx === 0 && (p.name === 'self' || p.name === 'cls'))),
+                    returns: top.name,
+                }
+                : unitSignature(top, document.units);
+            result.set(top.id, { signature: sig, unit: top, detail: top.signature ?? `class ${top.name}`, group: 'node' });
+            continue;
+        }
+        result.set(top.id, { signature: unitSignature(top, document.units), unit: top, detail: top.signature ?? `class ${top.name}`, group: 'node' });
     }
     for (const document of snapshot.library ?? []) {
         for (const unit of document.units.filter(item => item.parentId === null)) {
@@ -351,12 +384,33 @@ function directChildren(units: HarnessUnit[], parentId: string): HarnessUnit[] {
     return units.filter(unit => unit.parentId === parentId);
 }
 
-/** Root canvas definitions: every node file is one free node; classes still contain their methods. */
+/** Root canvas definitions: functions, class frame containers + nested owned methods, and legacy classes. */
 function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeData>[], map: boolean): void {
     const folders = [...new Set(snapshot.documents.map(document => folderOf(nodeIdOf(document.path))))].sort();
     const rows = new Map<string, number>();
     const positions = map ? snapshot.mapPositions ?? {} : snapshot.layout ?? {};
     const targets = callables(snapshot);
+    const ownedByClass = new Map<string, HarnessDocument[]>();
+    const classFrameIds = new Set<string>();
+    for (const doc of snapshot.documents) {
+        if (doc.nodeKind === 'class') {
+            classFrameIds.add(nodeIdOf(doc.path));
+        }
+        if (doc.classOwner) {
+            const list = ownedByClass.get(doc.classOwner) ?? [];
+            list.push(doc);
+            ownedByClass.set(doc.classOwner, list);
+        }
+    }
+    for (const [, list] of ownedByClass) {
+        list.sort((left, right) => {
+            const lName = left.units[0]?.name ?? '';
+            const rName = right.units[0]?.name ?? '';
+            if (lName === '__init__' && rName !== '__init__') return -1;
+            if (rName === '__init__' && lName !== '__init__') return 1;
+            return nodeIdOf(left.path).localeCompare(nodeIdOf(right.path));
+        });
+    }
     if (map) {
         folders.forEach((folder, column) => nodes.push({
             id: `folder:${folder}`, type: 'slate', draggable: false, selectable: false,
@@ -366,12 +420,15 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
     }
     for (const document of snapshot.documents) {
         const nodeId = nodeIdOf(document.path);
+        if (!map && document.classOwner && classFrameIds.has(document.classOwner)) {
+            continue;
+        }
         const folder = folderOf(nodeId);
         const column = folders.indexOf(folder);
         const row = rows.get(folder) ?? 0;
         const groupColor = GROUP_COLORS[column % GROUP_COLORS.length];
         const fallback = { x: 80 + column * 340, y: (map ? 70 : 60) + row * (map ? 150 : 170) };
-        if (document.nodeKind) {
+        if (document.nodeKind === 'prelude' || document.nodeKind === 'epilogue') {
             // Module state: a small node showing the statement it starts with.
             rows.set(folder, row + 1);
             const firstLine = (document.source ?? '').split('\n').find(line => line.trim() && !line.trim().startsWith('#'));
@@ -387,30 +444,47 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
         }
         const top = document.units.find(unit => unit.parentId === null);
         const id = top?.id ?? document.id;
-        const children = top && !map ? directChildren(document.units, top.id) : [];
-        const isClass = top?.kind === 'class' && !map;
-        const ports = map ? { inputs: [], outputs: [] } : portsOf(top ? targets.get(top.id)?.signature : undefined);
-        const height = isClass ? Math.max(132, children.length * 96 + 72) : 0;
-        rows.set(folder, row + (isClass ? Math.ceil(height / 170) : 1) + (ports.inputs.length > 2 ? 1 : 0));
+        const isClassFrame = document.nodeKind === 'class';
+        const ownedDocs = isClassFrame && !map ? (ownedByClass.get(nodeId) ?? []) : [];
+        const children = !isClassFrame && top && !map ? directChildren(document.units, top.id) : [];
+        const isClass = (isClassFrame || top?.kind === 'class') && !map;
+        const classMeta = document.classMeta;
         const intent = typeof top?.annotation?.intent === 'string' ? top.annotation.intent : '';
+        const frameHeaderHeight = isClassFrame
+            ? 84
+                + (classMeta?.decorators?.length ? 22 : 0)
+                + (classMeta?.fields?.length ? Math.min(classMeta.fields.length, 4) * 20 + 22 : 0)
+                + (intent ? 26 : 0)
+            : 58;
+        const methodSpacing = 148;
+        const ports = map ? { inputs: [], outputs: [] } : portsOf(top ? targets.get(top.id)?.signature : undefined);
+        const height = isClassFrame && !map
+            ? Math.max(frameHeaderHeight + 36, frameHeaderHeight + ownedDocs.length * methodSpacing + 18)
+            : isClass ? Math.max(132, children.length * 96 + 72) : 0;
+        rows.set(folder, row + (isClass ? Math.max(1, Math.ceil(height / 170)) : 1) + (!isClass && ports.inputs.length > 2 ? 1 : 0));
         nodes.push({
             id,
             type: 'slate',
             position: positions[id] ?? fallback,
-            style: isClass ? { width: 320, height } : undefined,
+            style: isClass ? { width: isClassFrame ? 336 : 320, height } : undefined,
             data: {
                 label: top?.name ?? nodeId,
-                detail: top?.signature ?? (top ? top.qualifiedName : 'unreadable node'),
-                kind: top?.kind ?? 'document',
+                detail: top?.signature ?? (isClassFrame ? `class ${top?.name ?? nodeId}` : (top ? top.qualifiedName : 'unreadable node')),
+                kind: isClassFrame ? 'class' : (top?.kind ?? 'document'),
                 identity: top?.identity,
                 invalid: !document.valid,
                 stale: document.stale,
                 container: isClass,
                 groupColor,
                 path: nodeId,
+                classOwner: document.classOwner,
                 unit: top,
                 intent,
-                editableIntent: Boolean(top) && !isClass && !map,
+                editableIntent: Boolean(top) && !map && (!isClass || isClassFrame),
+                classBases: classMeta?.bases,
+                classDecorators: classMeta?.decorators,
+                classFields: classMeta?.fields,
+                methodCount: isClassFrame ? ownedDocs.length : children.length,
                 problem: document.diagnostics[0]?.message,
                 verification: snapshot.verifications?.[nodeId] ?? document.verification,
                 usage: snapshot.usages?.[nodeId] ?? document.usage,
@@ -418,9 +492,46 @@ function buildDefinitionNodes(snapshot: HarnessSnapshot, nodes: Node<SlateNodeDa
                 guardrails: snapshot.guardrails?.[nodeId] ?? document.guardrails,
                 execution: snapshot.execution?.observations.find(obs => obs.instanceId === nodeId || obs.instanceId === id),
                 observedOutputs: snapshot.execution?.observations.find(obs => obs.instanceId === nodeId || obs.instanceId === id)?.outputs,
-                ...ports,
-                contextPorts: Boolean(top) && !map,
+                ...(isClassFrame ? { inputs: [], outputs: [] } : ports),
+                contextPorts: Boolean(top) && !map && !isClassFrame,
             },
+        });
+        ownedDocs.forEach((ownedDoc, index) => {
+            const mId = nodeIdOf(ownedDoc.path);
+            const mTop = ownedDoc.units.find(unit => unit.parentId === null);
+            const mPorts = portsOf(mTop ? targets.get(mTop.id)?.signature : undefined);
+            const mIntent = typeof mTop?.annotation?.intent === 'string' ? mTop.annotation.intent : '';
+            const mObs = snapshot.execution?.observations.find(obs => obs.instanceId === mId || obs.instanceId === (mTop?.id ?? mId));
+            nodes.push({
+                id: mTop?.id ?? mId,
+                type: 'slate',
+                parentId: id,
+                extent: 'parent',
+                position: positions[mTop?.id ?? mId] ?? { x: 24, y: frameHeaderHeight + index * methodSpacing },
+                data: {
+                    label: mTop?.name ?? mId.split('/').pop() ?? mId,
+                    detail: mTop?.signature ?? (mTop ? mTop.qualifiedName : 'unreadable method'),
+                    kind: 'method',
+                    identity: mTop?.identity,
+                    invalid: !ownedDoc.valid,
+                    stale: ownedDoc.stale,
+                    groupColor,
+                    path: mId,
+                    classOwner: nodeId,
+                    unit: mTop,
+                    intent: mIntent,
+                    editableIntent: Boolean(mTop),
+                    problem: ownedDoc.diagnostics[0]?.message,
+                    verification: snapshot.verifications?.[mId] ?? ownedDoc.verification,
+                    usage: snapshot.usages?.[mId] ?? ownedDoc.usage,
+                    cases: ownedDoc.cases,
+                    guardrails: snapshot.guardrails?.[mId] ?? ownedDoc.guardrails,
+                    execution: mObs,
+                    observedOutputs: mObs?.outputs,
+                    ...mPorts,
+                    contextPorts: Boolean(mTop),
+                },
+            });
         });
         children.forEach((unit, index) => nodes.push({
             id: unit.id,
