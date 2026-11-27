@@ -4,8 +4,10 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 
-import { BoardNote, FlowExecutionSnapshot, FlowInstance, FlowRegion, HarnessDocument, HarnessSnapshot, LiveModeState, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
-import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
+import { BatchForgeStatus, BoardNote, FlowExecutionSnapshot, FlowInstance, FlowRegion, HarnessDocument, HarnessSnapshot, LiveModeState, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
+import { batchForgeWorkspace } from './batch_forge';
+import { checkGenerationSlot, clampForgeConcurrency, summarizeBatchForge } from './forge_concurrency';
+import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, normalizeNeighborSignature, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import {
     checkLlamaHealth,
     evaluateProjectCredentialAccess,
@@ -36,7 +38,7 @@ import {
 } from './flow';
 import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, parseConfig, pathForNodeId, serializeNode, type SlateConfig, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
-import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
+import { collectExpandedDependencies, runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
 import { buildUsageIndex } from './usage_index';
 import { runFlow } from './flow_runner';
 import { runNodeGuardrails } from './guardrails_runner';
@@ -83,6 +85,17 @@ function buildHtml(context: vscode.ExtensionContext, webview: vscode.Webview): s
     return html.replace('<head>', `<head>\n<meta http-equiv="Content-Security-Policy" content="${csp}">`);
 }
 
+interface PendingProposal {
+    id: string;
+    packet: GenerationPacket;
+    proposal: SourceProposal;
+    candidate: string;
+    implementation?: string;
+    check?: string;
+    language?: 'python' | 'typescript' | 'javascript';
+    path: string;
+}
+
 export class HarnessPanel implements vscode.Disposable {
     static current: HarnessPanel | undefined;
 
@@ -96,18 +109,10 @@ export class HarnessPanel implements vscode.Disposable {
     private refreshChain: Promise<void> = Promise.resolve();
     private mutations: Promise<void> = Promise.resolve();
     private revision = 0;
-    private generation: AbortController | undefined;
+    private activeGenerations = new Map<string, AbortController>();
+    private batchForgeRun: AbortController | undefined;
     private describeRun: AbortController | undefined;
-    private pendingProposal: {
-        id: string;
-        packet: GenerationPacket;
-        proposal: SourceProposal;
-        candidate: string;
-        implementation?: string;
-        check?: string;
-        language?: 'python' | 'typescript' | 'javascript';
-        path: string;
-    } | undefined;
+    private pendingProposals = new Map<string, PendingProposal>();
     private lastAcceptedUnitId: string | undefined;
     private lastAcceptedVersion: number | undefined;
     private readonly testMessages: unknown[] | undefined;
@@ -172,6 +177,9 @@ export class HarnessPanel implements vscode.Disposable {
                 endpoint: guarded.settings.endpoint,
                 model: guarded.settings.model,
                 statusText: guarded.credentialBlockedReason,
+                provider: guarded.settings.provider,
+                apiKeyEnv: guarded.settings.apiKeyEnv,
+                concurrency: guarded.settings.concurrency,
             };
             this.lastLlamaHealth = blocked;
             await this.postMessage({ type: 'llamaHealth', status: blocked });
@@ -190,6 +198,9 @@ export class HarnessPanel implements vscode.Disposable {
             model: settings.model,
             statusText: health.statusText,
             models: health.models,
+            provider: settings.provider,
+            apiKeyEnv: settings.apiKeyEnv,
+            concurrency: settings.concurrency,
         };
         this.lastLlamaHealth = status;
         await this.postMessage({ type: 'llamaHealth', status });
@@ -389,7 +400,7 @@ export class HarnessPanel implements vscode.Disposable {
         const value = (message && typeof message === 'object' ? message : {}) as Record<string, unknown>;
         const kind = (value.action as Record<string, unknown> | undefined)?.kind;
         const queued = ['layout', 'noteCreate', 'noteUpdate', 'noteDelete', 'acceptProposal', 'undoAccepted'].includes(value.type as string)
-            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe' && kind !== 'verifyNode' && kind !== 'cancelVerification' && kind !== 'tryRevisions' && kind !== 'runFlow' && kind !== 'stopFlow');
+            || (value.type === 'action' && kind !== 'describeNodes' && kind !== 'cancelDescribe' && kind !== 'verifyNode' && kind !== 'cancelVerification' && kind !== 'tryRevisions' && kind !== 'runFlow' && kind !== 'stopFlow' && kind !== 'batchForge' && kind !== 'cancelBatchForge');
         if (!queued) return this.handleMessageNow(message);
         this.mutations = this.mutations.then(() => this.handleMessageNow(message), () => this.handleMessageNow(message));
         return this.mutations;
@@ -450,7 +461,25 @@ export class HarnessPanel implements vscode.Disposable {
             return;
         }
         if (value.type === 'cancelGeneration') {
-            this.generation?.abort();
+            const targetUnitId = typeof value.unitId === 'string' && value.unitId.trim() ? value.unitId.trim() : undefined;
+            if (targetUnitId) {
+                this.activeGenerations.get(targetUnitId)?.abort();
+            } else {
+                for (const controller of this.activeGenerations.values()) {
+                    controller.abort();
+                }
+            }
+            return;
+        }
+        if (value.type === 'batchForge') {
+            const nodeIds = Array.isArray(value.nodeIds)
+                ? value.nodeIds.filter((x): x is string => typeof x === 'string')
+                : undefined;
+            await this.runBatchForge(nodeIds);
+            return;
+        }
+        if (value.type === 'cancelBatchForge') {
+            this.batchForgeRun?.abort();
             return;
         }
         if (value.type === 'verifyNode') {
@@ -523,6 +552,9 @@ export class HarnessPanel implements vscode.Disposable {
             }
             if (typeof value.apiKeyEnv === 'string') {
                 await config.update('apiKeyEnv', value.apiKeyEnv.trim(), vscode.ConfigurationTarget.Global);
+            }
+            if (typeof value.concurrency === 'number' && Number.isFinite(value.concurrency)) {
+                await config.update('concurrency', clampForgeConcurrency(value.concurrency, 3), vscode.ConfigurationTarget.Global);
             }
             await this.checkAndBroadcastLlamaHealth(undefined, undefined, { interactive: true });
             this.postCommandResult(true, `Updated local LLM configuration: ${value.endpoint.trim()}`);
@@ -608,12 +640,28 @@ export class HarnessPanel implements vscode.Disposable {
             contextWindowTokens: globalNumber('contextWindow', 4096),
             ...(typeof explicitOutputTokens === 'number' ? { outputTokens: explicitOutputTokens } : {}),
             timeoutSeconds: globalNumber('timeoutSeconds', 120),
+            concurrency: clampForgeConcurrency(globalNumber('concurrency', 3), 3),
             ...(apiKeyEnv ? { apiKeyEnv } : {}),
         };
     }
 
     private generationSettings(): ResolvedLlmConfig {
         return resolveLlmConfig(this.projectConfig?.llm, this.fallbackLlmSettings(), process.env);
+    }
+
+    private async collectExpandedVerificationDeps(target: SlateNode, targetNodeId: string): Promise<Map<string, SlateNode>> {
+        const { nodes } = await this.folder.readNodes();
+        nodes.set(targetNodeId, target);
+        return collectExpandedDependencies(targetNodeId, target, nodes).dependencies;
+    }
+
+    private resolveProjectPythonPath(configOverride?: SlateConfig): string {
+        const projectPython = vscode.workspace.isTrusted
+            ? (configOverride?.pythonPath ?? this.projectConfig?.pythonPath)
+            : undefined;
+        const settingPython = vscode.workspace.getConfiguration('slate.python').get<string>('path');
+        const workspaceRoot = this.folder.root.scheme === 'file' ? this.folder.root.fsPath : undefined;
+        return resolvePythonPath(projectPython ?? settingPython, workspaceRoot);
     }
 
     private canonicalForgeLanguage(language?: string): 'python' | 'typescript' | 'javascript' {
@@ -755,11 +803,32 @@ export class HarnessPanel implements vscode.Disposable {
         }
     }
 
+    private setPendingProposalForUnit(unitId: string, proposal: PendingProposal): void {
+        for (const [existingId, existing] of this.pendingProposals.entries()) {
+            if (existing.packet.targetId === unitId) {
+                this.pendingProposals.delete(existingId);
+            }
+        }
+        this.pendingProposals.set(proposal.id, proposal);
+    }
+
+    private clearPendingProposalsForUnit(unitId: string): void {
+        for (const [existingId, existing] of this.pendingProposals.entries()) {
+            if (existing.packet.targetId === unitId) {
+                this.pendingProposals.delete(existingId);
+            }
+        }
+    }
+
     private async generate(unitId: string, options?: { forge?: boolean; boundInputs?: boolean; retryFeedback?: string; occurrence?: { flowId: string; instanceId: string } }): Promise<void> {
-        if (this.generation) {
-            this.postCommandResult(false, 'A llama.cpp generation is already running.');
+        const preflightConcurrency = this.generationSettings().concurrency;
+        const preflightError = checkGenerationSlot(Array.from(this.activeGenerations.keys()), unitId, preflightConcurrency);
+        if (preflightError) {
+            this.postCommandResult(false, preflightError);
             return;
         }
+        const controller = new AbortController();
+        this.activeGenerations.set(unitId, controller);
         try {
             const config = vscode.workspace.getConfiguration('slate.llama');
             const isForge = options?.forge !== false;
@@ -767,6 +836,13 @@ export class HarnessPanel implements vscode.Disposable {
                 ? options.boundInputs
                 : config.get<boolean>('boundInputs', false);
             const settings = await this.resolvedGenerationSettings();
+            if (this.activeGenerations.size > clampForgeConcurrency(settings.concurrency, 3)) {
+                this.postCommandResult(
+                    false,
+                    `Maximum concurrent LLM generations (${clampForgeConcurrency(settings.concurrency, 3)}) already running.`,
+                );
+                return;
+            }
             const target = this.resolveUnit(unitId);
             const nodeLanguage = await this.effectiveUnitLanguage(unitId, target.document.path);
             const packet = this.packet(unitId, {
@@ -776,9 +852,7 @@ export class HarnessPanel implements vscode.Disposable {
                 occurrence: options?.occurrence,
                 language: nodeLanguage,
             });
-            const controller = new AbortController();
-            this.generation = controller;
-            this.pendingProposal = undefined;
+            this.clearPendingProposalsForUnit(unitId);
             await this.postMessage({
                 type: 'generationStarted', unitId,
                 message: `Sent ${packet.items.length} exact source unit${packet.items.length === 1 ? '' : 's'} (${packet.estimatedInputTokens}/${packet.inputBudgetTokens} estimated input tokens) to ${settings.endpoint}.`,
@@ -811,7 +885,7 @@ export class HarnessPanel implements vscode.Disposable {
                 nodeId: nodeIdForPath(target.document.path) ?? undefined,
             });
             const id = randomUUID();
-            this.pendingProposal = {
+            this.setPendingProposalForUnit(unitId, {
                 id,
                 packet,
                 proposal,
@@ -820,7 +894,7 @@ export class HarnessPanel implements vscode.Disposable {
                 check: forgeCandidate.check,
                 language: nodeLanguage,
                 path: target.document.path,
-            };
+            });
             const langDisplay = nodeLanguage === 'typescript' ? 'TypeScript' : nodeLanguage === 'javascript' ? 'JavaScript' : 'Python';
             const checkLabel = nodeLanguage === 'python' ? 'Pytest unit check generated' : 'Unit test() check generated';
             const checks = [
@@ -847,13 +921,15 @@ export class HarnessPanel implements vscode.Disposable {
                 message: error instanceof Error ? error.message : String(error),
             });
         } finally {
-            this.generation = undefined;
+            if (this.activeGenerations.get(unitId) === controller) {
+                this.activeGenerations.delete(unitId);
+            }
         }
     }
 
     private async acceptProposal(proposalId: string, editedCandidate?: string): Promise<void> {
-        const pending = this.pendingProposal;
-        if (!pending || pending.id !== proposalId) {
+        const pending = this.pendingProposals.get(proposalId);
+        if (!pending) {
             this.postCommandResult(false, 'That proposal is no longer active.');
             return;
         }
@@ -868,8 +944,8 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private async verifyCandidate(proposalId: string, candidate: string): Promise<void> {
-        const pending = this.pendingProposal;
-        if (!pending || pending.id !== proposalId) {
+        const pending = this.pendingProposals.get(proposalId);
+        if (!pending) {
             await this.postMessage({
                 type: 'candidateVerification',
                 proposalId,
@@ -906,12 +982,7 @@ export class HarnessPanel implements vscode.Disposable {
             };
 
             if (nodeLang === 'typescript' || nodeLang === 'javascript') {
-                const deps = new Map<string, SlateNode>();
-                for (const depId of candidateNode.context) {
-                    try {
-                        deps.set(depId, await this.folder.readNode(depId));
-                    } catch {}
-                }
+                const deps = await this.collectExpandedVerificationDeps(candidateNode, nodeId);
                 const verifyRes = await runNodeVerification({
                     workspaceRoot: this.folder.root.fsPath,
                     node: candidateNode,
@@ -936,7 +1007,7 @@ export class HarnessPanel implements vscode.Disposable {
                 return;
             }
 
-            const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+            const pythonPath = this.resolveProjectPythonPath();
             const report = await runNodeGuardrails({
                 nodeId,
                 folder: this.folder,
@@ -973,7 +1044,7 @@ export class HarnessPanel implements vscode.Disposable {
 
     private async acceptFolderProposal(
         folder: SlateFolderHost,
-        pending: NonNullable<HarnessPanel['pendingProposal']>,
+        pending: PendingProposal,
         editedCandidate?: string,
     ): Promise<void> {
         if (editedCandidate && typeof editedCandidate === 'string' && editedCandidate.trim()) {
@@ -1026,8 +1097,7 @@ export class HarnessPanel implements vscode.Disposable {
                     const neighborNode = await folder.readNode(neighborId);
                     const neighborCode = neighborNode.code.join('\n');
                     const parsed = await this.adapterForLanguage(neighborNode.language).parseModule(neighborCode + '\n', neighborId);
-                    const rawCurrentSig = parsed.units[0]?.signature ?? neighborNode.code[0] ?? '';
-                    const currentSig = rawCurrentSig.endsWith(':') ? rawCurrentSig.slice(0, -1).trimEnd() : rawCurrentSig.trim();
+                    const currentSig = normalizeNeighborSignature(parsed.units[0], neighborCode);
                     const expectedSig = expected.signature.endsWith(':') ? expected.signature.slice(0, -1).trimEnd() : expected.signature.trim();
                     if (currentSig !== expectedSig) {
                         throw new Error(`Neighbor ${neighborId} signature changed after generation. The draft was preserved; regenerate against current code.`);
@@ -1059,7 +1129,7 @@ export class HarnessPanel implements vscode.Disposable {
             node.check = codeLines(pending.check);
         }
 
-        const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+        const pythonPath = this.resolveProjectPythonPath();
         const guardrailReport = await runNodeGuardrails({
             nodeId,
             folder: this.folder,
@@ -1080,7 +1150,7 @@ export class HarnessPanel implements vscode.Disposable {
         const appliedVersion = await folder.writeNode(nodeId, node);
         this.lastAcceptedUnitId = pending.packet.targetId;
         this.lastAcceptedVersion = appliedVersion;
-        this.pendingProposal = undefined;
+        this.pendingProposals.delete(pending.id);
         await this.postMessage({ type: 'proposalAccepted', unitId: this.lastAcceptedUnitId });
         this.postCommandResult(true, `Wrote the candidate into ${pending.path}. Use Undo to revert it.`);
         this.triggerLiveRerun('acceptProposal');
@@ -1147,15 +1217,10 @@ export class HarnessPanel implements vscode.Disposable {
             }
 
             const readInputs = async (target: SlateNode) => {
-                const dependencies = new Map<string, SlateNode>();
-                for (const depId of target.context) {
-                    try {
-                        dependencies.set(depId, await this.folder.readNode(depId));
-                    } catch { /* Missing dependencies are omitted by the verifier. */ }
-                }
-                const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                const dependencies = await this.collectExpandedVerificationDeps(target, nodeId);
+                const pythonPath = this.resolveProjectPythonPath();
                 const language = target.language ?? parseConfig(await this.folder.readConfigText()).language;
-                const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.imports, n.context,
+                const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.classOwner, n.imports, n.context,
                     n.uses, n.check, n.cases, n.extra, n.contract];
                 const fingerprint = JSON.stringify([language, pythonPath, inputs(target),
                     [...dependencies].map(([id, dep]) => [id, inputs(dep)])]);
@@ -1243,7 +1308,7 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private async tryRevisions(nodeId: string, maxRevisions = 3): Promise<void> {
-        if (this.activeVerifications.has(nodeId) || this.generation) {
+        if (this.activeVerifications.has(nodeId) || this.activeGenerations.has(nodeId)) {
             this.postCommandResult(false, `Operation already running for ${nodeId}.`);
             return;
         }
@@ -1301,13 +1366,8 @@ export class HarnessPanel implements vscode.Disposable {
                     return parsed;
                 },
                 verifyCandidate: async (candidateNode: SlateNode) => {
-                    const deps = new Map<string, SlateNode>();
-                    for (const depId of candidateNode.context) {
-                        try {
-                            deps.set(depId, await this.folder.readNode(depId));
-                        } catch {}
-                    }
-                    const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                    const deps = await this.collectExpandedVerificationDeps(candidateNode, nodeId);
+                    const pythonPath = this.resolveProjectPythonPath();
                     return runNodeVerification({
                         workspaceRoot: this.folder.root.fsPath,
                         node: candidateNode,
@@ -1361,7 +1421,7 @@ export class HarnessPanel implements vscode.Disposable {
                 });
 
                 const id = randomUUID();
-                this.pendingProposal = {
+                this.setPendingProposalForUnit(nodeId, {
                     id,
                     packet,
                     proposal,
@@ -1370,7 +1430,7 @@ export class HarnessPanel implements vscode.Disposable {
                     check: candidateCheck,
                     language: nodeLang,
                     path: target.document.path,
-                };
+                });
 
                 await this.postMessage({
                     type: 'proposalReady',
@@ -1404,7 +1464,7 @@ export class HarnessPanel implements vscode.Disposable {
     }
 
     private async runGuardrails(nodeId: string): Promise<NodeGuardrailsReport> {
-        const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+        const pythonPath = this.resolveProjectPythonPath();
         const report = await runNodeGuardrails({
             nodeId,
             folder: this.folder,
@@ -1468,7 +1528,7 @@ export class HarnessPanel implements vscode.Disposable {
                 }
             }
 
-            const configuredPython = vscode.workspace.getConfiguration('slate.python').get<string>('path');
+            const configuredPython = this.resolveProjectPythonPath(config);
 
             const result = await runFlow({
                 workspaceRoot: this.folder.root.fsPath,
@@ -2757,6 +2817,17 @@ export class HarnessPanel implements vscode.Disposable {
                 this.describeRun?.abort();
                 return;
             }
+            if (action.kind === 'batchForge') {
+                const nodeIds = Array.isArray(action.nodeIds)
+                    ? action.nodeIds.filter((x): x is string => typeof x === 'string')
+                    : undefined;
+                await this.runBatchForge(nodeIds);
+                return;
+            }
+            if (action.kind === 'cancelBatchForge') {
+                this.batchForgeRun?.abort();
+                return;
+            }
             if (action.kind === 'verifyNode' && typeof action.target === 'string') {
                 await this.verifyNode(this.folderNodeId(action.target));
                 return;
@@ -2816,7 +2887,7 @@ export class HarnessPanel implements vscode.Disposable {
                 checkNodeCode(node, nodeId, action.code, { language: effectiveLanguage });
                 const candidateNode: SlateNode = { ...node, code: codeLines(action.code) };
                 if (action.force !== true && (node.cases?.length || node.check?.length)) {
-                    const pythonPath = resolvePythonPath(vscode.workspace.getConfiguration('slate.python').get<string>('path'));
+                    const pythonPath = this.resolveProjectPythonPath();
                     const guardrailReport = await runNodeGuardrails({
                         nodeId,
                         folder: this.folder,
@@ -2841,6 +2912,84 @@ export class HarnessPanel implements vscode.Disposable {
             this.triggerLiveRerun(`edit node ${nodeId}`);
         } catch (error) {
             this.postCommandResult(false, error instanceof Error ? error.message : String(error));
+        }
+    }
+
+    private async runBatchForge(nodeIds?: string[]): Promise<void> {
+        if (this.batchForgeRun) {
+            this.postCommandResult(false, 'Batch forge is already running.');
+            return;
+        }
+        if (this.folder.root.scheme !== 'file') {
+            this.postCommandResult(false, 'Batch forge requires a local filesystem workspace.');
+            return;
+        }
+        if (!vscode.workspace.isTrusted) {
+            this.postCommandResult(false, 'Workspace is not trusted; refusing batch forge.');
+            return;
+        }
+        const controller = new AbortController();
+        this.batchForgeRun = controller;
+        try {
+            const settings = await this.resolvedGenerationSettings();
+            const fallback = this.fallbackLlmSettings();
+            if (settings.apiKey) fallback.apiKey = settings.apiKey;
+            const startingState: BatchForgeStatus = {
+                running: true,
+                concurrency: settings.concurrency,
+                message: `Forging stubs (concurrency ${settings.concurrency})…`,
+            };
+            await this.postMessage({ type: 'batchForgeState', state: startingState });
+            let configOverride: SlateConfig | undefined;
+            try {
+                configOverride = parseConfig(await this.folder.readConfigText());
+            } catch {}
+            const pythonPath = this.resolveProjectPythonPath(configOverride);
+            const result = await batchForgeWorkspace({
+                workspaceRoot: this.folder.root.fsPath,
+                ...(nodeIds && nodeIds.length > 0 ? { nodeIds } : { allStubs: true }),
+                concurrency: settings.concurrency,
+                pythonPath,
+                isTrusted: vscode.workspace.isTrusted,
+                approvedCredentialPairings: this.loadApprovedPairings(),
+                fallbackLlm: fallback,
+                signal: controller.signal,
+                onNodeForged: async () => {
+                    this.scheduleRefresh(50);
+                },
+            });
+            await this.refresh();
+            const summary = summarizeBatchForge(
+                result.forgedCount,
+                result.failedCount,
+                result.skippedCount,
+                result.total,
+                result.concurrency,
+            );
+            await this.postMessage({
+                type: 'batchForgeState',
+                state: {
+                    running: false,
+                    concurrency: result.concurrency,
+                    forgedCount: result.forgedCount,
+                    failedCount: result.failedCount,
+                    skippedCount: result.skippedCount,
+                    total: result.total,
+                    message: summary,
+                },
+            });
+            this.postCommandResult(result.ok, summary);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await this.postMessage({
+                type: 'batchForgeState',
+                state: { running: false, message: msg },
+            });
+            this.postCommandResult(false, `Batch forge failed: ${msg}`);
+        } finally {
+            if (this.batchForgeRun === controller) {
+                this.batchForgeRun = undefined;
+            }
         }
     }
 
@@ -3104,7 +3253,11 @@ export class HarnessPanel implements vscode.Disposable {
             clearTimeout(this.liveDebounceTimer);
             this.liveDebounceTimer = undefined;
         }
-        this.generation?.abort();
+        for (const controller of this.activeGenerations.values()) {
+            controller.abort();
+        }
+        this.activeGenerations.clear();
+        this.batchForgeRun?.abort();
         this.describeRun?.abort();
         if (this.activeRunController) {
             this.activeRunController.abort();

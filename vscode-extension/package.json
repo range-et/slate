@@ -109,6 +109,14 @@
           "minimum": 5,
           "restricted": true
         },
+        "slate.llama.concurrency": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 16,
+          "restricted": true,
+          "description": "Maximum concurrent LLM forge requests (1-16)."
+        },
         "slate.llama.boundInputs": {
           "type": "boolean",
           "default": false,

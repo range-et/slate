@@ -1,6 +1,6 @@
 import type { FlowGuardrailSummary, NodeGuardrailsReport, ObservedValue, SlateFlow, TestCase } from './harness_protocol';
 import { runFlow, type FlowRunRequest } from './flow_runner';
-import { runNodeVerification } from './verification_runner';
+import { collectExpandedDependencies, runNodeVerification } from './verification_runner';
 import type { SlateFolderHost } from './slate_folder_host';
 import type { SlateNode } from './slate_folder';
 
@@ -209,14 +209,8 @@ export async function runNodeGuardrails(options: NodeGuardrailsOptions): Promise
         if (hf.flow) flowsMap.set(hf.id, hf.flow);
     }
 
-    // 1. Run node's own verification checks
-    const dependencies = new Map<string, SlateNode>();
-    for (const depId of node.context) {
-        try {
-            const depNode = await folder.readNode(depId);
-            dependencies.set(depId, depNode);
-        } catch {}
-    }
+    // 1. Run node's own verification checks (expanding class frames, siblings, and class dependencies)
+    const { dependencies } = collectExpandedDependencies(nodeId, node, nodes);
 
     const nodeVerif = await runNodeVerification({
         nodeId,

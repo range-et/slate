@@ -213,8 +213,16 @@ it('ports decorated classes, blank-separated preludes, trailing comments, multi-
         ].join('\n')],
     ]));
     expect(ported.nodes.get('pkg/sub/mod/_prelude')?.code).toEqual(['A = 1', '', 'B = 2', 'Box = None', '# trailing module comment']);
-    expect(ported.nodes.get('pkg/sub/mod/Box')?.uses).toEqual(['pkg/ops/add', 'pkg/sub/mod/_prelude']);
+    expect(ported.nodes.get('pkg/sub/mod/Box')).toMatchObject({ kind: 'class', uses: [], code: ['@dec', 'class Box:', '    pass'] });
+    expect(ported.nodes.get('pkg/sub/mod/Box/calc')).toMatchObject({ classOwner: 'pkg/sub/mod/Box', uses: ['pkg/ops/add', 'pkg/sub/mod/_prelude'] });
     expect(ported.report.warnings).toContain('pkg/sub/mod/Box: the prelude also binds Box.');
+
+    const legacyPorted = portPythonProject(new Map([
+        ['pkg/ops.py', 'def add(a, b):\n    return a + b\n'],
+        ['pkg/sub/mod.py', 'from ..ops import add\n@dec\nclass Box:\n    def calc(self):\n        return add(1, 2)\n'],
+    ]), { splitClasses: false });
+    expect(legacyPorted.nodes.get('pkg/sub/mod/Box')?.kind).toBeUndefined();
+    expect(legacyPorted.nodes.get('pkg/sub/mod/Box')?.uses).toEqual(['pkg/ops/add']);
 });
 
 it('covers flow edge cases, root module folder collisions, invalid/star imports, and uncompiled/library uses', () => {
@@ -293,4 +301,115 @@ it('covers flow edge cases, root module folder collisions, invalid/star imports,
     expect(messages).toContain('flows/bad_flow: s.in:b is positional-only after an unwired one.');
     expect(result.files.get('demo.py')).toContain('def caller_flow():\n    side_effect()\n    v_v = None\n    return v_v');
     expect(result.files.get('demo.py')).toContain('def pair_flow() -> tuple[int, str]:\n    v_v1 = 1\n    v_v2 = "ok"\n    return (v_v1, v_v2)');
+});
+
+it('ports and deterministically compiles class frames + owned methods without method-name collisions', () => {
+    const ported = portPythonProject(new Map([
+        ['math_ops.py', 'def scale(x: int, k: int) -> int:\n    return x * k\n'],
+        ['layers.py', [
+            'import math',
+            'from math_ops import scale',
+            '',
+            'class Encoder:',
+            '    width: int = 4',
+            '',
+            '    def __init__(self, gain: int) -> None:',
+            '        self.gain = gain',
+            '',
+            '    def forward(self, x: int) -> int:',
+            '        return int(math.floor(scale(x, self.gain)))',
+            '',
+            'class Decoder:',
+            '    def forward(self, x: int) -> int:',
+            '        return x + 1',
+            '',
+            'class PropBox:',
+            '    @property',
+            '    def size(self) -> int:',
+            '        return 1',
+            '    @size.setter',
+            '    def size(self, v: int) -> None:',
+            '        pass',
+        ].join('\n')],
+    ]));
+
+    expect(ported.nodes.get('layers/Encoder')?.kind).toBe('class');
+    expect(ported.nodes.get('layers/Encoder/__init__')?.classOwner).toBe('layers/Encoder');
+    expect(ported.nodes.get('layers/Encoder/forward')).toMatchObject({
+        classOwner: 'layers/Encoder',
+        imports: ['import math'],
+        uses: ['math_ops/scale'],
+    });
+    expect(ported.nodes.get('layers/Decoder/forward')?.classOwner).toBe('layers/Decoder');
+    // PropBox has duplicate method name `size` (getter + setter) so importer falls back to monolithic losslessly
+    expect(ported.nodes.get('layers/PropBox')?.kind).toBeUndefined();
+    expect(ported.report.warnings.some(w => w.includes('PropBox kept monolithic'))).toBe(true);
+
+    const compiled = compilePython(
+        new Map([...ported.nodes].map(([id, n]) => [id, parseNode(serializeNode(n))])),
+        config,
+        new Map([
+            ['make_enc', {
+                name: 'make_enc',
+                inputs: [{ name: 'gain', annotation: 'int' }],
+                outputs: [{ name: 'out', annotation: 'Encoder' }],
+                instances: [{ id: 'enc', node: 'layers/Encoder' }],
+                wires: [
+                    { from: 'input:gain', to: 'enc.in:gain' },
+                    { from: 'enc.out', to: 'output:out' },
+                ],
+                extra: {},
+            }],
+        ]),
+    );
+    expect(compiled.diagnostics).toEqual([]);
+    expect([...compiled.files.keys()]).toEqual(['demo.py', 'layers.py', 'math_ops.py']);
+    const layersOut = compiled.files.get('layers.py')!;
+    expect(layersOut).toContain('import math\nfrom math_ops import scale');
+    expect(layersOut).toContain('# slate: nodes/layers/Encoder\nclass Encoder:\n    width: int = 4');
+    expect(layersOut).toContain('    # slate: nodes/layers/Encoder/__init__\n    def __init__(self, gain: int) -> None:');
+    expect(layersOut).toContain('    # slate: nodes/layers/Encoder/forward\n    def forward(self, x: int) -> int:');
+    expect(layersOut).toContain('# slate: nodes/layers/Decoder\nclass Decoder:\n\n    # slate: nodes/layers/Decoder/forward\n    def forward(self, x: int) -> int:');
+    // Encoder had pass stripped cleanly when methods exist; Decoder had placeholder pass stripped cleanly
+    expect(layersOut).not.toContain('class Decoder:\n    pass');
+    // Constructor flow resolved parameters from owned __init__
+    expect(compiled.files.get('demo.py')).toContain('from layers import Encoder');
+    expect(compiled.files.get('demo.py')).toContain('Encoder(gain=gain)');
+});
+
+it('diagnoses orphan classOwner and duplicate owned method names in compilePython', () => {
+    const diagResult = compilePython(new Map([
+        ['pkg/Frame', node({ name: 'Frame', kind: 'class', code: ['class Frame:', '    pass'] })],
+        ['pkg/Frame/m1', node({ name: 'run', classOwner: 'pkg/Frame', code: ['def run(self) -> int:', '    return 1'] })],
+        ['pkg/Frame/m2', node({ name: 'run', classOwner: 'pkg/Frame', code: ['def run(self) -> int:', '    return 2'] })],
+        ['pkg/Orphan', node({ name: 'orphan', classOwner: 'pkg/MissingFrame', code: ['def orphan(self) -> None:', '    pass'] })],
+    ]), config);
+    const msgText = diagResult.diagnostics.map(d => d.message).join('\n');
+    expect(msgText).toContain('duplicate method "run" on class Frame');
+    expect(msgText).toContain('pkg/Orphan: classOwner "pkg/MissingFrame" does not exist or is not a class frame');
+});
+
+it('keeps classes with post-method statements monolithic so alias = method preserves statement order', () => {
+    const ported = portPythonProject(new Map([
+        ['runner.py', [
+            'class Runner:',
+            '    def run(self) -> int:',
+            '        return 7',
+            '    alias = run',
+        ].join('\n')],
+    ]), { splitClasses: true });
+
+    const runnerNode = ported.nodes.get('runner/Runner');
+    expect(runnerNode).toBeDefined();
+    expect(runnerNode?.kind).toBeUndefined();
+    expect(ported.nodes.has('runner/Runner/run')).toBe(false);
+    expect(ported.report.warnings.some(w => w.includes('Runner kept monolithic') && w.includes('after a method definition'))).toBe(true);
+
+    const compiled = compilePython(
+        new Map([...ported.nodes].map(([id, n]) => [id, parseNode(serializeNode(n))])),
+        config,
+    );
+    expect(compiled.diagnostics).toEqual([]);
+    const runnerOut = compiled.files.get('runner.py')!;
+    expect(runnerOut.indexOf('def run(self)')).toBeLessThan(runnerOut.indexOf('alias = run'));
 });

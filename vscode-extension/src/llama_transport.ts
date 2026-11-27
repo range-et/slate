@@ -1,4 +1,11 @@
+import {
+    clampForgeConcurrency,
+    DEFAULT_OPENROUTER_MODEL,
+    MAX_FORGE_CONCURRENCY,
+} from './forge_concurrency';
 import type { SlateLlmConfig, SlateLlmProvider } from './slate_folder';
+
+export { DEFAULT_OPENROUTER_MODEL, MAX_FORGE_CONCURRENCY };
 
 export const DEFAULT_OUTPUT_TOKENS = 1536;
 
@@ -15,6 +22,10 @@ export interface LlamaOptions {
     headers?: Record<string, string>;
     /** Optional callback notified when SSE emits a non-empty finish_reason. */
     onFinishReason?: (finishReason: string) => void;
+    /** Maximum automatic retries on HTTP 429 rate limits (default 3, clamped 0..5). */
+    maxRateLimitRetries?: number;
+    /** Base exponential backoff delay in ms for HTTP 429 retries (default 1200, clamped 0..15000). */
+    rateLimitBaseDelayMs?: number;
 }
 
 export interface LlamaHealthOptions {
@@ -347,10 +358,14 @@ export interface LlamaHealthResult {
 
 export class LlamaTransportError extends Error {}
 
-const PROVIDER_DEFAULTS: Record<SlateLlmProvider, { endpoint: string; apiKeyEnv?: string }> = {
+const PROVIDER_DEFAULTS: Record<SlateLlmProvider, { endpoint: string; apiKeyEnv?: string; model?: string }> = {
     'llama.cpp': { endpoint: 'http://127.0.0.1:8080' },
     ollama: { endpoint: 'http://127.0.0.1:11434/v1' },
-    openrouter: { endpoint: 'https://openrouter.ai/api/v1', apiKeyEnv: 'OPENROUTER_API_KEY' },
+    openrouter: {
+        endpoint: 'https://openrouter.ai/api/v1',
+        apiKeyEnv: 'OPENROUTER_API_KEY',
+        model: DEFAULT_OPENROUTER_MODEL,
+    },
     'openai-compatible': { endpoint: 'http://127.0.0.1:8080/v1', apiKeyEnv: 'SLATE_LLM_API_KEY' },
 };
 
@@ -414,9 +429,13 @@ export function resolveLlmConfig(
     else if (fallback?.provider) provider = fallback.provider;
     else provider = inferProviderFromEndpoint(endpoint);
 
+    const fallbackModel = cleanString(fallback?.model);
+    const defaultModel = PROVIDER_DEFAULTS[provider].model;
     const model = cleanString(override?.model)
         ?? cleanString(projectLlm?.model)
-        ?? cleanString(fallback?.model)
+        ?? (defaultModel
+            ? (fallbackModel && fallbackModel !== 'local' ? fallbackModel : defaultModel)
+            : fallbackModel)
         ?? 'local';
 
     const explicitApiKeyEnv = cleanString(override?.apiKeyEnv)
@@ -425,8 +444,9 @@ export function resolveLlmConfig(
     const apiKeyEnv = explicitApiKeyEnv
         ?? PROVIDER_DEFAULTS[provider].apiKeyEnv;
 
-    const rawConcurrency = override?.concurrency ?? projectLlm?.concurrency ?? fallback?.concurrency ?? 3;
-    const concurrency = Math.max(1, Math.min(16, Math.trunc(Number.isFinite(rawConcurrency) ? rawConcurrency : 3)));
+    const fallbackConcurrency = clampForgeConcurrency(fallback?.concurrency, 3);
+    const projectConcurrency = clampForgeConcurrency(projectLlm?.concurrency, fallbackConcurrency);
+    const concurrency = clampForgeConcurrency(override?.concurrency, projectConcurrency);
 
     const rawTimeout = override?.timeoutSeconds ?? projectLlm?.timeoutSeconds ?? fallback?.timeoutSeconds ?? 120;
     const timeoutSeconds = Math.max(5, Math.trunc(Number.isFinite(rawTimeout) ? rawTimeout : 120));
@@ -645,6 +665,37 @@ export async function checkLlamaHealth(
     }
 }
 
+function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+        return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+    }
+    if (ms <= 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+        };
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
+
+function computeRateLimitDelayMs(retryAfterHeader: string | null, attempt: number, baseDelayMs: number): number {
+    if (retryAfterHeader) {
+        const trimmed = retryAfterHeader.trim();
+        const seconds = Number(trimmed);
+        if (trimmed && Number.isFinite(seconds) && seconds >= 0) {
+            return Math.min(Math.ceil(seconds * 1000), 15000);
+        }
+    }
+    const exp = Math.min(baseDelayMs * (2 ** attempt), 8000);
+    const jitter = baseDelayMs > 0 ? Math.floor(Math.random() * Math.min(250, baseDelayMs)) : 0;
+    return exp + jitter;
+}
+
 export async function streamLlamaCompletion(
     prompt: string,
     options: LlamaOptions,
@@ -654,25 +705,44 @@ export async function streamLlamaCompletion(
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(new Error('llama.cpp request timed out')), options.timeoutMs);
     const combined = AbortSignal.any([signal, timeout.signal]);
+    const maxRetries = typeof options.maxRateLimitRetries === 'number' && Number.isFinite(options.maxRateLimitRetries)
+        ? Math.max(0, Math.min(5, Math.trunc(options.maxRateLimitRetries)))
+        : 3;
+    const baseDelayMs = typeof options.rateLimitBaseDelayMs === 'number' && Number.isFinite(options.rateLimitBaseDelayMs)
+        ? Math.max(0, Math.min(15000, Math.trunc(options.rateLimitBaseDelayMs)))
+        : 1200;
     try {
         validateLlmEndpointUrl(options.endpoint);
         const authHeaders = buildAuthHeaders(options.endpoint, options.apiKey, options.headers);
-        const response = await fetch(completionUrl(options.endpoint), {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...authHeaders },
-            redirect: 'error',
-            body: JSON.stringify({
-                model: options.model,
-                messages: [
-                    { role: 'system', content: options.system ?? 'You are a constrained Python function implementation engine. Follow the output contract exactly.' },
-                    { role: 'user', content: prompt },
-                ],
-                stream: true,
-                temperature: 0.1,
-                max_tokens: options.outputTokens,
-            }),
-            signal: combined,
+        const url = completionUrl(options.endpoint);
+        const payloadBody = JSON.stringify({
+            model: options.model,
+            messages: [
+                { role: 'system', content: options.system ?? 'You are a constrained Python function implementation engine. Follow the output contract exactly.' },
+                { role: 'user', content: prompt },
+            ],
+            stream: true,
+            temperature: 0.1,
+            max_tokens: options.outputTokens,
         });
+        let response: Response;
+        for (let rateAttempt = 0; ; rateAttempt++) {
+            response = await fetch(url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', ...authHeaders },
+                redirect: 'error',
+                body: payloadBody,
+                signal: combined,
+            });
+            if (response.status === 429 && rateAttempt < maxRetries) {
+                const retryAfter = response.headers?.get?.('retry-after') ?? null;
+                await response.text().catch(() => '');
+                const delayMs = computeRateLimitDelayMs(retryAfter, rateAttempt, baseDelayMs);
+                await sleepWithSignal(delayMs, combined);
+                continue;
+            }
+            break;
+        }
         if (!response.ok) {
             const detail = (await response.text()).slice(0, 500);
             throw new LlamaTransportError(`llama.cpp returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`);

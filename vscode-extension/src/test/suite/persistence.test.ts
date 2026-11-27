@@ -2228,4 +2228,210 @@ suite('Slate native persistence and proposal QA', () => {
 
         await post({ type: 'setLiveMode', enabled: false });
     });
+
+    test('concurrent multi-unit generate requests and panel batchForge persist independent proposals and stubs', async () => {
+        await open();
+        const cfg = vscode.workspace.getConfiguration('slate.llama');
+        const prevConcurrency = cfg.inspect<number>('concurrency')?.globalValue;
+        const listeners = server.listeners('request') as Array<(...args: any[]) => void>;
+        const stubNode = {
+            slate: 3,
+            name: 'batch_stub',
+            intent: 'Add one to input',
+            contract: 'Returns x + 1',
+            context: [],
+            cases: [{ name: 'c1', input: { x: 4 }, expected: 5 }],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            code: ['def batch_stub(x: int) -> int:', '    raise NotImplementedError'],
+        };
+
+        try {
+            await cfg.update('concurrency', 2, vscode.ConfigurationTarget.Global);
+
+            let inFlight = 0;
+            let maxInFlight = 0;
+            let releasePair!: () => void;
+            let pairArrived = false;
+            const heldPair = new Promise<void>(resolve => { releasePair = resolve; });
+
+            server.removeAllListeners('request');
+            server.on('request', (req, res) => {
+                if (req.method === 'GET') {
+                    res.writeHead(200, { 'content-type': 'application/json' });
+                    res.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+                    return;
+                }
+                let raw = '';
+                req.on('data', chunk => { raw += String(chunk); });
+                req.on('end', () => {
+                    const parsed = JSON.parse(raw);
+                    const userPrompt = String(parsed.messages?.[1]?.content ?? '');
+
+                    if (userPrompt.includes('batch_stub')) {
+                        const reply = [
+                            '### Implementation',
+                            '```python',
+                            'def batch_stub(x: int) -> int:',
+                            '    return x + 1',
+                            '```',
+                            '',
+                            '### Unit Check',
+                            '```python',
+                            'def test_batch_stub():',
+                            '    assert batch_stub(4) == 5',
+                            '```',
+                        ].join('\n');
+                        res.writeHead(200, { 'content-type': 'text/event-stream' });
+                        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply } }] })}\n\n`);
+                        res.end('data: [DONE]\n\n');
+                        return;
+                    }
+
+                    inFlight += 1;
+                    maxInFlight = Math.max(maxInFlight, inFlight);
+                    if (inFlight === 2) {
+                        pairArrived = true;
+                    }
+                    void heldPair.then(() => {
+                        inFlight -= 1;
+                        const reply = userPrompt.includes('### Target stub: clamp')
+                            ? 'def clamp(value: int, lower: int, upper: int) -> int:\n    return max(lower, min(upper, value))'
+                            : candidate;
+                        res.writeHead(200, { 'content-type': 'text/event-stream' });
+                        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply } }] })}\n\n`);
+                        res.end('data: [DONE]\n\n');
+                    });
+                });
+            });
+
+            await messages();
+            const req1 = post({ type: 'generate', unitId: 'normalize' });
+            const req2 = post({ type: 'generate', unitId: 'clamp' });
+            await eventually(async () => pairArrived, 'two distinct generation requests arrived concurrently');
+
+            // Third request while at concurrency limit 2 is refused cleanly
+            await post({ type: 'generate', unitId: 'clamp' });
+            releasePair();
+            await Promise.all([req1, req2]);
+
+            const genMsgs = await messages();
+            assert.equal(maxInFlight, 2);
+            assert.ok(genMsgs.some(m => m.ok === false && m.message?.includes('already running')), JSON.stringify(genMsgs));
+            assert.ok(genMsgs.some(m => m.type === 'proposalReady' && (m.proposal as any)?.unitId === 'normalize'), JSON.stringify(genMsgs));
+            assert.ok(genMsgs.some(m => m.type === 'proposalReady' && (m.proposal as any)?.unitId === 'clamp'), JSON.stringify(genMsgs));
+
+            // Also verify panel batchForge persists a forged stub to disk
+            await vscode.workspace.fs.writeFile(uri(...nodePath('batch_stub')), encode(stubNode));
+            await act({ kind: 'refreshIndex' });
+            await messages();
+            await post({ type: 'batchForge', nodeIds: ['batch_stub'] });
+            const batchMsgs = await messages();
+            assert.ok(batchMsgs.some(m => m.type === 'batchForgeState' && (m as any).state?.running === true));
+            assert.ok(batchMsgs.some(m => m.type === 'batchForgeState' && (m as any).state?.running === false && (m as any).state?.forgedCount === 1));
+            const forgedDisk = await read(...nodePath('batch_stub'));
+            assert.ok(forgedDisk.code.join('\n').includes('return x + 1'));
+
+            // Verify owned method on decorated/subclassed frame accepts with boundInputs: true and empty context
+            const frameNode = {
+                slate: 3,
+                name: 'ChildBox',
+                kind: 'class',
+                intent: 'Box class',
+                contract: 'Holds value',
+                context: [],
+                examples: [],
+                describedBy: 'human',
+                locked: false,
+                imports: ['from dataclasses import dataclass'],
+                uses: [],
+                code: ['@dataclass', 'class ChildBox(object):', '    pass'],
+            };
+            const initNode = {
+                slate: 3,
+                name: '__init__',
+                classOwner: 'ChildBox',
+                intent: 'Init box',
+                contract: 'Stores v',
+                context: [],
+                examples: [],
+                describedBy: 'human',
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def __init__(self, v: int) -> None:', '    self.v = v'],
+            };
+            const methodNode = {
+                slate: 3,
+                name: 'double_v',
+                classOwner: 'ChildBox',
+                intent: 'Return self.v * 2',
+                contract: 'Returns int',
+                context: [],
+                cases: [{ name: 'd1', init: { v: 3 }, inputs: {}, expected: 6 }],
+                examples: [],
+                describedBy: 'human',
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def double_v(self) -> int:', '    raise NotImplementedError'],
+            };
+            await vscode.workspace.fs.createDirectory(uri('slate', 'nodes', 'ChildBox'));
+            await vscode.workspace.fs.writeFile(uri(...nodePath('ChildBox')), encode(frameNode));
+            await vscode.workspace.fs.writeFile(uri(...nodePath('ChildBox/__init__')), encode(initNode));
+            await vscode.workspace.fs.writeFile(uri(...nodePath('ChildBox/double_v')), encode(methodNode));
+            await act({ kind: 'refreshIndex' });
+            await messages();
+
+            server.removeAllListeners('request');
+            server.on('request', (req, res) => {
+                if (req.method === 'GET') {
+                    res.writeHead(200, { 'content-type': 'application/json' });
+                    res.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+                    return;
+                }
+                req.on('data', () => {});
+                req.on('end', () => {
+                    const reply = [
+                        '### Implementation',
+                        '```python',
+                        'def double_v(self) -> int:',
+                        '    return self.v * 2',
+                        '```',
+                        '',
+                        '### Unit Check',
+                        '```python',
+                        'def test_double_v():',
+                        '    assert ChildBox(3).double_v() == 6',
+                        '```',
+                    ].join('\n');
+                    res.writeHead(200, { 'content-type': 'text/event-stream' });
+                    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply } }] })}\n\n`);
+                    res.end('data: [DONE]\n\n');
+                });
+            });
+
+            await post({ type: 'generate', unitId: 'ChildBox/double_v', boundInputs: true });
+            const methodGenMsgs = await messages();
+            const methodProposal = methodGenMsgs.find(m => m.type === 'proposalReady') as any;
+            assert.ok(methodProposal?.proposal?.id, JSON.stringify(methodGenMsgs));
+
+            await post({ type: 'acceptProposal', proposalId: methodProposal.proposal.id });
+            const methodAcceptMsgs = await messages();
+            assert.ok(
+                methodAcceptMsgs.some(m => m.type === 'proposalAccepted' && m.unitId === 'ChildBox/double_v'),
+                JSON.stringify(methodAcceptMsgs),
+            );
+        } finally {
+            server.removeAllListeners('request');
+            for (const listener of listeners) server.on('request', listener);
+            await cfg.update('concurrency', prevConcurrency, vscode.ConfigurationTarget.Global);
+            try { await vscode.workspace.fs.delete(uri(...nodePath('batch_stub'))); } catch {}
+            try { await vscode.workspace.fs.delete(uri('slate', 'nodes', 'ChildBox'), { recursive: true }); } catch {}
+            try { await vscode.workspace.fs.delete(uri(...nodePath('ChildBox'))); } catch {}
+        }
+    });
 });

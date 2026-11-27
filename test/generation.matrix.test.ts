@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildForgePacket, buildGenerationPacket, FORGE_INPUT_BUDGET_TOKENS, PacketError, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from '../vscode-extension/src/generation';
+import { buildForgePacket, buildGenerationPacket, FORGE_INPUT_BUDGET_TOKENS, normalizeNeighborSignature, PacketError, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from '../vscode-extension/src/generation';
 import { buildDescribePacket, describeNodes, describeOrder, parseDescribeReply } from '../vscode-extension/src/port/describe';
 import { indexNode, parseNode } from '../vscode-extension/src/slate_folder';
 import { containsJsxSyntax } from '../vscode-extension/src/ts_adapter';
@@ -466,5 +466,122 @@ describe('S-512 local llama.cpp component forge matrix', () => {
         }, 'typescript');
         expect(droppedExport.valid).toBe(false);
         expect(droppedExport.diagnostics.some(d => d.includes('export modifier'))).toBe(true);
+    });
+
+    it('injects owning class frame and sibling signatures for owned method forge packets within 600 tokens', () => {
+        const classFrame = indexNode(
+            'slate/nodes/models/ConvBlock.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'ConvBlock',
+                kind: 'class',
+                intent: 'Residual conv block',
+                contract: 'Preserves shape',
+                code: ['@dataclass', 'class ConvBlock:', '    scale: float = 1.0'],
+            }),
+            'python',
+            1,
+        );
+        const initMethod = indexNode(
+            'slate/nodes/models/ConvBlock/__init__.json',
+            JSON.stringify({
+                slate: 3,
+                name: '__init__',
+                classOwner: 'models/ConvBlock',
+                intent: 'Store scale factor',
+                contract: 'scale > 0',
+                code: ['def __init__(self, scale: float) -> None:', '    self.scale = scale'],
+            }),
+            'python',
+            1,
+        );
+        const forwardMethod = indexNode(
+            'slate/nodes/models/ConvBlock/forward.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'forward',
+                classOwner: 'models/ConvBlock',
+                intent: 'Multiply input by self.scale',
+                contract: 'Returns float',
+                cases: [{ name: 'c1', init: { scale: 2.0 }, inputs: { x: 3.0 }, expected: 6.0 }],
+                code: ['def forward(self, x: float) -> float:', '    raise NotImplementedError'],
+            }),
+            'python',
+            1,
+        );
+        const snapshot = {
+            revision: 1,
+            projectName: 'nn_proj',
+            documents: [classFrame.document, initMethod.document, forwardMethod.document],
+        };
+        const sources = new Map([
+            [classFrame.document.path, classFrame.code],
+            [initMethod.document.path, initMethod.code],
+            [forwardMethod.document.path, forwardMethod.code],
+        ]);
+        const packet = buildForgePacket(snapshot, sources, 'models/ConvBlock/forward');
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(600);
+        expect(packet.prompt).toContain('Owning class frame: ConvBlock');
+        expect(packet.prompt).toContain('scale: float = 1.0');
+        expect(packet.prompt).toContain('Sibling methods on ConvBlock');
+        expect(packet.prompt).toContain('def __init__(self, scale: float) -> None');
+        expect(packet.fingerprint?.neighborSignatures['models/ConvBlock']).toBeDefined();
+
+        // Candidate validation accepts self unannotated in owned method implementation
+        const validMethod = validateForgeCandidate(forwardMethod.document.units[0], {
+            implementation: 'def forward(self, x: float) -> float:\n    return x * self.scale',
+            check: 'def test_forward():\n    assert ConvBlock(2.0).forward(3.0) == pytest.approx(6.0)',
+        });
+        expect(validMethod.valid).toBe(true);
+    });
+
+    it('normalizes decorated/subclassed owner signatures consistently and compacts large class frames within 600 tokens', () => {
+        const manyFields = Array.from({ length: 65 }, (_, i) => `    field_${i}: int = ${i}`);
+        manyFields[42] = '    gain: float = 2.5';
+        const bigFrame = indexNode(
+            'slate/nodes/models/BigOp.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'BigOp',
+                kind: 'class',
+                intent: 'Large config-heavy operator',
+                contract: 'Preserves typed attributes',
+                code: ['@dataclass', 'class BigOp(BaseOp):', ...manyFields],
+            }),
+            'python',
+            1,
+        );
+        const targetMethod = indexNode(
+            'slate/nodes/models/BigOp/apply.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'apply',
+                classOwner: 'models/BigOp',
+                intent: 'Scale x by self.gain',
+                contract: 'Returns float',
+                code: ['def apply(self, x: float) -> float:', '    raise NotImplementedError'],
+            }),
+            'python',
+            1,
+        );
+        const snapshot = {
+            revision: 1,
+            projectName: 'big_cls_proj',
+            documents: [bigFrame.document, targetMethod.document],
+        };
+        const sources = new Map([
+            [bigFrame.document.path, bigFrame.code],
+            [targetMethod.document.path, targetMethod.code],
+        ]);
+        const packet = buildForgePacket(snapshot, sources, 'models/BigOp/apply');
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.prompt).toContain('@dataclass');
+        expect(packet.prompt).toContain('class BigOp(BaseOp):');
+        expect(packet.prompt).toContain('gain: float = 2.5');
+        expect(packet.prompt).toContain('frame line(s) omitted');
+
+        // Signature fingerprint matches normalizeNeighborSignature used during acceptFolderProposal
+        expect(packet.fingerprint?.neighborSignatures['models/BigOp']?.signature).toBe('@dataclass class BigOp(BaseOp)');
+        expect(normalizeNeighborSignature(bigFrame.document.units[0], bigFrame.code)).toBe('@dataclass class BigOp(BaseOp)');
     });
 });

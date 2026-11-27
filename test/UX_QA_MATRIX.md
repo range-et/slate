@@ -22,6 +22,7 @@ Browser tests use a recording host. They assert real DOM interaction, enabled/di
 | Area | Interaction and expected behavior | Automated evidence / remaining gap |
 |---|---|---|
 | Startup | Host receives `ready`; snapshot renders definitions, state, diagnostics, refs, placeholders, flows, values, notes | B/Q startup; H indexing; W bundle rendering |
+| Class Frame Containers | Class frames (`kind: 'class'`) render bases, decorators, typed fields/properties (`[data-testid="class-frame-fields"]`), method counts (`[data-testid="class-frame-method-count"]`), and interactive owned method child nodes (`parentId`, `extent: 'parent'`) | Q renders Class Frame containers with bases, decorators, fields/properties, and nested owned method nodes; U `harness_graph.test.ts` |
 | JPL-60 & Contracts | Warning badge on node card for >60 lines or missing annotations; inspector displays diagnostics and split/refactor prompt | B inspector diagnostics; Q inspector JPL-60 warning / split action |
 | Node Verification & Quality Badges | Live verification badge on node cards (untested, running, passed, failed, mutant_survived, stale); inspector displays Verification & JPL-60 Quality section with passed/total tests, mutant count, collapsible failure traceback / mutant diff, "Verify Node" trigger and "Try up to 3 revisions" bounded retry loop with micro-packet feedback | Q surfaces live verification badges on canvas nodes and verification inspector controls; P concurrent target code, case and dependency edits during verification mark the persisted result stale; P per-node Pydantic + pytest + mutmut verification runner, badges, staleness, cancellation, and bounded retry loop; U verification_runner.matrix.test.ts |
 | Verified Candidates & Revision Loop (S-701) | Local LLM health status dot in top bar with endpoint/model details and test/config modal; candidate review editor allowing edits to proposed code and check before accept; "Verify Draft (Scratch)" runs guardrails in isolated scratch overlay without writing to disk; "Regenerate with feedback" allows user prompt adjustments within micro-packet budget (<=600 tokens); "Try up to 3 revisions" loops on test failures with bounded traceback feedback; typed stubs created from wire drops and canvas search with auto-wiring | Q surfaces local LLM health dot & modal, candidate review editor, scratch verification badge, revision loop banner, feedback regeneration, and typed stub wire creation (S-701); P S-701 createStub action, local LLM health check/config, scratch candidate verification, and accept edited candidate; U verified_candidates.matrix.test.ts |
@@ -266,7 +267,12 @@ readiness.
   `liveModeStatus` reflection, active indicators, status-bar badge, and disabling,
   and S-701 verified candidates, candidate review editing, scratch verification badge,
   regenerate with feedback, revision loop attempts banner, local LLM health indicator and
-  config modal, and wire drop stub creation.
+  config modal, wire drop stub creation, OpenRouter `qwen/qwen3-coder-next` modal preset
+  (`apiKeyEnv`, `concurrency`), concurrent multi-unit generation progress & per-unit
+  cancellation (`active-generations-badge`), and topbar `⚒ Forge Stubs` / `⏹ Stop Forge`
+  batch forge controls. Real Extension Host `persistence.test.ts` additionally verifies
+  concurrent multi-unit `generate` dispatch with independent proposals and `batchForge`
+  disk persistence.
 - S-800 Control-Flow Regions (`branch`, `foreach`, `repeat`, Issue #14) and S-850
   Prose Mode (`language: "prose"`, Issue #27): `test/flow_regions.test.ts` covers
   canvas region node rendering (`BRANCH`/`FOREACH`/`REPEAT` badges, child flow labels,

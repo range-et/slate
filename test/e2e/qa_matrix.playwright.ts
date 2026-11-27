@@ -123,7 +123,7 @@ test('QA generation disabled/error, progress, cancel, retry, accept and undo cha
     await host(page, { type: 'generationProgress', unitId: 'scoring/normalize_score', receivedCharacters: 123 });
     await expect(page.locator('.generation-activity')).toContainText('123 characters');
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    expect(await messages(page)).toContainEqual({ type: 'cancelGeneration' });
+    expect(await messages(page)).toContainEqual({ type: 'cancelGeneration', unitId: 'scoring/normalize_score' });
     await host(page, { type: 'generationFailed', message: 'Generation cancelled.' });
     await expect(page.getByRole('status')).toContainText('Generation cancelled.');
     await generate.click();
@@ -1281,4 +1281,183 @@ test('Verified candidates, revision loop, scratch overlay and local LLM health c
         proposalId: 'prop-701',
         editedCandidate,
     }));
+});
+
+test('QA OpenRouter Qwen3-Coder-Next preset, concurrent multi-unit generation, and batch forge controls', async ({ page }) => {
+    await host(page, {
+        type: 'llamaHealth',
+        status: {
+            ok: true,
+            endpoint: 'http://127.0.0.1:8080',
+            model: 'local',
+            statusText: 'Connected',
+            concurrency: 3,
+        },
+    });
+
+    // 1. Open LLM config modal, apply OpenRouter Qwen3-Coder-Next preset, and save
+    await page.locator('[data-testid="llama-health-dot"]').click();
+    const modal = page.locator('[data-testid="llama-modal"]');
+    await expect(modal).toBeVisible();
+    await page.locator('[data-testid="llama-preset-openrouter-btn"]').click();
+    await expect(page.locator('[data-testid="llama-endpoint-input"]')).toHaveValue('https://openrouter.ai/api/v1');
+    await expect(page.locator('[data-testid="llama-model-input"]')).toHaveValue('qwen/qwen3-coder-next');
+    await expect(page.locator('[data-testid="llama-apikey-env-input"]')).toHaveValue('OPENROUTER_API_KEY');
+    await expect(page.locator('[data-testid="llama-concurrency-input"]')).toHaveValue('4');
+
+    await page.locator('[data-testid="llama-concurrency-input"]').fill('6');
+    await page.locator('[data-testid="llama-save-btn"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'setLlamaConfig',
+        endpoint: 'https://openrouter.ai/api/v1',
+        model: 'qwen/qwen3-coder-next',
+        apiKeyEnv: 'OPENROUTER_API_KEY',
+        concurrency: 6,
+    }));
+    await host(page, {
+        type: 'llamaHealth',
+        status: {
+            ok: true,
+            provider: 'openrouter',
+            endpoint: 'https://openrouter.ai/api/v1',
+            model: 'qwen/qwen3-coder-next',
+            apiKeyEnv: 'OPENROUTER_API_KEY',
+            concurrency: 4,
+            statusText: 'Connected',
+        },
+    });
+
+    // 2. Concurrent multi-unit generation tracking and per-unit cancellation/proposals
+    await host(page, { type: 'generationStarted', unitId: 'scoring/normalize_score', message: 'Forging normalize_score…' });
+    await host(page, { type: 'generationStarted', unitId: 'clamp', message: 'Forging clamp…' });
+
+    const badge = page.locator('[data-testid="active-generations-badge"]');
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText('2/4 forging');
+
+    await select(page, 'scoring/normalize_score');
+    await expect(page.locator('.generation-activity')).toContainText('Forging normalize_score…');
+    await select(page, 'clamp');
+    await expect(page.locator('.generation-activity')).toContainText('Forging clamp…');
+
+    await page.locator('.generation-activity').getByRole('button', { name: 'Cancel' }).click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({
+        type: 'cancelGeneration',
+        unitId: 'clamp',
+    }));
+    await host(page, { type: 'generationFailed', unitId: 'clamp', message: 'Generation cancelled.' });
+    await expect(badge).toContainText('1/4 forging');
+
+    await host(page, {
+        type: 'proposalReady',
+        proposal: {
+            id: 'prop-norm',
+            unitId: 'scoring/normalize_score',
+            path: 'slate/nodes/scoring/normalize_score.json',
+            candidate: 'def normalize_score(score: int, maximum: int) -> int:\n    return score',
+            checks: ['Valid Python'],
+        },
+    });
+    await expect(badge).toHaveCount(0);
+    await select(page, 'scoring/normalize_score');
+    await expect(page.locator('[data-testid="proposal-candidate-editor"]')).toHaveValue(/normalize_score/);
+
+    // 3. Batch forge topbar button start/stop dispatch
+    await page.locator('[data-testid="batch-forge-button"]').click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({ type: 'batchForge' }));
+
+    await host(page, { type: 'batchForgeState', state: { running: true, concurrency: 4, message: 'Forging stubs…' } });
+    const stopBtn = page.locator('[data-testid="batch-forge-stop-button"]');
+    await expect(stopBtn).toBeVisible();
+    await stopBtn.click();
+    expect(await messages(page)).toContainEqual(expect.objectContaining({ type: 'cancelBatchForge' }));
+});
+
+test('renders Class Frame containers with bases, decorators, fields/properties, and nested owned method nodes', async ({ page }) => {
+    await host(page, null);
+    await page.evaluate(() => {
+        window.postMessage({
+            type: 'snapshot',
+            snapshot: {
+                revision: 5,
+                projectName: 'class-frame-demo',
+                documents: [
+                    {
+                        id: 'node:models/ConvBlock',
+                        path: 'slate/nodes/models/ConvBlock.json',
+                        nodeKind: 'class',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:convblock',
+                        version: null,
+                        diagnostics: [],
+                        source: '@dataclass\nclass ConvBlock(nn.Module):\n    dim: int\n    scale: float = 1.0\n',
+                        classMeta: {
+                            decorators: ['@dataclass'],
+                            bases: ['nn.Module'],
+                            fields: [
+                                { name: 'dim', annotation: 'int', defaultValue: null, raw: 'dim: int' },
+                                { name: 'scale', annotation: 'float', defaultValue: '1.0', raw: 'scale: float = 1.0' },
+                            ],
+                            hasMethods: false,
+                        },
+                        units: [{
+                            id: 'models/ConvBlock',
+                            identity: 'durable',
+                            kind: 'class',
+                            name: 'ConvBlock',
+                            qualifiedName: 'ConvBlock',
+                            parentId: null,
+                            ranges: { name: { start: { line: 1, character: 6 }, end: { line: 1, character: 15 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 3, character: 22 } } },
+                            annotation: { intent: 'Residual conv block', contract: 'dim > 0', dependencies: [], examples: [], locked: false },
+                            decorators: ['dataclass'],
+                        }],
+                    },
+                    {
+                        id: 'node:models/ConvBlock/forward',
+                        path: 'slate/nodes/models/ConvBlock/forward.json',
+                        classOwner: 'models/ConvBlock',
+                        valid: true,
+                        stale: false,
+                        sourceHash: 'sha256:forward',
+                        version: null,
+                        diagnostics: [],
+                        source: 'def forward(self, x: float) -> float:\n    return x * self.scale\n',
+                        units: [{
+                            id: 'models/ConvBlock/forward',
+                            identity: 'durable',
+                            kind: 'method',
+                            name: 'forward',
+                            qualifiedName: 'forward',
+                            parentId: null,
+                            ranges: { name: { start: { line: 0, character: 4 }, end: { line: 0, character: 11 } }, declaration: { start: { line: 0, character: 0 }, end: { line: 1, character: 25 } } },
+                            annotation: { intent: 'Scale input by self.scale', contract: 'Returns float', classOwner: 'models/ConvBlock', dependencies: [], examples: [], locked: false },
+                            decorators: [],
+                            signature: 'def forward(self, x: float) -> float',
+                            parameters: 'self, x: float',
+                            returnAnnotation: 'float',
+                            params: [
+                                { name: 'self', annotation: null, default: null, kind: 'keyword' },
+                                { name: 'x', annotation: 'float', default: null, kind: 'keyword' },
+                            ],
+                        }],
+                    },
+                ],
+            },
+        }, '*');
+    });
+
+    const frameNode = page.locator('.react-flow__node[data-id="models/ConvBlock"]');
+    await expect(frameNode).toBeVisible();
+    await expect(frameNode).toContainText('class frame');
+    await expect(frameNode).toContainText('(nn.Module)');
+    await expect(frameNode.locator('[data-testid="class-frame-method-count"]')).toHaveText('1 method');
+    await expect(frameNode.locator('[data-testid="class-frame-fields"]')).toContainText('dim: int');
+    await expect(frameNode.locator('[data-testid="class-frame-fields"]')).toContainText('scale: float = 1.0');
+
+    const methodNode = page.locator('.react-flow__node[data-id="models/ConvBlock/forward"]');
+    await expect(methodNode).toBeVisible();
+    await expect(methodNode).toContainText('Scale input by self.scale');
+    await select(page, 'models/ConvBlock/forward');
+    await expect(page.locator('.harness-inspector')).toContainText('forward');
 });

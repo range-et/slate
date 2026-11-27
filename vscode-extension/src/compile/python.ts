@@ -65,10 +65,37 @@ export function libraryImport(target: string): string | null {
 
 /** Signature of a definition node from its code, or null. */
 export function nodeSignature(node: SlateNode): CallableSignature | null {
-    if (node.kind) return null;
+    if (node.kind && node.kind !== 'class') return null;
     const units = parseModule(`${node.code.join('\n')}\n`, '<signature>').units;
     const unit = units.find(item => item.parentId === null && item.name === node.name);
     return unit ? unitSignature(unit, units) : null;
+}
+
+function classConstructorSignature(classNode: SlateNode, ownedMethods: ReadonlyArray<[string, SlateNode]>): CallableSignature | null {
+    const initEntry = ownedMethods.find(([, method]) => method.name === '__init__');
+    if (initEntry) {
+        const initUnits = parseModule(`${initEntry[1].code.join('\n')}\n`, '<init>').units;
+        const initUnit = initUnits.find(item => item.parentId === null && item.name === '__init__');
+        if (initUnit) {
+            return {
+                name: classNode.name,
+                params: (initUnit.params ?? []).filter((param, idx) => !(idx === 0 && (param.name === 'self' || param.name === 'cls'))),
+                returns: classNode.name,
+            };
+        }
+    }
+    return nodeSignature(classNode);
+}
+
+function stripTrailingPlaceholderPass(lines: string[]): string[] {
+    const copy = [...lines];
+    while (copy.length > 0 && copy[copy.length - 1].trim() === '') {
+        copy.pop();
+    }
+    if (copy.length > 0 && /^[ \t]+(?:pass|\.\.\.)[ \t]*(?:#.*)?$/.test(copy[copy.length - 1])) {
+        copy.pop();
+    }
+    return copy;
 }
 
 const variable = (instanceId: string) => `v_${instanceId.replace(/[^A-Za-z0-9_]/g, '_')}`;
@@ -715,6 +742,13 @@ export function compilePython(
         const node = safeSourceNodes.get(clean);
         const flow = node ? undefined : flows.get(clean);
         if (flow) return { signature: flowSignature(flow), imports: [] };
+        if (node?.kind === 'class') {
+            const owned = [...safeSourceNodes]
+                .filter(([, candidate]) => candidate.classOwner === clean)
+                .map(([id, candidate]) => [id, candidate] as [string, SlateNode]);
+            const signature = classConstructorSignature(node, owned);
+            return signature ? { signature, imports: node.imports } : null;
+        }
         const signature = node ? nodeSignature(node) : library.get(target) ?? library.get(clean) ?? null;
         return signature ? { signature, imports: node?.imports ?? [] } : null;
     };
@@ -739,9 +773,61 @@ export function compilePython(
         else valid.set(nodeId, node);
     }
 
+    const topLevelValid = new Map<string, SlateNode>();
+    const ownedMethodsByOwner = new Map<string, Array<[string, SlateNode]>>();
+    for (const [nodeId, node] of valid) {
+        if (!node.classOwner) {
+            topLevelValid.set(nodeId, node);
+            continue;
+        }
+        const ownerNode = valid.get(node.classOwner);
+        if (!ownerNode || ownerNode.kind !== 'class') {
+            error(`${nodeId}: classOwner "${node.classOwner}" does not exist or is not a class frame.`);
+            continue;
+        }
+        const parsedMethod = parseModule(`${node.code.join('\n')}\n`, nodeId, node.name);
+        const topMethodUnits = parsedMethod.units.filter(u => u.parentId === null);
+        if (topMethodUnits.length !== 1 || topMethodUnits[0].kind !== 'function' || topMethodUnits[0].name !== node.name) {
+            error(`${nodeId}: owned method must define a single Python function named "${node.name}".`);
+            continue;
+        }
+        const list = ownedMethodsByOwner.get(node.classOwner) ?? [];
+        list.push([nodeId, node]);
+        ownedMethodsByOwner.set(node.classOwner, list);
+    }
+    for (const [ownerId, methodList] of ownedMethodsByOwner) {
+        methodList.sort(([leftId, left], [rightId, right]) => {
+            const leftHasOrder = left.order !== undefined;
+            const rightHasOrder = right.order !== undefined;
+            if (leftHasOrder && rightHasOrder && left.order !== right.order) {
+                return left.order! - right.order!;
+            }
+            if (!leftHasOrder && !rightHasOrder) {
+                if (left.name === '__init__' && right.name !== '__init__') return -1;
+                if (right.name === '__init__' && left.name !== '__init__') return 1;
+            }
+            if (leftHasOrder !== rightHasOrder) return leftHasOrder ? -1 : 1;
+            return leftId.localeCompare(rightId);
+        });
+        const seenNames = new Map<string, { id: string; decorators: string[] }>();
+        for (const [methodId, methodNode] of methodList) {
+            const parsedM = parseModule(`${methodNode.code.join('\n')}\n`, methodId, methodNode.name);
+            const decs = parsedM.units.find(u => u.parentId === null && u.name === methodNode.name)?.decorators ?? [];
+            const isPropAccessor = decs.some(d => d.endsWith('.setter') || d.endsWith('.deleter'));
+            const prev = seenNames.get(methodNode.name);
+            if (prev && !isPropAccessor) {
+                const ownerFolder = folderOf(ownerId);
+                const ownerFile = ownerFolder ? `${ownerFolder}.py` : `${projectModuleName(config.name)}.py`;
+                error(`${ownerFile}: duplicate method "${methodNode.name}" on class ${valid.get(ownerId)!.name} (${prev.id} vs ${methodId}).`);
+            } else if (!prev) {
+                seenNames.set(methodNode.name, { id: methodId, decorators: decs });
+            }
+        }
+    }
+
     if (options?.checkJpl60) {
         for (const [nodeId, node] of valid) {
-            if (node.kind) continue;
+            if (node.kind === 'prelude' || node.kind === 'epilogue') continue;
             const jpl = checkJpl60(node);
             for (const diag of jpl.diagnostics) {
                 diagnostics.push({ severity: 'warning', message: `${nodeId}: ${diag.message}` });
@@ -749,7 +835,7 @@ export function compilePython(
         }
     }
 
-    const folders = [...new Set([...valid.keys()].map(folderOf))].sort();
+    const folders = [...new Set([...topLevelValid.keys()].map(folderOf))].sort();
     const rootModule = projectModuleName(config.name);
     if (folders.includes('') && folders.includes(rootModule)) error(`Folder ${rootModule}/ collides with the module for root-level nodes (${rootModule}.py).`);
     const hasChildren = (folder: string) => folders.some(other => other !== folder && other.startsWith(`${folder}/`));
@@ -759,9 +845,9 @@ export function compilePython(
 
     const preludeNames = new Map<string, Set<string>>();
     const definitions = new Map<string, string[]>();
-    for (const [nodeId, node] of valid) {
+    for (const [nodeId, node] of topLevelValid) {
         if (node.kind === 'prelude') preludeNames.set(nodeId, topLevelBindings(node.code.join('\n')));
-        else if (!node.kind) definitions.set(node.name, [...(definitions.get(node.name) ?? []), nodeId]);
+        else if (!node.kind || node.kind === 'class') definitions.set(node.name, [...(definitions.get(node.name) ?? []), nodeId]);
     }
 
     const existingMap = normalizeExistingFiles(options?.existingFiles);
@@ -781,14 +867,14 @@ export function compilePython(
     };
     const moduleEdges = new Map<string, Set<string>>();
     for (const folder of folders) {
-        const members = [...valid].filter(([nodeId]) => folderOf(nodeId) === folder).sort(([leftId, left], [rightId, right]) =>
+        const members = [...topLevelValid].filter(([nodeId]) => folderOf(nodeId) === folder).sort(([leftId, left], [rightId, right]) =>
             blockOrder(left) - blockOrder(right)
             || (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER)
             || leftId.localeCompare(rightId));
         const localNames = new Set<string>();
         for (const [nodeId, node] of members) {
             if (node.kind === 'prelude') preludeNames.get(nodeId)!.forEach(name => localNames.add(name));
-            else if (!node.kind) localNames.add(node.name);
+            else if (!node.kind || node.kind === 'class') localNames.add(node.name);
         }
 
         const external: string[] = [];
@@ -799,52 +885,66 @@ export function compilePython(
             if (previous && previous !== origin) error(`${modulePath(folder)}: name collision on "${name}" (${previous} vs ${origin}, in ${nodeId}).`);
             else origins.set(name, origin);
         };
-        for (const [nodeId, node] of members) if (!node.kind) bind(node.name, `node ${nodeId}`, nodeId);
-
         for (const [nodeId, node] of members) {
-            const names = identifierNames(node.code.join('\n'));
-            const own = new Set<string>();
-            for (const line of node.imports) {
-                const parsed = splitImport(line);
-                if (!parsed.length) error(`${nodeId}: "${line}" is not an import.`);
-                for (const item of parsed) {
-                    external.push(item.line);
-                    if (!item.binding) continue;
-                    own.add(item.binding);
-                    // `import a.b` and `import a.c` both bind `a` compatibly.
-                    bind(item.binding, item.name === null && !item.line.includes(' as ') ? `"import ${item.binding}…"` : `"${item.line}"`, nodeId);
+            if (!node.kind || node.kind === 'class') bind(node.name, `node ${nodeId}`, nodeId);
+        }
+
+        for (const [memberId, memberNode] of members) {
+            const unitsToResolve: Array<[string, SlateNode, string | null]> = [
+                [memberId, memberNode, memberNode.kind === 'class' ? memberNode.name : null],
+            ];
+            if (memberNode.kind === 'class') {
+                for (const [methodId, methodNode] of ownedMethodsByOwner.get(memberId) ?? []) {
+                    unitsToResolve.push([methodId, methodNode, memberNode.name]);
                 }
             }
-            const importFrom = (target: string, name: string) => {
-                const line = `from ${moduleName(folderOf(target))} import ${name}`;
-                crossModule.push(line);
-                own.add(name);
-                bind(name, `"${line}"`, nodeId);
-                moduleEdges.set(folder, (moduleEdges.get(folder) ?? new Set()).add(folderOf(target)));
-            };
-            for (const target of node.uses) {
-                const external = libraryImport(target);
-                if (external) {
-                    if (!library.has(target)) error(`${nodeId} uses ${target}, which is not in the library.`);
-                    const item = splitImport(external)[0];
-                    if (names.has(item.binding!)) { crossModule.push(external); own.add(item.binding!); bind(item.binding!, `"${external}"`, nodeId); }
-                    continue;
+            for (const [nodeId, node, owningClassName] of unitsToResolve) {
+                const names = identifierNames(node.code.join('\n'));
+                const own = new Set<string>();
+                for (const line of node.imports) {
+                    const parsed = splitImport(line);
+                    if (!parsed.length) error(`${nodeId}: "${line}" is not an import.`);
+                    for (const item of parsed) {
+                        external.push(item.line);
+                        if (!item.binding) continue;
+                        own.add(item.binding);
+                        // `import a.b` and `import a.c` both bind `a` compatibly.
+                        bind(item.binding, item.name === null && !item.line.includes(' as ') ? `"import ${item.binding}…"` : `"${item.line}"`, nodeId);
+                    }
                 }
-                const used = valid.get(target);
-                if (!used) {
-                    error(`${nodeId} uses ${target}, which ${nodes.has(target) ? 'did not compile' : 'does not exist'}.`);
-                    continue;
+                const importFrom = (target: string, name: string) => {
+                    const line = `from ${moduleName(folderOf(target))} import ${name}`;
+                    crossModule.push(line);
+                    own.add(name);
+                    bind(name, `"${line}"`, nodeId);
+                    moduleEdges.set(folder, (moduleEdges.get(folder) ?? new Set()).add(folderOf(target)));
+                };
+                for (const rawTarget of node.uses) {
+                    const externalLib = libraryImport(rawTarget);
+                    if (externalLib) {
+                        if (!library.has(rawTarget)) error(`${nodeId} uses ${rawTarget}, which is not in the library.`);
+                        const item = splitImport(externalLib)[0];
+                        if (names.has(item.binding!)) { crossModule.push(externalLib); own.add(item.binding!); bind(item.binding!, `"${externalLib}"`, nodeId); }
+                        continue;
+                    }
+                    const rawUsed = valid.get(rawTarget);
+                    if (!rawUsed) {
+                        error(`${nodeId} uses ${rawTarget}, which ${nodes.has(rawTarget) ? 'did not compile' : 'does not exist'}.`);
+                        continue;
+                    }
+                    const resolvedTargetId = rawUsed.classOwner ? rawUsed.classOwner : rawTarget;
+                    const used = rawUsed.classOwner ? valid.get(rawUsed.classOwner)! : rawUsed;
+                    if (!used || folderOf(resolvedTargetId) === folder) continue;
+                    if (used.kind === 'prelude') [...preludeNames.get(resolvedTargetId)!].filter(name => names.has(name)).forEach(name => importFrom(resolvedTargetId, name));
+                    else if ((!used.kind || used.kind === 'class') && names.has(used.name)) importFrom(resolvedTargetId, used.name);
                 }
-                if (folderOf(target) === folder) continue;
-                if (used.kind === 'prelude') [...preludeNames.get(target)!].filter(name => names.has(name)).forEach(name => importFrom(target, name));
-                else if (!used.kind && names.has(used.name)) importFrom(target, used.name);
-            }
-            // Bare names not resolved by the folder, imports, or `uses`: a unique node elsewhere.
-            for (const name of names) {
-                if (name === node.name || own.has(name) || localNames.has(name)) continue;
-                const candidates = (definitions.get(name) ?? []).filter(candidate => folderOf(candidate) !== folder);
-                if (candidates.length === 1) importFrom(candidates[0], name);
-                else if (candidates.length > 1) error(`${nodeId}: "${name}" matches ${candidates.join(', ')}; add the intended one to "uses".`);
+                // Bare names not resolved by the folder, imports, or `uses`: a unique node elsewhere.
+                for (const name of names) {
+                    if (name === node.name || name === owningClassName || own.has(name) || localNames.has(name)) continue;
+                    const candidates = (definitions.get(name) ?? []).filter(candidate => folderOf(candidate) !== folder);
+                    if (candidates.length === 1) importFrom(candidates[0], name);
+                    else if (candidates.length > 1) error(`${nodeId}: "${name}" matches ${candidates.join(', ')}; add the intended one to "uses".`);
+                }
             }
         }
 
@@ -854,12 +954,34 @@ export function compilePython(
             mergeImports(future),
             [...mergeImports(external.filter(line => !future.includes(line))), ...mergeImports(crossModule)],
         ].filter(section => section.length).map(section => section.join('\n'));
-        const blocks = members.map(([nodeId, node]) => [
-            `# slate: ${node.extra?.flow ? 'flows' : 'nodes'}/${nodeId}`,
-            ...comment('intent', node.intent),
-            ...comment('contract', node.contract),
-            ...node.code,
-        ].join('\n'));
+        const blocks = members.map(([nodeId, node]) => {
+            if (node.kind === 'class') {
+                const ownedMethods = ownedMethodsByOwner.get(nodeId) ?? [];
+                const classHeaderLines = ownedMethods.length > 0
+                    ? stripTrailingPlaceholderPass(node.code)
+                    : node.code;
+                const classBlock = [
+                    `# slate: nodes/${nodeId}`,
+                    ...comment('intent', node.intent),
+                    ...comment('contract', node.contract),
+                    ...classHeaderLines,
+                ];
+                for (const [methodId, methodNode] of ownedMethods) {
+                    classBlock.push('');
+                    classBlock.push(`    # slate: nodes/${methodId}`);
+                    classBlock.push(...comment('intent', methodNode.intent).map(l => `    ${l}`));
+                    classBlock.push(...comment('contract', methodNode.contract).map(l => `    ${l}`));
+                    classBlock.push(...methodNode.code.map(l => (l.length > 0 ? `    ${l}` : '')));
+                }
+                return classBlock.join('\n');
+            }
+            return [
+                `# slate: ${node.extra?.flow ? 'flows' : 'nodes'}/${nodeId}`,
+                ...comment('intent', node.intent),
+                ...comment('contract', node.contract),
+                ...node.code,
+            ].join('\n');
+        });
         emitFile(modulePath(folder), `${[sections.join('\n\n'), ...blocks].join('\n\n\n')}\n`);
     }
 

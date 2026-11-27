@@ -11,6 +11,9 @@ import {
 } from './generation';
 import type { HarnessDocument, HarnessSnapshot, NodeVerificationResult, ParsedUnit } from './harness_protocol';
 import {
+    clampForgeConcurrency,
+} from './forge_concurrency';
+import {
     evaluateProjectCredentialAccess,
     resolveLlmConfig,
     streamLlamaCompletion,
@@ -32,10 +35,11 @@ import {
     pathForNodeId,
     serializeNode,
     validateNodeStub,
+    type SlateConfig,
     type SlateLlmProvider,
     type SlateNode,
 } from './slate_folder';
-import { runNodeVerification, type VerificationOptions } from './verification_runner';
+import { collectExpandedDependencies, runNodeVerification, type VerificationOptions } from './verification_runner';
 
 export const BATCH_FORGE_SYSTEM_PROMPT =
     'You are a constrained local Python component forge engine. Follow JPL-60 rules strictly, provide concise implementation and pytest check (no docstrings or prose), and never import from slate.* or redefine dependencies already in scope.';
@@ -116,37 +120,17 @@ interface IndexedTarget {
     language: BatchForgeLanguage;
 }
 
+interface WaveForgeContext {
+    waveStartNodes: ReadonlyMap<string, SlateNode>;
+    waveWrittenText: Map<string, string>;
+}
+
 function collectTransitiveDependencies(
     rootId: string,
     rootNode: SlateNode,
     nodesById: ReadonlyMap<string, SlateNode>,
 ): { dependencies: Map<string, SlateNode>; missingDeps: string[] } {
-    const dependencies = new Map<string, SlateNode>();
-    const missingSet = new Set<string>();
-    const visiting = new Set<string>([rootId]);
-    const visited = new Set<string>();
-
-    const visit = (depId: string) => {
-        if (depId === rootId || visiting.has(depId) || visited.has(depId)) return;
-        const depNode = nodesById.get(depId);
-        if (!depNode) {
-            missingSet.add(depId);
-            visited.add(depId);
-            return;
-        }
-        visiting.add(depId);
-        for (const subId of [...depNode.context, ...depNode.uses]) {
-            visit(subId);
-        }
-        visiting.delete(depId);
-        visited.add(depId);
-        dependencies.set(depId, depNode);
-    };
-
-    for (const depId of [...rootNode.context, ...rootNode.uses]) {
-        visit(depId);
-    }
-    return { dependencies, missingDeps: Array.from(missingSet).sort() };
+    return collectExpandedDependencies(rootId, rootNode, nodesById);
 }
 
 /**
@@ -165,6 +149,12 @@ export function partitionTargetsIntoWaves<T extends { target: { nodeId: string; 
         byId.set(item.target.nodeId, item);
         lookupNodes.set(item.target.nodeId, item.target.node);
     }
+    const initTargetByOwner = new Map<string, string>();
+    for (const item of items) {
+        if (item.target.node.classOwner && item.target.node.name === '__init__') {
+            initTargetByOwner.set(item.target.node.classOwner, item.target.nodeId);
+        }
+    }
     const remaining = new Set<string>(byId.keys());
     const depsById = new Map<string, Set<string>>();
     for (const item of items) {
@@ -172,7 +162,22 @@ export function partitionTargetsIntoWaves<T extends { target: { nodeId: string; 
         const internalDeps = new Set<string>();
         for (const depId of transitive.dependencies.keys()) {
             if (depId !== item.target.nodeId && byId.has(depId)) {
+                const depNode = lookupNodes.get(depId);
+                // Sibling non-__init__ methods should not block each other or cycle; only __init__ runs in an earlier wave.
+                if (
+                    item.target.node.classOwner
+                    && depNode?.classOwner === item.target.node.classOwner
+                    && depNode.name !== '__init__'
+                ) {
+                    continue;
+                }
                 internalDeps.add(depId);
+            }
+        }
+        if (item.target.node.classOwner && item.target.node.name !== '__init__') {
+            const initId = initTargetByOwner.get(item.target.node.classOwner);
+            if (initId && initId !== item.target.nodeId) {
+                internalDeps.add(initId);
             }
         }
         depsById.set(item.target.nodeId, internalDeps);
@@ -306,6 +311,8 @@ function computeForgeInputFingerprint(
         ]);
     const payload = {
         language: node.language ?? null,
+        kind: node.kind ?? null,
+        classOwner: node.classOwner ?? null,
         intent: node.intent,
         contract: node.contract,
         cases: node.cases ?? [],
@@ -406,8 +413,10 @@ async function forgeSingleTarget(
     sources: ReadonlyMap<string, string>,
     nodesById: ReadonlyMap<string, SlateNode>,
     llm: ReturnType<typeof resolveLlmConfig>,
+    config: SlateConfig,
     options: BatchForgeOptions,
     maxRevisions: number,
+    waveContext: WaveForgeContext,
 ): Promise<BatchForgeNodeResult> {
     const startMs = Date.now();
     const shouldVerify = options.verify !== false;
@@ -463,7 +472,6 @@ async function forgeSingleTarget(
         } catch (error) {
             lastReason = error instanceof Error ? error.message : String(error);
             if (options.signal?.aborted) break;
-            retryFeedback = lastReason;
             continue;
         }
 
@@ -502,7 +510,7 @@ async function forgeSingleTarget(
                 dependencies,
                 isTrusted: options.isTrusted === true,
                 timeoutMs: options.verifyTimeoutMs ?? 30000,
-                pythonPath: options.pythonPath,
+                pythonPath: options.pythonPath ?? config.pythonPath,
                 language: target.language,
                 executeCommand: options.executeCommand,
                 signal: options.signal,
@@ -561,7 +569,11 @@ async function forgeSingleTarget(
                 try {
                     const safeDep = assertSafeNodeId(options.workspaceRoot, depId);
                     const depText = await fs.promises.readFile(safeDep.fullPath, 'utf8');
-                    depNode = parseNode(depText);
+                    const waveOwnedText = waveContext.waveWrittenText.get(depId);
+                    const waveBaseline = waveContext.waveStartNodes.get(depId);
+                    depNode = (waveOwnedText !== undefined && waveOwnedText === depText && waveBaseline)
+                        ? waveBaseline
+                        : parseNode(depText);
                 } catch {
                     currentMissing.add(depId);
                     diskVisited.add(depId);
@@ -571,11 +583,30 @@ async function forgeSingleTarget(
                 for (const subId of [...depNode.context, ...depNode.uses]) {
                     await visitDiskDep(subId);
                 }
+                if (depNode.kind === 'class') {
+                    for (const [candidateId, candidateNode] of waveContext.waveStartNodes) {
+                        if (candidateNode.classOwner === depId) {
+                            await visitDiskDep(candidateId);
+                        }
+                    }
+                }
+                if (depNode.classOwner) {
+                    await visitDiskDep(depNode.classOwner);
+                }
                 diskVisiting.delete(depId);
                 diskVisited.add(depId);
                 currentDeps.set(depId, depNode);
             };
-            for (const depId of [...diskNode.context, ...diskNode.uses]) {
+            const diskExtraSeeds: string[] = [];
+            if (diskNode.classOwner) {
+                diskExtraSeeds.push(diskNode.classOwner);
+                for (const [candidateId, candidateNode] of waveContext.waveStartNodes) {
+                    if (candidateNode.classOwner === diskNode.classOwner && candidateId !== target.nodeId) {
+                        diskExtraSeeds.push(candidateId);
+                    }
+                }
+            }
+            for (const depId of [...diskNode.context, ...diskNode.uses, ...diskExtraSeeds]) {
                 await visitDiskDep(depId);
             }
             const currentHash = sourceHash(codeText(diskNode));
@@ -610,7 +641,9 @@ async function forgeSingleTarget(
                     ...(attemptsRun > 1 ? { retryCount: attemptsRun - 1 } : {}),
                 };
             }
-            await fs.promises.writeFile(target.fullPath, serializeNode(diskNode), 'utf8');
+            const serialized = serializeNode(diskNode);
+            await fs.promises.writeFile(target.fullPath, serialized, 'utf8');
+            waveContext.waveWrittenText.set(target.nodeId, serialized);
             written = true;
             await options.onNodeForged?.(target.nodeId);
         }
@@ -684,7 +717,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
         throw new Error('Workspace is not trusted; refusing to run batch forge verification in an untrusted workspace.');
     }
 
-    const concurrency = clampInt(options.concurrency, 1, 8, clampInt(llm.concurrency, 1, 8, 3));
+    const concurrency = clampForgeConcurrency(options.concurrency, clampForgeConcurrency(llm.concurrency, 3));
     const maxRevisions = clampInt(options.maxRevisions, 1, 5, 3);
 
     const requestedIds = Array.isArray(options.nodeIds)
@@ -762,7 +795,9 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                 results.push({
                     nodeId: req.nodeId,
                     status: 'skipped',
-                    reason: `Module ${node.kind} node cannot be forged as an atomic function.`,
+                    reason: node.kind === 'class'
+                        ? 'Class frame node cannot be forged directly; forge its owned method nodes instead.'
+                        : `Module ${node.kind} node cannot be forged as an atomic function.`,
                     attempts: 0,
                     written: false,
                     durationMs: 0,
@@ -932,6 +967,11 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
             runnableWave.push(item);
         }
 
+        const waveContext: WaveForgeContext = {
+            waveStartNodes: new Map<string, SlateNode>(nodesById),
+            waveWrittenText: new Map<string, string>(),
+        };
+
         let cursor = 0;
         const workerCount = Math.min(concurrency, runnableWave.length);
         const workers = Array.from({ length: workerCount }, async () => {
@@ -944,8 +984,10 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     sources,
                     nodesById,
                     llm,
+                    config,
                     options,
                     maxRevisions,
+                    waveContext,
                 );
                 results[item.resultIndex] = nodeResult;
                 resultById.set(item.target.nodeId, nodeResult);

@@ -95,7 +95,7 @@ npm --prefix vscode-extension run sync-dist
 npm --prefix vscode-extension run compile
 ```
 
-Verify the MCP server lists all 10 tools (`slate_find`, `slate_focus`, `slate_place_notes`, `slate_references`, `slate_define_stub`, `slate_wire_flow`, `slate_compile`, `slate_llm_status`, `slate_configure_llm`, `slate_forge_batch`):
+Verify the MCP server lists all 11 tools (`slate_find`, `slate_focus`, `slate_place_notes`, `slate_references`, `slate_define_stub`, `slate_wire_flow`, `slate_compile`, `slate_verify_ci`, `slate_llm_status`, `slate_configure_llm`, `slate_forge_batch`):
 
 ```bash
 node vscode-extension/out/mcp/slate_mcp_server.js --workspace /path/to/your/project --list-tools
@@ -138,7 +138,7 @@ Slate does not ship a bundled model binary. Configure an endpoint in VS Code Set
   ```
 
 - **Local Ollama:** endpoint `http://127.0.0.1:11434/v1`, provider `ollama`.
-- **OpenRouter (or remote OpenAI-compatible HTTP):** set `provider: "openrouter"`, `apiKeyEnv: "OPENROUTER_API_KEY"`, and a `model` such as `qwen/qwen3-coder-30b-a3b-instruct` or `google/gemma-4-26b-a4b-it`. Slate rejects raw secrets inside `slate/slate.json` and reads keys only from process environment variables or VS Code `SecretStorage`.
+- **OpenRouter (or remote OpenAI-compatible HTTP):** set `provider: "openrouter"`, `apiKeyEnv: "OPENROUTER_API_KEY"`, and a `model` such as `qwen/qwen3-coder-next` (default OpenRouter preset in the Canvas LLM modal), `qwen/qwen3-coder-30b-a3b-instruct`, or `google/gemma-4-26b-a4b-it`. Slate rejects raw secrets inside `slate/slate.json` and reads keys only from process environment variables or VS Code `SecretStorage`.
 
 Example `slate/slate.json` snippet:
 
@@ -168,8 +168,8 @@ Example `slate/slate.json` snippet:
 
 ### Current Practical Limits to Know
 
-- Canvas UI currently triggers single-node generation interactively; multi-wave dependency batch forging runs through MCP (`slate_forge_batch`, see [Issue #17](https://github.com/range-et/slate/issues/17)).
-- Class methods stay inside class units rather than splitting into individual method nodes ([Issue #16](https://github.com/range-et/slate/issues/16)).
+- Canvas UI supports concurrent per-unit generation and topbar **⚒ Forge Stubs** (`1`–`16` parallel requests) alongside MCP `slate_forge_batch`; multi-wave verification loops continue to require a trusted workspace.
+- Class-as-Frame (`kind: "class"` frames + `classOwner` owned method nodes) is shipped for Python (including MCP `slate_define_class`, per-method Two-Tier forging & Pydantic+pytest verification, 4-pillar CI parity/drift/coverage, and canvas class frames); multi-language class frame splitting (TS/C#/C++) remains future work ([Issue #16](https://github.com/range-et/slate/issues/16)).
 - Per-node runtime test verification is shipped for Python and TypeScript/JavaScript; C# and C++/Arduino support porting, checks, and compiling only.
 - On native Windows, `mutmut` mutation testing is skipped with an explicit diagnostic (requires Linux or WSL).
 
@@ -180,10 +180,14 @@ Example `slate/slate.json` snippet:
 ```bash
 npm test                  # Vitest unit suites
 npm run build             # Vite build -> dist/
+npm run verify:contracts  # 4-pillar contract & CI check on example projects
+npm run verify:ci -- --workspace /path/to/project --require-tests  # Standalone 4-pillar CI CLI
 npm run verify:baseline   # Static checks + tests + mutation + contract + example round-trips
 npm run verify:launch     # Full launch gate (verify:baseline + Playwright + Extension Host + Workbench QA)
 npm run demo:llama        # Local llama.cpp demo loop (see DEMO.md)
 ```
+
+For external repositories (such as scientific Python or PyTorch codebases), configure optional `pythonPath` (e.g. `".venv/bin/python"`) and `ci: { "srcRoots": ["pkg"], "testRoots": ["tests"], "requireTests": true }` in `slate/slate.json`, and call the reusable GitHub Actions template [`.github/workflows/slate-ci.yml`](.github/workflows/slate-ci.yml).
 
 Run the automated Two-Tier offload benchmark (offline `fake` or live provider):
 

@@ -7,7 +7,7 @@ import type { NodeVerificationResult, VerificationState } from './harness_protoc
 import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
-import { parseModule, sourceHash, topLevelBindings } from './python_adapter';
+import { identifierNames, parseModule, sourceHash, topLevelBindings } from './python_adapter';
 import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
@@ -16,10 +16,321 @@ export interface GeneratedVerification {
     hasChecks: boolean;
 }
 
+/**
+ * Collects transitive `context` + `uses` dependencies while expanding `classOwner` frames/siblings
+ * and split `kind: 'class'` frames with all of their owned methods.
+ */
+export function collectExpandedDependencies(
+    rootId: string,
+    rootNode: SlateNode,
+    allNodes: ReadonlyMap<string, SlateNode>,
+): { dependencies: Map<string, SlateNode>; missingDeps: string[] } {
+    const methodsByOwner = new Map<string, string[]>();
+    for (const [candidateId, candidateNode] of allNodes) {
+        if (candidateNode.classOwner) {
+            let list = methodsByOwner.get(candidateNode.classOwner);
+            if (!list) {
+                list = [];
+                methodsByOwner.set(candidateNode.classOwner, list);
+            }
+            list.push(candidateId);
+        }
+    }
+    for (const list of methodsByOwner.values()) {
+        list.sort();
+    }
+
+    const dependencies = new Map<string, SlateNode>();
+    const missingSet = new Set<string>();
+    const visiting = new Set<string>([rootId]);
+    const visited = new Set<string>();
+
+    const visit = (depId: string) => {
+        if (depId === rootId || visiting.has(depId) || visited.has(depId)) return;
+        const depNode = allNodes.get(depId);
+        if (!depNode) {
+            missingSet.add(depId);
+            visited.add(depId);
+            return;
+        }
+        visiting.add(depId);
+        for (const subId of [...depNode.context, ...depNode.uses]) {
+            visit(subId);
+        }
+        if (depNode.kind === 'class') {
+            for (const methodId of methodsByOwner.get(depId) ?? []) {
+                visit(methodId);
+            }
+        }
+        if (depNode.classOwner) {
+            visit(depNode.classOwner);
+        }
+        visiting.delete(depId);
+        visited.add(depId);
+        dependencies.set(depId, depNode);
+    };
+
+    const extraSeeds: string[] = [];
+    if (rootNode.classOwner) {
+        extraSeeds.push(rootNode.classOwner);
+        for (const methodId of methodsByOwner.get(rootNode.classOwner) ?? []) {
+            if (methodId !== rootId) {
+                extraSeeds.push(methodId);
+            }
+        }
+    }
+
+    for (const depId of [...rootNode.context, ...rootNode.uses, ...extraSeeds]) {
+        visit(depId);
+    }
+    return { dependencies, missingDeps: Array.from(missingSet).sort() };
+}
+
+function sortPythonMethods(methods: Array<[string, SlateNode]>): Array<[string, SlateNode]> {
+    return [...methods].sort(([leftId, left], [rightId, right]) => {
+        if (left.name === '__init__' && right.name !== '__init__') return -1;
+        if (right.name === '__init__' && left.name !== '__init__') return 1;
+        if (left.order !== undefined && right.order !== undefined && left.order !== right.order) {
+            return left.order - right.order;
+        }
+        return leftId.localeCompare(rightId);
+    });
+}
+
+function assemblePythonClassLines(
+    frameNode: SlateNode,
+    methods: Array<[string, SlateNode]>,
+    targetMethod?: SlateNode,
+    headerComment?: string,
+): string[] {
+    const out: string[] = [];
+    const sorted = sortPythonMethods(methods);
+    const frameLines = [...frameNode.code];
+    while (frameLines.length > 0 && frameLines[frameLines.length - 1].trim() === '') frameLines.pop();
+    if (
+        (sorted.length > 0 || targetMethod)
+        && frameLines.length > 0
+        && /^[ \t]+(?:pass|\.\.\.)[ \t]*(?:#.*)?$/.test(frameLines[frameLines.length - 1])
+    ) {
+        frameLines.pop();
+    }
+    if (headerComment) {
+        out.push(headerComment);
+    }
+    out.push(...frameLines);
+    for (const [, methodNode] of sorted) {
+        out.push('');
+        out.push(`    # ${targetMethod ? 'Sibling' : 'Owned'} method: ${methodNode.name}`);
+        out.push(...methodNode.code.map(l => (l.length > 0 ? `    ${l}` : '')));
+    }
+    if (targetMethod) {
+        out.push('');
+        out.push(`    # Target method: ${targetMethod.name}`);
+        out.push(...targetMethod.code.map(l => (l.length > 0 ? `    ${l}` : '')));
+    }
+    return out;
+}
+
+const OWNER_CLASS_SENTINEL = '__slate_owner_class__';
+
+function collectCallableDefIdentifiers(
+    unit: { decorators?: string[]; params?: Array<{ default?: string | null }> },
+    out: Set<string>,
+): void {
+    for (const dec of unit.decorators ?? []) {
+        for (const ident of identifierNames(dec)) {
+            out.add(ident);
+        }
+    }
+    for (const param of unit.params ?? []) {
+        if (param.default) {
+            for (const ident of identifierNames(param.default)) {
+                out.add(ident);
+            }
+        }
+    }
+}
+
+function extractDefinitionTimeIdentifiers(depNode: SlateNode): Set<string> {
+    const code = codeText(depNode);
+    if (depNode.kind === 'prelude' || depNode.kind === 'epilogue' || depNode.kind === 'class') {
+        return new Set(identifierNames(code));
+    }
+    const parsed = parseModule(`${code}\n`, '<def-order>', depNode.name);
+    const topUnit = parsed.units.find(u => u.parentId === null);
+    if (topUnit?.kind === 'function') {
+        const idents = new Set<string>();
+        collectCallableDefIdentifiers(topUnit, idents);
+        return idents;
+    }
+    if (topUnit?.kind === 'class') {
+        const lines = code.replace(/\r\n?/g, '\n').split('\n');
+        const classUnitIds = new Set(parsed.units.filter(u => u.kind === 'class').map(u => u.id));
+        const methodUnits = parsed.units.filter(
+            u => u.parentId !== null && classUnitIds.has(u.parentId) && u.kind === 'method',
+        );
+        const excludedLines = new Set<number>();
+        const idents = new Set<string>();
+        for (const unit of methodUnits) {
+            for (let line = unit.ranges.declaration.start.line; line <= unit.ranges.declaration.end.line; line++) {
+                excludedLines.add(line);
+            }
+            collectCallableDefIdentifiers(unit, idents);
+        }
+        const frameOnly = lines.filter((_, idx) => !excludedLines.has(idx)).join('\n');
+        for (const ident of identifierNames(frameOnly)) {
+            idents.add(ident);
+        }
+        return idents;
+    }
+    return new Set(identifierNames(code));
+}
+
+function orderDefinitionDependencies(
+    emittedDeps: Array<[string, SlateNode]>,
+    allDeps: ReadonlyMap<string, SlateNode>,
+    ownerId?: string,
+    ownerNode?: SlateNode,
+    methodsByClassDep?: ReadonlyMap<string, Array<[string, SlateNode]>>,
+): { preOwnerDeps: Array<[string, SlateNode]>; postOwnerDeps: Array<[string, SlateNode]> } {
+    if (emittedDeps.length === 0) {
+        return { preOwnerDeps: [], postOwnerDeps: [] };
+    }
+
+    const emittedById = new Map<string, SlateNode>(emittedDeps);
+    const orderIndex = new Map<string, number>();
+    const nameToIds = new Map<string, string[]>();
+    const preludeBindings = new Map<string, Set<string>>();
+    emittedDeps.forEach(([id, dep], idx) => {
+        orderIndex.set(id, idx);
+        if (dep.kind === 'prelude') {
+            preludeBindings.set(id, topLevelBindings(codeText(dep)));
+        } else if (dep.name) {
+            const list = nameToIds.get(dep.name) ?? [];
+            list.push(id);
+            nameToIds.set(dep.name, list);
+        }
+    });
+
+    const defDepsById = new Map<string, Set<string>>();
+    for (const [depId, depNode] of emittedDeps) {
+        const explicitTargetsByName = new Map<string, string[]>();
+        const addExplicit = (name: string, targetId: string) => {
+            const list = explicitTargetsByName.get(name) ?? [];
+            if (!list.includes(targetId)) list.push(targetId);
+            explicitTargetsByName.set(name, list);
+        };
+        const ownedMethods = depNode.kind === 'class' ? (methodsByClassDep?.get(depId) ?? []) : [];
+        const refSources = [depNode, ...ownedMethods.map(([, methodNode]) => methodNode)];
+        for (const refSource of refSources) {
+            for (const rawRef of [...refSource.context, ...refSource.uses]) {
+                const ownerMatch = ownerId && (rawRef === ownerId || allDeps.get(rawRef)?.classOwner === ownerId);
+                if (ownerMatch) {
+                    if (ownerNode?.name) addExplicit(ownerNode.name, OWNER_CLASS_SENTINEL);
+                    continue;
+                }
+                const resolvedId = emittedById.has(rawRef) ? rawRef : allDeps.get(rawRef)?.classOwner;
+                if (!resolvedId || !emittedById.has(resolvedId) || resolvedId === depId) continue;
+                const targetNode = emittedById.get(resolvedId)!;
+                if (targetNode.kind === 'prelude') {
+                    for (const binding of preludeBindings.get(resolvedId) ?? []) {
+                        addExplicit(binding, resolvedId);
+                    }
+                } else if (targetNode.name) {
+                    addExplicit(targetNode.name, resolvedId);
+                }
+            }
+        }
+
+        const defIdents = extractDefinitionTimeIdentifiers(depNode);
+        for (const [, methodNode] of ownedMethods) {
+            for (const ident of extractDefinitionTimeIdentifiers(methodNode)) {
+                defIdents.add(ident);
+            }
+        }
+
+        const deps = new Set<string>();
+        for (const ident of defIdents) {
+            if (ident === depNode.name) continue;
+            const explicit = explicitTargetsByName.get(ident);
+            if (explicit && explicit.length > 0) {
+                for (const targetId of explicit) deps.add(targetId);
+            } else if (ownerId && ownerNode?.name === ident) {
+                deps.add(OWNER_CLASS_SENTINEL);
+            } else {
+                const matched = nameToIds.get(ident);
+                if (matched && matched.length === 1 && matched[0] !== depId) {
+                    deps.add(matched[0]);
+                } else {
+                    for (const [pId, bindings] of preludeBindings) {
+                        if (pId !== depId && bindings.has(ident)) {
+                            deps.add(pId);
+                        }
+                    }
+                }
+            }
+        }
+        defDepsById.set(depId, deps);
+    }
+
+    const ownerDependents = new Set<string>();
+    if (ownerId) {
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [depId] of emittedDeps) {
+                if (ownerDependents.has(depId)) continue;
+                const deps = defDepsById.get(depId)!;
+                if (deps.has(OWNER_CLASS_SENTINEL) || Array.from(deps).some(d => ownerDependents.has(d))) {
+                    ownerDependents.add(depId);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    const topoSortSlice = (slice: Array<[string, SlateNode]>): Array<[string, SlateNode]> => {
+        const sliceIds = new Set(slice.map(([id]) => id));
+        const remaining = new Set(sliceIds);
+        const sorted: Array<[string, SlateNode]> = [];
+        while (remaining.size > 0) {
+            const ready = Array.from(remaining).filter(id => {
+                const deps = defDepsById.get(id)!;
+                for (const d of deps) {
+                    if (sliceIds.has(d) && remaining.has(d)) return false;
+                }
+                return true;
+            });
+            const pickPool = ready.length > 0 ? ready : Array.from(remaining);
+            pickPool.sort((a, b) => {
+                const aPrelude = emittedById.get(a)?.kind === 'prelude' ? 0 : 1;
+                const bPrelude = emittedById.get(b)?.kind === 'prelude' ? 0 : 1;
+                if (aPrelude !== bPrelude) return aPrelude - bPrelude;
+                return (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0);
+            });
+            const chosen = pickPool[0];
+            remaining.delete(chosen);
+            sorted.push([chosen, emittedById.get(chosen)!]);
+        }
+        return sorted;
+    };
+
+    const preSlice = emittedDeps.filter(([id]) => !ownerDependents.has(id));
+    const postSlice = emittedDeps.filter(([id]) => ownerDependents.has(id));
+    return {
+        preOwnerDeps: topoSortSlice(preSlice),
+        postOwnerDeps: topoSortSlice(postSlice),
+    };
+}
+
 /** Resolves the Python binary to use, checking explicit config, environment variables, and platform paths. */
-export function resolvePythonPath(configuredPath?: string): string {
+export function resolvePythonPath(configuredPath?: string, workspaceRoot?: string): string {
     if (configuredPath && configuredPath.trim().length > 0) {
-        return configuredPath.trim();
+        const trimmed = configuredPath.trim();
+        if (workspaceRoot && !path.isAbsolute(trimmed) && (trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.'))) {
+            return path.resolve(workspaceRoot, trimmed);
+        }
+        return trimmed;
     }
     if (process.env.PYTHON_BIN && process.env.PYTHON_BIN.trim().length > 0) {
         return process.env.PYTHON_BIN.trim();
@@ -71,7 +382,7 @@ function toPythonLiteral(value: unknown): string {
     return JSON.stringify(value);
 }
 
-const CASE_METADATA_KEYS = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx']);
+const CASE_METADATA_KEYS = new Set(['name', 'id', 'description', 'error', 'expectedError', 'expected', 'return', 'output', 'approx', 'init']);
 
 const FLOAT_RETURN_RE = /^\s*(?:float|Optional\[float\]|float\s*\|\s*None|None\s*\|\s*float)\s*$/;
 const PY_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -108,10 +419,13 @@ function assertPathInsideDir(baseDir: string, targetPath: string, label: string)
 export function formatCasesAsPython(
     nodeName: string,
     cases: unknown[],
-    options?: { returnAnnotation?: string | null },
+    options?: { returnAnnotation?: string | null; ownerClassName?: string; isStaticMethod?: boolean },
 ): string[] {
     if (!PY_IDENTIFIER.test(nodeName)) {
         throw new Error(`Invalid Python identifier for verification: "${nodeName}".`);
+    }
+    if (options?.ownerClassName && !PY_IDENTIFIER.test(options.ownerClassName)) {
+        throw new Error(`Invalid Python owner class identifier for verification: "${options.ownerClassName}".`);
     }
     const lines: string[] = [];
     lines.push(`def test_structured_cases_${nodeName}():`);
@@ -122,6 +436,35 @@ export function formatCasesAsPython(
 
     const isFloatReturn = Boolean(options?.returnAnnotation && FLOAT_RETURN_RE.test(options.returnAnnotation));
     let emittedBodyLine = false;
+
+    const formatArgList = (inputs: unknown, fallbackObj?: Record<string, unknown>): string | null => {
+        if (inputs && typeof inputs === 'object' && !Array.isArray(inputs)) {
+            const kwargs = Object.entries(inputs as Record<string, unknown>)
+                .map(([k, v]) => {
+                    if (!PY_IDENTIFIER.test(k)) {
+                        throw new Error(`Invalid Python keyword argument name in test case: "${k}".`);
+                    }
+                    return `${k}=${toPythonLiteral(v)}`;
+                })
+                .join(', ');
+            return kwargs;
+        }
+        if (Array.isArray(inputs)) {
+            return inputs.map(v => toPythonLiteral(v)).join(', ');
+        }
+        if (fallbackObj) {
+            const keys = Object.keys(fallbackObj).filter(k => !CASE_METADATA_KEYS.has(k));
+            if (keys.length > 0) {
+                return keys.map(k => {
+                    if (!PY_IDENTIFIER.test(k)) {
+                        throw new Error(`Invalid Python keyword argument name in test case: "${k}".`);
+                    }
+                    return `${k}=${toPythonLiteral(fallbackObj[k])}`;
+                }).join(', ');
+            }
+        }
+        return null;
+    };
 
     cases.forEach((item, index) => {
         if (!item || typeof item !== 'object') {
@@ -158,31 +501,22 @@ export function formatCasesAsPython(
             ? obj.error.trim()
             : (typeof obj.expectedError === 'string' && obj.expectedError.trim() ? obj.expectedError.trim() : undefined);
         const inputs = obj.inputs ?? obj.input ?? obj.args ?? obj.params;
+        const argString = formatArgList(inputs, obj);
 
         let callExpr: string | null = null;
-        if (inputs && typeof inputs === 'object' && !Array.isArray(inputs)) {
-            const kwargs = Object.entries(inputs as Record<string, unknown>)
-                .map(([k, v]) => {
-                    if (!PY_IDENTIFIER.test(k)) {
-                        throw new Error(`Invalid Python keyword argument name in test case: "${k}".`);
-                    }
-                    return `${k}=${toPythonLiteral(v)}`;
-                })
-                .join(', ');
-            callExpr = `${nodeName}(${kwargs})`;
-        } else if (Array.isArray(inputs)) {
-            const args = inputs.map(v => toPythonLiteral(v)).join(', ');
-            callExpr = `${nodeName}(${args})`;
-        } else {
-            const keys = Object.keys(obj).filter(k => !CASE_METADATA_KEYS.has(k));
-            if (keys.length > 0) {
-                const kwargs = keys.map(k => {
-                    if (!PY_IDENTIFIER.test(k)) {
-                        throw new Error(`Invalid Python keyword argument name in test case: "${k}".`);
-                    }
-                    return `${k}=${toPythonLiteral(obj[k])}`;
-                }).join(', ');
-                callExpr = `${nodeName}(${kwargs})`;
+        if (argString !== null) {
+            if (options?.ownerClassName) {
+                if (options.isStaticMethod) {
+                    callExpr = `${options.ownerClassName}.${nodeName}(${argString})`;
+                } else if (nodeName === '__init__') {
+                    callExpr = `${options.ownerClassName}(${argString})`;
+                } else {
+                    const initArgString = obj.init !== undefined ? (formatArgList(obj.init) ?? '') : '';
+                    lines.push(`    _inst_${index} = ${options.ownerClassName}(${initArgString})`);
+                    callExpr = `_inst_${index}.${nodeName}(${argString})`;
+                }
+            } else {
+                callExpr = `${nodeName}(${argString})`;
             }
         }
 
@@ -393,7 +727,35 @@ export function generateVerificationFiles(
         }
     };
 
-    const depCodeBlocks: string[] = [];
+    const ownerNode = node.classOwner ? dependencies?.get(node.classOwner) : undefined;
+    if (node.classOwner && !ownerNode) {
+        throw new Error(`Owned method "${nodeId ?? node.name}" requires owning class frame "${node.classOwner}" in verification dependencies.`);
+    }
+
+    const depClassFrameIds = new Set<string>();
+    const methodsByClassDep = new Map<string, Array<[string, SlateNode]>>();
+    if (dependencies && dependencies.size > 0) {
+        for (const [depId, depNode] of dependencies.entries()) {
+            if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
+            if (depNode.kind === 'class' && depNode !== ownerNode) {
+                depClassFrameIds.add(depId);
+            }
+        }
+        for (const [depId, depNode] of dependencies.entries()) {
+            if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
+            if (depNode.classOwner && depClassFrameIds.has(depNode.classOwner) && depNode.classOwner !== node.classOwner) {
+                let list = methodsByClassDep.get(depNode.classOwner);
+                if (!list) {
+                    list = [];
+                    methodsByClassDep.set(depNode.classOwner, list);
+                }
+                list.push([depId, depNode]);
+            }
+        }
+    }
+
+    const siblingMethods: Array<[string, SlateNode]> = [];
+    const emittedDepEntries: Array<[string, SlateNode]> = [];
     const depExportNames = new Set<string>();
     if (dependencies && dependencies.size > 0) {
         for (const [depId, depNode] of dependencies.entries()) {
@@ -401,18 +763,62 @@ export function generateVerificationFiles(
             for (const imp of depNode.imports ?? []) {
                 pushImport(imp);
             }
-            if (depNode.code.length > 0) {
-                depCodeBlocks.push(`\n# Context: ${depNode.name}`);
-                depCodeBlocks.push(...depNode.code);
-                if (
-                    depNode.kind !== 'prelude'
-                    && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
-                    && topLevelBindings(codeText(depNode)).has(depNode.name)
-                ) {
-                    depExportNames.add(depNode.name);
-                }
+            if (ownerNode && depNode === ownerNode) {
+                continue;
+            }
+            if (node.classOwner && depNode.classOwner === node.classOwner) {
+                siblingMethods.push([depId, depNode]);
+                continue;
+            }
+            if (depNode.classOwner && depClassFrameIds.has(depNode.classOwner)) {
+                continue;
+            }
+            emittedDepEntries.push([depId, depNode]);
+        }
+    }
+
+    const { preOwnerDeps, postOwnerDeps } = orderDefinitionDependencies(
+        emittedDepEntries,
+        dependencies ?? new Map<string, SlateNode>(),
+        node.classOwner,
+        ownerNode,
+        methodsByClassDep,
+    );
+
+    const emitDepBlock = (targetBlocks: string[], [depId, depNode]: [string, SlateNode]): void => {
+        if (depNode.kind === 'class') {
+            targetBlocks.push(...assemblePythonClassLines(
+                depNode,
+                methodsByClassDep.get(depId) ?? [],
+                undefined,
+                `\n# Context class: ${depNode.name}`,
+            ));
+            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name) && topLevelBindings(codeText(depNode)).has(depNode.name)) {
+                depExportNames.add(depNode.name);
+            }
+            return;
+        }
+        if (depNode.code.length > 0) {
+            targetBlocks.push(`\n# Context: ${depNode.name}`);
+            targetBlocks.push(...depNode.code);
+            if (
+                depNode.kind !== 'prelude'
+                && !depNode.classOwner
+                && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
+                && topLevelBindings(codeText(depNode)).has(depNode.name)
+            ) {
+                depExportNames.add(depNode.name);
             }
         }
+    };
+
+    const depCodeBlocks: string[] = [];
+    for (const entry of preOwnerDeps) {
+        emitDepBlock(depCodeBlocks, entry);
+    }
+    const postOwnerDepBlocks: string[] = [];
+    for (const entry of postOwnerDeps) {
+        emitDepBlock(postOwnerDepBlocks, entry);
     }
 
     for (const imp of node.imports ?? []) {
@@ -430,24 +836,60 @@ export function generateVerificationFiles(
         moduleParts.push(...depCodeBlocks);
     }
 
-    moduleParts.push(`\n# Target implementation: ${node.name}`);
-    moduleParts.push(...node.code);
-
-    // Pydantic strict parameter & return contract validation wrapper
-    moduleParts.push(`
+    let ownerIsStaticMethod = false;
+    if (ownerNode) {
+        moduleParts.push(...assemblePythonClassLines(
+            ownerNode,
+            siblingMethods,
+            node,
+            `\n# Owning class frame: ${ownerNode.name}`,
+        ));
+        const parsedMethod = parseModule(`${codeText(node)}\n`, '<verify-method>', node.name);
+        const methodUnit = parsedMethod.units.find(u => u.parentId === null && u.name === node.name);
+        ownerIsStaticMethod = Boolean(methodUnit?.decorators.some(d => d === 'staticmethod' || d.endsWith('.staticmethod')));
+        moduleParts.push(`
 # Pydantic contract validation (S-513)
 try:
     from pydantic import ConfigDict, validate_call
-    ${node.name} = validate_call(config=ConfigDict(strict=True), validate_return=True)(${node.name})
+    _slate_raw_member = ${ownerNode.name}.__dict__.get(${JSON.stringify(node.name)})
+    _slate_cfg = ConfigDict(strict=True, arbitrary_types_allowed=True)
+    if isinstance(_slate_raw_member, staticmethod):
+        setattr(${ownerNode.name}, ${JSON.stringify(node.name)}, staticmethod(validate_call(config=_slate_cfg, validate_return=True)(_slate_raw_member.__func__)))
+    elif isinstance(_slate_raw_member, classmethod):
+        setattr(${ownerNode.name}, ${JSON.stringify(node.name)}, classmethod(validate_call(config=_slate_cfg, validate_return=True)(_slate_raw_member.__func__)))
+    elif _slate_raw_member is not None and not isinstance(_slate_raw_member, property):
+        setattr(${ownerNode.name}, ${JSON.stringify(node.name)}, validate_call(config=_slate_cfg, validate_return=True)(_slate_raw_member))
 except Exception:
     pass
 `);
+        if (postOwnerDepBlocks.length > 0) {
+            moduleParts.push('# Dependent subclass/downstream nodes');
+            moduleParts.push(...postOwnerDepBlocks);
+        }
+    } else {
+        if (postOwnerDepBlocks.length > 0) {
+            moduleParts.push(...postOwnerDepBlocks);
+        }
+        moduleParts.push(`\n# Target implementation: ${node.name}`);
+        moduleParts.push(...node.code);
 
+        // Pydantic strict parameter & return contract validation wrapper
+        moduleParts.push(`
+# Pydantic contract validation (S-513)
+try:
+    from pydantic import ConfigDict, validate_call
+    ${node.name} = validate_call(config=ConfigDict(strict=True, arbitrary_types_allowed=True), validate_return=True)(${node.name})
+except Exception:
+    pass
+`);
+    }
+
+    const primaryExportName = ownerNode ? ownerNode.name : node.name;
     const checkTopBindings = hasCheck && node.check
         ? topLevelBindings(node.check.join('\n'))
         : new Set<string>();
     const extraTestImports = Array.from(depExportNames)
-        .filter(name => name !== node.name && name !== 'pytest' && !checkTopBindings.has(name))
+        .filter(name => name !== primaryExportName && name !== node.name && name !== 'pytest' && !checkTopBindings.has(name))
         .sort();
     const isPytestTestName = (name: string) => name.startsWith('test') || name.startsWith('Test');
     const safeTestImports = extraTestImports.filter(name => !isPytestTestName(name));
@@ -470,7 +912,7 @@ except Exception:
     if (pytestCollidingImports.length > 0) {
         const reservedNames = new Set<string>([
             'pytest',
-            node.name,
+            primaryExportName,
             ...depExportNames,
             ...checkTopBindings,
         ]);
@@ -513,7 +955,7 @@ except Exception:
     const testParts: string[] = [
         '# Auto-generated pytest check file for Slate atomic node',
         'import pytest',
-        `from ${node.name}_impl import ${node.name}`,
+        `from ${node.name}_impl import ${primaryExportName}`,
         ...(safeTestImports.length > 0 ? [`from ${node.name}_impl import ${safeTestImports.join(', ')}`] : []),
         ...nonCollectedHelperLines,
     ];
@@ -527,7 +969,11 @@ except Exception:
         const parsedTarget = parseModule(`${codeText(node)}\n`, '<verify>', node.name);
         const targetUnit = parsedTarget.units.find(u => u.parentId === null && u.name === node.name);
         testParts.push('\n# Structured cases');
-        testParts.push(...formatCasesAsPython(node.name, node.cases, { returnAnnotation: targetUnit?.returnAnnotation }));
+        testParts.push(...formatCasesAsPython(node.name, node.cases, {
+            returnAnnotation: targetUnit?.returnAnnotation,
+            ownerClassName: ownerNode?.name,
+            isStaticMethod: ownerIsStaticMethod,
+        }));
     }
 
     return {
@@ -723,7 +1169,7 @@ export async function runNodeVerification(options: VerificationOptions): Promise
         };
     }
 
-    const pythonPath = resolvePythonPath(rawPythonPath);
+    const pythonPath = resolvePythonPath(rawPythonPath, workspaceRoot);
     const normNodeRel = normalizeCompileOutputPath(nodeId);
     const pyRelSegments = normNodeRel
         ? normNodeRel.split('/')

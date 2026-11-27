@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import {
     validateNodeSchema,
@@ -7,9 +9,14 @@ import {
     validateNodeAst,
     checkProjectParity,
     checkProjectDrift,
+    checkProjectTests,
+    resolveCiConfig,
+    verifyProjectCi,
     validateProjectContracts,
     verifyAll,
 } from '../scripts/verify-contracts.mjs';
+import { EMBEDDED_FLOW_SCHEMA, EMBEDDED_NODE_SCHEMA } from '../vscode-extension/src/contract_schemas';
+import { runSlateVerifyCiCli } from '../vscode-extension/src/cli/slate_verify_ci';
 
 const validNode = {
     slate: 3,
@@ -507,5 +514,420 @@ describe('Workspace-wide contract verification (verifyAll)', () => {
         expect(result.errors).toEqual([]);
         expect(result.stats.projectsCount).toBeGreaterThanOrEqual(2);
         expect(result.stats.nodesCount).toBeGreaterThanOrEqual(5);
+    });
+});
+
+describe('4-Pillar CI gate (ci_verifier & standalone CLI)', () => {
+    it('keeps embedded node and flow schemas identical to contracts/*.schema.json', () => {
+        const diskNode = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'contracts', 'slate-node.schema.json'), 'utf8'));
+        const diskFlow = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'contracts', 'slate-flow.schema.json'), 'utf8'));
+        expect(EMBEDDED_NODE_SCHEMA).toEqual(diskNode);
+        expect(EMBEDDED_FLOW_SCHEMA).toEqual(diskFlow);
+    });
+
+    it('resolves ci defaults and overrides cleanly', () => {
+        expect(resolveCiConfig({ slate: 3, name: 'p', language: 'python' })).toEqual({
+            srcRoots: ['src'],
+            testRoots: ['tests', 'test'],
+            requireTests: false,
+        });
+        expect(resolveCiConfig({
+            slate: 3,
+            name: 'p',
+            language: 'python',
+            compile: { outDir: 'pkg/cfd' },
+            ci: { srcRoots: ['pkg/cfd', 'custom'], testRoots: ['unit_tests'], requireTests: true },
+        })).toEqual({
+            srcRoots: ['pkg/cfd', 'custom'],
+            testRoots: ['unit_tests'],
+            requireTests: true,
+        });
+    });
+
+    it('scopes parity strictly to srcRoots without scanning unrelated repo scripts, and verifies Pillar 4 test coverage', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-4pillar-ci-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'cfd_src'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'scripts'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'my_tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'hawa_demo',
+                language: 'python',
+                compile: { outDir: 'cfd_src' },
+                ci: {
+                    srcRoots: ['cfd_src'],
+                    testRoots: ['my_tests'],
+                    requireTests: true,
+                },
+            }, null, 2));
+
+            // 1 node covered via node.cases, 1 via external test file, 1 missing coverage, plus 1 prelude
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', '_prelude.json'), JSON.stringify({
+                slate: 3,
+                name: '_prelude',
+                kind: 'prelude',
+                intent: 'Constants',
+                contract: 'Defines GAMMA',
+                code: ['GAMMA = 1.4'],
+            }));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'step_flux.json'), JSON.stringify({
+                slate: 3,
+                name: 'step_flux',
+                intent: 'Compute flux',
+                contract: 'Returns x * 2.0',
+                cases: [{ name: 'c1', inputs: { x: 2.0 }, expected: 4.0 }],
+                code: ['def step_flux(x: float) -> float:', '    return x * 2.0'],
+            }));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'calc_cfl.json'), JSON.stringify({
+                slate: 3,
+                name: 'calc_cfl',
+                intent: 'Compute CFL',
+                contract: 'Returns dt',
+                code: ['def calc_cfl(dx: float) -> float:', '    return dx * 0.5'],
+            }));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'untested_fn.json'), JSON.stringify({
+                slate: 3,
+                name: 'untested_fn',
+                intent: 'Untested helper',
+                contract: 'Returns x',
+                code: ['def untested_fn(x: float) -> float:', '    return x'],
+            }));
+
+            // Unrelated repo script outside srcRoots has an arbitrary unmapped function (must NOT be scanned)
+            fs.writeFileSync(path.join(tmpDir, 'scripts', 'train_cfd.py'), [
+                'def ad_hoc_plot(data):',
+                '    return data',
+            ].join('\n'));
+
+            // External tests: one covering calc_cfl, one orphan unmapped test
+            fs.writeFileSync(path.join(tmpDir, 'my_tests', 'test_cfl.py'), [
+                'def test_cfl_basic():',
+                '    assert calc_cfl(2.0) == 1.0',
+            ].join('\n'));
+            fs.writeFileSync(path.join(tmpDir, 'my_tests', 'test_orphan.py'), [
+                'def test_nothing():',
+                '    assert True',
+            ].join('\n'));
+
+            // Compiled output in cfd_src (initially skip compile drift by matching compiler output)
+            const initial = verifyProjectCi(tmpDir);
+            expect(initial.pillars.schema.valid).toBe(true);
+            expect(initial.pillars.stub.valid).toBe(true);
+            // Only drift error so far because cfd_src/hawa_demo.py not written yet; parity ignored scripts/train_cfd.py
+            expect(initial.pillars.code.parityFilesChecked).toEqual([]);
+            expect(initial.pillars.test.valid).toBe(false);
+            expect(initial.pillars.test.coveredNodes).toEqual(['calc_cfl', 'step_flux']);
+            expect(initial.pillars.test.missingNodes).toEqual(['untested_fn']);
+            expect(initial.pillars.test.unmappedTestFiles).toEqual(['my_tests/test_orphan.py']);
+            expect(initial.pillars.test.errors).toHaveLength(1);
+            expect(initial.pillars.test.errors[0]).toContain('[MISSING_TEST] Atomic node "untested_fn"');
+
+            // With requireTests: false override, test pillar succeeds with clean warnings
+            const relaxedTests = checkProjectTests(tmpDir, { requireTests: false });
+            expect(relaxedTests.valid).toBe(true);
+            expect(relaxedTests.warnings.some(w => w.includes('[MISSING_TEST]'))).toBe(true);
+            expect(relaxedTests.warnings.some(w => w.includes('[UNMAPPED_TEST]'))).toBe(true);
+
+            // Adding a rogue function inside srcRoots fails Pillar 3 parity
+            fs.writeFileSync(path.join(tmpDir, 'cfd_src', 'rogue.py'), 'def rogue_cfd(x: int) -> int:\n    return x\n');
+            const parity = checkProjectParity(tmpDir);
+            expect(parity.valid).toBe(false);
+            expect(parity.errors[0]).toContain('[ROGUE_FUNCTION] Undocumented function "rogue_cfd"');
+
+            // Standalone CLI helper reports failure exit code 1 with JSON output
+            let stdout = '';
+            let stderr = '';
+            const code = runSlateVerifyCiCli(['--workspace', tmpDir, '--json'], {
+                stdout: s => { stdout += s; },
+                stderr: s => { stderr += s; },
+            });
+            expect(code).toBe(1);
+            expect(stderr).toBe('');
+            const parsedJson = JSON.parse(stdout);
+            expect(parsedJson.valid).toBe(false);
+            expect(parsedJson.pillars.test.missingNodes).toEqual(['untested_fn']);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('runs the bundled standalone out/cli/slate_verify_ci.js CLI cleanly against examples/flow_demo', () => {
+        const cliBundle = path.resolve(__dirname, '..', 'vscode-extension', 'out', 'cli', 'slate_verify_ci.js');
+        const flowDemo = path.resolve(__dirname, '..', 'examples', 'flow_demo');
+        const out = execFileSync(process.execPath, [cliBundle, '--workspace', flowDemo, '--json'], {
+            encoding: 'utf8',
+            timeout: 15000,
+        });
+        const report = JSON.parse(out);
+        expect(report.valid).toBe(true);
+        expect(report.pillars.schema.valid).toBe(true);
+        expect(report.pillars.stub.valid).toBe(true);
+        expect(report.pillars.code.valid).toBe(true);
+        expect(report.pillars.test.valid).toBe(true);
+    });
+
+    it('validates class frames + owned methods across all 4 CI pillars and catches rogue classes, rogue methods, and orphan methods', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ci-class-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'src', 'models'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'nn_app',
+                language: 'python',
+                compile: { outDir: 'src' },
+                ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+            }, null, 2));
+
+            // >60 line class frame of typed fields is exempt from JPL-60 line cap
+            const longFields = Array.from({ length: 65 }, (_, i) => `    param_${i}: int = ${i}`);
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock.json'), JSON.stringify({
+                slate: 3,
+                name: 'ConvBlock',
+                kind: 'class',
+                intent: 'Conv block container with configuration fields',
+                contract: 'Immutable field defaults',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['class ConvBlock:', ...longFields],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', '__init__.json'), JSON.stringify({
+                slate: 3,
+                name: '__init__',
+                classOwner: 'models/ConvBlock',
+                intent: 'Store scale',
+                contract: 'scale >= 0',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def __init__(self, scale: float = 1.0) -> None:', '    self.scale = scale'],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', 'forward.json'), JSON.stringify({
+                slate: 3,
+                name: 'forward',
+                classOwner: 'models/ConvBlock',
+                intent: 'Scale value by self.scale',
+                contract: 'Returns float',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                cases: [{ name: 'fwd', inputs: { x: 2.0 }, expected: 2.0 }],
+                code: ['def forward(self, x: float) -> float:', '    return x * self.scale'],
+            }));
+
+            fs.writeFileSync(path.join(tmpDir, 'tests', 'test_conv.py'), [
+                'def test_conv_init():',
+                '    b = ConvBlock(2.0)',
+                '    assert b.scale == 2.0',
+            ].join('\n'));
+
+            // Write matching compiled output so drift passes
+            const driftBefore = verifyProjectCi(tmpDir);
+            expect(driftBefore.pillars.schema.valid).toBe(true);
+            expect(driftBefore.pillars.stub.valid).toBe(true);
+            expect(driftBefore.pillars.test.valid).toBe(true);
+            expect(driftBefore.pillars.test.missingNodes).toEqual([]);
+
+            // Now simulate compiled models.py containing a rogue undocumented method and another file containing a rogue class
+            fs.writeFileSync(path.join(tmpDir, 'src', 'models.py'), [
+                'class ConvBlock:',
+                ...longFields,
+                '    def __init__(self, scale: float = 1.0) -> None:',
+                '        self.scale = scale',
+                '    def forward(self, x: float) -> float:',
+                '        return x * self.scale',
+                '    def rogue_method(self, x: float) -> float:',
+                '        return x',
+            ].join('\n'));
+            fs.writeFileSync(path.join(tmpDir, 'src', 'extra.py'), 'class RogueLayer:\n    pass\n');
+
+            const parity = checkProjectParity(tmpDir);
+            expect(parity.valid).toBe(false);
+            expect(parity.errors.some(e => e.includes('[ROGUE_METHOD] Undocumented method "ConvBlock.rogue_method"'))).toBe(true);
+            expect(parity.errors.some(e => e.includes('[ROGUE_CLASS] Undocumented class "RogueLayer"'))).toBe(true);
+
+            // Adding a method directly inside a class frame JSON triggers [CLASS_FRAME_METHOD]
+            const badFrame = validateNodeAst({
+                name: 'ConvBlock',
+                kind: 'class',
+                intent: 'Bad frame',
+                contract: 'Bad',
+                code: ['class ConvBlock:', '    def embedded(self) -> None:', '        pass'],
+            }, 'models/ConvBlock.json', 'python');
+            expect(badFrame.valid).toBe(false);
+            expect(badFrame.errors.some(e => e.includes('[CLASS_FRAME_METHOD]'))).toBe(true);
+
+            // An owned method pointing to a missing owner triggers [ORPHAN_METHOD]
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', 'orphan.json'), JSON.stringify({
+                slate: 3,
+                name: 'orphan',
+                classOwner: 'models/MissingClass',
+                intent: 'Orphan',
+                contract: 'None',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: ['def orphan(self) -> None:', '    pass'],
+            }));
+            const orphanReport = verifyProjectCi(tmpDir);
+            expect(orphanReport.pillars.stub.valid).toBe(false);
+            expect(orphanReport.pillars.stub.errors.some(e => e.includes('[ORPHAN_METHOD]'))).toBe(true);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('counts collectable Test* class methods as coverage and rejects comment-only check or unusable cases', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ci-test-validity-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'test_validity',
+                language: 'python',
+                compile: { outDir: 'src' },
+                ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+            }));
+
+            const makePyNode = (name: string, patch: Record<string, unknown> = {}) => ({
+                slate: 3,
+                name,
+                intent: `Compute ${name}`,
+                contract: 'Returns int',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: [`def ${name}(x: int) -> int:`, '    return x'],
+                ...patch,
+            });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_class_test.json'), JSON.stringify(makePyNode('fn_class_test')));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_comment_check.json'), JSON.stringify(makePyNode('fn_comment_check', {
+                check: ['# TODO: add real pytest'],
+            })));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_import_check.json'), JSON.stringify(makePyNode('fn_import_check', {
+                check: ['import pytest'],
+            })));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_empty_case.json'), JSON.stringify(makePyNode('fn_empty_case', {
+                cases: [{}, '# comment-only'],
+            })));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_helper_cls_only.json'), JSON.stringify(makePyNode('fn_helper_cls_only')));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_init_cls_only.json'), JSON.stringify(makePyNode('fn_init_cls_only')));
+
+            fs.writeFileSync(path.join(tmpDir, 'tests', 'test_suite.py'), [
+                'class TestSuite:',
+                '    def test_class_based(self):',
+                '        assert fn_class_test(2) == 2',
+                'class HelperNotATest:',
+                '    def test_ignored(self):',
+                '        assert fn_helper_cls_only(2) == 2',
+                'class TestWithInit:',
+                '    def __init__(self):',
+                '        pass',
+                '    def test_uncollectable(self):',
+                '        assert fn_init_cls_only(2) == 2',
+            ].join('\n'));
+
+            const testPillar = checkProjectTests(tmpDir);
+            expect(testPillar.valid).toBe(false);
+            expect(testPillar.coveredNodes).toEqual(['fn_class_test']);
+            expect(testPillar.missingNodes).toEqual([
+                'fn_comment_check',
+                'fn_empty_case',
+                'fn_helper_cls_only',
+                'fn_import_check',
+                'fn_init_cls_only',
+            ]);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('accepts runner-supported case shapes (args/return, params/output, inline kwargs, multiline code) and rejects untyped/comment-only cases', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ci-case-shapes-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'case_shapes',
+                language: 'python',
+                compile: { outDir: 'src' },
+                ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+            }));
+
+            const makePyNode = (name: string, cases: unknown[]) => ({
+                slate: 3,
+                name,
+                intent: `Compute ${name}`,
+                contract: 'Returns int',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                cases,
+                code: [`def ${name}(x: int) -> int:`, '    return x * 2'],
+            });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_args.json'), JSON.stringify(makePyNode('ok_args', [
+                { args: [2], return: 4 },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_params.json'), JSON.stringify(makePyNode('ok_params', [
+                { params: { x: 2 }, output: 4 },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_inline.json'), JSON.stringify(makePyNode('ok_inline', [
+                { x: 2, expected: 4 },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_multiline_code.json'), JSON.stringify(makePyNode('ok_multiline_code', [
+                { code: '# Verify double\nassert ok_multiline_code(2) == 4' },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'bad_comment_code.json'), JSON.stringify(makePyNode('bad_comment_code', [
+                { code: '# line 1\n# line 2' },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'bad_no_inputs.json'), JSON.stringify(makePyNode('bad_no_inputs', [
+                { expected: 4 },
+            ])));
+
+            const testPillar = checkProjectTests(tmpDir);
+            expect(testPillar.valid).toBe(false);
+            expect(testPillar.coveredNodes).toEqual([
+                'ok_args',
+                'ok_inline',
+                'ok_multiline_code',
+                'ok_params',
+            ]);
+            expect(testPillar.missingNodes).toEqual([
+                'bad_comment_code',
+                'bad_no_inputs',
+            ]);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
     });
 });

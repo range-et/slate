@@ -3,10 +3,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    collectExpandedDependencies,
     formatCasesAsPython,
     formatCasesAsTs,
     generateVerificationFiles,
     isVerificationStale,
+    resolvePythonPath,
     runNodeVerification,
     runRevisionLoop,
 } from '../vscode-extension/src/verification_runner';
@@ -123,7 +125,7 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
             const { moduleContent, testContent, hasChecks } = generateVerificationFiles(node);
             expect(hasChecks).toBe(true);
             expect(moduleContent).toContain('from pydantic import ConfigDict, validate_call');
-            expect(moduleContent).toContain('clamp = validate_call(config=ConfigDict(strict=True), validate_return=True)(clamp)');
+            expect(moduleContent).toContain('clamp = validate_call(config=ConfigDict(strict=True, arbitrary_types_allowed=True), validate_return=True)(clamp)');
             expect(moduleContent).toContain('def clamp(value: int, lower: int, upper: int) -> int:');
 
             expect(testContent).toContain('import pytest');
@@ -2342,5 +2344,477 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }
         });
+    });
+
+    describe('Scientific / PyTorch arbitrary types & relative venv pythonPath', () => {
+        it('resolves relative venv pythonPath against workspaceRoot while leaving bare commands intact', () => {
+            const ws = path.resolve(os.tmpdir(), 'sample-ws');
+            expect(resolvePythonPath('.venv/bin/python', ws)).toBe(path.resolve(ws, '.venv/bin/python'));
+            expect(resolvePythonPath('.venv\\Scripts\\python.exe', ws)).toBe(path.resolve(ws, '.venv\\Scripts\\python.exe'));
+            expect(resolvePythonPath('python3', ws)).toBe('python3');
+            const absBin = path.resolve(ws, 'custom', 'python');
+            expect(resolvePythonPath(absBin, ws)).toBe(absBin);
+        });
+
+        it('permits arbitrary scientific types (e.g. Tensor/ndarray-like classes) under Pydantic strict mode', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-arbitrary-types-'));
+            try {
+                const helperDep = makeNode({
+                    name: 'TensorLike',
+                    code: [
+                        'class TensorLike:',
+                        '    def __init__(self, shape: tuple[int, ...]) -> None:',
+                        '        self.shape = shape',
+                    ],
+                });
+                const scaleNode = makeNode({
+                    name: 'scale_tensor',
+                    context: ['TensorLike'],
+                    uses: ['TensorLike'],
+                    cases: undefined,
+                    code: [
+                        'def scale_tensor(t: TensorLike, factor: int) -> TensorLike:',
+                        '    return TensorLike((t.shape[0] * factor,))',
+                    ],
+                    check: [
+                        'import pytest',
+                        'from pydantic import ValidationError',
+                        'def test_scale_tensor():',
+                        '    out = scale_tensor(TensorLike((3,)), 2)',
+                        '    assert isinstance(out, TensorLike) and out.shape == (6,)',
+                        '    with pytest.raises(ValidationError):',
+                        '        scale_tensor(TensorLike((3,)), True)',
+                    ],
+                });
+                const deps = new Map<string, SlateNode>([['TensorLike', helperDep]]);
+                const result = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: scaleNode,
+                    nodeId: 'scale_tensor',
+                    dependencies: deps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(result.state, result.traceback).toBe('passed');
+                expect(result.pydanticValid).toBe(true);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
+
+        it('assembles owning class frame and sibling methods when verifying an owned method in real pytest + Pydantic', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-class-frame-verify-'));
+            try {
+                const classFrame = makeNode({
+                    name: 'ScaledTensorOp',
+                    kind: 'class',
+                    intent: 'Tensor scaling block',
+                    contract: 'Applies scalar multiplier',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'class ScaledTensorOp:',
+                        '    default_factor: int = 2',
+                    ],
+                });
+                const initMethod = makeNode({
+                    name: '__init__',
+                    classOwner: 'ScaledTensorOp',
+                    intent: 'Store factor',
+                    contract: 'Stores integer factor',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'def __init__(self, factor: int = 2) -> None:',
+                        '    self.factor = factor',
+                    ],
+                });
+                const applyMethod = makeNode({
+                    name: 'apply',
+                    classOwner: 'ScaledTensorOp',
+                    intent: 'Multiply value by self.factor',
+                    contract: 'Strict int args',
+                    cases: [{ name: 'c1', init: { factor: 3 }, inputs: { x: 4 }, expected: 12 }],
+                    check: [
+                        'import pytest',
+                        'from pydantic import ValidationError',
+                        'def test_apply_strict():',
+                        '    op = ScaledTensorOp(5)',
+                        '    assert op.apply(2) == 10',
+                        '    with pytest.raises(ValidationError):',
+                        '        op.apply(True)',
+                    ],
+                    code: [
+                        'def apply(self, x: int) -> int:',
+                        '    return x * self.factor',
+                    ],
+                });
+
+                const deps = new Map<string, SlateNode>([
+                    ['ScaledTensorOp', classFrame],
+                    ['ScaledTensorOp/__init__', initMethod],
+                ]);
+                const result = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: applyMethod,
+                    nodeId: 'ScaledTensorOp/apply',
+                    dependencies: deps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(result.state, result.traceback).toBe('passed');
+                expect(result.pydanticValid).toBe(true);
+                expect(result.testsPassed).toBeGreaterThanOrEqual(2);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
+
+        it('expands and assembles split class dependencies when a free function calls a split class', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-class-dep-verify-'));
+            try {
+                const counterFrame = makeNode({
+                    name: 'Counter',
+                    kind: 'class',
+                    intent: 'Counter frame',
+                    contract: 'Tracks count',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class Counter:', '    pass'],
+                });
+                const counterInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'Counter',
+                    intent: 'Initialize count',
+                    contract: 'Stores start',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, start: int) -> None:', '    self.count = start'],
+                });
+                const counterInc = makeNode({
+                    name: 'inc',
+                    classOwner: 'Counter',
+                    intent: 'Increment count',
+                    contract: 'Returns count + 1',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def inc(self) -> int:', '    self.count += 1', '    return self.count'],
+                });
+                const useCounter = makeNode({
+                    name: 'step_counter',
+                    context: ['Counter'],
+                    uses: ['Counter'],
+                    cases: [{ name: 'c1', inputs: { start: 3 }, expected: 4 }],
+                    check: ['def test_step_counter():', '    assert step_counter(10) == 11'],
+                    code: ['def step_counter(start: int) -> int:', '    return Counter(start).inc()'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['Counter', counterFrame],
+                    ['Counter/__init__', counterInit],
+                    ['Counter/inc', counterInc],
+                    ['step_counter', useCounter],
+                ]);
+                const { dependencies } = collectExpandedDependencies('step_counter', useCounter, allNodes);
+                expect(Array.from(dependencies.keys())).toContain('Counter');
+                expect(Array.from(dependencies.keys())).toContain('Counter/__init__');
+                expect(Array.from(dependencies.keys())).toContain('Counter/inc');
+
+                const result = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: useCounter,
+                    nodeId: 'step_counter',
+                    dependencies,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(result.state, result.traceback).toBe('passed');
+                expect(result.pydanticValid).toBe(true);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
+
+        it('orders base class frames before subclasses even when a base method references the subclass', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-subclass-order-'));
+            try {
+                const baseFrame = makeNode({
+                    name: 'BaseWidget',
+                    kind: 'class',
+                    intent: 'Base widget frame',
+                    contract: 'Defines label',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class BaseWidget:', '    pass'],
+                });
+                const baseInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'BaseWidget',
+                    intent: 'Init base',
+                    contract: 'Stores label',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, label: str) -> None:', '    self.label = label'],
+                });
+                const baseSpawn = makeNode({
+                    name: 'spawn',
+                    classOwner: 'BaseWidget',
+                    uses: ['ChildWidget'],
+                    context: ['ChildWidget'],
+                    intent: 'Spawn child widget',
+                    contract: 'Returns ChildWidget',
+                    cases: [{ name: 'spawn_ok', init: { label: 'a' }, inputs: {}, code: 'assert BaseWidget("a").spawn().label == "a!"' }],
+                    check: undefined,
+                    code: ['def spawn(self) -> "ChildWidget":', '    return ChildWidget(self.label + "!")'],
+                });
+                const childFrame = makeNode({
+                    name: 'ChildWidget',
+                    kind: 'class',
+                    uses: ['BaseWidget'],
+                    context: ['BaseWidget'],
+                    intent: 'Child widget subclassing BaseWidget',
+                    contract: 'Inherits from BaseWidget',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class ChildWidget(BaseWidget):', '    pass'],
+                });
+                const caller = makeNode({
+                    name: 'make_widget',
+                    uses: ['BaseWidget'],
+                    context: ['BaseWidget'],
+                    cases: [{ name: 'w1', inputs: { label: 'hi' }, expected: 'hi!' }],
+                    check: ['def test_make_widget():', '    assert make_widget("x") == "x!"'],
+                    code: ['def make_widget(label: str) -> str:', '    return BaseWidget(label).spawn().label'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['BaseWidget', baseFrame],
+                    ['BaseWidget/__init__', baseInit],
+                    ['BaseWidget/spawn', baseSpawn],
+                    ['ChildWidget', childFrame],
+                    ['make_widget', caller],
+                ]);
+
+                // 1) Free caller verifying against BaseWidget + ChildWidget(BaseWidget)
+                const callerDeps = collectExpandedDependencies('make_widget', caller, allNodes).dependencies;
+                const callerResult = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: caller,
+                    nodeId: 'make_widget',
+                    dependencies: callerDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(callerResult.state, callerResult.traceback).toBe('passed');
+
+                // 2) BaseWidget/spawn itself verifying with owner BaseWidget and subclass dependency ChildWidget(BaseWidget)
+                const spawnDeps = collectExpandedDependencies('BaseWidget/spawn', baseSpawn, allNodes).dependencies;
+                const spawnResult = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: baseSpawn,
+                    nodeId: 'BaseWidget/spawn',
+                    dependencies: spawnDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(spawnResult.state, spawnResult.traceback).toBe('passed');
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 30_000);
+
+        it('keeps helper functions returning the class before a class frame that binds them at definition time', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-helper-before-class-'));
+            try {
+                const makeBox = makeNode({
+                    name: 'make_box',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Create a default Box',
+                    contract: 'Returns Box(1)',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def make_box() -> "Box":', '    return Box(1)'],
+                });
+                const boxFrame = makeNode({
+                    name: 'Box',
+                    kind: 'class',
+                    uses: ['make_box'],
+                    context: ['make_box'],
+                    intent: 'Box class with static factory field',
+                    contract: 'Exposes factory staticmethod',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class Box:', '    factory = staticmethod(make_box)'],
+                });
+                const boxInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'Box',
+                    intent: 'Init Box',
+                    contract: 'Stores v',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, v: int) -> None:', '    self.v = v'],
+                });
+                const boxRead = makeNode({
+                    name: 'read',
+                    classOwner: 'Box',
+                    intent: 'Return stored value',
+                    contract: 'Returns int',
+                    cases: [{ name: 'factory_ok', init: { v: 7 }, inputs: {}, expected: 7 }],
+                    check: ['def test_box_factory():', '    assert Box.factory().read() == 1'],
+                    code: ['def read(self) -> int:', '    return self.v'],
+                });
+                const useBox = makeNode({
+                    name: 'use_box',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Call Box.factory().read()',
+                    contract: 'Returns 1',
+                    cases: [{ name: 'u1', inputs: {}, expected: 1 }],
+                    check: ['def test_use_box():', '    assert use_box() == 1'],
+                    code: ['def use_box() -> int:', '    return Box.factory().read()'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['make_box', makeBox],
+                    ['Box', boxFrame],
+                    ['Box/__init__', boxInit],
+                    ['Box/read', boxRead],
+                    ['use_box', useBox],
+                ]);
+
+                // 1) Method on Box verifying with Box frame referencing make_box (which calls Box in its body)
+                const readDeps = collectExpandedDependencies('Box/read', boxRead, allNodes).dependencies;
+                const readFiles = generateVerificationFiles(boxRead, readDeps, 'Box/read');
+                expect(readFiles.moduleContent.indexOf('def make_box')).toBeLessThan(readFiles.moduleContent.indexOf('class Box:'));
+                const readRes = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: boxRead,
+                    nodeId: 'Box/read',
+                    dependencies: readDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(readRes.state, readRes.traceback).toBe('passed');
+
+                // 2) Free caller verifying against Box + make_box
+                const useDeps = collectExpandedDependencies('use_box', useBox, allNodes).dependencies;
+                const useRes = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: useBox,
+                    nodeId: 'use_box',
+                    dependencies: useDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(useRes.state, useRes.traceback).toBe('passed');
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 30_000);
+
+        it('keeps legacy and split class dependencies with method default expressions ordered after the referenced class', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-legacy-class-method-default-'));
+            try {
+                const boxFrame = makeNode({
+                    name: 'Box',
+                    kind: 'class',
+                    intent: 'Box class',
+                    contract: 'Stores v',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class Box:', '    pass'],
+                });
+                const boxInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'Box',
+                    intent: 'Init Box',
+                    contract: 'Stores v',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, v: int) -> None:', '    self.v = v'],
+                });
+                const legacyHandler = makeNode({
+                    name: 'LegacyHandler',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Legacy monolithic handler whose method default constructs Box(2)',
+                    contract: 'Returns box.v',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'class LegacyHandler:',
+                        '    def run(self, box: Box = Box(2)) -> int:',
+                        '        return box.v',
+                    ],
+                });
+                const splitHandlerFrame = makeNode({
+                    name: 'SplitHandler',
+                    kind: 'class',
+                    intent: 'Split handler frame',
+                    contract: 'Defines handler',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class SplitHandler:', '    pass'],
+                });
+                const splitHandlerRun = makeNode({
+                    name: 'run',
+                    classOwner: 'SplitHandler',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Method with default constructing Box(3)',
+                    contract: 'Returns box.v',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'def run(self, box: Box = Box(3)) -> int:',
+                        '    return box.v',
+                    ],
+                });
+                const boxRead = makeNode({
+                    name: 'read',
+                    classOwner: 'Box',
+                    context: ['LegacyHandler', 'SplitHandler'],
+                    uses: ['LegacyHandler', 'SplitHandler'],
+                    intent: 'Return stored value and exercise handlers',
+                    contract: 'Returns int',
+                    cases: [{ name: 'c1', init: { v: 5 }, inputs: {}, expected: 5 }],
+                    check: [
+                        'def test_handlers():',
+                        '    assert Box(5).read() == 5',
+                        '    assert LegacyHandler().run() == 2',
+                        '    assert SplitHandler().run() == 3',
+                    ],
+                    code: ['def read(self) -> int:', '    return self.v'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['Box', boxFrame],
+                    ['Box/__init__', boxInit],
+                    ['Box/read', boxRead],
+                    ['LegacyHandler', legacyHandler],
+                    ['SplitHandler', splitHandlerFrame],
+                    ['SplitHandler/run', splitHandlerRun],
+                ]);
+
+                const readDeps = collectExpandedDependencies('Box/read', boxRead, allNodes).dependencies;
+                const generated = generateVerificationFiles(boxRead, readDeps, 'Box/read');
+                expect(generated.moduleContent.indexOf('class Box:')).toBeLessThan(generated.moduleContent.indexOf('class LegacyHandler:'));
+                expect(generated.moduleContent.indexOf('class Box:')).toBeLessThan(generated.moduleContent.indexOf('class SplitHandler:'));
+
+                const res = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: boxRead,
+                    nodeId: 'Box/read',
+                    dependencies: readDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(res.state, res.traceback).toBe('passed');
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 30_000);
     });
 });

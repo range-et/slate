@@ -55,14 +55,32 @@ export interface ParseModuleResult {
     }>;
 }
 
+export interface ClassFrameField {
+    name: string;
+    annotation: string | null;
+    defaultValue: string | null;
+    raw: string;
+}
+
+export interface ClassFrameMeta {
+    decorators: string[];
+    bases: string[];
+    fields: ClassFrameField[];
+    hasMethods?: boolean;
+}
+
 export interface HarnessDocument extends ParseModuleResult {
     id: string;
     version: number | null;
     stale: boolean;
     /** The node's code text (unit ranges are relative to it). */
     source?: string;
-    /** Module state (`prelude`/`epilogue`) instead of one definition. */
-    nodeKind?: 'prelude' | 'epilogue';
+    /** Special node kind: `prelude`/`epilogue` module state or `class` frame container. */
+    nodeKind?: 'prelude' | 'epilogue' | 'class';
+    /** Owning class frame node ID when this node represents an atomic class method. */
+    classOwner?: string;
+    /** Extracted class frame header, bases, decorators, and property fields when `nodeKind === 'class'`. */
+    classMeta?: ClassFrameMeta;
     /** External import lines declared in the node JSON (`imports`). */
     imports?: string[];
     /** Explicit node dependencies declared in the node JSON (`uses`). */
@@ -373,6 +391,19 @@ export interface LlamaHealthStatus {
     model: string;
     statusText: string;
     models?: string[];
+    provider?: string;
+    apiKeyEnv?: string;
+    concurrency?: number;
+}
+
+export interface BatchForgeStatus {
+    running: boolean;
+    concurrency?: number;
+    forgedCount?: number;
+    failedCount?: number;
+    skippedCount?: number;
+    total?: number;
+    message?: string;
 }
 
 export interface HarnessProposal {
@@ -409,4 +440,5 @@ export type HostMessage =
     | { type: 'guardrailsStatus'; report: NodeGuardrailsReport }
     | { type: 'liveModeStatus'; liveMode: LiveModeState }
     | { type: 'llamaHealth'; status: LlamaHealthStatus }
+    | { type: 'batchForgeState'; state: BatchForgeStatus }
     | { type: 'candidateVerification'; proposalId: string; passed: boolean; details?: string; report?: NodeGuardrailsReport };

@@ -112,7 +112,7 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
         });
 
-        it('tools/list enumerates all 10 required frontier architect tools', async () => {
+        it('tools/list enumerates all 12 required frontier architect tools', async () => {
             const resp = await server.handleRequest({
                 jsonrpc: '2.0',
                 id: 3,
@@ -120,19 +120,21 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             });
             expect(resp).not.toBeNull();
             const tools = (resp as any).result.tools;
-            expect(tools).toHaveLength(10);
+            expect(tools).toHaveLength(12);
             const toolNames = tools.map((t: any) => t.name);
             expect(toolNames).toEqual([
                 'slate_find',
                 'slate_focus',
                 'slate_place_notes',
                 'slate_define_stub',
+                'slate_define_class',
                 'slate_wire_flow',
                 'slate_llm_status',
                 'slate_configure_llm',
                 'slate_forge_batch',
                 'slate_references',
                 'slate_compile',
+                'slate_verify_ci',
             ]);
             for (const tool of tools) {
                 expect(tool.description).toBeTruthy();
@@ -1505,6 +1507,103 @@ describe('Frontier Architect MCP Server (S-510)', () => {
             expect(after.uses).toEqual(['calc']);
             expect(after.describedBy).toBe('llama');
             expect(after.verification.state).toBe('stale');
+        });
+
+        it('slate_verify_ci executes 4-pillar verification scoped to srcRoots/testRoots and rejects traversal paths', async () => {
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'slate.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'ci_mcp_demo',
+                    language: 'python',
+                    compile: { outDir: 'src' },
+                    ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+                }, null, 2),
+                'utf8',
+            );
+            // Update calc node so it has full intent, contract, cases, and strict typing
+            await fs.writeFile(
+                path.join(tmpDir, 'slate', 'nodes', 'calc.json'),
+                JSON.stringify({
+                    slate: 3,
+                    name: 'calc',
+                    intent: 'Double input integer',
+                    contract: 'Returns x * 2',
+                    cases: [{ name: 'c1', inputs: { x: 3 }, expected: 6 }],
+                    code: ['def calc(x: int) -> int:', '    return x * 2'],
+                }, null, 2),
+                'utf8',
+            );
+            await server.callTool('slate_compile', {});
+
+            const passRes = await server.callTool('slate_verify_ci', {});
+            expect(passRes.isError).toBe(false);
+            const passReport = JSON.parse(passRes.content[0].text);
+            expect(passReport.valid).toBe(true);
+            expect(passReport.pillars.schema.valid).toBe(true);
+            expect(passReport.pillars.stub.valid).toBe(true);
+            expect(passReport.pillars.code.valid).toBe(true);
+            expect(passReport.pillars.test.valid).toBe(true);
+
+            // Traversal srcRoots must be rejected
+            const badRoots = await server.callTool('slate_verify_ci', { srcRoots: ['../outside'] });
+            expect(badRoots.isError).toBe(true);
+            expect(badRoots.content[0].text).toMatch(/Unsafe srcRoots path/i);
+        });
+
+        it('defines class frames via slate_define_class and attaches owned method stubs via slate_define_stub', async () => {
+            const clsRes = await server.callTool('slate_define_class', {
+                name: 'models/ConvBlock',
+                signature: 'class ConvBlock(nn.Module)',
+                intent: 'Residual convolution block',
+                contract: 'channels > 0',
+                decorators: ['@dataclass'],
+                fields: ['channels: int', 'scale: float = 1.0'],
+                imports: ['from dataclasses import dataclass'],
+                position: { x: 120, y: 180 },
+            });
+            expect(clsRes.isError).toBe(false);
+            const clsParsed = JSON.parse(clsRes.content[0].text);
+            expect(clsParsed).toMatchObject({
+                ok: true,
+                nodeId: 'models/ConvBlock',
+                kind: 'class',
+                bases: ['nn.Module'],
+                decorators: ['@dataclass'],
+            });
+            expect(clsParsed.fields).toHaveLength(2);
+
+            // Refuses methods inside slate_define_class
+            const badClsRes = await server.callTool('slate_define_class', {
+                name: 'models/BadClass',
+                signature: 'class BadClass',
+                intent: 'Invalid',
+                fields: ['def nope(self): pass'],
+            });
+            expect(badClsRes.isError).toBe(true);
+
+            // Create owned method stubs attached to models/ConvBlock
+            const methodRes = await server.callTool('slate_define_stub', {
+                name: 'models/ConvBlock/forward',
+                signature: 'def forward(self, x: float) -> float',
+                intent: 'Scale x by self.scale',
+                contract: 'Returns scaled float',
+                classOwner: 'models/ConvBlock',
+                cases: [{ name: 'c1', init: { scale: 2.0 }, inputs: { x: 3.0 }, expected: 6.0 }],
+            });
+            expect(methodRes.isError).toBe(false);
+            const methodNode = JSON.parse(await fs.readFile(path.join(tmpDir, 'slate', 'nodes', 'models', 'ConvBlock', 'forward.json'), 'utf8'));
+            expect(methodNode.classOwner).toBe('models/ConvBlock');
+
+            // Refuses non-existent classOwner
+            const orphanRes = await server.callTool('slate_define_stub', {
+                name: 'models/Missing/run',
+                signature: 'def run(self) -> None',
+                intent: 'Orphan',
+                classOwner: 'models/Missing',
+            });
+            expect(orphanRes.isError).toBe(true);
+            expect(orphanRes.content[0].text).toContain('does not exist or is not a class frame');
         });
     });
 });
