@@ -865,4 +865,69 @@ describe('4-Pillar CI gate (ci_verifier & standalone CLI)', () => {
             fs.rmSync(tmpDir, { recursive: true, force: true });
         }
     });
+
+    it('accepts runner-supported case shapes (args/return, params/output, inline kwargs, multiline code) and rejects untyped/comment-only cases', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ci-case-shapes-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'case_shapes',
+                language: 'python',
+                compile: { outDir: 'src' },
+                ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+            }));
+
+            const makePyNode = (name: string, cases: unknown[]) => ({
+                slate: 3,
+                name,
+                intent: `Compute ${name}`,
+                contract: 'Returns int',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                cases,
+                code: [`def ${name}(x: int) -> int:`, '    return x * 2'],
+            });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_args.json'), JSON.stringify(makePyNode('ok_args', [
+                { args: [2], return: 4 },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_params.json'), JSON.stringify(makePyNode('ok_params', [
+                { params: { x: 2 }, output: 4 },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_inline.json'), JSON.stringify(makePyNode('ok_inline', [
+                { x: 2, expected: 4 },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'ok_multiline_code.json'), JSON.stringify(makePyNode('ok_multiline_code', [
+                { code: '# Verify double\nassert ok_multiline_code(2) == 4' },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'bad_comment_code.json'), JSON.stringify(makePyNode('bad_comment_code', [
+                { code: '# line 1\n# line 2' },
+            ])));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'bad_no_inputs.json'), JSON.stringify(makePyNode('bad_no_inputs', [
+                { expected: 4 },
+            ])));
+
+            const testPillar = checkProjectTests(tmpDir);
+            expect(testPillar.valid).toBe(false);
+            expect(testPillar.coveredNodes).toEqual([
+                'ok_args',
+                'ok_inline',
+                'ok_multiline_code',
+                'ok_params',
+            ]);
+            expect(testPillar.missingNodes).toEqual([
+                'bad_comment_code',
+                'bad_no_inputs',
+            ]);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
 });

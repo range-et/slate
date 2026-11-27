@@ -753,32 +753,52 @@ function extractTestBodyText(content: string, relativePath: string, tsMode: bool
     return { hasExecutableTests: hasPyTests, text: content };
 }
 
-function hasUsableStructuredCase(cases: unknown): boolean {
+const CI_CASE_METADATA_KEYS = new Set([
+    'name',
+    'id',
+    'description',
+    'error',
+    'expectedError',
+    'expected',
+    'return',
+    'output',
+    'approx',
+    'init',
+]);
+
+function hasExecutableCodeContent(raw: string, tsMode: boolean): boolean {
+    if (tsMode) {
+        const stripped = raw
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/\/\/.*$/gm, '');
+        return stripped.trim().length > 0;
+    }
+    const lines = raw.replace(/\r\n?/g, '\n').split('\n');
+    return lines.some(line => {
+        const trimmed = line.trim();
+        return trimmed.length > 0 && !trimmed.startsWith('#') && trimmed !== 'pass' && trimmed !== '...';
+    });
+}
+
+function hasUsableStructuredCase(cases: unknown, tsMode: boolean): boolean {
     if (!Array.isArray(cases) || cases.length === 0) return false;
     return cases.some(c => {
-        if (typeof c === 'string') {
-            const trimmed = c.trim();
-            return trimmed.length > 0 && !trimmed.startsWith('#') && !trimmed.startsWith('//');
+        if (!c || typeof c !== 'object') {
+            const raw = String(c);
+            if (/[\r\n]/.test(raw)) return false;
+            return hasExecutableCodeContent(raw, tsMode);
         }
-        if (c && typeof c === 'object' && !Array.isArray(c)) {
-            const rec = c as Record<string, unknown>;
-            if (typeof rec.code === 'string') {
-                const trimmedCode = rec.code.trim();
-                if (trimmedCode.length > 0 && !trimmedCode.startsWith('#') && !trimmedCode.startsWith('//')) {
-                    return true;
-                }
-            }
-            if (rec.input !== undefined || rec.inputs !== undefined || rec.expected !== undefined) {
-                return true;
-            }
-            if (
-                (typeof rec.error === 'string' && rec.error.trim().length > 0)
-                || (typeof rec.expectedError === 'string' && rec.expectedError.trim().length > 0)
-            ) {
-                return true;
-            }
+        if (Array.isArray(c)) return false;
+        const rec = c as Record<string, unknown>;
+        if (typeof rec.code === 'string') {
+            return hasExecutableCodeContent(rec.code, tsMode);
         }
-        return false;
+        const inputs = rec.inputs ?? rec.input ?? rec.args ?? rec.params;
+        const hasInlineParams = Object.keys(rec).some(k => !CI_CASE_METADATA_KEYS.has(k));
+        if (tsMode) {
+            return inputs !== undefined || hasInlineParams;
+        }
+        return (inputs !== null && typeof inputs === 'object') || hasInlineParams;
     });
 }
 
@@ -912,7 +932,7 @@ export function checkProjectTests(
 
     for (const { nodeId, node } of atomicNodes) {
         const nodeTsMode = node.language ? isTsLikeLanguage(node.language) !== null : tsMode;
-        const hasCases = hasUsableStructuredCase(node.cases);
+        const hasCases = hasUsableStructuredCase(node.cases, nodeTsMode);
         const hasCheck = hasExecutableNodeCheck(node, nodeTsMode);
         const hasExternal = coveredByExternalTests.has(nodeId);
         if (hasCases || hasCheck || hasExternal) {

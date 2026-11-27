@@ -7,7 +7,7 @@ import type { NodeVerificationResult, VerificationState } from './harness_protoc
 import { normalizeCompileOutputPath, tryNormalizeLanguage } from './language_types';
 import type { SlateNode } from './slate_folder';
 import { codeText } from './slate_folder';
-import { parseModule, sourceHash, topLevelBindings } from './python_adapter';
+import { identifierNames, parseModule, sourceHash, topLevelBindings } from './python_adapter';
 import { containsJsxSyntax, parseTsModule, scriptKindForPath, splitTsImport } from './ts_adapter';
 
 export interface GeneratedVerification {
@@ -129,6 +129,115 @@ function assemblePythonClassLines(
         out.push(...targetMethod.code.map(l => (l.length > 0 ? `    ${l}` : '')));
     }
     return out;
+}
+
+const OWNER_CLASS_SENTINEL = '__slate_owner_class__';
+
+function orderDefinitionDependencies(
+    emittedDeps: Array<[string, SlateNode]>,
+    allDeps: ReadonlyMap<string, SlateNode>,
+    ownerId?: string,
+    ownerNode?: SlateNode,
+): { preOwnerDeps: Array<[string, SlateNode]>; postOwnerDeps: Array<[string, SlateNode]> } {
+    if (emittedDeps.length === 0) {
+        return { preOwnerDeps: [], postOwnerDeps: [] };
+    }
+
+    const emittedById = new Map<string, SlateNode>(emittedDeps);
+    const orderIndex = new Map<string, number>();
+    const nameToIds = new Map<string, string[]>();
+    emittedDeps.forEach(([id, dep], idx) => {
+        orderIndex.set(id, idx);
+        if (dep.kind !== 'prelude' && dep.name) {
+            const list = nameToIds.get(dep.name) ?? [];
+            list.push(id);
+            nameToIds.set(dep.name, list);
+        }
+    });
+
+    const defDepsById = new Map<string, Set<string>>();
+    for (const [depId, depNode] of emittedDeps) {
+        const deps = new Set<string>();
+        for (const rawRef of [...depNode.context, ...depNode.uses]) {
+            if (ownerId && rawRef === ownerId) {
+                deps.add(OWNER_CLASS_SENTINEL);
+            } else if (emittedById.has(rawRef) && rawRef !== depId) {
+                deps.add(rawRef);
+            } else {
+                const refNode = allDeps.get(rawRef);
+                if (refNode?.classOwner) {
+                    if (ownerId && refNode.classOwner === ownerId) {
+                        deps.add(OWNER_CLASS_SENTINEL);
+                    } else if (emittedById.has(refNode.classOwner) && refNode.classOwner !== depId) {
+                        deps.add(refNode.classOwner);
+                    }
+                }
+            }
+        }
+        if (depNode.kind === 'class' || /^\s*(?:@\w[\w.]*[^\n]*\n\s*)*class\b/m.test(codeText(depNode))) {
+            for (const ident of identifierNames(codeText(depNode))) {
+                if (ident === depNode.name) continue;
+                if (ownerId && ownerNode?.name && ident === ownerNode.name) {
+                    deps.add(OWNER_CLASS_SENTINEL);
+                } else {
+                    const matched = nameToIds.get(ident);
+                    if (matched && matched.length === 1 && matched[0] !== depId) {
+                        deps.add(matched[0]);
+                    }
+                }
+            }
+        }
+        defDepsById.set(depId, deps);
+    }
+
+    const ownerDependents = new Set<string>();
+    if (ownerId) {
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [depId] of emittedDeps) {
+                if (ownerDependents.has(depId)) continue;
+                const deps = defDepsById.get(depId)!;
+                if (deps.has(OWNER_CLASS_SENTINEL) || Array.from(deps).some(d => ownerDependents.has(d))) {
+                    ownerDependents.add(depId);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    const topoSortSlice = (slice: Array<[string, SlateNode]>): Array<[string, SlateNode]> => {
+        const sliceIds = new Set(slice.map(([id]) => id));
+        const remaining = new Set(sliceIds);
+        const sorted: Array<[string, SlateNode]> = [];
+        while (remaining.size > 0) {
+            const ready = Array.from(remaining).filter(id => {
+                const deps = defDepsById.get(id)!;
+                for (const d of deps) {
+                    if (sliceIds.has(d) && remaining.has(d)) return false;
+                }
+                return true;
+            });
+            const pickPool = ready.length > 0 ? ready : Array.from(remaining);
+            pickPool.sort((a, b) => {
+                const aPrelude = emittedById.get(a)?.kind === 'prelude' ? 0 : 1;
+                const bPrelude = emittedById.get(b)?.kind === 'prelude' ? 0 : 1;
+                if (aPrelude !== bPrelude) return aPrelude - bPrelude;
+                return (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0);
+            });
+            const chosen = pickPool[0];
+            remaining.delete(chosen);
+            sorted.push([chosen, emittedById.get(chosen)!]);
+        }
+        return sorted;
+    };
+
+    const preSlice = emittedDeps.filter(([id]) => !ownerDependents.has(id));
+    const postSlice = emittedDeps.filter(([id]) => ownerDependents.has(id));
+    return {
+        preOwnerDeps: topoSortSlice(preSlice),
+        postOwnerDeps: topoSortSlice(postSlice),
+    };
 }
 
 /** Resolves the Python binary to use, checking explicit config, environment variables, and platform paths. */
@@ -563,7 +672,7 @@ export function generateVerificationFiles(
     }
 
     const siblingMethods: Array<[string, SlateNode]> = [];
-    const depCodeBlocks: string[] = [];
+    const emittedDepEntries: Array<[string, SlateNode]> = [];
     const depExportNames = new Set<string>();
     if (dependencies && dependencies.size > 0) {
         for (const [depId, depNode] of dependencies.entries()) {
@@ -581,31 +690,51 @@ export function generateVerificationFiles(
             if (depNode.classOwner && depClassFrameIds.has(depNode.classOwner)) {
                 continue;
             }
-            if (depNode.kind === 'class') {
-                depCodeBlocks.push(...assemblePythonClassLines(
-                    depNode,
-                    methodsByClassDep.get(depId) ?? [],
-                    undefined,
-                    `\n# Context class: ${depNode.name}`,
-                ));
-                if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name) && topLevelBindings(codeText(depNode)).has(depNode.name)) {
-                    depExportNames.add(depNode.name);
-                }
-                continue;
+            emittedDepEntries.push([depId, depNode]);
+        }
+    }
+
+    const { preOwnerDeps, postOwnerDeps } = orderDefinitionDependencies(
+        emittedDepEntries,
+        dependencies ?? new Map<string, SlateNode>(),
+        node.classOwner,
+        ownerNode,
+    );
+
+    const emitDepBlock = (targetBlocks: string[], [depId, depNode]: [string, SlateNode]): void => {
+        if (depNode.kind === 'class') {
+            targetBlocks.push(...assemblePythonClassLines(
+                depNode,
+                methodsByClassDep.get(depId) ?? [],
+                undefined,
+                `\n# Context class: ${depNode.name}`,
+            ));
+            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name) && topLevelBindings(codeText(depNode)).has(depNode.name)) {
+                depExportNames.add(depNode.name);
             }
-            if (depNode.code.length > 0) {
-                depCodeBlocks.push(`\n# Context: ${depNode.name}`);
-                depCodeBlocks.push(...depNode.code);
-                if (
-                    depNode.kind !== 'prelude'
-                    && !depNode.classOwner
-                    && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
-                    && topLevelBindings(codeText(depNode)).has(depNode.name)
-                ) {
-                    depExportNames.add(depNode.name);
-                }
+            return;
+        }
+        if (depNode.code.length > 0) {
+            targetBlocks.push(`\n# Context: ${depNode.name}`);
+            targetBlocks.push(...depNode.code);
+            if (
+                depNode.kind !== 'prelude'
+                && !depNode.classOwner
+                && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
+                && topLevelBindings(codeText(depNode)).has(depNode.name)
+            ) {
+                depExportNames.add(depNode.name);
             }
         }
+    };
+
+    const depCodeBlocks: string[] = [];
+    for (const entry of preOwnerDeps) {
+        emitDepBlock(depCodeBlocks, entry);
+    }
+    const postOwnerDepBlocks: string[] = [];
+    for (const entry of postOwnerDeps) {
+        emitDepBlock(postOwnerDepBlocks, entry);
     }
 
     for (const imp of node.imports ?? []) {
@@ -649,7 +778,14 @@ try:
 except Exception:
     pass
 `);
+        if (postOwnerDepBlocks.length > 0) {
+            moduleParts.push('# Dependent subclass/downstream nodes');
+            moduleParts.push(...postOwnerDepBlocks);
+        }
     } else {
+        if (postOwnerDepBlocks.length > 0) {
+            moduleParts.push(...postOwnerDepBlocks);
+        }
         moduleParts.push(`\n# Target implementation: ${node.name}`);
         moduleParts.push(...node.code);
 

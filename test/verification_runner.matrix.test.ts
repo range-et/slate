@@ -2534,5 +2534,93 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }
         }, 25_000);
+
+        it('orders base class frames before subclasses even when a base method references the subclass', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-subclass-order-'));
+            try {
+                const baseFrame = makeNode({
+                    name: 'BaseWidget',
+                    kind: 'class',
+                    intent: 'Base widget frame',
+                    contract: 'Defines label',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class BaseWidget:', '    pass'],
+                });
+                const baseInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'BaseWidget',
+                    intent: 'Init base',
+                    contract: 'Stores label',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, label: str) -> None:', '    self.label = label'],
+                });
+                const baseSpawn = makeNode({
+                    name: 'spawn',
+                    classOwner: 'BaseWidget',
+                    uses: ['ChildWidget'],
+                    context: ['ChildWidget'],
+                    intent: 'Spawn child widget',
+                    contract: 'Returns ChildWidget',
+                    cases: [{ name: 'spawn_ok', init: { label: 'a' }, inputs: {}, code: 'assert BaseWidget("a").spawn().label == "a!"' }],
+                    check: undefined,
+                    code: ['def spawn(self) -> "ChildWidget":', '    return ChildWidget(self.label + "!")'],
+                });
+                const childFrame = makeNode({
+                    name: 'ChildWidget',
+                    kind: 'class',
+                    uses: ['BaseWidget'],
+                    context: ['BaseWidget'],
+                    intent: 'Child widget subclassing BaseWidget',
+                    contract: 'Inherits from BaseWidget',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class ChildWidget(BaseWidget):', '    pass'],
+                });
+                const caller = makeNode({
+                    name: 'make_widget',
+                    uses: ['BaseWidget'],
+                    context: ['BaseWidget'],
+                    cases: [{ name: 'w1', inputs: { label: 'hi' }, expected: 'hi!' }],
+                    check: ['def test_make_widget():', '    assert make_widget("x") == "x!"'],
+                    code: ['def make_widget(label: str) -> str:', '    return BaseWidget(label).spawn().label'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['BaseWidget', baseFrame],
+                    ['BaseWidget/__init__', baseInit],
+                    ['BaseWidget/spawn', baseSpawn],
+                    ['ChildWidget', childFrame],
+                    ['make_widget', caller],
+                ]);
+
+                // 1) Free caller verifying against BaseWidget + ChildWidget(BaseWidget)
+                const callerDeps = collectExpandedDependencies('make_widget', caller, allNodes).dependencies;
+                const callerResult = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: caller,
+                    nodeId: 'make_widget',
+                    dependencies: callerDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(callerResult.state, callerResult.traceback).toBe('passed');
+
+                // 2) BaseWidget/spawn itself verifying with owner BaseWidget and subclass dependency ChildWidget(BaseWidget)
+                const spawnDeps = collectExpandedDependencies('BaseWidget/spawn', baseSpawn, allNodes).dependencies;
+                const spawnResult = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: baseSpawn,
+                    nodeId: 'BaseWidget/spawn',
+                    dependencies: spawnDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(spawnResult.state, spawnResult.traceback).toBe('passed');
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 30_000);
     });
 });
