@@ -708,15 +708,40 @@ function collectTestFilesUnderRoots(projectDir: string, testRoots: readonly stri
 
 function extractTestBodyText(content: string, relativePath: string, tsMode: boolean): { hasExecutableTests: boolean; text: string } {
     if (tsMode) {
-        const hasTests = /\b(?:test|it)\s*\(/.test(content);
-        return { hasExecutableTests: hasTests, text: content };
+        const stripped = content
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/\/\/.*$/gm, '');
+        const hasTests = /\b(?:test|it)\s*\(/.test(stripped);
+        return { hasExecutableTests: hasTests, text: stripped };
     }
     const parsed = parseModule(content, relativePath);
     if (parsed.valid) {
         const lines = content.replace(/\r\n?/g, '\n').split('\n');
+        const classesWithInit = new Set<string>();
+        for (const unit of parsed.units) {
+            if (unit.kind === 'method' && unit.name === '__init__' && unit.parentId !== null) {
+                classesWithInit.add(unit.parentId);
+            }
+        }
+        const collectableClassIds = new Set<string>();
+        for (const unit of parsed.units) {
+            if (
+                unit.kind === 'class'
+                && unit.parentId === null
+                && unit.name.startsWith('Test')
+                && !classesWithInit.has(unit.id)
+            ) {
+                collectableClassIds.add(unit.id);
+            }
+        }
         const testChunks: string[] = [];
         for (const unit of parsed.units) {
-            if (unit.kind === 'function' && unit.name.startsWith('test_')) {
+            const isTopTestFn = unit.kind === 'function' && unit.parentId === null && unit.name.startsWith('test_');
+            const isCollectableTestMethod = unit.kind === 'method'
+                && unit.parentId !== null
+                && unit.name.startsWith('test_')
+                && collectableClassIds.has(unit.parentId);
+            if (isTopTestFn || isCollectableTestMethod) {
                 const start = Math.max(0, unit.ranges.declaration.start.line);
                 const end = Math.min(lines.length - 1, unit.ranges.declaration.end.line);
                 testChunks.push(lines.slice(start, end + 1).join('\n'));
@@ -726,6 +751,46 @@ function extractTestBodyText(content: string, relativePath: string, tsMode: bool
     }
     const hasPyTests = /^\s*(?:async\s+)?def\s+test_[A-Za-z0-9_]*\s*\(/m.test(content);
     return { hasExecutableTests: hasPyTests, text: content };
+}
+
+function hasUsableStructuredCase(cases: unknown): boolean {
+    if (!Array.isArray(cases) || cases.length === 0) return false;
+    return cases.some(c => {
+        if (typeof c === 'string') {
+            const trimmed = c.trim();
+            return trimmed.length > 0 && !trimmed.startsWith('#') && !trimmed.startsWith('//');
+        }
+        if (c && typeof c === 'object' && !Array.isArray(c)) {
+            const rec = c as Record<string, unknown>;
+            if (typeof rec.code === 'string') {
+                const trimmedCode = rec.code.trim();
+                if (trimmedCode.length > 0 && !trimmedCode.startsWith('#') && !trimmedCode.startsWith('//')) {
+                    return true;
+                }
+            }
+            if (rec.input !== undefined || rec.inputs !== undefined || rec.expected !== undefined) {
+                return true;
+            }
+            if (
+                (typeof rec.error === 'string' && rec.error.trim().length > 0)
+                || (typeof rec.expectedError === 'string' && rec.expectedError.trim().length > 0)
+            ) {
+                return true;
+            }
+        }
+        return false;
+    });
+}
+
+function hasExecutableNodeCheck(node: SlateNode, tsMode: boolean): boolean {
+    if (!Array.isArray(node.check) || node.check.length === 0) return false;
+    const checkText = node.check.join('\n');
+    if (checkText.trim().length === 0) return false;
+    if (!tsMode) {
+        const parsed = parseModule(checkText, '<node.check>');
+        if (!parsed.valid) return false;
+    }
+    return extractTestBodyText(checkText, '<node.check>', tsMode).hasExecutableTests;
 }
 
 /**
@@ -846,8 +911,9 @@ export function checkProjectTests(
     const warnings: string[] = [];
 
     for (const { nodeId, node } of atomicNodes) {
-        const hasCases = Array.isArray(node.cases) && node.cases.length > 0;
-        const hasCheck = Array.isArray(node.check) && node.check.some(line => line.trim().length > 0);
+        const nodeTsMode = node.language ? isTsLikeLanguage(node.language) !== null : tsMode;
+        const hasCases = hasUsableStructuredCase(node.cases);
+        const hasCheck = hasExecutableNodeCheck(node, nodeTsMode);
         const hasExternal = coveredByExternalTests.has(nodeId);
         if (hasCases || hasCheck || hasExternal) {
             coveredNodes.push(nodeId);

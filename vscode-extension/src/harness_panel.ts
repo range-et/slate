@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import { BatchForgeStatus, BoardNote, FlowExecutionSnapshot, FlowInstance, FlowRegion, HarnessDocument, HarnessSnapshot, LiveModeState, LlamaHealthStatus, NodeGuardrailsReport, NodeVerificationResult, ParsedUnit, SlateFlow, SourceProposal, TestCase } from './harness_protocol';
 import { batchForgeWorkspace } from './batch_forge';
 import { checkGenerationSlot, clampForgeConcurrency, summarizeBatchForge } from './forge_concurrency';
-import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
+import { buildForgePacket, buildGenerationPacket, ForgeOptions, GenerationPacket, normalizeNeighborSignature, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from './generation';
 import {
     checkLlamaHealth,
     evaluateProjectCredentialAccess,
@@ -38,7 +38,7 @@ import {
 } from './flow';
 import { checkNodeCode, codeLines, codeText, CONFIG_PATH, LAYOUT_PATH, nodeFromSignature, nodeIdForPath, parseConfig, pathForNodeId, serializeNode, type SlateConfig, type SlateNode } from './slate_folder';
 import { SlateFolderHost } from './slate_folder_host';
-import { runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
+import { collectExpandedDependencies, runNodeVerification, runRevisionLoop, isVerificationStale, resolvePythonPath } from './verification_runner';
 import { buildUsageIndex } from './usage_index';
 import { runFlow } from './flow_runner';
 import { runNodeGuardrails } from './guardrails_runner';
@@ -649,6 +649,12 @@ export class HarnessPanel implements vscode.Disposable {
         return resolveLlmConfig(this.projectConfig?.llm, this.fallbackLlmSettings(), process.env);
     }
 
+    private async collectExpandedVerificationDeps(target: SlateNode, targetNodeId: string): Promise<Map<string, SlateNode>> {
+        const { nodes } = await this.folder.readNodes();
+        nodes.set(targetNodeId, target);
+        return collectExpandedDependencies(targetNodeId, target, nodes).dependencies;
+    }
+
     private resolveProjectPythonPath(configOverride?: SlateConfig): string {
         const projectPython = vscode.workspace.isTrusted
             ? (configOverride?.pythonPath ?? this.projectConfig?.pythonPath)
@@ -976,12 +982,7 @@ export class HarnessPanel implements vscode.Disposable {
             };
 
             if (nodeLang === 'typescript' || nodeLang === 'javascript') {
-                const deps = new Map<string, SlateNode>();
-                for (const depId of candidateNode.context) {
-                    try {
-                        deps.set(depId, await this.folder.readNode(depId));
-                    } catch {}
-                }
+                const deps = await this.collectExpandedVerificationDeps(candidateNode, nodeId);
                 const verifyRes = await runNodeVerification({
                     workspaceRoot: this.folder.root.fsPath,
                     node: candidateNode,
@@ -1096,8 +1097,7 @@ export class HarnessPanel implements vscode.Disposable {
                     const neighborNode = await folder.readNode(neighborId);
                     const neighborCode = neighborNode.code.join('\n');
                     const parsed = await this.adapterForLanguage(neighborNode.language).parseModule(neighborCode + '\n', neighborId);
-                    const rawCurrentSig = parsed.units[0]?.signature ?? neighborNode.code[0] ?? '';
-                    const currentSig = rawCurrentSig.endsWith(':') ? rawCurrentSig.slice(0, -1).trimEnd() : rawCurrentSig.trim();
+                    const currentSig = normalizeNeighborSignature(parsed.units[0], neighborCode);
                     const expectedSig = expected.signature.endsWith(':') ? expected.signature.slice(0, -1).trimEnd() : expected.signature.trim();
                     if (currentSig !== expectedSig) {
                         throw new Error(`Neighbor ${neighborId} signature changed after generation. The draft was preserved; regenerate against current code.`);
@@ -1216,30 +1216,8 @@ export class HarnessPanel implements vscode.Disposable {
                 return;
             }
 
-            const collectVerificationDeps = async (target: SlateNode, targetNodeId: string): Promise<Map<string, SlateNode>> => {
-                const dependencies = new Map<string, SlateNode>();
-                for (const depId of target.context) {
-                    try {
-                        dependencies.set(depId, await this.folder.readNode(depId));
-                    } catch { /* Missing dependencies are omitted by the verifier. */ }
-                }
-                if (target.classOwner) {
-                    try {
-                        dependencies.set(target.classOwner, await this.folder.readNode(target.classOwner));
-                    } catch {}
-                    for (const doc of this.snapshot?.documents ?? []) {
-                        const docId = nodeIdForPath(doc.path);
-                        if (docId && docId !== targetNodeId && doc.classOwner === target.classOwner) {
-                            try {
-                                dependencies.set(docId, await this.folder.readNode(docId));
-                            } catch {}
-                        }
-                    }
-                }
-                return dependencies;
-            };
             const readInputs = async (target: SlateNode) => {
-                const dependencies = await collectVerificationDeps(target, nodeId);
+                const dependencies = await this.collectExpandedVerificationDeps(target, nodeId);
                 const pythonPath = this.resolveProjectPythonPath();
                 const language = target.language ?? parseConfig(await this.folder.readConfigText()).language;
                 const inputs = (n: SlateNode) => [n.name, n.language, n.code, n.kind, n.classOwner, n.imports, n.context,
@@ -1388,25 +1366,7 @@ export class HarnessPanel implements vscode.Disposable {
                     return parsed;
                 },
                 verifyCandidate: async (candidateNode: SlateNode) => {
-                    const deps = new Map<string, SlateNode>();
-                    for (const depId of candidateNode.context) {
-                        try {
-                            deps.set(depId, await this.folder.readNode(depId));
-                        } catch {}
-                    }
-                    if (candidateNode.classOwner) {
-                        try {
-                            deps.set(candidateNode.classOwner, await this.folder.readNode(candidateNode.classOwner));
-                        } catch {}
-                        for (const doc of this.snapshot?.documents ?? []) {
-                            const docId = nodeIdForPath(doc.path);
-                            if (docId && docId !== nodeId && doc.classOwner === candidateNode.classOwner) {
-                                try {
-                                    deps.set(docId, await this.folder.readNode(docId));
-                                } catch {}
-                            }
-                        }
-                    }
+                    const deps = await this.collectExpandedVerificationDeps(candidateNode, nodeId);
                     const pythonPath = this.resolveProjectPythonPath();
                     return runNodeVerification({
                         workspaceRoot: this.folder.root.fsPath,
@@ -2980,10 +2940,16 @@ export class HarnessPanel implements vscode.Disposable {
                 message: `Forging stubs (concurrency ${settings.concurrency})…`,
             };
             await this.postMessage({ type: 'batchForgeState', state: startingState });
+            let configOverride: SlateConfig | undefined;
+            try {
+                configOverride = parseConfig(await this.folder.readConfigText());
+            } catch {}
+            const pythonPath = this.resolveProjectPythonPath(configOverride);
             const result = await batchForgeWorkspace({
                 workspaceRoot: this.folder.root.fsPath,
                 ...(nodeIds && nodeIds.length > 0 ? { nodeIds } : { allStubs: true }),
                 concurrency: settings.concurrency,
+                pythonPath,
                 isTrusted: vscode.workspace.isTrusted,
                 approvedCredentialPairings: this.loadApprovedPairings(),
                 fallbackLlm: fallback,

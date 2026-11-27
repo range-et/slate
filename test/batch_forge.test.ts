@@ -1202,4 +1202,197 @@ describe('Stateless batched Tier 2 forge (batch_forge.ts)', () => {
         expect(frameSkip.skippedCount).toBe(1);
         expect(frameSkip.results[0].reason).toContain('Class frame node cannot be forged directly');
     }, 25_000);
+
+    it('forges same-wave sibling methods without fingerprint collision and expands split class callers cleanly', async () => {
+        const frame: SlateNode = {
+            name: 'Counter',
+            kind: 'class',
+            intent: 'Counter container',
+            contract: 'Stores value',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            code: ['class Counter:', '    pass'],
+            extra: {},
+        };
+        const initImpl: SlateNode = {
+            name: '__init__',
+            classOwner: 'Counter',
+            intent: 'Initialize Counter',
+            contract: 'Stores value',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            code: ['def __init__(self, value: int) -> None:', '    self.value = value'],
+            extra: {},
+        };
+        const incStub: SlateNode = {
+            name: 'inc',
+            classOwner: 'Counter',
+            intent: 'Return self.value + delta',
+            contract: 'Returns integer sum',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            cases: [{ name: 'inc_1', init: { value: 2 }, inputs: { delta: 3 }, expected: 5 }],
+            code: ['def inc(self, delta: int) -> int:', '    raise NotImplementedError'],
+            extra: {},
+        };
+        const decStub: SlateNode = {
+            name: 'dec',
+            classOwner: 'Counter',
+            intent: 'Return self.value - delta',
+            contract: 'Returns integer difference',
+            context: [],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: [],
+            cases: [{ name: 'dec_1', init: { value: 5 }, inputs: { delta: 2 }, expected: 3 }],
+            code: ['def dec(self, delta: int) -> int:', '    raise NotImplementedError'],
+            extra: {},
+        };
+        const callerStub: SlateNode = {
+            name: 'run_counter',
+            intent: 'Create Counter(start) and return inc(delta)',
+            contract: 'Returns start + delta',
+            context: ['Counter'],
+            examples: [],
+            describedBy: 'human',
+            locked: false,
+            imports: [],
+            uses: ['Counter'],
+            cases: [{ name: 'call_1', inputs: { start: 4, delta: 6 }, expected: 10 }],
+            code: ['def run_counter(start: int, delta: int) -> int:', '    raise NotImplementedError'],
+            extra: {},
+        };
+
+        await fs.mkdir(path.join(tmpDir, 'slate', 'nodes', 'Counter'), { recursive: true });
+        await fs.writeFile(
+            path.join(tmpDir, 'slate', 'slate.json'),
+            JSON.stringify({ slate: 3, name: 'counter_wave', language: 'python', llm: { provider: 'openai-compatible', model: 'tiny' } }, null, 2),
+            'utf8',
+        );
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter.json'), serializeNode(frame), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', '__init__.json'), serializeNode(initImpl), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', 'inc.json'), serializeNode(incStub), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', 'dec.json'), serializeNode(decStub), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'run_counter.json'), serializeNode(callerStub), 'utf8');
+
+        activeServer = await startCustomSseServer(body => {
+            const prompt = String(body.messages?.[1]?.content ?? '');
+            if (prompt.includes('### Target stub: inc')) {
+                return [
+                    '### Implementation',
+                    '```python',
+                    'def inc(self, delta: int) -> int:',
+                    '    return self.value + delta',
+                    '```',
+                    '### Unit Check',
+                    '```python',
+                    'def test_inc():',
+                    '    assert Counter(2).inc(3) == 5',
+                    '```',
+                ].join('\n');
+            }
+            if (prompt.includes('### Target stub: dec')) {
+                return [
+                    '### Implementation',
+                    '```python',
+                    'def dec(self, delta: int) -> int:',
+                    '    return self.value - delta',
+                    '```',
+                    '### Unit Check',
+                    '```python',
+                    'def test_dec():',
+                    '    assert Counter(5).dec(2) == 3',
+                    '```',
+                ].join('\n');
+            }
+            return [
+                '### Implementation',
+                '```python',
+                'def run_counter(start: int, delta: int) -> int:',
+                '    return Counter(start).inc(delta)',
+                '```',
+                '### Unit Check',
+                '```python',
+                'def test_run_counter():',
+                '    assert run_counter(4, 6) == 10',
+                '```',
+            ].join('\n');
+        });
+
+        // First test concurrency: 1 so sibling #2 writes after sibling #1 in the same wave
+        const seqRes = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: true,
+            allStubs: true,
+            concurrency: 1,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(seqRes.ok, JSON.stringify(seqRes.results)).toBe(true);
+        expect(seqRes.waves).toBe(2);
+        expect(seqRes.forgedCount).toBe(3);
+
+        // Reset stubs and test concurrency: 2 + external modification rejection
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', 'inc.json'), serializeNode(incStub), 'utf8');
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', 'dec.json'), serializeNode(decStub), 'utf8');
+        const parRes = await batchForgeWorkspace({
+            workspaceRoot: tmpDir,
+            isTrusted: true,
+            nodeIds: ['Counter/inc', 'Counter/dec'],
+            concurrency: 2,
+            llmOverride: { endpoint: activeServer.url },
+        });
+        expect(parRes.ok, JSON.stringify(parRes.results)).toBe(true);
+        expect(parRes.forgedCount).toBe(2);
+
+        // External edit to Counter frame while forging still triggers staleness rejection
+        await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter', 'inc.json'), serializeNode(incStub), 'utf8');
+        let touched = false;
+        const conflictServer = await startCustomSseServer(async () => {
+            if (!touched) {
+                touched = true;
+                const modifiedFrame = { ...frame, contract: 'Changed externally mid-forge' };
+                await fs.writeFile(path.join(tmpDir, 'slate', 'nodes', 'Counter.json'), serializeNode(modifiedFrame), 'utf8');
+            }
+            return [
+                '### Implementation',
+                '```python',
+                'def inc(self, delta: int) -> int:',
+                '    return self.value + delta',
+                '```',
+                '### Unit Check',
+                '```python',
+                'def test_inc():',
+                '    assert Counter(2).inc(3) == 5',
+                '```',
+            ].join('\n');
+        });
+        try {
+            const conflictRes = await batchForgeWorkspace({
+                workspaceRoot: tmpDir,
+                isTrusted: true,
+                nodeIds: ['Counter/inc'],
+                concurrency: 1,
+                llmOverride: { endpoint: conflictServer.url },
+            });
+            expect(conflictRes.ok).toBe(false);
+            expect(conflictRes.results[0].status).toBe('failed');
+            expect(conflictRes.results[0].reason).toContain('changed on disk while forging');
+        } finally {
+            await conflictServer.close();
+        }
+    }, 30_000);
 });

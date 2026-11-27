@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildForgePacket, buildGenerationPacket, FORGE_INPUT_BUDGET_TOKENS, PacketError, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from '../vscode-extension/src/generation';
+import { buildForgePacket, buildGenerationPacket, FORGE_INPUT_BUDGET_TOKENS, normalizeNeighborSignature, PacketError, parseForgeCandidate, stripModelEnvelope, validateForgeCandidate } from '../vscode-extension/src/generation';
 import { buildDescribePacket, describeNodes, describeOrder, parseDescribeReply } from '../vscode-extension/src/port/describe';
 import { indexNode, parseNode } from '../vscode-extension/src/slate_folder';
 import { containsJsxSyntax } from '../vscode-extension/src/ts_adapter';
@@ -533,5 +533,55 @@ describe('S-512 local llama.cpp component forge matrix', () => {
             check: 'def test_forward():\n    assert ConvBlock(2.0).forward(3.0) == pytest.approx(6.0)',
         });
         expect(validMethod.valid).toBe(true);
+    });
+
+    it('normalizes decorated/subclassed owner signatures consistently and compacts large class frames within 600 tokens', () => {
+        const manyFields = Array.from({ length: 65 }, (_, i) => `    field_${i}: int = ${i}`);
+        manyFields[42] = '    gain: float = 2.5';
+        const bigFrame = indexNode(
+            'slate/nodes/models/BigOp.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'BigOp',
+                kind: 'class',
+                intent: 'Large config-heavy operator',
+                contract: 'Preserves typed attributes',
+                code: ['@dataclass', 'class BigOp(BaseOp):', ...manyFields],
+            }),
+            'python',
+            1,
+        );
+        const targetMethod = indexNode(
+            'slate/nodes/models/BigOp/apply.json',
+            JSON.stringify({
+                slate: 3,
+                name: 'apply',
+                classOwner: 'models/BigOp',
+                intent: 'Scale x by self.gain',
+                contract: 'Returns float',
+                code: ['def apply(self, x: float) -> float:', '    raise NotImplementedError'],
+            }),
+            'python',
+            1,
+        );
+        const snapshot = {
+            revision: 1,
+            projectName: 'big_cls_proj',
+            documents: [bigFrame.document, targetMethod.document],
+        };
+        const sources = new Map([
+            [bigFrame.document.path, bigFrame.code],
+            [targetMethod.document.path, targetMethod.code],
+        ]);
+        const packet = buildForgePacket(snapshot, sources, 'models/BigOp/apply');
+        expect(packet.estimatedInputTokens).toBeLessThanOrEqual(FORGE_INPUT_BUDGET_TOKENS);
+        expect(packet.prompt).toContain('@dataclass');
+        expect(packet.prompt).toContain('class BigOp(BaseOp):');
+        expect(packet.prompt).toContain('gain: float = 2.5');
+        expect(packet.prompt).toContain('frame line(s) omitted');
+
+        // Signature fingerprint matches normalizeNeighborSignature used during acceptFolderProposal
+        expect(packet.fingerprint?.neighborSignatures['models/BigOp']?.signature).toBe('@dataclass class BigOp(BaseOp)');
+        expect(normalizeNeighborSignature(bigFrame.document.units[0], bigFrame.code)).toBe('@dataclass class BigOp(BaseOp)');
     });
 });

@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    collectExpandedDependencies,
     formatCasesAsPython,
     formatCasesAsTs,
     generateVerificationFiles,
@@ -2464,6 +2465,71 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 expect(result.state, result.traceback).toBe('passed');
                 expect(result.pydanticValid).toBe(true);
                 expect(result.testsPassed).toBeGreaterThanOrEqual(2);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
+
+        it('expands and assembles split class dependencies when a free function calls a split class', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-class-dep-verify-'));
+            try {
+                const counterFrame = makeNode({
+                    name: 'Counter',
+                    kind: 'class',
+                    intent: 'Counter frame',
+                    contract: 'Tracks count',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class Counter:', '    pass'],
+                });
+                const counterInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'Counter',
+                    intent: 'Initialize count',
+                    contract: 'Stores start',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, start: int) -> None:', '    self.count = start'],
+                });
+                const counterInc = makeNode({
+                    name: 'inc',
+                    classOwner: 'Counter',
+                    intent: 'Increment count',
+                    contract: 'Returns count + 1',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def inc(self) -> int:', '    self.count += 1', '    return self.count'],
+                });
+                const useCounter = makeNode({
+                    name: 'step_counter',
+                    context: ['Counter'],
+                    uses: ['Counter'],
+                    cases: [{ name: 'c1', inputs: { start: 3 }, expected: 4 }],
+                    check: ['def test_step_counter():', '    assert step_counter(10) == 11'],
+                    code: ['def step_counter(start: int) -> int:', '    return Counter(start).inc()'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['Counter', counterFrame],
+                    ['Counter/__init__', counterInit],
+                    ['Counter/inc', counterInc],
+                    ['step_counter', useCounter],
+                ]);
+                const { dependencies } = collectExpandedDependencies('step_counter', useCounter, allNodes);
+                expect(Array.from(dependencies.keys())).toContain('Counter');
+                expect(Array.from(dependencies.keys())).toContain('Counter/__init__');
+                expect(Array.from(dependencies.keys())).toContain('Counter/inc');
+
+                const result = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: useCounter,
+                    nodeId: 'step_counter',
+                    dependencies,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(result.state, result.traceback).toBe('passed');
+                expect(result.pydanticValid).toBe(true);
             } finally {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }

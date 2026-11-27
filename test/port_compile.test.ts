@@ -388,3 +388,28 @@ it('diagnoses orphan classOwner and duplicate owned method names in compilePytho
     expect(msgText).toContain('duplicate method "run" on class Frame');
     expect(msgText).toContain('pkg/Orphan: classOwner "pkg/MissingFrame" does not exist or is not a class frame');
 });
+
+it('keeps classes with post-method statements monolithic so alias = method preserves statement order', () => {
+    const ported = portPythonProject(new Map([
+        ['runner.py', [
+            'class Runner:',
+            '    def run(self) -> int:',
+            '        return 7',
+            '    alias = run',
+        ].join('\n')],
+    ]), { splitClasses: true });
+
+    const runnerNode = ported.nodes.get('runner/Runner');
+    expect(runnerNode).toBeDefined();
+    expect(runnerNode?.kind).toBeUndefined();
+    expect(ported.nodes.has('runner/Runner/run')).toBe(false);
+    expect(ported.report.warnings.some(w => w.includes('Runner kept monolithic') && w.includes('after a method definition'))).toBe(true);
+
+    const compiled = compilePython(
+        new Map([...ported.nodes].map(([id, n]) => [id, parseNode(serializeNode(n))])),
+        config,
+    );
+    expect(compiled.diagnostics).toEqual([]);
+    const runnerOut = compiled.files.get('runner.py')!;
+    expect(runnerOut.indexOf('def run(self)')).toBeLessThan(runnerOut.indexOf('alias = run'));
+});

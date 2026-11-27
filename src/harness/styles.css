@@ -45,38 +45,35 @@ button, input, textarea, select { font: inherit; }
     background: color-mix(in srgb, var(--slate-group) 13%, var(--strata-layer-01, #191d21));
 }
 .slate-node__title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; font-size: 13px; }
-.slate-class-frame__bases { color: var(--strata-info, #62d9ff); font-size: 10px; font-weight: 400; }
+.slate-class-frame__bases { color: var(--strata-info); font-size: 10px; font-weight: 400; }
 .slate-class-frame__count {
     margin-left: auto;
     padding: 1px 6px;
-    border-radius: 10px;
     border: 1px solid color-mix(in srgb, var(--slate-group) 45%, transparent);
     font-size: 9px;
     font-weight: 500;
-    color: var(--strata-text-secondary, #9da5ad);
+    color: var(--strata-text-secondary);
 }
 .slate-class-frame__decorators { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
 .slate-class-frame__decorator {
     padding: 1px 5px;
-    border-radius: 3px;
-    background: rgba(167, 139, 250, 0.14);
-    color: #c4b5fd;
+    background: color-mix(in srgb, var(--strata-interactive) 14%, transparent);
+    color: var(--strata-interactive);
     font-size: 9px;
 }
 .slate-class-frame__fields {
     margin: 4px 0 8px;
     padding: 5px 8px;
-    border-radius: 6px;
-    border: 1px solid color-mix(in srgb, var(--strata-border, #343a40) 80%, transparent);
-    background: rgba(16, 18, 20, 0.55);
+    border: 1px solid color-mix(in srgb, var(--strata-border) 80%, transparent);
+    background: color-mix(in srgb, var(--strata-bg) 55%, transparent);
     font-size: 10px;
     line-height: 1.45;
 }
 .slate-class-frame__field { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.slate-class-frame__field-name { color: var(--strata-text-primary, #f3f4f6); font-weight: 600; }
-.slate-class-frame__field-type { color: var(--strata-info, #62d9ff); }
-.slate-class-frame__field-default { color: var(--strata-text-secondary, #9da5ad); }
-.slate-class-frame__field-more { color: var(--strata-text-secondary, #9da5ad); font-size: 9px; font-style: italic; }
+.slate-class-frame__field-name { color: var(--strata-text-primary); font-weight: 600; }
+.slate-class-frame__field-type { color: var(--strata-info); }
+.slate-class-frame__field-default { color: var(--strata-text-secondary); }
+.slate-class-frame__field-more { color: var(--strata-text-secondary); font-size: 9px; font-style: italic; }
 .slate-node--note {
     width: 280px; min-height: 112px;
     border-color: var(--strata-warning); border-left-width: 4px;
@@ -424,21 +421,21 @@ button, input, textarea, select { font: inherit; }
     margin-bottom: 8px;
 }
 .harness-forge-button {
-    background: rgba(98, 217, 255, 0.14) !important;
-    border: 1px solid rgba(98, 217, 255, 0.4) !important;
-    color: #62d9ff !important;
+    background: color-mix(in srgb, var(--strata-info) 14%, transparent) !important;
+    border: 1px solid color-mix(in srgb, var(--strata-info) 40%, transparent) !important;
+    color: var(--strata-info) !important;
     font-weight: 600;
     font-size: 11px;
 }
 .harness-forge-button:hover:not(:disabled) {
-    background: rgba(98, 217, 255, 0.26) !important;
-    border-color: #62d9ff !important;
+    background: color-mix(in srgb, var(--strata-info) 26%, transparent) !important;
+    border-color: var(--strata-info) !important;
 }
 .status-forging {
     padding: 2px 6px;
-    background: rgba(98, 217, 255, 0.14);
-    border: 1px solid rgba(98, 217, 255, 0.35);
-    color: #62d9ff;
+    background: color-mix(in srgb, var(--strata-info) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--strata-info) 35%, transparent);
+    color: var(--strata-info);
     font-size: 11px;
 }
 .error { color: var(--strata-error, #ff6b6b) !important; }

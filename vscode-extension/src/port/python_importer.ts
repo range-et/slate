@@ -112,6 +112,7 @@ function splitClassNode(
     let commentFrom: number | null = null;
     let hasNestedClass = false;
     let hasNonMethodBody = false;
+    let hasPostMethodStatement = false;
 
     for (const stmt of directChildren(bodyNode)) {
         if (stmt.name === ':') continue;
@@ -128,6 +129,7 @@ function splitClassNode(
             const methodName = definitionName(stmt, source);
             if (!methodName) {
                 hasNonMethodBody = true;
+                if (rawMethods.length > 0) hasPostMethodStatement = true;
                 continue;
             }
             const globals = contains(stmt, ['ScopeStatement'])
@@ -141,6 +143,9 @@ function splitClassNode(
             || (stmt.name === 'DecoratedStatement' && directChildren(stmt).some(c => c.name === 'ClassDefinition'));
         if (isNestedCls) {
             hasNestedClass = true;
+        }
+        if (rawMethods.length > 0 && stmt.name !== 'PassStatement') {
+            hasPostMethodStatement = true;
         }
         hasNonMethodBody = true;
     }
@@ -157,9 +162,14 @@ function splitClassNode(
 
     const methodNames = rawMethods.map(m => m.name);
     const hasDuplicateMethods = new Set(methodNames).size !== methodNames.length;
-    if (hasNestedClass || hasDuplicateMethods) {
+    if (hasNestedClass || hasDuplicateMethods || hasPostMethodStatement) {
+        const reason = hasNestedClass
+            ? 'contains nested class'
+            : hasDuplicateMethods
+                ? 'defines duplicate method name'
+                : 'contains non-method statements after a method definition';
         warnings.push(
-            `${filePath}: class ${className} kept monolithic (${hasNestedClass ? 'contains nested class' : 'defines duplicate method name'}).`,
+            `${filePath}: class ${className} kept monolithic (${reason}).`,
         );
         return null;
     }

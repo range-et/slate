@@ -794,4 +794,75 @@ describe('4-Pillar CI gate (ci_verifier & standalone CLI)', () => {
             fs.rmSync(tmpDir, { recursive: true, force: true });
         }
     });
+
+    it('counts collectable Test* class methods as coverage and rejects comment-only check or unusable cases', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-ci-test-validity-'));
+        try {
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'nodes'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'slate', 'flows'), { recursive: true });
+            fs.mkdirSync(path.join(tmpDir, 'tests'), { recursive: true });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'slate.json'), JSON.stringify({
+                slate: 3,
+                name: 'test_validity',
+                language: 'python',
+                compile: { outDir: 'src' },
+                ci: { srcRoots: ['src'], testRoots: ['tests'], requireTests: true },
+            }));
+
+            const makePyNode = (name: string, patch: Record<string, unknown> = {}) => ({
+                slate: 3,
+                name,
+                intent: `Compute ${name}`,
+                contract: 'Returns int',
+                context: [],
+                examples: [],
+                locked: false,
+                imports: [],
+                uses: [],
+                code: [`def ${name}(x: int) -> int:`, '    return x'],
+                ...patch,
+            });
+
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_class_test.json'), JSON.stringify(makePyNode('fn_class_test')));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_comment_check.json'), JSON.stringify(makePyNode('fn_comment_check', {
+                check: ['# TODO: add real pytest'],
+            })));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_import_check.json'), JSON.stringify(makePyNode('fn_import_check', {
+                check: ['import pytest'],
+            })));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_empty_case.json'), JSON.stringify(makePyNode('fn_empty_case', {
+                cases: [{}, '# comment-only'],
+            })));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_helper_cls_only.json'), JSON.stringify(makePyNode('fn_helper_cls_only')));
+            fs.writeFileSync(path.join(tmpDir, 'slate', 'nodes', 'fn_init_cls_only.json'), JSON.stringify(makePyNode('fn_init_cls_only')));
+
+            fs.writeFileSync(path.join(tmpDir, 'tests', 'test_suite.py'), [
+                'class TestSuite:',
+                '    def test_class_based(self):',
+                '        assert fn_class_test(2) == 2',
+                'class HelperNotATest:',
+                '    def test_ignored(self):',
+                '        assert fn_helper_cls_only(2) == 2',
+                'class TestWithInit:',
+                '    def __init__(self):',
+                '        pass',
+                '    def test_uncollectable(self):',
+                '        assert fn_init_cls_only(2) == 2',
+            ].join('\n'));
+
+            const testPillar = checkProjectTests(tmpDir);
+            expect(testPillar.valid).toBe(false);
+            expect(testPillar.coveredNodes).toEqual(['fn_class_test']);
+            expect(testPillar.missingNodes).toEqual([
+                'fn_comment_check',
+                'fn_empty_case',
+                'fn_helper_cls_only',
+                'fn_import_check',
+                'fn_init_cls_only',
+            ]);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
 });

@@ -16,6 +16,121 @@ export interface GeneratedVerification {
     hasChecks: boolean;
 }
 
+/**
+ * Collects transitive `context` + `uses` dependencies while expanding `classOwner` frames/siblings
+ * and split `kind: 'class'` frames with all of their owned methods.
+ */
+export function collectExpandedDependencies(
+    rootId: string,
+    rootNode: SlateNode,
+    allNodes: ReadonlyMap<string, SlateNode>,
+): { dependencies: Map<string, SlateNode>; missingDeps: string[] } {
+    const methodsByOwner = new Map<string, string[]>();
+    for (const [candidateId, candidateNode] of allNodes) {
+        if (candidateNode.classOwner) {
+            let list = methodsByOwner.get(candidateNode.classOwner);
+            if (!list) {
+                list = [];
+                methodsByOwner.set(candidateNode.classOwner, list);
+            }
+            list.push(candidateId);
+        }
+    }
+    for (const list of methodsByOwner.values()) {
+        list.sort();
+    }
+
+    const dependencies = new Map<string, SlateNode>();
+    const missingSet = new Set<string>();
+    const visiting = new Set<string>([rootId]);
+    const visited = new Set<string>();
+
+    const visit = (depId: string) => {
+        if (depId === rootId || visiting.has(depId) || visited.has(depId)) return;
+        const depNode = allNodes.get(depId);
+        if (!depNode) {
+            missingSet.add(depId);
+            visited.add(depId);
+            return;
+        }
+        visiting.add(depId);
+        for (const subId of [...depNode.context, ...depNode.uses]) {
+            visit(subId);
+        }
+        if (depNode.kind === 'class') {
+            for (const methodId of methodsByOwner.get(depId) ?? []) {
+                visit(methodId);
+            }
+        }
+        if (depNode.classOwner) {
+            visit(depNode.classOwner);
+        }
+        visiting.delete(depId);
+        visited.add(depId);
+        dependencies.set(depId, depNode);
+    };
+
+    const extraSeeds: string[] = [];
+    if (rootNode.classOwner) {
+        extraSeeds.push(rootNode.classOwner);
+        for (const methodId of methodsByOwner.get(rootNode.classOwner) ?? []) {
+            if (methodId !== rootId) {
+                extraSeeds.push(methodId);
+            }
+        }
+    }
+
+    for (const depId of [...rootNode.context, ...rootNode.uses, ...extraSeeds]) {
+        visit(depId);
+    }
+    return { dependencies, missingDeps: Array.from(missingSet).sort() };
+}
+
+function sortPythonMethods(methods: Array<[string, SlateNode]>): Array<[string, SlateNode]> {
+    return [...methods].sort(([leftId, left], [rightId, right]) => {
+        if (left.name === '__init__' && right.name !== '__init__') return -1;
+        if (right.name === '__init__' && left.name !== '__init__') return 1;
+        if (left.order !== undefined && right.order !== undefined && left.order !== right.order) {
+            return left.order - right.order;
+        }
+        return leftId.localeCompare(rightId);
+    });
+}
+
+function assemblePythonClassLines(
+    frameNode: SlateNode,
+    methods: Array<[string, SlateNode]>,
+    targetMethod?: SlateNode,
+    headerComment?: string,
+): string[] {
+    const out: string[] = [];
+    const sorted = sortPythonMethods(methods);
+    const frameLines = [...frameNode.code];
+    while (frameLines.length > 0 && frameLines[frameLines.length - 1].trim() === '') frameLines.pop();
+    if (
+        (sorted.length > 0 || targetMethod)
+        && frameLines.length > 0
+        && /^[ \t]+(?:pass|\.\.\.)[ \t]*(?:#.*)?$/.test(frameLines[frameLines.length - 1])
+    ) {
+        frameLines.pop();
+    }
+    if (headerComment) {
+        out.push(headerComment);
+    }
+    out.push(...frameLines);
+    for (const [, methodNode] of sorted) {
+        out.push('');
+        out.push(`    # ${targetMethod ? 'Sibling' : 'Owned'} method: ${methodNode.name}`);
+        out.push(...methodNode.code.map(l => (l.length > 0 ? `    ${l}` : '')));
+    }
+    if (targetMethod) {
+        out.push('');
+        out.push(`    # Target method: ${targetMethod.name}`);
+        out.push(...targetMethod.code.map(l => (l.length > 0 ? `    ${l}` : '')));
+    }
+    return out;
+}
+
 /** Resolves the Python binary to use, checking explicit config, environment variables, and platform paths. */
 export function resolvePythonPath(configuredPath?: string, workspaceRoot?: string): string {
     if (configuredPath && configuredPath.trim().length > 0) {
@@ -425,6 +540,28 @@ export function generateVerificationFiles(
         throw new Error(`Owned method "${nodeId ?? node.name}" requires owning class frame "${node.classOwner}" in verification dependencies.`);
     }
 
+    const depClassFrameIds = new Set<string>();
+    const methodsByClassDep = new Map<string, Array<[string, SlateNode]>>();
+    if (dependencies && dependencies.size > 0) {
+        for (const [depId, depNode] of dependencies.entries()) {
+            if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
+            if (depNode.kind === 'class' && depNode !== ownerNode) {
+                depClassFrameIds.add(depId);
+            }
+        }
+        for (const [depId, depNode] of dependencies.entries()) {
+            if (depNode === node || (nodeId ? depId === nodeId : depId === node.name)) continue;
+            if (depNode.classOwner && depClassFrameIds.has(depNode.classOwner) && depNode.classOwner !== node.classOwner) {
+                let list = methodsByClassDep.get(depNode.classOwner);
+                if (!list) {
+                    list = [];
+                    methodsByClassDep.set(depNode.classOwner, list);
+                }
+                list.push([depId, depNode]);
+            }
+        }
+    }
+
     const siblingMethods: Array<[string, SlateNode]> = [];
     const depCodeBlocks: string[] = [];
     const depExportNames = new Set<string>();
@@ -441,11 +578,27 @@ export function generateVerificationFiles(
                 siblingMethods.push([depId, depNode]);
                 continue;
             }
+            if (depNode.classOwner && depClassFrameIds.has(depNode.classOwner)) {
+                continue;
+            }
+            if (depNode.kind === 'class') {
+                depCodeBlocks.push(...assemblePythonClassLines(
+                    depNode,
+                    methodsByClassDep.get(depId) ?? [],
+                    undefined,
+                    `\n# Context class: ${depNode.name}`,
+                ));
+                if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name) && topLevelBindings(codeText(depNode)).has(depNode.name)) {
+                    depExportNames.add(depNode.name);
+                }
+                continue;
+            }
             if (depNode.code.length > 0) {
                 depCodeBlocks.push(`\n# Context: ${depNode.name}`);
                 depCodeBlocks.push(...depNode.code);
                 if (
                     depNode.kind !== 'prelude'
+                    && !depNode.classOwner
                     && /^[A-Za-z_][A-Za-z0-9_]*$/.test(depNode.name)
                     && topLevelBindings(codeText(depNode)).has(depNode.name)
                 ) {
@@ -472,29 +625,12 @@ export function generateVerificationFiles(
 
     let ownerIsStaticMethod = false;
     if (ownerNode) {
-        siblingMethods.sort(([leftId, left], [rightId, right]) => {
-            if (left.name === '__init__' && right.name !== '__init__') return -1;
-            if (right.name === '__init__' && left.name !== '__init__') return 1;
-            if (left.order !== undefined && right.order !== undefined && left.order !== right.order) {
-                return left.order - right.order;
-            }
-            return leftId.localeCompare(rightId);
-        });
-        const ownerLines = [...ownerNode.code];
-        while (ownerLines.length > 0 && ownerLines[ownerLines.length - 1].trim() === '') ownerLines.pop();
-        if (ownerLines.length > 0 && /^[ \t]+(?:pass|\.\.\.)[ \t]*(?:#.*)?$/.test(ownerLines[ownerLines.length - 1])) {
-            ownerLines.pop();
-        }
-        moduleParts.push(`\n# Owning class frame: ${ownerNode.name}`);
-        moduleParts.push(...ownerLines);
-        for (const [, sibling] of siblingMethods) {
-            moduleParts.push('');
-            moduleParts.push(`    # Sibling method: ${sibling.name}`);
-            moduleParts.push(...sibling.code.map(l => (l.length > 0 ? `    ${l}` : '')));
-        }
-        moduleParts.push('');
-        moduleParts.push(`    # Target method: ${node.name}`);
-        moduleParts.push(...node.code.map(l => (l.length > 0 ? `    ${l}` : '')));
+        moduleParts.push(...assemblePythonClassLines(
+            ownerNode,
+            siblingMethods,
+            node,
+            `\n# Owning class frame: ${ownerNode.name}`,
+        ));
         const parsedMethod = parseModule(`${codeText(node)}\n`, '<verify-method>', node.name);
         const methodUnit = parsedMethod.units.find(u => u.parentId === null && u.name === node.name);
         ownerIsStaticMethod = Boolean(methodUnit?.decorators.some(d => d === 'staticmethod' || d.endsWith('.staticmethod')));

@@ -39,7 +39,7 @@ import {
     type SlateLlmProvider,
     type SlateNode,
 } from './slate_folder';
-import { runNodeVerification, type VerificationOptions } from './verification_runner';
+import { collectExpandedDependencies, runNodeVerification, type VerificationOptions } from './verification_runner';
 
 export const BATCH_FORGE_SYSTEM_PROMPT =
     'You are a constrained local Python component forge engine. Follow JPL-60 rules strictly, provide concise implementation and pytest check (no docstrings or prose), and never import from slate.* or redefine dependencies already in scope.';
@@ -120,47 +120,17 @@ interface IndexedTarget {
     language: BatchForgeLanguage;
 }
 
+interface WaveForgeContext {
+    waveStartNodes: ReadonlyMap<string, SlateNode>;
+    waveWrittenText: Map<string, string>;
+}
+
 function collectTransitiveDependencies(
     rootId: string,
     rootNode: SlateNode,
     nodesById: ReadonlyMap<string, SlateNode>,
 ): { dependencies: Map<string, SlateNode>; missingDeps: string[] } {
-    const dependencies = new Map<string, SlateNode>();
-    const missingSet = new Set<string>();
-    const visiting = new Set<string>([rootId]);
-    const visited = new Set<string>();
-
-    const visit = (depId: string) => {
-        if (depId === rootId || visiting.has(depId) || visited.has(depId)) return;
-        const depNode = nodesById.get(depId);
-        if (!depNode) {
-            missingSet.add(depId);
-            visited.add(depId);
-            return;
-        }
-        visiting.add(depId);
-        for (const subId of [...depNode.context, ...depNode.uses]) {
-            visit(subId);
-        }
-        visiting.delete(depId);
-        visited.add(depId);
-        dependencies.set(depId, depNode);
-    };
-
-    const extraSeeds: string[] = [];
-    if (rootNode.classOwner) {
-        extraSeeds.push(rootNode.classOwner);
-        for (const [candidateId, candidateNode] of nodesById) {
-            if (candidateNode.classOwner === rootNode.classOwner && candidateId !== rootId) {
-                extraSeeds.push(candidateId);
-            }
-        }
-    }
-
-    for (const depId of [...rootNode.context, ...rootNode.uses, ...extraSeeds]) {
-        visit(depId);
-    }
-    return { dependencies, missingDeps: Array.from(missingSet).sort() };
+    return collectExpandedDependencies(rootId, rootNode, nodesById);
 }
 
 /**
@@ -446,6 +416,7 @@ async function forgeSingleTarget(
     config: SlateConfig,
     options: BatchForgeOptions,
     maxRevisions: number,
+    waveContext: WaveForgeContext,
 ): Promise<BatchForgeNodeResult> {
     const startMs = Date.now();
     const shouldVerify = options.verify !== false;
@@ -598,7 +569,11 @@ async function forgeSingleTarget(
                 try {
                     const safeDep = assertSafeNodeId(options.workspaceRoot, depId);
                     const depText = await fs.promises.readFile(safeDep.fullPath, 'utf8');
-                    depNode = parseNode(depText);
+                    const waveOwnedText = waveContext.waveWrittenText.get(depId);
+                    const waveBaseline = waveContext.waveStartNodes.get(depId);
+                    depNode = (waveOwnedText !== undefined && waveOwnedText === depText && waveBaseline)
+                        ? waveBaseline
+                        : parseNode(depText);
                 } catch {
                     currentMissing.add(depId);
                     diskVisited.add(depId);
@@ -608,6 +583,16 @@ async function forgeSingleTarget(
                 for (const subId of [...depNode.context, ...depNode.uses]) {
                     await visitDiskDep(subId);
                 }
+                if (depNode.kind === 'class') {
+                    for (const [candidateId, candidateNode] of waveContext.waveStartNodes) {
+                        if (candidateNode.classOwner === depId) {
+                            await visitDiskDep(candidateId);
+                        }
+                    }
+                }
+                if (depNode.classOwner) {
+                    await visitDiskDep(depNode.classOwner);
+                }
                 diskVisiting.delete(depId);
                 diskVisited.add(depId);
                 currentDeps.set(depId, depNode);
@@ -615,7 +600,7 @@ async function forgeSingleTarget(
             const diskExtraSeeds: string[] = [];
             if (diskNode.classOwner) {
                 diskExtraSeeds.push(diskNode.classOwner);
-                for (const [candidateId, candidateNode] of nodesById) {
+                for (const [candidateId, candidateNode] of waveContext.waveStartNodes) {
                     if (candidateNode.classOwner === diskNode.classOwner && candidateId !== target.nodeId) {
                         diskExtraSeeds.push(candidateId);
                     }
@@ -656,7 +641,9 @@ async function forgeSingleTarget(
                     ...(attemptsRun > 1 ? { retryCount: attemptsRun - 1 } : {}),
                 };
             }
-            await fs.promises.writeFile(target.fullPath, serializeNode(diskNode), 'utf8');
+            const serialized = serializeNode(diskNode);
+            await fs.promises.writeFile(target.fullPath, serialized, 'utf8');
+            waveContext.waveWrittenText.set(target.nodeId, serialized);
             written = true;
             await options.onNodeForged?.(target.nodeId);
         }
@@ -980,6 +967,11 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
             runnableWave.push(item);
         }
 
+        const waveContext: WaveForgeContext = {
+            waveStartNodes: new Map<string, SlateNode>(nodesById),
+            waveWrittenText: new Map<string, string>(),
+        };
+
         let cursor = 0;
         const workerCount = Math.min(concurrency, runnableWave.length);
         const workers = Array.from({ length: workerCount }, async () => {
@@ -995,6 +987,7 @@ export async function batchForgeWorkspace(options: BatchForgeOptions): Promise<B
                     config,
                     options,
                     maxRevisions,
+                    waveContext,
                 );
                 results[item.resultIndex] = nodeResult;
                 resultById.set(item.target.nodeId, nodeResult);

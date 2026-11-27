@@ -1,3 +1,6 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { describe, expect, it } from 'vitest';
 import { deepValueEqual, matchFlowOutputs, runFlowCase, runFlowGuardrails, runNodeGuardrails } from '../vscode-extension/src/guardrails_runner';
 import { parseFlow, serializeFlow } from '../vscode-extension/src/flow';
@@ -206,5 +209,79 @@ describe('Cases & Guardrails Matrix (S-602)', () => {
             expect(deniedOmitted.passed).toBe(false);
             expect(deniedOmitted.nodeCases.failures.join('\n')).toContain('Workspace is not trusted');
         });
+
+        it('expands classOwner frame and siblings in runNodeGuardrails even when node.context is empty', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-guardrail-owner-'));
+            try {
+                const frameNode = {
+                    name: 'Box',
+                    kind: 'class' as const,
+                    intent: 'Box container',
+                    contract: 'Holds value',
+                    context: [],
+                    examples: [],
+                    locked: false,
+                    imports: [],
+                    uses: [],
+                    code: ['class Box:', '    pass'],
+                    extra: {},
+                };
+                const initNode = {
+                    name: '__init__',
+                    classOwner: 'Box',
+                    intent: 'Init box',
+                    contract: 'Stores v',
+                    context: [],
+                    examples: [],
+                    locked: false,
+                    imports: [],
+                    uses: [],
+                    code: ['def __init__(self, v: int) -> None:', '    self.v = v'],
+                    extra: {},
+                };
+                const getNode = {
+                    name: 'scaled',
+                    classOwner: 'Box',
+                    intent: 'Scale value',
+                    contract: 'Returns v * k',
+                    context: [],
+                    examples: [],
+                    locked: false,
+                    imports: [],
+                    uses: [],
+                    code: ['def scaled(self, k: int) -> int:', '    return self.v * k'],
+                    cases: [{ id: 'c1', init: { v: 3 }, inputs: { k: 4 }, expected: 12 }],
+                    extra: {},
+                };
+                const nodesMap = new Map([
+                    ['Box', frameNode],
+                    ['Box/__init__', initNode],
+                    ['Box/scaled', getNode],
+                ]);
+                const fakeFolder = {
+                    readNode: async (id: string) => {
+                        const found = nodesMap.get(id);
+                        if (!found) throw new Error(`Missing ${id}`);
+                        return found;
+                    },
+                    readNodes: async () => ({
+                        config: { slate: 3, name: 'demo', language: 'python' },
+                        nodes: new Map(nodesMap),
+                    }),
+                    readFlows: async () => [],
+                };
+
+                const report = await runNodeGuardrails({
+                    nodeId: 'Box/scaled',
+                    folder: fakeFolder as any,
+                    workspaceRoot: tmpRoot,
+                    isTrusted: true,
+                });
+                expect(report.passed, JSON.stringify(report.nodeCases.failures)).toBe(true);
+                expect(report.nodeCases.passed).toBe(1);
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 25_000);
     });
 });
