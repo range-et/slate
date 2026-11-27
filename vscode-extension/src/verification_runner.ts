@@ -133,6 +133,45 @@ function assemblePythonClassLines(
 
 const OWNER_CLASS_SENTINEL = '__slate_owner_class__';
 
+function extractDefinitionTimeIdentifiers(depNode: SlateNode): Set<string> {
+    const code = codeText(depNode);
+    if (depNode.kind === 'prelude' || depNode.kind === 'epilogue' || depNode.kind === 'class') {
+        return new Set(identifierNames(code));
+    }
+    const parsed = parseModule(`${code}\n`, '<def-order>', depNode.name);
+    const topUnit = parsed.units.find(u => u.parentId === null);
+    if (topUnit?.kind === 'function') {
+        const idents = new Set<string>();
+        for (const dec of topUnit.decorators ?? []) {
+            for (const ident of identifierNames(dec)) {
+                idents.add(ident);
+            }
+        }
+        for (const param of topUnit.params ?? []) {
+            if (param.default) {
+                for (const ident of identifierNames(param.default)) {
+                    idents.add(ident);
+                }
+            }
+        }
+        return idents;
+    }
+    if (topUnit?.kind === 'class') {
+        const lines = code.replace(/\r\n?/g, '\n').split('\n');
+        const excludedLines = new Set<number>();
+        for (const unit of parsed.units) {
+            if (unit.parentId === topUnit.id && unit.kind === 'method') {
+                for (let line = unit.ranges.declaration.start.line; line <= unit.ranges.declaration.end.line; line++) {
+                    excludedLines.add(line);
+                }
+            }
+        }
+        const frameOnly = lines.filter((_, idx) => !excludedLines.has(idx)).join('\n');
+        return new Set(identifierNames(frameOnly));
+    }
+    return new Set(identifierNames(code));
+}
+
 function orderDefinitionDependencies(
     emittedDeps: Array<[string, SlateNode]>,
     allDeps: ReadonlyMap<string, SlateNode>,
@@ -146,9 +185,12 @@ function orderDefinitionDependencies(
     const emittedById = new Map<string, SlateNode>(emittedDeps);
     const orderIndex = new Map<string, number>();
     const nameToIds = new Map<string, string[]>();
+    const preludeBindings = new Map<string, Set<string>>();
     emittedDeps.forEach(([id, dep], idx) => {
         orderIndex.set(id, idx);
-        if (dep.kind !== 'prelude' && dep.name) {
+        if (dep.kind === 'prelude') {
+            preludeBindings.set(id, topLevelBindings(codeText(dep)));
+        } else if (dep.name) {
             const list = nameToIds.get(dep.name) ?? [];
             list.push(id);
             nameToIds.set(dep.name, list);
@@ -157,32 +199,47 @@ function orderDefinitionDependencies(
 
     const defDepsById = new Map<string, Set<string>>();
     for (const [depId, depNode] of emittedDeps) {
-        const deps = new Set<string>();
+        const explicitTargetsByName = new Map<string, string[]>();
+        const addExplicit = (name: string, targetId: string) => {
+            const list = explicitTargetsByName.get(name) ?? [];
+            if (!list.includes(targetId)) list.push(targetId);
+            explicitTargetsByName.set(name, list);
+        };
         for (const rawRef of [...depNode.context, ...depNode.uses]) {
-            if (ownerId && rawRef === ownerId) {
-                deps.add(OWNER_CLASS_SENTINEL);
-            } else if (emittedById.has(rawRef) && rawRef !== depId) {
-                deps.add(rawRef);
-            } else {
-                const refNode = allDeps.get(rawRef);
-                if (refNode?.classOwner) {
-                    if (ownerId && refNode.classOwner === ownerId) {
-                        deps.add(OWNER_CLASS_SENTINEL);
-                    } else if (emittedById.has(refNode.classOwner) && refNode.classOwner !== depId) {
-                        deps.add(refNode.classOwner);
-                    }
+            const ownerMatch = ownerId && (rawRef === ownerId || allDeps.get(rawRef)?.classOwner === ownerId);
+            if (ownerMatch) {
+                if (ownerNode?.name) addExplicit(ownerNode.name, OWNER_CLASS_SENTINEL);
+                continue;
+            }
+            const resolvedId = emittedById.has(rawRef) ? rawRef : allDeps.get(rawRef)?.classOwner;
+            if (!resolvedId || !emittedById.has(resolvedId) || resolvedId === depId) continue;
+            const targetNode = emittedById.get(resolvedId)!;
+            if (targetNode.kind === 'prelude') {
+                for (const binding of preludeBindings.get(resolvedId) ?? []) {
+                    addExplicit(binding, resolvedId);
                 }
+            } else if (targetNode.name) {
+                addExplicit(targetNode.name, resolvedId);
             }
         }
-        if (depNode.kind === 'class' || /^\s*(?:@\w[\w.]*[^\n]*\n\s*)*class\b/m.test(codeText(depNode))) {
-            for (const ident of identifierNames(codeText(depNode))) {
-                if (ident === depNode.name) continue;
-                if (ownerId && ownerNode?.name && ident === ownerNode.name) {
-                    deps.add(OWNER_CLASS_SENTINEL);
+
+        const deps = new Set<string>();
+        for (const ident of extractDefinitionTimeIdentifiers(depNode)) {
+            if (ident === depNode.name) continue;
+            const explicit = explicitTargetsByName.get(ident);
+            if (explicit && explicit.length > 0) {
+                for (const targetId of explicit) deps.add(targetId);
+            } else if (ownerId && ownerNode?.name === ident) {
+                deps.add(OWNER_CLASS_SENTINEL);
+            } else {
+                const matched = nameToIds.get(ident);
+                if (matched && matched.length === 1 && matched[0] !== depId) {
+                    deps.add(matched[0]);
                 } else {
-                    const matched = nameToIds.get(ident);
-                    if (matched && matched.length === 1 && matched[0] !== depId) {
-                        deps.add(matched[0]);
+                    for (const [pId, bindings] of preludeBindings) {
+                        if (pId !== depId && bindings.has(ident)) {
+                            deps.add(pId);
+                        }
                     }
                 }
             }

@@ -2622,5 +2622,96 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }
         }, 30_000);
+
+        it('keeps helper functions returning the class before a class frame that binds them at definition time', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-helper-before-class-'));
+            try {
+                const makeBox = makeNode({
+                    name: 'make_box',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Create a default Box',
+                    contract: 'Returns Box(1)',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def make_box() -> "Box":', '    return Box(1)'],
+                });
+                const boxFrame = makeNode({
+                    name: 'Box',
+                    kind: 'class',
+                    uses: ['make_box'],
+                    context: ['make_box'],
+                    intent: 'Box class with static factory field',
+                    contract: 'Exposes factory staticmethod',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class Box:', '    factory = staticmethod(make_box)'],
+                });
+                const boxInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'Box',
+                    intent: 'Init Box',
+                    contract: 'Stores v',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, v: int) -> None:', '    self.v = v'],
+                });
+                const boxRead = makeNode({
+                    name: 'read',
+                    classOwner: 'Box',
+                    intent: 'Return stored value',
+                    contract: 'Returns int',
+                    cases: [{ name: 'factory_ok', init: { v: 7 }, inputs: {}, expected: 7 }],
+                    check: ['def test_box_factory():', '    assert Box.factory().read() == 1'],
+                    code: ['def read(self) -> int:', '    return self.v'],
+                });
+                const useBox = makeNode({
+                    name: 'use_box',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Call Box.factory().read()',
+                    contract: 'Returns 1',
+                    cases: [{ name: 'u1', inputs: {}, expected: 1 }],
+                    check: ['def test_use_box():', '    assert use_box() == 1'],
+                    code: ['def use_box() -> int:', '    return Box.factory().read()'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['make_box', makeBox],
+                    ['Box', boxFrame],
+                    ['Box/__init__', boxInit],
+                    ['Box/read', boxRead],
+                    ['use_box', useBox],
+                ]);
+
+                // 1) Method on Box verifying with Box frame referencing make_box (which calls Box in its body)
+                const readDeps = collectExpandedDependencies('Box/read', boxRead, allNodes).dependencies;
+                const readFiles = generateVerificationFiles(boxRead, readDeps, 'Box/read');
+                expect(readFiles.moduleContent.indexOf('def make_box')).toBeLessThan(readFiles.moduleContent.indexOf('class Box:'));
+                const readRes = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: boxRead,
+                    nodeId: 'Box/read',
+                    dependencies: readDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(readRes.state, readRes.traceback).toBe('passed');
+
+                // 2) Free caller verifying against Box + make_box
+                const useDeps = collectExpandedDependencies('use_box', useBox, allNodes).dependencies;
+                const useRes = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: useBox,
+                    nodeId: 'use_box',
+                    dependencies: useDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(useRes.state, useRes.traceback).toBe('passed');
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 30_000);
     });
 });
