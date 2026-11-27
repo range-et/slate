@@ -133,6 +133,24 @@ function assemblePythonClassLines(
 
 const OWNER_CLASS_SENTINEL = '__slate_owner_class__';
 
+function collectCallableDefIdentifiers(
+    unit: { decorators?: string[]; params?: Array<{ default?: string | null }> },
+    out: Set<string>,
+): void {
+    for (const dec of unit.decorators ?? []) {
+        for (const ident of identifierNames(dec)) {
+            out.add(ident);
+        }
+    }
+    for (const param of unit.params ?? []) {
+        if (param.default) {
+            for (const ident of identifierNames(param.default)) {
+                out.add(ident);
+            }
+        }
+    }
+}
+
 function extractDefinitionTimeIdentifiers(depNode: SlateNode): Set<string> {
     const code = codeText(depNode);
     if (depNode.kind === 'prelude' || depNode.kind === 'epilogue' || depNode.kind === 'class') {
@@ -142,32 +160,28 @@ function extractDefinitionTimeIdentifiers(depNode: SlateNode): Set<string> {
     const topUnit = parsed.units.find(u => u.parentId === null);
     if (topUnit?.kind === 'function') {
         const idents = new Set<string>();
-        for (const dec of topUnit.decorators ?? []) {
-            for (const ident of identifierNames(dec)) {
-                idents.add(ident);
-            }
-        }
-        for (const param of topUnit.params ?? []) {
-            if (param.default) {
-                for (const ident of identifierNames(param.default)) {
-                    idents.add(ident);
-                }
-            }
-        }
+        collectCallableDefIdentifiers(topUnit, idents);
         return idents;
     }
     if (topUnit?.kind === 'class') {
         const lines = code.replace(/\r\n?/g, '\n').split('\n');
+        const classUnitIds = new Set(parsed.units.filter(u => u.kind === 'class').map(u => u.id));
+        const methodUnits = parsed.units.filter(
+            u => u.parentId !== null && classUnitIds.has(u.parentId) && u.kind === 'method',
+        );
         const excludedLines = new Set<number>();
-        for (const unit of parsed.units) {
-            if (unit.parentId === topUnit.id && unit.kind === 'method') {
-                for (let line = unit.ranges.declaration.start.line; line <= unit.ranges.declaration.end.line; line++) {
-                    excludedLines.add(line);
-                }
+        const idents = new Set<string>();
+        for (const unit of methodUnits) {
+            for (let line = unit.ranges.declaration.start.line; line <= unit.ranges.declaration.end.line; line++) {
+                excludedLines.add(line);
             }
+            collectCallableDefIdentifiers(unit, idents);
         }
         const frameOnly = lines.filter((_, idx) => !excludedLines.has(idx)).join('\n');
-        return new Set(identifierNames(frameOnly));
+        for (const ident of identifierNames(frameOnly)) {
+            idents.add(ident);
+        }
+        return idents;
     }
     return new Set(identifierNames(code));
 }
@@ -177,6 +191,7 @@ function orderDefinitionDependencies(
     allDeps: ReadonlyMap<string, SlateNode>,
     ownerId?: string,
     ownerNode?: SlateNode,
+    methodsByClassDep?: ReadonlyMap<string, Array<[string, SlateNode]>>,
 ): { preOwnerDeps: Array<[string, SlateNode]>; postOwnerDeps: Array<[string, SlateNode]> } {
     if (emittedDeps.length === 0) {
         return { preOwnerDeps: [], postOwnerDeps: [] };
@@ -205,26 +220,37 @@ function orderDefinitionDependencies(
             if (!list.includes(targetId)) list.push(targetId);
             explicitTargetsByName.set(name, list);
         };
-        for (const rawRef of [...depNode.context, ...depNode.uses]) {
-            const ownerMatch = ownerId && (rawRef === ownerId || allDeps.get(rawRef)?.classOwner === ownerId);
-            if (ownerMatch) {
-                if (ownerNode?.name) addExplicit(ownerNode.name, OWNER_CLASS_SENTINEL);
-                continue;
-            }
-            const resolvedId = emittedById.has(rawRef) ? rawRef : allDeps.get(rawRef)?.classOwner;
-            if (!resolvedId || !emittedById.has(resolvedId) || resolvedId === depId) continue;
-            const targetNode = emittedById.get(resolvedId)!;
-            if (targetNode.kind === 'prelude') {
-                for (const binding of preludeBindings.get(resolvedId) ?? []) {
-                    addExplicit(binding, resolvedId);
+        const ownedMethods = depNode.kind === 'class' ? (methodsByClassDep?.get(depId) ?? []) : [];
+        const refSources = [depNode, ...ownedMethods.map(([, methodNode]) => methodNode)];
+        for (const refSource of refSources) {
+            for (const rawRef of [...refSource.context, ...refSource.uses]) {
+                const ownerMatch = ownerId && (rawRef === ownerId || allDeps.get(rawRef)?.classOwner === ownerId);
+                if (ownerMatch) {
+                    if (ownerNode?.name) addExplicit(ownerNode.name, OWNER_CLASS_SENTINEL);
+                    continue;
                 }
-            } else if (targetNode.name) {
-                addExplicit(targetNode.name, resolvedId);
+                const resolvedId = emittedById.has(rawRef) ? rawRef : allDeps.get(rawRef)?.classOwner;
+                if (!resolvedId || !emittedById.has(resolvedId) || resolvedId === depId) continue;
+                const targetNode = emittedById.get(resolvedId)!;
+                if (targetNode.kind === 'prelude') {
+                    for (const binding of preludeBindings.get(resolvedId) ?? []) {
+                        addExplicit(binding, resolvedId);
+                    }
+                } else if (targetNode.name) {
+                    addExplicit(targetNode.name, resolvedId);
+                }
+            }
+        }
+
+        const defIdents = extractDefinitionTimeIdentifiers(depNode);
+        for (const [, methodNode] of ownedMethods) {
+            for (const ident of extractDefinitionTimeIdentifiers(methodNode)) {
+                defIdents.add(ident);
             }
         }
 
         const deps = new Set<string>();
-        for (const ident of extractDefinitionTimeIdentifiers(depNode)) {
+        for (const ident of defIdents) {
             if (ident === depNode.name) continue;
             const explicit = explicitTargetsByName.get(ident);
             if (explicit && explicit.length > 0) {
@@ -756,6 +782,7 @@ export function generateVerificationFiles(
         dependencies ?? new Map<string, SlateNode>(),
         node.classOwner,
         ownerNode,
+        methodsByClassDep,
     );
 
     const emitDepBlock = (targetBlocks: string[], [depId, depNode]: [string, SlateNode]): void => {

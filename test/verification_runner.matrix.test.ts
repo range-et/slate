@@ -2713,5 +2713,108 @@ describe('S-513 Verification Runner & Mutation Matrix', () => {
                 fs.rmSync(tmpRoot, { recursive: true, force: true });
             }
         }, 30_000);
+
+        it('keeps legacy and split class dependencies with method default expressions ordered after the referenced class', async () => {
+            const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slate-legacy-class-method-default-'));
+            try {
+                const boxFrame = makeNode({
+                    name: 'Box',
+                    kind: 'class',
+                    intent: 'Box class',
+                    contract: 'Stores v',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class Box:', '    pass'],
+                });
+                const boxInit = makeNode({
+                    name: '__init__',
+                    classOwner: 'Box',
+                    intent: 'Init Box',
+                    contract: 'Stores v',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['def __init__(self, v: int) -> None:', '    self.v = v'],
+                });
+                const legacyHandler = makeNode({
+                    name: 'LegacyHandler',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Legacy monolithic handler whose method default constructs Box(2)',
+                    contract: 'Returns box.v',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'class LegacyHandler:',
+                        '    def run(self, box: Box = Box(2)) -> int:',
+                        '        return box.v',
+                    ],
+                });
+                const splitHandlerFrame = makeNode({
+                    name: 'SplitHandler',
+                    kind: 'class',
+                    intent: 'Split handler frame',
+                    contract: 'Defines handler',
+                    cases: undefined,
+                    check: undefined,
+                    code: ['class SplitHandler:', '    pass'],
+                });
+                const splitHandlerRun = makeNode({
+                    name: 'run',
+                    classOwner: 'SplitHandler',
+                    uses: ['Box'],
+                    context: ['Box'],
+                    intent: 'Method with default constructing Box(3)',
+                    contract: 'Returns box.v',
+                    cases: undefined,
+                    check: undefined,
+                    code: [
+                        'def run(self, box: Box = Box(3)) -> int:',
+                        '    return box.v',
+                    ],
+                });
+                const boxRead = makeNode({
+                    name: 'read',
+                    classOwner: 'Box',
+                    context: ['LegacyHandler', 'SplitHandler'],
+                    uses: ['LegacyHandler', 'SplitHandler'],
+                    intent: 'Return stored value and exercise handlers',
+                    contract: 'Returns int',
+                    cases: [{ name: 'c1', init: { v: 5 }, inputs: {}, expected: 5 }],
+                    check: [
+                        'def test_handlers():',
+                        '    assert Box(5).read() == 5',
+                        '    assert LegacyHandler().run() == 2',
+                        '    assert SplitHandler().run() == 3',
+                    ],
+                    code: ['def read(self) -> int:', '    return self.v'],
+                });
+
+                const allNodes = new Map<string, SlateNode>([
+                    ['Box', boxFrame],
+                    ['Box/__init__', boxInit],
+                    ['Box/read', boxRead],
+                    ['LegacyHandler', legacyHandler],
+                    ['SplitHandler', splitHandlerFrame],
+                    ['SplitHandler/run', splitHandlerRun],
+                ]);
+
+                const readDeps = collectExpandedDependencies('Box/read', boxRead, allNodes).dependencies;
+                const generated = generateVerificationFiles(boxRead, readDeps, 'Box/read');
+                expect(generated.moduleContent.indexOf('class Box:')).toBeLessThan(generated.moduleContent.indexOf('class LegacyHandler:'));
+                expect(generated.moduleContent.indexOf('class Box:')).toBeLessThan(generated.moduleContent.indexOf('class SplitHandler:'));
+
+                const res = await runNodeVerification({
+                    workspaceRoot: tmpRoot,
+                    node: boxRead,
+                    nodeId: 'Box/read',
+                    dependencies: readDeps,
+                    isTrusted: true,
+                    timeoutMs: 20000,
+                });
+                expect(res.state, res.traceback).toBe('passed');
+            } finally {
+                fs.rmSync(tmpRoot, { recursive: true, force: true });
+            }
+        }, 30_000);
     });
 });
